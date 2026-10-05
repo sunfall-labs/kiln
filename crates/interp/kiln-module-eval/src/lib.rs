@@ -397,6 +397,14 @@ pub struct GraphModuleLoader {
     /// Query and fragment variants are distinct Node module instances and can observe different
     /// source bytes when the file changes between imports.
     runtime_graphs: std::sync::Mutex<HashMap<RuntimeGraphKey, Arc<ModuleGraph>>>,
+    /// Successfully loaded URL identities remain resolvable after their source file is removed.
+    /// This mirrors Node's module cache: resolving an already loaded URL must not stat the file
+    /// again or discard the source graph that was retained for that module instance.
+    runtime_url_graphs: std::sync::Mutex<HashMap<String, Arc<ModuleGraph>>>,
+    /// A resolved request keeps its graph even if the target is removed or its resolver inputs
+    /// later change. The importer is part of the key because the same relative specifier can
+    /// name different files from different modules.
+    runtime_requests: std::sync::Mutex<HashMap<RuntimeRequestKey, Arc<ModuleGraph>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -405,11 +413,19 @@ struct RuntimeGraphKey {
     url_identity: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RuntimeRequestKey {
+    importer: String,
+    specifier: String,
+}
+
 impl GraphModuleLoader {
     pub fn new(graph: Arc<ModuleGraph>) -> Self {
         Self {
             graph,
             runtime_graphs: std::sync::Mutex::new(HashMap::new()),
+            runtime_url_graphs: std::sync::Mutex::new(HashMap::new()),
+            runtime_requests: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -460,6 +476,20 @@ impl GraphModuleLoader {
         let url = url::Url::parse(specifier).ok()?;
         (url.scheme() == "file" && (url.query().is_some() || url.fragment().is_some()))
             .then(|| url.to_string())
+    }
+
+    fn cached_url_graph(&self, identity: &str) -> Option<Arc<ModuleGraph>> {
+        self.runtime_url_graphs.lock().ok()?.get(identity).cloned()
+    }
+
+    fn cached_request_graph(&self, key: &RuntimeRequestKey) -> Option<Arc<ModuleGraph>> {
+        self.runtime_requests.lock().ok()?.get(key).cloned()
+    }
+
+    fn retain_request_graph(&self, key: RuntimeRequestKey, graph: &Arc<ModuleGraph>) {
+        if let Ok(mut graphs) = self.runtime_requests.lock() {
+            graphs.entry(key).or_insert_with(|| Arc::clone(graph));
+        }
     }
 
     fn apply_file_url_identity(mut plan: ModulePlan, identity: Option<&str>) -> ModulePlan {
@@ -568,12 +598,24 @@ impl GraphModuleLoader {
         if let Ok(mut graphs) = self.runtime_graphs.lock() {
             graphs.insert(key, Arc::clone(&built));
         }
+        if let Some(identity) = url_identity
+            && let Ok(mut graphs) = self.runtime_url_graphs.lock()
+        {
+            graphs.insert(identity.to_owned(), Arc::clone(&built));
+        }
         Ok(built)
     }
 }
 
 impl ModuleLoaderService for GraphModuleLoader {
     fn load(&self, request: ModuleLoadRequest) -> Result<ModulePlan, ModuleLoadError> {
+        let request_key = RuntimeRequestKey {
+            importer: request
+                .importer
+                .clone()
+                .unwrap_or_else(|| self.graph.entry().to_string_lossy().into_owned()),
+            specifier: request.specifier.clone(),
+        };
         let importer_identity = request
             .importer
             .as_deref()
@@ -583,6 +625,15 @@ impl ModuleLoaderService for GraphModuleLoader {
                 ModuleLoadError::NotFound("invalid dynamic import referrer".to_owned())
             })?;
         let file_url_identity = Self::file_url_identity(&request.specifier);
+        if let Some(loaded) = self.cached_request_graph(&request_key) {
+            let plan = loaded
+                .import_plan_for_request(loaded.entry(), request.attributes.as_ref())
+                .map_err(|error| ModuleLoadError::Unsupported(error.to_string()))?;
+            return Ok(Self::apply_file_url_identity(
+                plan,
+                file_url_identity.as_deref(),
+            ));
+        }
         let graph = self
             .graph_holding(&importer, importer_identity.as_deref())
             .ok_or_else(|| {
@@ -592,6 +643,15 @@ impl ModuleLoaderService for GraphModuleLoader {
                 ))
             })?;
         let graph = graph.as_ref();
+        if let Some(identity) = file_url_identity.as_deref()
+            && let Some(loaded) = self.cached_url_graph(identity)
+        {
+            self.retain_request_graph(request_key, &loaded);
+            let plan = loaded
+                .import_plan_for_request(loaded.entry(), request.attributes.as_ref())
+                .map_err(|error| ModuleLoadError::Unsupported(error.to_string()))?;
+            return Ok(Self::apply_file_url_identity(plan, Some(identity)));
+        }
         let node = graph
             .module(&importer)
             .expect("graph_holding found the importer");
@@ -690,17 +750,17 @@ impl ModuleLoaderService for GraphModuleLoader {
                     request.specifier
                 )));
             }
-            let plan = self
-                .runtime_graph(
-                    graph.project_root(),
-                    &resolved.path,
-                    file_url_identity.as_deref(),
-                )
-                .and_then(|loaded| {
-                    loaded
-                        .import_plan_for_request(loaded.entry(), request.attributes.as_ref())
-                        .map_err(|error| ModuleLoadError::Unsupported(error.to_string()))
-                })?;
+            let loaded = self.runtime_graph(
+                graph.project_root(),
+                &resolved.path,
+                file_url_identity.as_deref(),
+            )?;
+            let plan = loaded
+                .import_plan_for_request(loaded.entry(), request.attributes.as_ref())
+                .map_err(|error| ModuleLoadError::Unsupported(error.to_string()))?;
+            // Retain only the first successful resolution for this request identity, as Node's
+            // module cache does. Different query/fragment URLs remain separate keys.
+            self.retain_request_graph(request_key, &loaded);
             return Ok(Self::apply_file_url_identity(
                 plan,
                 file_url_identity.as_deref(),

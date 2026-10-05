@@ -2400,12 +2400,13 @@ fn runtime_file_url_queries_keep_distinct_source_graphs_after_a_file_changes() {
     let fixture = Fixture::empty();
     let entry = fixture.dir.join("entry.mjs");
     let generated = fixture.dir.join("generated.mjs");
-    let entry_source = "import { writeFileSync } from 'node:fs';\n\
+    let entry_source = "import { unlinkSync, writeFileSync } from 'node:fs';\n\
         import { fileURLToPath } from 'node:url';\n\
         const url = new URL('./generated.mjs', import.meta.url).href;\n\
         const first = await import(url + '?one');\n\
         writeFileSync(fileURLToPath(url), \"export const value = 'two';\\n\");\n\
         const second = await import(url + '?two');\n\
+        unlinkSync(fileURLToPath(url));\n\
         const firstAgain = await import(url + '?one');\n\
         console.log(first.value, second.value, firstAgain.value, firstAgain === first);\n";
     std::fs::write(&entry, entry_source).expect("write runtime-query entry");
