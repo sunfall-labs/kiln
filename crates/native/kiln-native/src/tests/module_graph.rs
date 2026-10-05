@@ -5080,7 +5080,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         .expect("compile wrapper source");
     objects.push(wrapper_object);
     let target = target_identity(toolchain.identity());
-    let (provider, _, _, _) = builder
+    let (provider, _, _, provider_link_arguments) = builder
         .cached_number_provider(&target)
         .expect("load Realm provider");
     let provider_archive = root.path.join("realm-provider.a");
@@ -5088,6 +5088,13 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
     let library = root.path.join(shared_library_name());
     let mut manual_link = LinkOptions::default();
     manual_link.runtime_libraries.push(provider_archive);
+    // Manual fixture links must honor the same provider contract as NativeBuilder,
+    // including platform libraries required by an explicitly configured GUI archive.
+    manual_link.extra_args.extend(
+        provider_link_arguments
+            .into_iter()
+            .map(std::ffi::OsString::from),
+    );
     if cfg!(not(target_os = "windows")) {
         manual_link.libraries.push("m".to_owned());
     }
