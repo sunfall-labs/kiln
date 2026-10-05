@@ -2295,13 +2295,9 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
         // if any accessor exists, read every key in order because a getter can mutate later keys.
         let data = match &value {
             Value::Object(object) => {
-                let mut object = object.borrow_mut();
-                object.refresh_namespace();
+                let object = object.borrow();
                 keys.iter()
-                    .map(|key| match object.get_own_property(key) {
-                        Some(Property::Value(value)) => Some((key.clone(), value.clone())),
-                        _ => None,
-                    })
+                    .map(|key| object.get_own_value(key).map(|value| (key.clone(), value)))
                     .collect::<Option<HashMap<_, _>>>()
             }
             Value::Function(function) => {
@@ -2592,9 +2588,9 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 let object_ref = object.borrow();
                 for key in object_ref.keys() {
                     if key != "default"
-                        && let Some(Property::Value(val)) = object_ref.get_own_property_units(key)
+                        && let Some(value) = object_ref.get_own_value_units(key)
                     {
-                        exports_map.insert(key.to_lossy_string(), val.clone());
+                        exports_map.insert(key.to_lossy_string(), value);
                     }
                 }
             } else if let Value::Function(closure) = &final_exports {

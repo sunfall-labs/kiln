@@ -66,7 +66,15 @@ impl ObjectData {
     /// Host adapters that intentionally inspect data properties without invoking accessors use
     /// this instead of `get_own`, whose borrowed result can only expose the stored slot.
     pub fn get_own_value(&self, key: &str) -> Option<Value> {
-        let key = PropertyKeyRef::Utf8(key);
+        self.get_own_value_key(PropertyKeyRef::Utf8(key))
+    }
+
+    /// Exact-unit counterpart of [`ObjectData::get_own_value`].
+    pub fn get_own_value_units(&self, key: &StringUnits) -> Option<Value> {
+        self.get_own_value_key(PropertyKeyRef::Units(key))
+    }
+
+    fn get_own_value_key(&self, key: PropertyKeyRef<'_>) -> Option<Value> {
         self.properties
             .iter()
             .enumerate()
