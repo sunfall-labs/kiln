@@ -2112,6 +2112,9 @@ static __attribute__((noinline, unused)) int kiln_c99_pic_list_holder(const kiln
                                                                      const kiln_object *level,
                                                                      kiln_val *out) {
     const kiln_property *record;
+    /* A namespace's descriptor payload is an export cell, not the result of Get. Leave it to
+     * the throwing generic reader, which also performs the TDZ check. */
+    if (KILN_UNLIKELY(level->module_namespace)) return 0;
     if (KILN_UNLIKELY(entry->proto_slot >= level->count)) return 0;
     record = &level->properties[entry->proto_slot];
     if (KILN_UNLIKELY(record->key != entry->key || record->accessor)) return 0;
@@ -2127,6 +2130,7 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_e
     if (KILN_LIKELY(entry->one_step)) {
         if (KILN_UNLIKELY(obj->prototype.tag != KILN_VALUE_OBJECT)) return 0;
         level = (const kiln_object *)(uintptr_t)obj->prototype.bits;
+        if (KILN_UNLIKELY(level->module_namespace)) return 0;
         if (KILN_UNLIKELY(level->shape != entry->level_shape[0])) return 0;
         *out = level->slots[entry->proto_slot];
         return 1;
@@ -2134,6 +2138,9 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_e
     if (entry->depth == 0 && !entry->absent) return 0;
     level = kiln_c99_pic_path(entry, obj);
     if (level == NULL) return 0;
+    /* Prototype PIC entries retain descriptor slots, which for a module namespace are live
+     * cells. Only generic [[Get]] can resolve that cell and preserve ReferenceError in the TDZ. */
+    if (KILN_UNLIKELY(level->module_namespace)) return 0;
 #ifdef KILN_IC_CHECK
     kiln_c99_pic_oracle(entry, obj);
 #endif

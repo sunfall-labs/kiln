@@ -478,6 +478,25 @@ done:
     return status;
 }
 
+/* A namespace property's stored value is its live export cell. Resolve it at the point the
+ * namespace descriptor is encountered, including when that namespace is an ordinary object's
+ * prototype. This keeps direct and inherited reads on the same TDZ path. */
+static int kiln_c99_namespace_cell_read(kiln_value value, kiln_value *out,
+                                         kiln_value *thrown) {
+    kiln_val *cell;
+    int status;
+    if (value.tag != KILN_VALUE_CELL) {
+        *out = value;
+        return KILN_C99_OK;
+    }
+    cell = kiln_c99_cell_of(value);
+    if (cell == NULL) KILN_C99_REFUSE("namespace export cell has no storage");
+    status = kiln_c99_val_check_tdz(*cell, thrown);
+    if (status != KILN_C99_OK) return status;
+    *out = kiln_val_to_boundary(*cell);
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
                                  const kiln_string *ikey, kiln_value *out, int depth,
                                  kiln_value *thrown) {
@@ -617,6 +636,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     KILN_C99_REFUSE("a member this backend declares and has not implemented");
                 }
                 if (!property.accessor) {
+                    if (current.tag == KILN_VALUE_OBJECT &&
+                        kiln_c99_object_of(current)->module_namespace) {
+                        return kiln_c99_namespace_cell_read(property.value, out, thrown);
+                    }
                     *out = property.value;
                     return KILN_C99_OK;
                 }
@@ -2623,11 +2646,7 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
      * evaluated. */
     if (status == KILN_C99_OK && target.tag == KILN_VALUE_OBJECT &&
         kiln_c99_object_of(target)->module_namespace && out->tag == KILN_VALUE_CELL) {
-        kiln_val *cell = kiln_c99_cell_of(*out);
-        if (cell == NULL) KILN_C99_REFUSE("namespace export cell has no storage");
-        status = kiln_c99_val_check_tdz(*cell, thrown);
-        if (status != KILN_C99_OK) return status;
-        *out = kiln_val_to_boundary(*cell);
+        return kiln_c99_namespace_cell_read(*out, out, thrown);
     }
     if (status == KILN_C99_CONTROL_ERROR && kiln_c99_key_is_program_symbol(key)) {
         /* `Boolean[Symbol.for("immer-draftable")]`, which a bundled `immer` reads off every
@@ -2721,7 +2740,7 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
     }
     if (object->prototype.tag == KILN_VALUE_OBJECT) {
         const kiln_object *parent = kiln_c99_object_of(object->prototype);
-        if (parent->sealed != NULL) return 0;
+        if (parent->sealed != NULL || parent->module_namespace) return 0;
         for (index = 0; index < parent->count && parent->properties != NULL; ++index) {
             if (kiln_c99_same_key_view(&parent->properties[index], key)) {
                 kiln_c99_site_set_dictionary(site, 0, kiln_c99_site_encode_dictionary_index(index));
@@ -2778,7 +2797,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                 kiln_value current = object->prototype;
                 while (current.tag == KILN_VALUE_OBJECT) {
                     const kiln_object *proto_obj = kiln_c99_object_of(current);
-                    if (proto_obj->sealed != NULL) goto generic;
+                    if (proto_obj->sealed != NULL || proto_obj->module_namespace) goto generic;
                     if (proto_obj->shape != NULL) {
                         uint32_t proto_slot;
                         if (canonical != NULL &&
@@ -2817,7 +2836,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                    !kiln_c99_same_key_view(&object->properties[index], key)) ++index;
             if (index == object->count) {
                 const kiln_object *parent = kiln_c99_object_of(object->prototype);
-                if (parent->sealed != NULL) goto generic;
+                if (parent->sealed != NULL || parent->module_namespace) goto generic;
                 uint32_t at = kiln_c99_site_decode_dictionary_index(kiln_c99_site_proto(site));
                 if (parent->properties != NULL && at < parent->count &&
                     kiln_c99_same_key_view(&parent->properties[at], key) &&
