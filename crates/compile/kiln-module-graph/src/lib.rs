@@ -1883,6 +1883,7 @@ where
         for (path, source) in includes {
             self.visit_static(path, Some(source))?;
         }
+        self.visit_elided_runtime_alias_targets()?;
         let export_resolutions = resolve_exports(&self.modules, &self.order)?;
         validate_links(&self.modules, &self.order, &export_resolutions)?;
         loop {
@@ -1978,6 +1979,56 @@ where
                     runtime.specifier,
                     format!("runtime request failed: {error}"),
                 );
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep targets of authored TS value imports that lowering erased only when the resolver
+    /// confirms that a generated runtime package alias addresses the target. These targets are
+    /// graph candidates, not module edges, so demand analysis still leaves them unevaluated until
+    /// the generated runtime import is selected.
+    fn visit_elided_runtime_alias_targets(&mut self) -> Result<(), ModuleGraphError> {
+        let mut inspected = HashSet::<(PathBuf, String)>::new();
+        loop {
+            let mut candidates = Vec::new();
+            for (importer, node) in &self.modules {
+                let Some(provenance) = node.program.program.static_source_provenance.as_ref()
+                else {
+                    continue;
+                };
+                for specifier in provenance.authored_value_imports.iter() {
+                    let specifier = specifier.as_ref();
+                    if node.program.dependencies.iter().any(|dep| dep == specifier)
+                        || !inspected.insert((importer.clone(), specifier.to_owned()))
+                    {
+                        continue;
+                    }
+                    let Ok(resolved) = self.resolver.resolve_for_request(
+                        specifier,
+                        importer,
+                        NodeRequestKind::Import,
+                    ) else {
+                        continue;
+                    };
+                    if resolved.builtin().is_none()
+                        && !self
+                            .resolver
+                            .runtime_package_aliases(&resolved.path)
+                            .is_empty()
+                        && !self.modules.contains_key(&resolved.path)
+                    {
+                        candidates.push(resolved.path);
+                    }
+                }
+            }
+            if candidates.is_empty() {
+                break;
+            }
+            candidates.sort();
+            candidates.dedup();
+            for target in candidates {
+                self.visit_static(target, None)?;
             }
         }
         Ok(())

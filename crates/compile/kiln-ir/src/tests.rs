@@ -81,6 +81,7 @@ fn transformed_static_callsite_coordinates_use_original_typescript() {
         },
         transform_fingerprint: "test-policy".into(),
         identity: "map-identity".into(),
+        authored_value_imports: Arc::from([]),
         source_map: vec![SourceMapSegment {
             generated_offset: 0,
             original_offset: 9,

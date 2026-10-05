@@ -133,6 +133,10 @@ pub struct StaticSourceProvenance {
     /// Digest over original text, transform/source-kind fingerprint, and every source-map segment.
     /// The original path is retained separately for diagnostics and does not affect reusable code.
     pub identity: Arc<str>,
+    /// Authored non-type-only import requests captured before TypeScript erasure. Graph building
+    /// filters out requests still present in generated JavaScript and uses only erased requests
+    /// as resolver hints for runtime-package aliases; this metadata is never an execution edge.
+    pub authored_value_imports: Arc<[Arc<str>]>,
     pub source_map: Arc<[SourceMapSegment]>,
 }
 

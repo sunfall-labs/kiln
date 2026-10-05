@@ -34,9 +34,9 @@ use oxc_ast::{
     ast::{
         Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern,
         Class, ClassElement, Declaration, Directive, ExportDefaultDeclarationKind, Expression,
-        FormalParameters, Function, ImportDeclarationSpecifier, MethodDefinitionKind,
-        ObjectExpression, ObjectPropertyKind, PropertyKind, Statement, TSEnumDeclaration,
-        TSEnumMemberName, VariableDeclaration, VariableDeclarationKind,
+        FormalParameters, Function, ImportDeclarationSpecifier, ImportOrExportKind,
+        MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement,
+        TSEnumDeclaration, TSEnumMemberName, VariableDeclaration, VariableDeclarationKind,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -67,7 +67,7 @@ pub enum StaticTypescriptPolicy {
     TransformToNode22JavaScript,
 }
 
-const STATIC_TS_TRANSFORM_FINGERPRINT: &str = "kiln-static-ts-v1;oxc=0.147.0;target=node22;typescript=default;jsx=automatic;codegen=0.147.0-default";
+const STATIC_TS_TRANSFORM_FINGERPRINT: &str = "kiln-static-ts-v2;oxc=0.147.0;target=node22;typescript=default;jsx=automatic;codegen=0.147.0-default";
 
 /// Convert Oxc's lossless sentinel representation into ECMAScript UTF-16 units.
 ///
@@ -361,6 +361,34 @@ fn transform_static_typescript(
         return Err(parsed.diagnostics.iter().map(lower_diagnostic).collect());
     }
 
+    // Capture authored value-import requests before Oxc removes imports used only by types or
+    // erased as unused values. The graph uses these solely to retain resolver-approved runtime
+    // package alias targets as lazy link candidates; they do not become execution dependencies.
+    let authored_value_imports = parsed
+        .program
+        .body
+        .iter()
+        .filter_map(|statement| {
+            let Statement::ImportDeclaration(declaration) = statement else {
+                return None;
+            };
+            if declaration.import_kind == ImportOrExportKind::Type {
+                return None;
+            }
+            let has_runtime_specifier = declaration.specifiers.as_ref().is_none_or(|specifiers| {
+                specifiers.is_empty()
+                    || specifiers.iter().any(|specifier| match specifier {
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                            specifier.import_kind == ImportOrExportKind::Value
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(_)
+                        | ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => true,
+                    })
+            });
+            has_runtime_specifier.then(|| Arc::<str>::from(declaration.source.value.as_str()))
+        })
+        .collect::<Vec<_>>();
+
     let semantic = SemanticBuilder::new()
         .with_enum_eval(true)
         .build(&parsed.program)
@@ -462,6 +490,7 @@ fn transform_static_typescript(
             },
             transform_fingerprint: fingerprint,
             identity,
+            authored_value_imports: authored_value_imports.into(),
             source_map: segments.into(),
         },
     ))
@@ -6894,6 +6923,34 @@ mod tests {
                 .unwrap()
                 .identity,
             "diagnostic paths are not part of generated-program content identity"
+        );
+    }
+
+    #[test]
+    fn static_typescript_provenance_keeps_authored_value_imports_only() {
+        let parsed = parse_static_typescript(
+            "compiler.ts",
+            "import { runtime } from './runtime.ts'; import type { Shape } from './types.ts'; import { type Token } from './tokens.ts'; export const generated = () => String(runtime);",
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let provenance = parsed
+            .static_source_provenance
+            .expect("static TypeScript has provenance");
+        assert_eq!(
+            provenance
+                .authored_value_imports
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            ["./runtime.ts"]
+        );
+        assert!(
+            !parsed
+                .requested_modules
+                .iter()
+                .any(|request| request.specifier == "./types.ts"),
+            "type-only source imports are absent from runtime dependencies"
         );
     }
 
