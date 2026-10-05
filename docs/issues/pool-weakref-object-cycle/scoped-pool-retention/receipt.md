@@ -18,16 +18,19 @@ Run from the pinned Effect source root with the frozen interpreter CLI:
 
 The command exited 0. Its stdout is preserved verbatim as `result.json`.
 The invalidated PoolItems were distinct from the one remaining live item and
-both PoolItem WeakRefs cleared. Their finalizer Effects also cleared. Both
-resources remained live; their Success Exit objects and acquisition scopes
-remained live, and each retained scope's Closed Exit pointed to the respective
-resource. The control object and nested test scopes were collected. This narrows
-the owner search to the allocation-scope/Exit path but does not identify which
-reachable runtime owner keeps those closed scopes alive.
+both PoolItem WeakRefs cleared. Their finalizer Effects and nested test scopes
+also cleared. Both resources remained live; their Success Exit objects and
+acquisition scopes remained live, and each retained scope's Closed Exit pointed
+to the respective resource. The observed allocation scopes have no parent. The
+WeakRefs to their acquisition Context snapshots cleared, while the replacement
+item's current acquisition Context and Open scope remained live. The control
+object was collected. This narrows the owner search to the detached closed
+allocation-scope/Exit path but does not identify which runtime owner keeps those
+scopes alive.
 
 Provenance:
 
 - Frozen CLI SHA-256: `f1c8f22d171e209a929842563e5dd35f2a2226d9c363486497665bcde9189de0`
 - Upstream Effect pin: `67ba4e46a11ccda0b6761578bfd22c04ae00167d`
 - Unchanged upstream `Pool.test.ts` SHA-256: `a219193dd30dc547f7364a723e2682d653ab824ccbda816b48b1a9d5bfb539f8`
-- Probe SHA-256: `01dd1bb1cdf4125222ae6a0678693fce86e1b0e966bd4d766227b1a19ba8444b`
+- Probe SHA-256: `dc0e5485b048b7f238d066a790a3681a804c5aa892ba10f5b11629a9f1af90b9`

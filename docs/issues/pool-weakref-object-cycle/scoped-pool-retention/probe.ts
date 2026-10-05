@@ -1,10 +1,11 @@
-import { Effect, Pool } from "effect"
+import { Context, Effect, Pool, Scope } from "effect"
 import { collectGarbage } from "../utils/gc.ts"
 
 const control = new WeakRef({})
 const itemRefs: Array<WeakRef<any>> = []
 const resourceRefs: Array<WeakRef<object>> = []
 const acquisitionScopeRefs: Array<WeakRef<any>> = []
+const acquisitionContextRefs: Array<WeakRef<any>> = []
 const observed: Array<{ label: string; reference: WeakRef<any> }> = []
 let finalized = 0
 const observeItems = (pool: any) => {
@@ -26,7 +27,9 @@ const observeItems = (pool: any) => {
 await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
   const pool = yield* Pool.makeWithTTL({
     acquire: Effect.acquireRelease(
-      Effect.flatMap(Effect.scope, (scope) => Effect.sync(() => {
+      Effect.flatMap(Effect.context(), (context) => Effect.sync(() => {
+        acquisitionContextRefs.push(new WeakRef(context))
+        const scope = Context.get(context, Scope.Scope)
         acquisitionScopeRefs.push(new WeakRef(scope))
         return {}
       })),
@@ -79,8 +82,18 @@ await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
     const resource = resourceRefs[index]?.deref()
     return {
       alive: scope !== undefined,
+      parentIsUndefined: scope?.parent === undefined,
+      stateTag: scope?.state?._tag,
       closedExitIsResource: scope !== undefined && resource !== undefined &&
         scope.state?._tag === "Closed" && scope.state.exit?._tag === "Success" && scope.state.exit.value === resource
+    }
+  })
+  const acquisitionContexts = acquisitionContextRefs.map((reference, index) => {
+    const context = reference.deref()
+    const scope = acquisitionScopeRefs[index]?.deref()
+    return {
+      alive: context !== undefined,
+      pointsToAcquisitionScope: context !== undefined && scope !== undefined && Context.get(context, Scope.Scope) === scope
     }
   })
   console.log(JSON.stringify({
@@ -91,6 +104,7 @@ await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
     itemAlive: itemRefs.map((reference) => reference.deref() !== undefined),
     observationsAlive: observed.map(({ label, reference }) => ({ label, alive: reference.deref() !== undefined })),
     acquisitionScopes,
+    acquisitionContexts,
     resourceAlive: resourceRefs.map((reference) => reference.deref() !== undefined),
     controlAlive: control.deref() !== undefined,
     remainingItems: pool.state.items.size
