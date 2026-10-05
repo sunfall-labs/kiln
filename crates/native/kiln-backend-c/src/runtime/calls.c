@@ -918,6 +918,13 @@ static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced, kiln_
     kiln_value breceiver = kiln_val_to_boundary(*receiver);
     kiln_value bproduced = kiln_val_to_boundary(produced);
     kiln_value bparent = kiln_val_to_boundary(parent);
+    /* `super_call` unwraps bound constructors before dispatch. A bound native builtin still
+     * needs the derived prototype transplanted onto its separately allocated result, while a
+     * Proxy must keep its `[[Construct]]` result untouched. Classify the same effective target
+     * without unwrapping Proxies. */
+    while (bparent.tag == KILN_VALUE_BOUND) {
+        bparent = ((kiln_bound *)(uintptr_t)bparent.bits)->target;
+    }
     int status = kiln_c99_adopt_super(
         &breceiver, bproduced, bparent.tag != KILN_VALUE_BUILTIN);
     if (status == KILN_C99_OK) {

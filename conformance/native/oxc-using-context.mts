@@ -250,4 +250,12 @@ const explicitDerived = new ExplicitDerived();
 if (explicitDerived !== explicitParentObject) {
   throw new Error("transparent Proxy replaced explicit parent return");
 }
+const BoundArray = Array.bind(null);
+Object.defineProperty(BoundArray, "prototype", { value: Array.prototype });
+class BoundArrayDerived extends BoundArray {}
+const boundArray = new BoundArrayDerived(3, 5, 8);
+if (!Array.isArray(boundArray) || !(boundArray instanceof BoundArrayDerived) ||
+    boundArray.length !== 3 || boundArray[2] !== 8) {
+  throw new Error("bound native superclass lost derived array adoption");
+}
 console.log("Oxc using context and SuppressedError passed");
