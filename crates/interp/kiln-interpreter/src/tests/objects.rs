@@ -2672,7 +2672,7 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
                 asynchronous: true,
                 name: None,
                 arrow: false,
-                generator: false,
+                generator: true,
                 async_generator: true,
                 is_method: false,
                 is_class: false,
@@ -2756,6 +2756,31 @@ fn generator_and_async_generator_prototype_and_constructor_hierarchy() {
     let gen_fn = Value::Function(vm.make_closure(0).expect("make generator closure"));
     let async_gen_fn = Value::Function(vm.make_closure(1).expect("make async generator closure"));
     let async_fn = Value::Function(vm.make_closure(2).expect("make async closure"));
+
+    let generator = vm
+        .call_value(&gen_fn, Value::Undefined, Vec::new(), 0)
+        .unwrap();
+    let async_generator = vm
+        .call_value(&async_gen_fn, Value::Undefined, Vec::new(), 0)
+        .unwrap();
+    let iterator_key = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
+    let async_iterator_key = Value::Symbol(Symbol::WellKnown(WellKnown::AsyncIterator));
+    assert!(has_property(&vm.intrinsics, &generator, &iterator_key));
+    assert!(!has_property(
+        &vm.intrinsics,
+        &generator,
+        &async_iterator_key
+    ));
+    assert!(has_property(
+        &vm.intrinsics,
+        &async_generator,
+        &async_iterator_key
+    ));
+    assert!(!has_property(
+        &vm.intrinsics,
+        &async_generator,
+        &iterator_key
+    ));
 
     let async_proto = prototype_of(&async_fn);
     assert_eq!(

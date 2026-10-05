@@ -332,16 +332,33 @@ kiln_has_next_prototype:
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_GENERATOR) {
-        kiln_value store = kiln_c99_generator_of(target)->properties;
+        kiln_generator *frame = kiln_c99_generator_of(target);
+        kiln_value store = frame->properties;
         if (store.tag == KILN_VALUE_OBJECT) {
-            int status = kiln_c99_has_property_key(host, store, key, ikey, answer, depth, thrown);
-            if (status != KILN_C99_OK || *answer) return status;
+            if (kiln_c99_store_has(store, key, ikey)) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+        }
+        kiln_value prototype = frame->prototype;
+        if (store.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_object_of(store)->prototype.tag != KILN_VALUE_UNDEFINED) {
+            prototype = kiln_c99_object_of(store)->prototype;
+        }
+        /* The TypeScript-owned generator prototype is authoritative for membership too.
+         * Walk descriptors without evaluating a getter or inventing intrinsic members. */
+        if (prototype.tag == KILN_VALUE_OBJECT || prototype.tag == KILN_VALUE_PROXY ||
+            prototype.tag == KILN_VALUE_NULL) {
+            target = prototype;
+            ++steps;
+            goto kiln_has_next_prototype;
         }
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         *answer = kiln_c99_same_name_key(key, "throw") ||
-            (kiln_c99_same_name_key(key, "@@asyncIterator") && kiln_c99_generator_of(target)->async_generator) ||
-            kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_GENERATOR_NEXT,
-                                    KILN_C99_METHOD_GENERATOR_SELF) != 0;
+            (kiln_c99_same_name_key(key, "@@asyncIterator") && frame->async_generator) ||
+            (!(frame->async_generator && kiln_c99_same_name_key(key, "@@iterator")) &&
+             kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_GENERATOR_NEXT,
+                                   KILN_C99_METHOD_GENERATOR_SELF) != 0);
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_TIMER) {

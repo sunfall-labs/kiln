@@ -793,7 +793,7 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
                     .borrow()
                     .prototype_table()
                     .is_some_and(|(table, realm)| {
-                        own_attributes(
+                        has_property_ascii(
                             intrinsics,
                             &Value::Native(
                                 Native::PrototypeOf(table),
@@ -801,7 +801,6 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
                             ),
                             &name,
                         )
-                        .is_some()
                     })
                 // An iterator this realm made inherits `%IteratorPrototype%`, as the read does.
                 || ((object.borrow().get_own("@@iterated").is_some()
@@ -886,11 +885,7 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
         other if exotic_properties(other).is_some() => {
             exotic_properties(target).is_some_and(|store| store.borrow().lookup(&name).is_some())
                 || exotic_reserved_name(target, &name)
-                || own_attributes(intrinsics, &prototype_of(target), &name).is_some()
-                || !matches!(
-                    inherited_object_property(intrinsics, &name, value_realm(target)),
-                    Value::Undefined
-                )
+                || has_property_ascii(intrinsics, &prototype_of(target), &name)
         }
         // Mirrors the read: the realm's store first, then the table, then the `name` and
         // `length` every callable owns. A property a program deleted is absent here too, or
@@ -929,17 +924,7 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
             // is every constructor and method table but that one. Answering from the built-in's
             // own names alone denied them `hasOwnProperty`, and denied `Math` a property the
             // program had put on `Object.prototype` and could read straight off it.
-            let inherited = if matches!(
-                native,
-                Native::PrototypeOf(PrototypeTable::IteratorFor(_) | PrototypeTable::Generator)
-            ) {
-                // One link further: these reach `%IteratorPrototype%` before `Object.prototype`.
-                native_inherited_property(intrinsics, target, &name)
-            } else {
-                inherited_object_property(intrinsics, &name, value_realm(target))
-            };
-            own || (!matches!(native, Native::PrototypeOf(PrototypeTable::Object))
-                && !matches!(inherited, Value::Undefined))
+            own || has_property_ascii(intrinsics, &prototype_of(target), name)
         }
         // Callable methods belong to the actual prototype chain. In particular, setting a
         // function's prototype to null removes inherited methods without removing its own
