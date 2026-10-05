@@ -42,14 +42,21 @@ impl<T> WeakCensus<T> {
     }
 
     fn prune(&mut self) {
-        self.entries.retain(|entry| entry.strong_count() > 0);
-        self.internal_weak_counts.clear();
-        for entry in &self.entries {
-            *self
-                .internal_weak_counts
-                .entry(entry.as_ptr() as usize)
-                .or_default() += 1;
-        }
+        let entries = &mut self.entries;
+        let counts = &mut self.internal_weak_counts;
+        entries.retain(|entry| {
+            if entry.strong_count() > 0 {
+                return true;
+            }
+            let identity = entry.as_ptr() as usize;
+            if let Some(count) = counts.get_mut(&identity) {
+                *count -= 1;
+                if *count == 0 {
+                    counts.remove(&identity);
+                }
+            }
+            false
+        });
         self.prune_at = self
             .entries
             .len()
@@ -146,5 +153,34 @@ mod tests {
         census.prune();
         assert!(census.entries.is_empty());
         assert_eq!(census.internal_weak_counts.len(), 0);
+    }
+
+    #[test]
+    fn pruning_removes_all_duplicate_weak_edges_for_an_expired_identity() {
+        let mut census = WeakCensus::<usize>::default();
+        let repeated = Rc::new(7);
+        let identity = Rc::as_ptr(&repeated) as usize;
+        census.register(&repeated);
+        census.register(&repeated);
+
+        let snapshot = census.internal_weak_counts();
+        assert_eq!(snapshot.get(&identity), Some(&2));
+        assert_eq!(Rc::weak_count(&repeated), 2);
+        assert_eq!(Rc::strong_count(&repeated), 1);
+        census.prune();
+        assert_eq!(
+            census.internal_weak_counts.get(&identity),
+            Some(&2),
+            "pruning must preserve duplicate entries while their Rc allocation is alive"
+        );
+        assert_eq!(Rc::weak_count(&repeated), 2);
+
+        drop(repeated);
+        census.prune();
+        assert!(census.entries.is_empty());
+        assert!(!census.internal_weak_counts.contains_key(&identity));
+        // Numeric count snapshots own neither Weak nor Rc references and remain stable when the
+        // census removes expired registration entries.
+        assert_eq!(snapshot.get(&identity), Some(&2));
     }
 }
