@@ -1,0 +1,10 @@
+# Native Effect replay on pushed compiler, 2026-10-05
+
+These are unchanged upstream probes from pin `67ba4e46a11ccda0b6761578bfd22c04ae00167`, run against pushed source snapshot `411030258c7637c52b059d777b8fac04ada4fc01` and immutable native-release CLI SHA-256 `d0830baef65b01c9ccfeb626984e44cf863418a7008596188feb29822949ea88`. Native provider ABI is 82; exact manifest and its archive/source hashes are in `provider.json` (manifest SHA-256 `4b68a2200f148e19ff7fcd146cacd5c8ffb546692d67e52478fb3b266c19621b`). The upstream source digest, runner and harness identities, mode mapping, per-case deadlines, and exact build/run commands are retained in each report JSON. Each run used one build worker, one runtime worker, `native-release`, an 8192 MiB process cap, and the original per-case 5000 ms timeout. No timeout was raised.
+
+- Sharding: 66 cases discovered, 60 passed, 6 timed out, 0 skipped. The failures were unchanged 5000 ms timeouts: active request replay after entity defect; active uninterruptible request after restart; active stream after acknowledged chunk; request reset during pending async storage read; durable messages while entity layers build; and durable-message defects when no entity registers. No inventory, mapping, mode, or source mismatch errors.
+- ClusterWorkflowEngine: 47 cases discovered, 46 passed, 1 timed out, 0 skipped. The failure was `a parent stays suspended past the activity interrupt retry budget` at the unchanged 5000 ms case budget. No inventory, mapping, mode, or source mismatch errors.
+- Hash: 25 cases passed, no failures or skips, and no inventory/mapping/mode mismatches.
+- ManagedRuntime: the native build stopped before test registration (`complete: false`, no cases). The compiler-generated import `@oxc-project/runtime/helpers/usingCtx` could not resolve from `ManagedRuntime.test.ts`; this is a build blocker, not a test failure or pass.
+
+The per-suite case JSON and complete logs are preserved here. Original binaries are not included; the CLI hash identifies the immutable executable. Native test binaries were compressed separately during the run and are not needed to reproduce the recorded result.
