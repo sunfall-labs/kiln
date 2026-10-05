@@ -998,32 +998,23 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
         identities.len(),
         non_provider_count + provider_identities.len()
     );
-    let full_provider_identity = provider_identities
-        .iter()
-        .find(|(variant, _)| matches!(variant, ProviderVariant::Full))
-        .map(|(_, identity)| identity.clone())
-        .expect("full provider identity");
     for family in NativeArtifactFamily::SOURCES {
+        // Providers are checked below against every configured variant. An explicit
+        // manifest may select only FullGui or a capability-minimal variant.
+        if matches!(family, NativeArtifactFamily::NumberProvider) {
+            continue;
+        }
         let (backend, abi) = family.backend_abi(
             &module_abi_identity(),
             &runtime_abi_identity(),
             &shared_embedding_abi_identity(),
         );
-        let compiler_version = if matches!(family, NativeArtifactFamily::NumberProvider) {
-            full_provider_identity.clone()
-        } else {
-            family.compiler_version()
-        };
         assert!(identities.contains(&cache_identity(
-            compiler_version,
+            family.compiler_version(),
             backend,
             &abi,
             &target,
-            if matches!(family, NativeArtifactFamily::NumberProvider) {
-                CacheProfile::Release
-            } else {
-                CacheProfile::Debug
-            },
+            CacheProfile::Debug,
         )));
     }
     for (_variant, provider_identity) in provider_identities {
