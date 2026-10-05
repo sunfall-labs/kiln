@@ -123,6 +123,31 @@ combines the expanded activation coverage with a Weak Cell registry, then follow
 Cell to its real Closure/frame/module owner. No production collector change follows from this
 object-only result.
 
+## Diagnostic weak Cell registry
+
+The combined Cell run used the same fixed probe and expanded the object registry to Cells found
+in VM values, active and saved frames, captured Closure upvalues, arrays/ordinary-object slots,
+and weak module-generation records. It built from the source diff SHA-256
+`7ed6ea480cd6c85e835f7356c05b836a57a2b6ee54d9593ec072be0f826bdb3b` into CLI SHA-256
+`e15ef1180f4cfcd7edf99c2555918ee2e54a85aacc4a7119ef78017addc0ce6d`. The probe output SHA-256 is
+`6de2ab17e4e0aef5580ed2606dc3b410cb142010a023190f8c1d963c3af3b8e4`; the full log is
+`cell-registry/cell-registry-probe.log`. The upstream Pool source and diagnostic probe were
+unchanged.
+
+At the first collection, each observed inner Scope had one Cell whose borrowed value was that
+Scope. Both Cells were already production owner-graph nodes with one incoming edge, and the
+existing Closure census found each Cell as an upvalue at index 1. At later collections, those
+same scopes still had `strong=2,incoming=0`, but no registered Cell still held them. Thus the
+Cell/Closure relation is real but transient; the trace does not expose the persistent additional
+owner and does not establish a Pool fix. It also confirms that this Cell kind and the observed
+Closure upvalue path are already represented in production census accounting.
+
+After this binary was built, diagnostic-only source was extended to remember target-to-Cell
+identities weakly and print the matched Closure node's incoming/strong-count classification. That
+extension is unbuilt. It does not change the collector. The next source review compares borrowed
+Value-bearing fields in the existing Closure, Generator, Array and iterator owner paths against
+the corresponding structs, before deciding whether any narrower weak registry is needed.
+
 ## Next diagnostic
 
 Register physical Cells through VM values, saved frames, closure upvalues, and module bindings in
