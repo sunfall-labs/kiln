@@ -23,6 +23,22 @@ A no-build `KILN_GC_TRACE=1` replay of the default frozen binary also timed out 
 
 The native runtime has no existing environment switch for per-yield or per-call counts. `KILN_HEAP_PROFILE` emits heap snapshots at introspection checkpoints, not call-site attribution. Together with the earlier sampled stack (`run_one_timer` into `kiln_c99_call_inner`) and CPU accounting, the evidence points to CPU work in ready callbacks; GC volume may contribute, but the current data does not establish it as the cause. Do not infer a GC optimization from this trace.
 
+Source inspection identifies one repeated candidate path for a later focused profile. Each due
+sleep in `TestClock.run` opens its latch and yields with `Effect.yieldNow`; `yieldNowWith` creates a
+scheduler callback and a resume callback, and the `MixedScheduler` queues work and requests its
+`setImmediate` callback when idle. The native timer path then dispatches through
+`run_one_timer` → `kiln_c99_run_timer*` → `kiln_c99_call`, consistent with the sampled ready-turn
+and call frames. This establishes where per-yield work flows, not its allocation count or whether
+it dominates the deadline.
+
+The closure allocator does not eagerly copy function source or build a prototype for each closure:
+`kiln_c99_make_closure` stores the compiled source pointer, initializes the own-prototype slot to
+`undefined`, and uses inline upvalues for captures of four or fewer values. Some arrows may still
+allocate closure blocks and larger captures allocate external upvalue storage. The live snapshot
+cannot distinguish these repeated temporary allocations from retained closures. Error/interrupt
+formatting is another sampled path, but the profile has no time markers proving those samples
+belong to the failed test's teardown rather than its normal callbacks.
+
 The GC trace log and its process resource receipt are retained as `clock-progress/native-gc-trace.log` and `clock-progress/native-gc-trace.json`. The log SHA-256 is `ed8ecffbcd5957d03ec0c9b610d9750a69a2d2918ffc788cf5c0ff9f1e7f8e6f`; the run used the same frozen default native binary and source overlay recorded above.
 
 A second existing-binary sample enabled `KILN_HEAP_PROFILE=1` and sent `SIGUSR1` at 0.7 s. It used the original frozen `sharding-native.bin` (SHA-256 `e3db1b40fd1ff66014e715d741dbb3b4f3e20a9dc2e75b4c865edac6695faad5`), with the same private Sharding implementation overlay; unlike the numeric-clock build above, it did not include the TestClock instrumentation. The signal requested the ordinary safepoint introspection dump; the heap-profile hook emitted its first two snapshots at turn boundaries. The later snapshot, at about 564 ms elapsed according to the introspection runtime report, had 109,831 live blocks / 15.03 MB payload: objects 25,056 / 7.02 MB, closures 19,163 / 4.60 MB, arrays 13,506 / 2.27 MB, strings 10,888 / 282 KB, cells 40,055 / 625 KB, and generators 222 / 95 KB. Reported side capacity included 2.04 MB of object properties, 164 KB of upvalues, and 70.5 KB of array elements. The earlier snapshot had 52,899 blocks / 7.64 MB.
