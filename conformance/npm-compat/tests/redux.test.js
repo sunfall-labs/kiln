@@ -1,34 +1,92 @@
-// kiln eval smoke test (authored for kiln, not from porffor).
+// kiln npm functional test: redux
 const { createStore, combineReducers, applyMiddleware } = require('redux');
 
-function counter(state = 0, action) {
+// 1. Reducers with immutable state updates & reference preservation
+const initialUsers = [{ id: 1, name: 'Ada' }, { id: 2, name: 'Babbage' }];
+function usersReducer(state = initialUsers, action) {
   switch (action.type) {
-    case 'INC': return state + 1;
-    case 'ADD': return state + action.n;
-    default: return state;
+    case 'USER_ADD':
+      return [...state, action.payload];
+    case 'USER_RENAME':
+      return state.map(u => u.id === action.payload.id ? { ...u, name: action.payload.name } : u);
+    default:
+      return state;
   }
 }
-const store = createStore(counter);
-const states = [];
-store.subscribe(() => states.push(store.getState()));
-store.dispatch({ type: 'INC' });
-store.dispatch({ type: 'ADD', n: 5 });
-store.dispatch({ type: 'UNKNOWN' });
-console.log('states:', JSON.stringify(states));
-console.log('final:', store.getState());
 
-function todos(state = [], action) {
-  return action.type === 'ADD_TODO' ? [...state, action.text] : state;
+function filterReducer(state = 'ALL', action) {
+  switch (action.type) {
+    case 'FILTER_SET':
+      return action.payload;
+    default:
+      return state;
+  }
 }
-const root = combineReducers({ counter, todos });
-const store2 = createStore(root);
-store2.dispatch({ type: 'ADD_TODO', text: 'write tests' });
-console.log('combined:', JSON.stringify(store2.getState()));
 
-const logged = [];
-const logger = () => (next) => (action) => { logged.push(action.type); return next(action); };
-const store3 = createStore(counter, applyMiddleware(logger));
-store3.dispatch({ type: 'INC' });
-console.log('middleware saw:', JSON.stringify(logged), 'state:', store3.getState());
+const rootReducer = combineReducers({
+  users: usersReducer,
+  filter: filterReducer
+});
 
-console.log('replaceReducer:', typeof store.replaceReducer === 'function');
+// 2. Chained middleware (logging + thunk dispatch)
+const log = [];
+const actionLogger = store => next => action => {
+  log.push('before:' + (typeof action === 'function' ? 'thunk' : action.type));
+  const res = next(action);
+  log.push('after:' + (typeof action === 'function' ? 'thunk' : action.type));
+  return res;
+};
+
+const thunkMiddleware = ({ dispatch, getState }) => next => action => {
+  if (typeof action === 'function') {
+    return action(dispatch, getState);
+  }
+  return next(action);
+};
+
+const store = createStore(rootReducer, applyMiddleware(thunkMiddleware, actionLogger));
+
+// 3. Multi-subscriber lifecycle & unsubscription during notification
+const history = [];
+let notifyCount = 0;
+const unsub1 = store.subscribe(() => {
+  notifyCount++;
+  history.push({ step: notifyCount, users: store.getState().users.length });
+  if (notifyCount === 2) {
+    unsub1(); // unsubscribes itself on second call
+  }
+});
+
+const unsub2 = store.subscribe(() => {
+  // secondary subscriber
+});
+
+// Dispatch direct action
+const s0 = store.getState();
+store.dispatch({ type: 'USER_ADD', payload: { id: 3, name: 'Turing' } });
+const s1 = store.getState();
+console.log('ref-equality-filter:', s0.filter === s1.filter);
+console.log('ref-inequality-users:', s0.users === s1.users);
+
+// Dispatch thunk action
+const asyncAdd = (user) => (dispatch, getState) => {
+  const currentCount = getState().users.length;
+  if (currentCount < 5) {
+    dispatch({ type: 'USER_ADD', payload: user });
+  }
+};
+store.dispatch(asyncAdd({ id: 4, name: 'Lovelace' }));
+store.dispatch(asyncAdd({ id: 5, name: 'Shannon' }));
+
+console.log('notify-history:', JSON.stringify(history));
+console.log('final-user-count:', store.getState().users.length);
+console.log('middleware-log:', JSON.stringify(log));
+
+// 4. replaceReducer runtime migration
+const newReducer = combineReducers({
+  users: usersReducer,
+  filter: filterReducer,
+  extra: (state = 'loaded', action) => state
+});
+store.replaceReducer(newReducer);
+console.log('replaced-state:', JSON.stringify(store.getState()));

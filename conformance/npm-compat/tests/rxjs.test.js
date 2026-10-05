@@ -1,26 +1,71 @@
-// kiln eval smoke test (authored for kiln, not from porffor).
-const { of, from, map, filter, reduce, toArray } = require('rxjs');
+// kiln npm functional test: rxjs
+const { of, from, Subject, BehaviorSubject, ReplaySubject } = require('rxjs');
+const { map, filter, mergeMap, concatMap, catchError, retry, take, toArray, finalize, tap } = require('rxjs');
 
-const out1 = [];
-of(1, 2, 3).subscribe((v) => out1.push(v));
-console.log(JSON.stringify(out1));
+// 1. BehaviorSubject & ReplaySubject state retention
+const bs = new BehaviorSubject('initial');
+const bsLog = [];
+bs.subscribe(v => bsLog.push('sub1:' + v));
+bs.next('second');
+bs.subscribe(v => bsLog.push('sub2:' + v));
+console.log('bs-current-value:', bs.getValue());
+console.log('bs-log:', JSON.stringify(bsLog));
 
-const out2 = [];
-of(1, 2, 3, 4)
+const rs = new ReplaySubject(2);
+rs.next('r1');
+rs.next('r2');
+rs.next('r3');
+const rsLog = [];
+rs.subscribe(v => rsLog.push(v));
+console.log('rs-replay-last-two:', JSON.stringify(rsLog));
+
+// 2. Higher-order flattening: concatMap and mergeMap
+const outConcat = [];
+of(1, 2, 3)
   .pipe(
-    filter((x) => x % 2 === 0),
-    map((x) => x * 10)
-  )
-  .subscribe((v) => out2.push(v));
-console.log(JSON.stringify(out2));
-
-from(['a', 'b'])
-  .pipe(
-    map((s) => s.toUpperCase()),
+    concatMap(n => of(n * 10, n * 10 + 1)),
     toArray()
   )
-  .subscribe((arr) => console.log(JSON.stringify(arr)));
+  .subscribe(arr => outConcat.push(...arr));
+console.log('concatMap-order:', JSON.stringify(outConcat));
 
+const outMerge = [];
+of('a', 'b')
+  .pipe(
+    mergeMap(letter => of(letter + '1', letter + '2')),
+    toArray()
+  )
+  .subscribe(arr => outMerge.push(...arr));
+console.log('mergeMap-results:', JSON.stringify(outMerge));
+
+// 3. Error recovery with catchError and retry
+const attempts = [];
+let errorCount = 0;
 of(1, 2, 3)
-  .pipe(reduce((acc, x) => acc + x, 0))
-  .subscribe((sum) => console.log(sum));
+  .pipe(
+    map(n => {
+      attempts.push(n);
+      if (n === 2 && errorCount === 0) {
+        errorCount++;
+        throw new Error('transient');
+      }
+      return n * 100;
+    }),
+    retry(1),
+    catchError(err => of(999)),
+    toArray()
+  )
+  .subscribe(res => console.log('retry-and-recovered:', JSON.stringify(res), 'attempts:', JSON.stringify(attempts)));
+
+// 4. Stream combination and early termination with finalize
+const finalizeLog = [];
+of(10, 20, 30, 40, 50)
+  .pipe(
+    take(3),
+    finalize(() => finalizeLog.push('cleanup-done')),
+    toArray()
+  )
+  .subscribe(res => {
+    console.log('take-3:', JSON.stringify(res));
+  });
+console.log('finalize:', JSON.stringify(finalizeLog));

@@ -1,29 +1,74 @@
-// kiln eval smoke test (authored for kiln, not from porffor).
+// kiln npm functional test: zustand
 const { createStore } = require('zustand/vanilla');
 
-const store = createStore((set) => ({
-  count: 0,
-  inc: () => set((s) => ({ count: s.count + 1 })),
-  add: (n) => set({ count: n }),
-  reset: () => set({ count: 0 })
-}));
+// 1. Store with custom logging middleware
+const log = [];
+const logMiddleware = (config) => (set, get, api) =>
+  config(
+    (...args) => {
+      const prev = get();
+      set(...args);
+      log.push({ prevCount: prev.cart ? prev.cart.items.length : 0, nextCount: get().cart.items.length });
+    },
+    get,
+    api
+  );
 
-console.log('initial:', store.getState().count);
-store.getState().inc();
-store.getState().inc();
-console.log('after inc:', store.getState().count);
-store.getState().add(10);
-console.log('after add:', store.getState().count);
+// 2. Multi-slice state composition
+const createStoreWithSlices = (set, get) => ({
+  user: { name: 'Guest', loggedIn: false },
+  cart: { items: [], total: 0 },
 
-const seen = [];
-const unsub = store.subscribe((s) => seen.push(s.count));
-store.getState().inc();
+  // Actions using get() and functional set()
+  login: (name) => {
+    set((state) => ({ user: { name, loggedIn: true } }));
+  },
+  logout: () => {
+    set({ user: { name: 'Guest', loggedIn: false } });
+  },
+  addItem: (item) => {
+    const current = get().cart;
+    const newItems = [...current.items, item];
+    const newTotal = newItems.reduce((sum, i) => sum + i.price, 0);
+    set({ cart: { items: newItems, total: newTotal } });
+  },
+  // Full state replacement with second argument true
+  replaceWholeState: (newState) => {
+    set(newState, true);
+  }
+});
+
+const store = createStore(logMiddleware(createStoreWithSlices));
+
+// 3. Selective subscription tracking
+const cartChanges = [];
+let lastCartTotal = store.getState().cart.total;
+const unsub = store.subscribe((state) => {
+  if (state.cart && state.cart.total !== lastCartTotal) {
+    lastCartTotal = state.cart.total;
+    cartChanges.push(lastCartTotal);
+  }
+});
+
+// Trigger state changes
+store.getState().login('Ada');
+console.log('user-after-login:', JSON.stringify(store.getState().user));
+
+store.getState().addItem({ id: 101, name: 'Compiler', price: 50 });
+store.getState().addItem({ id: 102, name: 'Profiler', price: 30 });
+console.log('cart-after-items:', JSON.stringify(store.getState().cart));
+
+// Unsubscribe and perform another update
 unsub();
-store.getState().inc();
-console.log('subscriber saw:', JSON.stringify(seen));
+store.getState().addItem({ id: 103, name: 'Linter', price: 20 });
+console.log('cart-after-unsub:', store.getState().cart.items.length, store.getState().cart.total);
+console.log('selective-cart-notifications:', JSON.stringify(cartChanges));
+console.log('middleware-recorded-transitions:', JSON.stringify(log));
 
-store.setState({ count: 100 });
-console.log('setState:', store.getState().count);
-store.getState().reset();
-console.log('reset:', store.getState().count);
-console.log('persist-ish api:', typeof store.persist === 'undefined' || true);
+// 4. Test replace state
+store.getState().replaceWholeState({
+  user: { name: 'Root', loggedIn: true },
+  cart: { items: [], total: 0 }
+});
+console.log('after-replace-user:', store.getState().user.name);
+console.log('after-replace-has-addItem:', typeof store.getState().addItem === 'undefined');
