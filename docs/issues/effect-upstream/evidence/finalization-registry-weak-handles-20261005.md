@@ -22,11 +22,22 @@ Validation:
 - Pinned Effect `reactivity/Atom`, direct TypeScript, interpreter: 125/125 passed, with 125 Node /
   Vitest cases mapped and no inventory, mode, or outcome mismatches. CLI SHA-256:
   `403d9b682677ff94a9c149fd92ac8dfc8a96467d5369f1cefb63f4b538bd7117`. Report SHA-256:
-  `f510cacb22f8c8fcb989cab8124607cd26295c8a3b0d0c850407820c992d394c`.
+  `f510cacb22f8c8fcb989cab8124607cd26295c8a3b0d0c850407820c992d394c`. Source pin:
+  `67ba4e46a11ccda0b6761578bfd22c04ae00167d`; source file SHA-256:
+  `7d82b7fab16650ebdeb7bee6e7841effb7f0be70e5970360119584948b0b507b`. Runner commit and digest:
+  `4f39b9dca8fa5ff1ff4980180f2e5db15fdd20ae` and
+  `28211c0c0120db8bcfd0c9380eeb458c4ccbca0a00a0bf4cbb5026ba50af5e61`. The run used one job,
+  one runtime worker, an 8 GiB child limit, and a 600-second outer runner allowance; this outer
+  allowance did not alter upstream case deadlines.
 - A native Atom attempt using CLI `0a0b638392a50a2aa4c1c2e1c671e8a09746fd577260b162d20d55087078a771`
   reached the 600-second outer compilation deadline before producing an executable or registering
   any cases. Its report is explicitly incomplete and is not a native test verdict.
 
-The two Effect reports and raw streams remain in the ignored workspace under
-`.scratch/finalization-atom-interpreter-validation/` and
-`.scratch/temporal-now-atom-native-validation/`.
+The complete interpreter receipt (full report, per-file report, and raw log) is archived at
+`atom-interpreter-20261005.tar.zst`, SHA-256
+`0adec4b65b4f65fdde628e730d3b4ce9c526c4c07b49a221f2896619cc3c8fc9`. It can be inspected with
+`tar --zstd -tf` and restored with `tar --zstd -xf`. The exact CLI snapshot is retained outside the
+archive at `.scratch/finalization-atom-interpreter-validation/toolchain/kiln-403d9b682677ff94a9c149fd92ac8dfc8a96467d5369f1cefb63f4b538bd7117`; its SHA-256 is recorded above. The source workspace and generated report are
+also retained locally under `.scratch/finalization-atom-interpreter-validation/`. The incomplete
+native attempt remains local under `.scratch/temporal-now-atom-native-validation/` and is not
+presented as a result.
