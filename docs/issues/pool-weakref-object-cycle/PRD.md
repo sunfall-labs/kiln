@@ -33,7 +33,15 @@ ordinary-cycle discovery gap only; it does not identify the owner of a Pool targ
 
 ## Next evidence needed
 
-Map the existing pre-deref Rc-header hits to concrete live Pool/item/scope fields and active
-container bounds. Since both `Rc` and `Weak` store the same header pointer, a hit alone does not
-classify its ownership. Do not add a global ordinary-object census until the Pool owner path and
-its relevant object kinds are established.
+The scoped diagnostic keeps both invalidated resources alive through their detached, closed
+allocation scopes after Pool items, finalizers, and acquisition Contexts are collected. The
+aligned interpreter trace reports an unexplained strong owner for those scope objects, with no
+owner-graph parent or direct VM execution-slot root. The details and source/binary digests are in
+[the diagnostic receipt](scoped-pool-retention/receipt.md), with complete logs alongside it.
+
+The current evidence does not identify the physical owner. Next, watch the Scope `Rc` strong count
+from its WeakRef-construction hook, after verifying the pinned Rust `Rc` layout. Map clone/drop
+backtraces to the object that continues owning the scope before changing collector behavior. The
+prepared ModuleMap/module-realm direct-value checks have not yet been built or run. Do not add a
+global ordinary-object census until the Pool owner path and its relevant object kinds are
+established.
