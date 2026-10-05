@@ -10,19 +10,44 @@ fn generic_optimization_selection_is_bounded_ordered_and_frame_conservative() {
     let mut prog = program(Vec::new(), vec![Instruction::Return], 0);
     prog.functions = vec![first, generator, third, fourth];
 
-    let selected =
-        crate::direct::select_generic_optimization_functions(&prog, &[false, false, false, false]);
+    let selected = crate::direct::select_generic_optimization_functions(
+        &prog,
+        &[false, false, false, false],
+        None,
+    );
     assert_eq!(selected, [true, false, false, true]);
     assert_eq!(
         selected,
-        crate::direct::select_generic_optimization_functions(&prog, &[false, false, false, false],),
+        crate::direct::select_generic_optimization_functions(
+            &prog,
+            &[false, false, false, false],
+            None
+        ),
         "selection is deterministic"
     );
     assert_eq!(
-        crate::direct::select_generic_optimization_functions(&prog, &[false]),
+        crate::direct::select_generic_optimization_functions(&prog, &[false], None),
         [true, false, false, false],
         "missing publication facts conservatively exclude later functions"
     );
+}
+
+#[test]
+fn generic_optimization_budget_excludes_unavailable_declarations() {
+    let mut prog = program(Vec::new(), vec![Instruction::Return], 0);
+    // Both caps would be spent before reaching the live bodies if dead declarations counted.
+    prog.functions = (0..64)
+        .map(|_| function(vec![Instruction::Return; 320]))
+        .chain((0..65).map(|_| function(vec![Instruction::Return])))
+        .collect();
+    let publishes = vec![false; prog.functions.len()];
+    let mut available = vec![false; prog.functions.len()];
+    available[64..].fill(true);
+    let selected =
+        crate::direct::select_generic_optimization_functions(&prog, &publishes, Some(&available));
+    assert!(selected[..64].iter().all(|selected| !selected));
+    assert!(selected[64..128].iter().all(|selected| *selected));
+    assert!(!selected[128], "the retained function cap remains 64");
 }
 
 #[test]
@@ -2188,7 +2213,7 @@ fn large_generic_units_share_planning_tables_and_publish_updates() {
     plans.entry.typed_entries = Arc::new(vec![true; program.functions.len()]);
     let mut available = vec![true; program.functions.len()];
     available[17] = false;
-    plans.set_available(&available);
+    plans.set_available(&program, &available);
     assert!(!plans.entry.typed_entries[17]);
     assert!(plans.entry.typed_entries[18]);
     assert!(

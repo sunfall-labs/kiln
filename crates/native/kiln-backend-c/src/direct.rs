@@ -179,7 +179,7 @@ impl DirectPlan {
             // speculative facts only to erase them below.
             let function_count = graphs.len();
             let optimized_functions =
-                select_generic_optimization_functions(program, publishes_frame);
+                select_generic_optimization_functions(program, publishes_frame, None);
             let generic_verdicts = std::sync::Arc::new(vec![
                 Err(crate::parallel::Refusal::new(
                     if parallel_in_generic {
@@ -1159,7 +1159,20 @@ impl DirectPlan {
     }
 
     /// Restrict static dispatch and by-name specialization to bodies emitted in this unit.
-    pub fn set_available(&mut self, available: &[bool]) {
+    pub fn set_available(&mut self, program: &Program, available: &[bool]) {
+        // Liveness settles after the initial plan. Spend the generic compiler budget only on
+        // retained bodies: selecting first and masking later lets dead declarations displace
+        // executable functions from the bounded tier.
+        if self.entry.generic_only {
+            let selected = select_generic_optimization_functions(
+                program,
+                &self.entry.publishes_frame,
+                Some(available),
+            );
+            for (plan, selected) in self.functions.iter_mut().zip(selected) {
+                plan.generic_function_optimized = selected;
+            }
+        }
         let typed_entries = std::sync::Arc::new(
             self.entry
                 .typed_entries
@@ -1284,6 +1297,7 @@ impl DirectPlan {
 pub(crate) fn select_generic_optimization_functions(
     program: &Program,
     publishes_frame: &[bool],
+    available: Option<&[bool]>,
 ) -> Vec<bool> {
     const MAX_FUNCTIONS: usize = 64;
     const MAX_FUNCTION_INSTRUCTIONS: usize = 320;
@@ -1293,6 +1307,9 @@ pub(crate) fn select_generic_optimization_functions(
     let mut count = 0usize;
     let mut instructions = 0usize;
     for (index, proto) in program.functions.iter().enumerate() {
+        if available.is_some_and(|available| !available.get(index).copied().unwrap_or(false)) {
+            continue;
+        }
         let publishes = publishes_frame.get(index).copied().unwrap_or(true);
         let size = proto.code.len();
         if count >= MAX_FUNCTIONS || size == 0 || size > MAX_FUNCTION_INSTRUCTIONS {

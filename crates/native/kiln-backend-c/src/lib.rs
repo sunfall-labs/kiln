@@ -517,9 +517,13 @@ pub struct CModuleUnit {
 
 fn generic_mixed_for_program(program: &Program, policy: &EmissionPolicy) -> bool {
     policy.generic_only
-        && direct::select_generic_optimization_functions(program, &compute_publishes_frame(program))
-            .into_iter()
-            .any(|selected| selected)
+        && direct::select_generic_optimization_functions(
+            program,
+            &compute_publishes_frame(program),
+            None,
+        )
+        .into_iter()
+        .any(|selected| selected)
 }
 
 /// Backwards-compatible descriptive alias for callers that call an emitted unit a module.
@@ -5496,7 +5500,7 @@ fn render_module_positioned(
         let available = (0..emitted_program.functions.len())
             .map(|index| reachable.contains(&index))
             .collect::<Vec<_>>();
-        direct.set_available(&available);
+        direct.set_available(emitted_program, &available);
     }
     if emitted_program.has_dynamic_import() {
         output.push_str(

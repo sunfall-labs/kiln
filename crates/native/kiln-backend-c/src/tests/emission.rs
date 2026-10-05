@@ -1095,6 +1095,46 @@ fn generic_mixed_tier_keeps_unsupported_bodies_at_o0_and_boxed() {
 }
 
 #[test]
+fn generic_mixed_tier_budget_is_spent_after_module_liveness() {
+    let mut prog = program(
+        (0..65)
+            .map(|index| Constant::Number((index as f64).to_bits()))
+            .collect(),
+        vec![
+            Instruction::MakeFunction(64),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    prog.functions = (0..65)
+        .map(|index| function(vec![Instruction::Const(index), Instruction::Return]))
+        .collect();
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module(prog, Vec::new(), Vec::new()),
+        "retained-tier.js",
+        EmissionPolicy {
+            compact: true,
+            generic_only: true,
+            live_module_slots: Some(std::sync::Arc::new(Default::default())),
+            unit_chunk_bytes: Some(1),
+            ..Default::default()
+        },
+    )
+    .expect("module emits");
+    assert!(emitted.generic_mixed_optimization);
+    assert!(
+        emitted.chunks.is_empty(),
+        "one retained body needs only one unit"
+    );
+    assert!(emitted.source.contains("_fn_64"));
+    assert!(
+        !emitted.source.contains("defined(KILN_GENERIC_MIXED_TIER)"),
+        "the only retained function receives the optimized tier"
+    );
+}
+
+#[test]
 fn generic_mixed_tier_metadata_tracks_each_emitted_chunk() {
     let selected = function(vec![Instruction::Return]);
     let mut unsupported = function(vec![Instruction::Return]);
