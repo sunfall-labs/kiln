@@ -16,7 +16,7 @@ generation, waits for its evaluated namespace, and retries dependency scheduling
 pending dependency settles. Regression checks cover reset during an externally suspended
 await, dependency wake ordering and private engine bindings across suspension and rejection.
 
-The [latest complete gate attempt](milestone-gate-full-20261004/) passed 2,615 crate tests,
+The [earlier complete gate attempt](milestone-gate-full-20261004/) passed 2,615 crate tests,
 third-party correctness and all 13 unchanged third-party performance baselines, including
 PostCSS, after external task workers were stopped for timing. It failed native parity on
 three parallel-allocation probes and aborted one full-Test262 batch at its 1 GiB process
@@ -48,9 +48,16 @@ advertising HTTP capability. The feature contract is repaired with a red/green r
 and the [corrected package's focused checks](allocator-full-stress-20261004/http-provider-fix-focused/)
 match all 20 HTTP probes and three GUI probes under allocation stress, with one declared
 GUI stress skip. This full stress run remains failed until a complete corrected run proves
-otherwise. A fresh full integration gate (`run.zqPsS00h`) is now running with an eight-CPU
-budget and a 4 GiB Test262 cap; its release build passed and the candidate CLI is frozen as
+otherwise. The [fresh full integration gate](allocator-gate-green-20261004/)
+(`run.zqPsS00h`) passed all ten steps in 1,307 seconds with an eight-CPU budget and a
+4 GiB Test262 cap: 2,635 crate tests passed with zero failures, native parity matched
+645 probes with five named refusals and zero divergences, and all 102,638 Test262
+variants were selected with no chunk baseline regression. All 17 present third-party
+bundles matched and all 13 present unchanged performance baselines passed, including
+PostCSS. The candidate CLI is frozen as
 `16958abcd29f328d23bb789fc188f0e55a065e349b0b77736ce0354ba1820ceb`.
+The complete corrected-provider 650-probe allocation-stress run is now executing
+separately with two workers. Its result is required before this compiler milestone lands.
 
 The runner's opt-in artifact compression and shared-cache collection have also been
 [validated against 43 unchanged Boolean cases in native and Bun](runner-resource-policy-validation/).
@@ -61,8 +68,9 @@ pruning through its supported configuration interface after an automatic pruning
 The stopped older native survey covers 257 of 322 files; 65 remain unmeasured. It is not
 final-candidate coverage. [Resource coordination evidence](resource-coordination-20261004/)
 records the preserved survey and verified binary archives. Full 322-file interpreter and
-native validation, final quiet Bun benchmark comparison, allocation stress and a passing
-integration gate remain required before completion. The compiler milestone has not been pushed.
+native validation, final quiet Bun benchmark comparison and complete corrected allocation
+stress remain required before completion. The full integration gate is now green; the
+compiler milestone has not been pushed.
 
 ## Corpus and measurement
 
