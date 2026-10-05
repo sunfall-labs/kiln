@@ -147,18 +147,16 @@ string assertion, while direct-source execution preserves original source. The r
 the official outcome and the actual direct-source outcome as a named mismatch; it never counts
 that case as a pass by normalization.
 
-`Formatter > format > function` remains a genuine direct-source failure. Its assertion expects
- tab indentation and a trailing semicolon inside an arrow function's `toString()` result. The
- test source has space indentation and no semicolon. Node 26.8.1 with
- `--experimental-strip-types` and kiln preserve that source text; Bun 1.4.2 emits a different
- space-indented form with a semicolon. The official Node/Vitest case passes because Vite transforms
- the source before execution. The mismatch therefore describes the transformed Vitest fixture,
- not a direct-source function-string contract. Preserve the spelling of the executed buffer
-and the assertion itself. A real per-module TypeScript transform can make emitted JavaScript
-the parser/span buffer and keep original TypeScript plus mappings separately for diagnostics;
-that compiler-stage prototype is isolated and has not changed production defaults. The pinned Bun failure remains recorded in
-`bun-reference.json`, and the native failure remains in
-`native-diagnostic-reference.json`.
+The earlier authored-source path failed `Formatter > format > function`: its assertion expects
+ tab indentation and a trailing semicolon, whereas the pinned TypeScript spells spaces and no
+semicolon. The production per-module TypeScript transform now makes emitted JavaScript the
+parser/span buffer and retains original TypeScript plus mappings for diagnostics. A fresh
+unchanged-input interpreter replay on pushed `e8c82292` passes all 67 Formatter cases, exactly
+mapped to the official Node/Vitest oracle. Older Bun/native failures remain historical evidence;
+a fresh native Formatter replay is still required. The same compiler passes all 47 interpreter
+Pool cases, including the four GC-retention cases; Layer completes 38/39 with one unchanged
+five-second timeout. Complete reports and logs are in
+[evidence/formatter-pool-layer-20261005](evidence/formatter-pool-layer-20261005/README.md).
 
 The latest complete selection on native compiler `8cb04e4f` recorded 10,785 passes,
 142 failures and 45 skips. Two files stopped early: 47 registered cases were not
