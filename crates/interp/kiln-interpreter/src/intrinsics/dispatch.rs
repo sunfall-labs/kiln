@@ -166,39 +166,16 @@ pub(crate) fn call_native(
                 message: "Cannot convert undefined or null to object".to_owned(),
             });
         }
-        Native::ObjectHasOwnProperty => Value::Boolean(match receiver {
-            // A function has an own property store of its own -- a class's static members live
-            // in it -- plus the `name`, `length` and `prototype` every callable owns. A built-in
-            // has the properties its tables answer for, which for a method table is the methods
-            // it holds, plus whatever the realm's store has added to or removed from them.
-            // `own_attributes` knows about all of that, and answering from it is what stops
-            // `hasOwnProperty` and `getOwnPropertyDescriptor` from disagreeing.
-            Value::Object(_)
-            | Value::Function(_)
-            | Value::Native(_, _)
-            | Value::Callback(_, _)
-            | Value::Bound(_)
-            | Value::Wrapped(_)
-            // The anonymous built-ins the specification hands a program: a combinator's element
-            // functions, a capability's `resolve`/`reject` pair, and the executor that captures
-            // them. Each owns a `name` and a `length` and nothing else. They were absent here
-            // and present in `own_attributes`, so `getOwnPropertyDescriptor` reported an own
-            // `length` that `hasOwnProperty` denied -- and test262 asks both.
-            | Value::Element(_)
-            | Value::Settler(..)
-            | Value::Capability(..)
-            // An array's elements, its `length` and its property store are all own properties,
-            // and `has_property` is the wrong question for any of them: it follows the chain,
-            // and `Array.prototype[1] = 2` would make every array claim an own `1`.
-            | Value::Array(_)
-            | Value::TypedArray(_) => {
-                let value = arguments.first().unwrap_or(&Value::Undefined);
-                let key = value.property_key_units_checked()?;
+        Native::ObjectHasOwnProperty => {
+            // All receivers use the same own-descriptor authority as Object.hasOwn. Falling
+            // back to HasProperty for an exotic receiver incorrectly includes its prototype.
+            let value = arguments.first().unwrap_or(&Value::Undefined);
+            let key = value.property_key_units_checked()?;
+            Value::Boolean(
                 own_attributes_key(intrinsics, receiver, PropertyKeyRef::from_value(value, &key))
-                    .is_some()
-            }
-            other => has_property_checked(intrinsics, other, arguments.first().unwrap_or(&Value::Undefined))?,
-        }),
+                    .is_some(),
+            )
+        }
         // Walked with [`prototype_of`], the same function `Object.getPrototypeOf` and
         // `instanceof` use. Reading the stored link directly is not the chain: an intrinsic kind
         // -- a date, an array, a typed array -- has no stored link and still has a prototype, so
