@@ -459,10 +459,23 @@ impl ObjectData {
         self.module_namespace = true;
     }
 
-    /// Record the cell an export is a second name for, so the slot can be caught up later.
+    /// Record the cell and immutable property slot an export is a second name for.
     pub fn track_namespace_cell(&mut self, key: &str, cell: Value) {
         if matches!(cell, Value::Cell(_)) {
-            self.namespace_cells.push((key.to_owned(), cell));
+            // Namespace exports are inserted immediately before they are tracked. Usually the
+            // matching slot is last; find its actual position as well so duplicate names in a
+            // direct `namespace_object` input preserve define-value's replacement behavior.
+            // The namespace is closed before it escapes, making every slot non-configurable and
+            // keeping these indices stable for every later live-binding refresh.
+            let index = self
+                .properties
+                .last()
+                .filter(|slot| slot.key == key)
+                .map(|_| self.properties.len() - 1)
+                .or_else(|| self.properties.iter().position(|slot| slot.key == key));
+            if let Some(index) = index {
+                self.namespace_cells.push((index, cell));
+            }
         }
     }
 
@@ -484,19 +497,12 @@ impl ObjectData {
         if self.namespace_cells.is_empty() {
             return;
         }
-        for index in 0..self.namespace_cells.len() {
-            let (key, cell) = &self.namespace_cells[index];
+        for (slot_index, cell) in &self.namespace_cells {
             let Value::Cell(cell) = cell else {
                 continue;
             };
             let value = cell.borrow().clone();
-            let key = key.clone();
-
-            if let Some(slot) = self
-                .properties
-                .iter_mut()
-                .find(|slot| slot.key == key.as_str())
-            {
+            if let Some(slot) = self.properties.get_mut(*slot_index) {
                 slot.property = Property::Value(value);
             }
         }

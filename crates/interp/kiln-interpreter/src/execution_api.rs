@@ -371,7 +371,6 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
         // built with and the one the specification gives every export: the binding cannot be
         // removed or redefined, and its *value* is expected to change, because the module it
         // came from may still assign to it.
-        data.track_namespace_cell(&name, value.clone());
         data.define_value(
             &name,
             read_through_cell(&value),
@@ -381,6 +380,7 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
                 configurable: false,
             },
         );
+        data.track_namespace_cell(&name, value.clone());
     }
     // The tag is what `Object.prototype.toString` reads, and it is the only own property a
     // namespace has that is not an export -- so `String(ns)` is "[object Module]" rather than

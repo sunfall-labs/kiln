@@ -3404,3 +3404,70 @@ fn module_namespace_definitions_compare_live_bindings_with_same_value() {
         Ok(false)
     );
 }
+
+#[test]
+fn namespace_refresh_updates_many_fixed_slots_without_changing_their_descriptors() {
+    let exports: Vec<_> = (0..128)
+        .map(|index| {
+            (
+                format!("export_{index:03}"),
+                Value::Cell(Rc::new(RefCell::new(Value::Number(index as f64)))),
+            )
+        })
+        .collect();
+    let cells: Vec<_> = exports
+        .iter()
+        .map(|(_, value)| match value {
+            Value::Cell(cell) => Rc::clone(cell),
+            _ => unreachable!(),
+        })
+        .collect();
+    let namespace = namespace_object(exports);
+    let Value::Object(object) = namespace else {
+        panic!("module namespace must be an object");
+    };
+
+    for (index, value) in [(0, 1000.0), (64, 1064.0), (127, 1127.0)] {
+        *cells[index].borrow_mut() = Value::Number(value);
+    }
+    object.borrow_mut().refresh_namespace();
+
+    for (index, expected) in [(0, 1000.0), (64, 1064.0), (127, 1127.0)] {
+        let key = format!("export_{index:03}");
+        assert_eq!(
+            object.borrow().get_own(&key).cloned(),
+            Some(Value::Number(expected)),
+            "export {key} must read its current cell"
+        );
+        let attrs = object
+            .borrow()
+            .get_own_attributes(&key)
+            .expect("namespace export remains present");
+        assert!(attrs.enumerable);
+        assert!(attrs.writable);
+        assert!(!attrs.configurable);
+    }
+}
+
+#[test]
+fn namespace_refresh_keeps_the_replacement_slot_for_duplicate_input_names() {
+    let first = Rc::new(RefCell::new(Value::Number(1.0)));
+    let replacement = Rc::new(RefCell::new(Value::Number(2.0)));
+    let namespace = namespace_object([
+        ("duplicate".to_owned(), Value::Cell(first.clone())),
+        ("middle".to_owned(), Value::Number(3.0)),
+        ("duplicate".to_owned(), Value::Cell(replacement.clone())),
+    ]);
+    let Value::Object(object) = namespace else {
+        panic!("module namespace must be an object");
+    };
+
+    *first.borrow_mut() = Value::Number(10.0);
+    *replacement.borrow_mut() = Value::Number(20.0);
+    object.borrow_mut().refresh_namespace();
+
+    assert_eq!(
+        object.borrow().get_own("duplicate"),
+        Some(&Value::Number(20.0))
+    );
+}

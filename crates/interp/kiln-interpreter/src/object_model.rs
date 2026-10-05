@@ -337,7 +337,7 @@ pub struct ObjectData {
     /// value would reach `Object.keys`, a descriptor read, a spread and `JSON.stringify` as
     /// itself, which is a wrong answer everywhere it appeared. The slots keep ordinary values
     /// and are caught up from these before a read.
-    pub(super) namespace_cells: Vec<(String, Value)>,
+    pub(super) namespace_cells: Vec<(usize, Value)>,
     /// Strong generation owner for namespace objects created from an inactive generation. This
     /// edge keeps their source records available while the namespace is externally reachable.
     pub(super) module_generation: Option<crate::module_map::ModuleGenerationHandle>,
