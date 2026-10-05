@@ -3578,6 +3578,13 @@ pub(super) fn published_attributes(
             configurable: false,
         };
     }
+    // `Temporal.Now` is an object-valued built-in namespace property, not a constant. Node
+    // exposes it as writable/configurable so clock shims (including Sinon fake timers) can
+    // replace and later restore it. The generic non-function built-in rule below would lock it
+    // down because `Temporal.Now` itself is not callable.
+    if matches!(native, Native::Temporal(temporal::Op::Namespace)) && key == "Now" {
+        return Attributes::BUILT_IN;
+    }
     if found.type_of() == "function" {
         return Attributes::BUILT_IN;
     }

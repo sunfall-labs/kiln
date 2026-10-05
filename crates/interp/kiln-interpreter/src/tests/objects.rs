@@ -48,6 +48,39 @@ fn strict_symbol_writes_check_the_symbol_descriptor() {
 }
 
 #[test]
+fn temporal_now_namespace_member_has_the_replaceable_builtin_descriptor() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let temporal = Value::Native(Native::Temporal(temporal::Op::Namespace), RealmId::PRIMARY);
+
+    // Node exposes Temporal.Now as writable, non-enumerable and configurable. Sinon fake timers
+    // replaces this property while installing its clock, then restores its original value.
+    assert_eq!(
+        own_attributes(&vm.intrinsics, &temporal, "Now"),
+        Some(Attributes::BUILT_IN)
+    );
+    let replacement = Descriptor {
+        value: Some(Value::Number(42.0)),
+        ..Descriptor::default()
+    };
+    assert!(
+        vm.define_own_key(&temporal, PropertyKeyRef::Utf8("Now"), &replacement, 0,)
+            .expect("Temporal.Now is replaceable")
+    );
+    assert_eq!(
+        vm.read_property(&temporal, "Now", 0),
+        Ok(Value::Number(42.0))
+    );
+}
+
+#[test]
 fn numeric_array_writes_preserve_property_key_boundaries_and_refusals() {
     let program = no_program();
     let mut host = TestHost {
