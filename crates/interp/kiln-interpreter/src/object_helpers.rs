@@ -1070,8 +1070,11 @@ pub(super) fn next_array_present_index(
     {
         return Some(Some(cursor));
     }
+    // Arrays without an explicit [[Prototype]] link belong to the primary realm in this
+    // representation. Non-primary arrays carry their realm's intrinsic prototype as an
+    // explicit link and took the fallback above.
     if intrinsics.indexed_array_prototype.get()
-        || intrinsics.indexed_prototype_chain_is_custom()
+        || intrinsics.indexed_prototype_chain_is_custom(RealmId::PRIMARY)
         || array.properties.borrow().prototype().is_some()
     {
         return None;

@@ -1391,10 +1391,11 @@ pub(super) struct Intrinsics {
     /// Monotonic across all realms: a numeric property on either default array prototype
     /// invalidates the strict indexed-write shortcut, even after that property is deleted.
     pub(super) indexed_array_prototype: std::cell::Cell<bool>,
-    /// Monotonic guard for sparse array shortcuts after either indexed prototype link changes.
+    /// Realms whose default Array.prototype -> Object.prototype chain has been customized.
     /// This is cached because map/reduce ask once per callback, and walking every materialized
-    /// intrinsic entry there turns a dense map into quadratic work.
-    indexed_prototype_chain_custom: std::cell::Cell<bool>,
+    /// intrinsic entry there turns a dense map into quadratic work. Entries are per realm: a
+    /// change in one realm must not clear another realm's answer.
+    indexed_prototype_chain_custom: RefCell<Vec<bool>>,
     /// Each realm's nine error prototypes, indexed by realm and then by kind.
     ///
     /// Here rather than on the machine because `Error.prototype` is an own property of `Error`
@@ -1439,7 +1440,7 @@ impl Default for Intrinsics {
                             .is_some()
                     }),
             ),
-            indexed_prototype_chain_custom: std::cell::Cell::new(false),
+            indexed_prototype_chain_custom: RefCell::new(vec![false]),
             error_prototypes: RefCell::new(vec![[const { None }; ErrorKind::ALL.len()]]),
             error_stack_accessors: RefCell::new(vec![None]),
             unscopables: RefCell::new(vec![None]),
@@ -1498,8 +1499,12 @@ impl Intrinsics {
         });
         let default_object_parent =
             object_parent.is_none_or(|parent| matches!(parent, Value::Null));
-        self.indexed_prototype_chain_custom
-            .set(!default_array_parent || !default_object_parent);
+        let mut custom_chains = self.indexed_prototype_chain_custom.borrow_mut();
+        let index = realm.0 as usize;
+        if index >= custom_chains.len() {
+            custom_chains.resize(index + 1, false);
+        }
+        custom_chains[index] = !default_array_parent || !default_object_parent;
         true
     }
 
@@ -1549,6 +1554,7 @@ impl Intrinsics {
         self.error_prototypes
             .borrow_mut()
             .push([const { None }; ErrorKind::ALL.len()]);
+        self.indexed_prototype_chain_custom.borrow_mut().push(false);
         self.error_stack_accessors.borrow_mut().push(None);
         self.unscopables.borrow_mut().push(None);
     }
@@ -1714,8 +1720,12 @@ impl Intrinsics {
     /// chain it models: Array.prototype -> Object.prototype -> null. Direct numeric definitions
     /// have their own monotonic flag; this catches a custom prototype whose indexed properties
     /// live outside either intrinsic store.
-    pub(super) fn indexed_prototype_chain_is_custom(&self) -> bool {
-        self.indexed_prototype_chain_custom.get()
+    pub(super) fn indexed_prototype_chain_is_custom(&self, realm: RealmId) -> bool {
+        self.indexed_prototype_chain_custom
+            .borrow()
+            .get(realm.0 as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Whether this built-in still accepts new properties.

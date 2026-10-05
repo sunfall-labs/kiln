@@ -3198,6 +3198,62 @@ fn numeric_array_write_guard_is_shared_and_monotonic() {
 }
 
 #[test]
+fn sparse_array_query_guard_is_scoped_to_the_intrinsic_realm() {
+    let intrinsics = Intrinsics::default();
+    intrinsics.add_realm();
+
+    let primary_array_prototype =
+        Value::Native(Native::PrototypeOf(PrototypeTable::Array), RealmId::PRIMARY);
+    let primary_object_prototype = Value::Native(
+        Native::PrototypeOf(PrototypeTable::Object),
+        RealmId::PRIMARY,
+    );
+    let mut custom = ObjectData::default();
+    custom.define_value("0", Value::Number(41.0), Attributes::DEFAULT);
+    assert!(intrinsics.record_prototype(
+        &primary_array_prototype,
+        Value::Object(tracked_object(custom)),
+    ));
+    assert!(intrinsics.indexed_prototype_chain_is_custom(RealmId::PRIMARY));
+
+    // Materializing or restoring another realm's default links must not clear the primary
+    // realm's custom-chain guard. Both intrinsic records live in the same Intrinsics instance.
+    let other_array_prototype =
+        Value::Native(Native::PrototypeOf(PrototypeTable::Array), RealmId(1));
+    let other_object_prototype =
+        Value::Native(Native::PrototypeOf(PrototypeTable::Object), RealmId(1));
+    assert!(intrinsics.record_prototype(&other_array_prototype, other_object_prototype.clone(),));
+    assert!(intrinsics.record_prototype(&other_object_prototype, Value::Null));
+    assert!(!intrinsics.indexed_prototype_chain_is_custom(RealmId(1)));
+    assert!(intrinsics.indexed_prototype_chain_is_custom(RealmId::PRIMARY));
+
+    let array = ArrayData::new(vec![Value::Native(Native::Hole, RealmId::PRIMARY)]);
+    assert!(matches!(
+        array_inherited_index(&intrinsics, &array, "0"),
+        Some(Property::Value(Value::Number(41.0)))
+    ));
+    // `None` means the shared map/reduce loop must use ordinary `HasProperty`, where that
+    // inherited element is visible, rather than treating the hole as absent.
+    assert_eq!(
+        next_array_present_index(&intrinsics, &Value::Array(array.clone()), 0, 1, false),
+        None
+    );
+    assert!(has_property_ascii(
+        &intrinsics,
+        &Value::Array(array.clone()),
+        "0"
+    ));
+
+    // Restoring the primary chain re-enables the own-elements shortcut for that realm.
+    assert!(intrinsics.record_prototype(&primary_array_prototype, primary_object_prototype,));
+    assert!(!intrinsics.indexed_prototype_chain_is_custom(RealmId::PRIMARY));
+    assert_eq!(
+        next_array_present_index(&intrinsics, &Value::Array(array), 0, 1, false),
+        Some(None)
+    );
+}
+
+#[test]
 fn strict_numeric_array_appends_retain_conservative_sparse_policy() {
     let program = no_program();
     let mut host = TestHost {
