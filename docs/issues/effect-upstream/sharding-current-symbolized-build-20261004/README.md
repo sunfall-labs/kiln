@@ -1,0 +1,3 @@
+Current candidate Sharding build preparation
+
+Build-only evidence: no cases were executed and no correctness or performance verdict is implied. The unmodified pinned 66-case Sharding entry was compiled at native-release with local symbols retained for an attributable profile. Source, CLI and provider hashes are in receipt.json. Binary SHA-256: 1daaeb90e8c07f7846d913329f00d4e36fe12cd1f2327d3430feab49afbdbe8f. ELF Build ID: 4187d30bdf113afd9391abf0f9049d4faf54cfd6. Build completed exit 0 in 769.158 seconds. Native binary remains in the owned worktree under .scratch/sharding-current-symbolized-prebuild/native.bin. Case deadlines are unchanged; quiet replay and profile remain pending.
