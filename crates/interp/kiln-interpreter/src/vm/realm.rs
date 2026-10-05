@@ -120,7 +120,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::PrototypeOf(PrototypeTable::ShadowRealm),
             self.current_realm,
         ));
-        Ok(Value::Object(Rc::new(RefCell::new(instance))))
+        Ok(Value::Object(tracked_object(instance)))
     }
 
     /// `ValidateShadowRealmObject`: the realm `receiver` evaluates in, or a `TypeError`.
@@ -998,7 +998,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "profileEnd",
             Value::Native(Native::ConsoleProfileEnd, realm),
         );
-        globals.set_non_enumerable("console", Value::Object(Rc::new(RefCell::new(console))));
+        globals.set_non_enumerable("console", Value::Object(tracked_object(console)));
         // The three value properties of the global object are the only ones the specification
         // locks on every axis: `{ writable: false, enumerable: false, configurable: false }`.
         // That is not decoration -- it is what makes `delete NaN` answer `false` and
@@ -1006,7 +1006,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.define_value("NaN", Value::Number(f64::NAN), Attributes::NONE);
         globals.define_value("Infinity", Value::Number(f64::INFINITY), Attributes::NONE);
         globals.define_value("undefined", Value::Undefined, Attributes::NONE);
-        let object = Rc::new(RefCell::new(globals));
+        let object = tracked_object(globals);
         let value = Value::Object(Rc::clone(&object));
         // The global object holds itself under both of its names, which is how a program reaches
         // it without a keyword: `global.Object === Object` is the standard test for "am I in a

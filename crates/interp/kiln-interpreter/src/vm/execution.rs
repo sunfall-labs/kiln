@@ -1161,8 +1161,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     if raised {
                         continue;
                     }
-                    self.stack
-                        .push(Value::Object(Rc::new(RefCell::new(object))));
+                    self.stack.push(Value::Object(tracked_object(object)));
                 }
                 Instruction::SpreadObject => {
                     let source = self.pop(current)?;
@@ -3324,7 +3323,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         &[
                             value.clone(),
                             Value::String(key),
-                            Value::Object(Rc::new(RefCell::new(descriptor))),
+                            Value::Object(tracked_object(descriptor)),
                         ],
                         instruction,
                     )?;
@@ -3348,7 +3347,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             vec![
                 Value::String(name.clone()),
                 value,
-                Value::Object(Rc::new(RefCell::new(context))),
+                Value::Object(tracked_object(context)),
             ],
             instruction,
         )

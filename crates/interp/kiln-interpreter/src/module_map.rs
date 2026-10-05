@@ -1074,7 +1074,7 @@ mod tests {
             "/host.cjs",
             HashMap::from([("default".to_owned(), Value::Number(1.0))]),
         );
-        let failure = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+        let failure = Value::Object(tracked_object(ObjectData::default()));
         modules.fail_commonjs_namespace_in_generation(realm, 0, "/host.cjs", failure.clone());
 
         assert_eq!(modules.reset_generation(realm), 1);

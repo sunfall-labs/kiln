@@ -134,7 +134,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             WellKnown::Iterator.property_key(),
             Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
         );
-        Ok(Value::Object(Rc::new(RefCell::new(helper))))
+        Ok(Value::Object(tracked_object(helper)))
     }
 
     /// `Iterator.from(value)`.
@@ -209,7 +209,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::PrototypeOf(PrototypeTable::Iterator),
             RealmId::PRIMARY,
         ));
-        Ok(Value::Object(Rc::new(RefCell::new(wrapper))))
+        Ok(Value::Object(tracked_object(wrapper)))
     }
 
     /// One step of a helper's source, latching the helper done at either kind of ending.

@@ -2,11 +2,12 @@
 //!
 //! Provides filesystem operation bindings, options parsing, and property lookups.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::buffer::node_bytes_value;
-use crate::{ArrayData, ExecutionError, HostOps, Native, ObjectData, RealmId, Value, Vm};
+use crate::{
+    ArrayData, ExecutionError, HostOps, Native, ObjectData, RealmId, Value, Vm, tracked_object,
+};
 
 /// An open virtual file handle: either an in-memory buffer or an underlying OS file.
 #[derive(Debug)]
@@ -123,7 +124,7 @@ pub(crate) fn constants_object() -> Value {
     obj.set("COPYFILE_EXCL", Value::Number(1.0));
     obj.set("COPYFILE_FICLONE", Value::Number(2.0));
     obj.set("COPYFILE_FICLONE_FORCE", Value::Number(4.0));
-    Value::Object(Rc::new(RefCell::new(obj)))
+    Value::Object(tracked_object(obj))
 }
 
 pub(crate) fn property(prop: &str) -> Option<Value> {
@@ -322,7 +323,7 @@ pub(crate) fn stats_object(meta: &kiln_host_abi::FsMetadata) -> Value {
         "isSymbolicLink",
         Value::Native(Native::NodeStatIsSymbolicLink, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(object)))
+    Value::Object(tracked_object(object))
 }
 
 pub(crate) fn dispatch<H: HostOps + ?Sized>(
@@ -556,7 +557,7 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                         "isSymbolicLink",
                         Value::Native(Native::NodeStatIsSymbolicLink, RealmId::PRIMARY),
                     );
-                    out.push(Value::Object(Rc::new(RefCell::new(dirent))));
+                    out.push(Value::Object(tracked_object(dirent)));
                 } else {
                     out.push(Value::String(name.into()));
                 }

@@ -217,7 +217,7 @@ fn object(pairs: &[(&str, Value)]) -> Value {
     for (key, value) in pairs {
         data.set(key, value.clone());
     }
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 fn number(value: f64) -> Constant {

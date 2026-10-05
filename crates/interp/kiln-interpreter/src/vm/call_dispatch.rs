@@ -568,7 +568,7 @@ mod weak_get_or_insert_tests {
             true,
             &Value::Undefined,
             &[
-                Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+                Value::Object(tracked_object(ObjectData::default())),
                 callback,
             ],
             0,

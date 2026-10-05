@@ -13,7 +13,6 @@
 //! proxies, so it has to happen on the machine, here, rather than inside an adapter that only
 //! sees the values that came out.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use kiln_host_abi::HostOps;
@@ -22,7 +21,7 @@ use kiln_string::StringUnits;
 
 use crate::{
     ArrayData, ErrorKind, ExecutionError, Native, ObjectData, PrimitiveHint, RealmId, Value, Vm,
-    WellKnown,
+    WellKnown, tracked_object,
 };
 
 /// Which `Intl` service a constructor, prototype or instance belongs to.
@@ -885,7 +884,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     // accessors rely on the difference.
                     data.set(name, setting_to_value(&setting));
                 }
-                Ok(Value::Object(Rc::new(RefCell::new(data))))
+                Ok(Value::Object(tracked_object(data)))
             }
             (Method::Format, IntlValue::NumberFormat(formatter)) => {
                 let numeric = self.intl_numeric_argument(arguments.first(), instruction)?;
@@ -972,7 +971,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             data.set("type", Value::String(kind.to_owned().into()));
                             data.set("value", Value::String(text.into()));
                             data.set("source", Value::String(source.to_owned().into()));
-                            Value::Object(Rc::new(RefCell::new(data)))
+                            Value::Object(tracked_object(data))
                         })
                         .collect(),
                 )))
@@ -997,7 +996,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             if let Some(unit) = unit {
                                 data.set("unit", Value::String(unit.to_owned().into()));
                             }
-                            Value::Object(Rc::new(RefCell::new(data)))
+                            Value::Object(tracked_object(data))
                         })
                         .collect(),
                 )))
@@ -1033,7 +1032,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             if numeric {
                                 data.set("unit", Value::String(unit.to_owned().into()));
                             }
-                            Value::Object(Rc::new(RefCell::new(data)))
+                            Value::Object(tracked_object(data))
                         })
                         .collect(),
                 )))
@@ -2009,7 +2008,7 @@ fn segment_record(
     if let Some(word_like) = segment.word_like {
         data.set("isWordLike", Value::Boolean(word_like));
     }
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// A `formatToParts` result: an array of `{ type, value }` objects.
@@ -2021,7 +2020,7 @@ fn parts_array(parts: &[(&'static str, String)], value_key: &str) -> Value {
                 let mut data = ObjectData::default();
                 data.set("type", Value::String((*kind).to_owned().into()));
                 data.set(value_key, Value::String(text.clone().into()));
-                Value::Object(Rc::new(RefCell::new(data)))
+                Value::Object(tracked_object(data))
             })
             .collect(),
     ))
@@ -2035,7 +2034,7 @@ fn parts_array(parts: &[(&'static str, String)], value_key: &str) -> Value {
 fn empty_options() -> Value {
     let mut data = ObjectData::default();
     data.set_prototype(Value::Null);
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// `thisNumberValue`: the Number a `Number.prototype` method is running on.

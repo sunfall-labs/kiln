@@ -2,10 +2,8 @@
 //!
 //! Provides the Node EventEmitter object constructor, listener tracking, and property lookups.
 
+use crate::{Native, ObjectData, PrototypeTable, RealmId, Value, same_value, tracked_object};
 use std::cell::RefCell;
-use std::rc::Rc;
-
-use crate::{Native, ObjectData, PrototypeTable, RealmId, Value, same_value};
 
 #[derive(Clone, Debug)]
 pub(crate) struct NodeEventBucket {
@@ -26,7 +24,7 @@ pub(crate) fn node_event_emitter() -> Value {
         RealmId::PRIMARY,
     ));
     data.node_events = Some(Vec::new());
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 pub(crate) fn node_listeners(object: &RefCell<ObjectData>, event: &str) -> Vec<NodeEventListener> {

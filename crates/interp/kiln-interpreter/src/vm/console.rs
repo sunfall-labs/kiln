@@ -182,7 +182,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::ConsoleProfileEnd, RealmId::PRIMARY),
         );
 
-        Ok(Value::Object(Rc::new(RefCell::new(data))))
+        Ok(Value::Object(tracked_object(data)))
     }
 
     /// Node's `util.inspect.custom` for what a console prints: an object with a callable
@@ -218,7 +218,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if !is_callable(&hook) {
                 continue;
             }
-            let options = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+            let options = Value::Object(tracked_object(ObjectData::default()));
             let hook_arguments = vec![Value::Number(2.0), options, Value::Undefined];
             if let Ok(shown) =
                 self.call_catching(&hook, argument.clone(), hook_arguments, instruction)?

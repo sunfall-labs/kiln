@@ -297,7 +297,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut result = ObjectData::default();
         result.set("async", Value::Boolean(asynchronous));
         result.set("value", value);
-        Ok(Value::Object(Rc::new(RefCell::new(result))))
+        Ok(Value::Object(tracked_object(result)))
     }
 
     /// Suspend this agent on the cell it is waiting for, and answer with how the wait ended.

@@ -1747,7 +1747,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         unreferenced: false,
                         cleared: false,
                     })));
-                    Rc::new(RefCell::new(data))
+                    tracked_object(data)
                 });
                 let timer = match &handle {
                     Some(handle) => Timer::Handle(Rc::clone(handle)),
@@ -1861,7 +1861,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     result.set("promise", promise);
                     result.set("resolve", resolve);
                     result.set("reject", reject);
-                    return Ok(Value::Object(Rc::new(RefCell::new(result))));
+                    return Ok(Value::Object(tracked_object(result)));
                 }
                 call_native(
                     &self.intrinsics,
@@ -2069,7 +2069,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // which is what lets a reviver replace the whole document.
                 let mut holder = ObjectData::default();
                 holder.set("", parsed.clone());
-                let root_object = Rc::new(RefCell::new(holder));
+                let root_object = tracked_object(holder);
                 let root_identity = Rc::as_ptr(&root_object) as usize;
                 let root = Value::Object(root_object);
                 if let Some(raw) = root_source {
@@ -2180,7 +2180,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let wrapper = {
                     let mut data = ObjectData::default();
                     data.set("", value.clone());
-                    Value::Object(Rc::new(RefCell::new(data)))
+                    Value::Object(tracked_object(data))
                 };
                 let empty = StringUnits::default();
                 Ok(
@@ -2406,7 +2406,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     }
                 }
-                Ok(Value::Object(Rc::new(RefCell::new(data))))
+                Ok(Value::Object(tracked_object(data)))
             }
             // `String.raw` is the one built-in written to be used as a template tag: it reads
             // the `raw` half of the template object, which is the text before escapes were
@@ -2618,7 +2618,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         data.set_units(&key, descriptor);
                     }
                 }
-                Ok(Value::Object(Rc::new(RefCell::new(data))))
+                Ok(Value::Object(tracked_object(data)))
             }
             Native::ObjectDefineProperty | Native::ReflectDefineProperty
                 if matches!(arguments.first(), Some(Value::Proxy(_))) =>

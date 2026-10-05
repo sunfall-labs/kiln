@@ -397,7 +397,7 @@ pub(crate) fn call_native(
                 })),
             );
             pair.set("proxy", proxy);
-            Value::Object(Rc::new(RefCell::new(pair)))
+            Value::Object(tracked_object(pair))
         }
         Native::ProxyRevoke => {
             if let Value::Proxy(proxy) = receiver {
@@ -537,7 +537,7 @@ pub(crate) fn call_native(
                 Some(Value::Undefined) | None => {}
                 Some(prototype) => data.set_prototype(prototype.clone()),
             }
-            Value::Object(Rc::new(RefCell::new(data)))
+            Value::Object(tracked_object(data))
         }
         // `Object.seal` is the shared bootstrap's (`kiln-builtins/src/object_reflect.ts`), over
         // this and `defineProperty`.
@@ -619,7 +619,7 @@ pub(crate) fn call_native(
                     data.set_key(PropertyKeyRef::SymbolUnits(&key), descriptor);
                 }
             }
-            Value::Object(Rc::new(RefCell::new(data)))
+            Value::Object(tracked_object(data))
         }
         Native::Reflect => Value::Undefined,
         Native::ObjectOwnNames => {
@@ -1366,7 +1366,7 @@ pub(crate) fn call_native(
             result.set("promise", Value::Promise(Rc::clone(&promise)));
             result.set("resolve", Value::Settler(Rc::clone(&promise), false));
             result.set("reject", Value::Settler(promise, true));
-            Value::Object(Rc::new(RefCell::new(result)))
+            Value::Object(tracked_object(result))
         }
         // Namespaces and constructors, none of which is a plain call.
         Native::Performance
@@ -2507,7 +2507,7 @@ pub(crate) fn call_native(
             ));
             iterator.set("@@iterated", Value::Array(ArrayData::new(characters)));
             iterator.set("@@index", Value::Number(0.0));
-            Value::Object(Rc::new(RefCell::new(iterator)))
+            Value::Object(tracked_object(iterator))
         }
         // The state shape is the array iterator's, so the same stepper serves both.
         Native::StringIteratorNext => {
@@ -2698,7 +2698,7 @@ pub(crate) fn call_native(
                 WellKnown::Iterator.property_key(),
                 Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
             );
-            Value::Object(Rc::new(RefCell::new(iterator)))
+            Value::Object(tracked_object(iterator))
         }
         Native::CollectionIteratorNext => {
             let iterated = iterator_state(receiver)?;
@@ -2838,7 +2838,7 @@ pub(crate) fn call_native(
                 | Value::BigInt(_)),
             ) => wrap_primitive(primitive.clone()),
             // `Object()`, `Object(null)` and `Object(undefined)` all ask for a fresh object.
-            _ => Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            _ => Value::Object(tracked_object(ObjectData::default())),
         },
         Native::NodeEventEmitter => node_event_emitter(),
         Native::NodeStringDecoderConstructor => string_decoder::node_string_decoder(),

@@ -300,7 +300,7 @@ pub(super) fn named_group_object(
     for (name, range) in names {
         object.set(name, value(range.as_ref()));
     }
-    Value::Object(Rc::new(RefCell::new(object)))
+    Value::Object(tracked_object(object))
 }
 
 /// The array `exec` and `match` produce: the whole match, then each group, with `index` and
@@ -956,7 +956,7 @@ pub(super) fn prototype_object(closure: &Rc<Closure>) -> Value {
         // alone.
         None => data.set_non_enumerable("constructor", Value::Function(Rc::clone(closure))),
     }
-    let prototype = Value::Object(Rc::new(RefCell::new(data)));
+    let prototype = Value::Object(tracked_object(data));
     *slot = Some(prototype.clone());
     prototype
 }

@@ -306,6 +306,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut ephemerons = Vec::<(Key, Key, Key)>::new();
 
         let module_map = self.gc_module_map();
+        // These thread-local registries are weak-only. Rc interpreter values cannot cross
+        // threads, so one collector pass can discover disconnected cycles from every realm on
+        // this thread; another live realm's references remain external owners and stay live.
+        let allocated_objects = crate::gc_census::object_candidates();
+        let allocated_arrays = crate::gc_census::array_candidates();
         let (
             shared_closures,
             shared_generators,
@@ -355,6 +360,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         for weak in &shared_weak_objects {
             if let Some(object) = weak.upgrade() {
                 let owner = Owner::Object(object);
+                let key = owner.key();
+                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
+                    entry.insert(Node {
+                        owner: Some(owner),
+                        edges: Vec::new(),
+                    });
+                    work.push(key);
+                }
+            }
+        }
+
+        for weak in &allocated_objects {
+            if let Some(object) = weak.upgrade() {
+                let owner = Owner::Object(object);
+                let key = owner.key();
+                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
+                    entry.insert(Node {
+                        owner: Some(owner),
+                        edges: Vec::new(),
+                    });
+                    work.push(key);
+                }
+            }
+        }
+        for weak in &allocated_arrays {
+            if let Some(array) = weak.upgrade() {
+                let owner = Owner::Array(array);
                 let key = owner.key();
                 if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
                     entry.insert(Node {
@@ -562,6 +594,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // Drop the collector's temporary strong owners before checking which weak census entries
         // expired during the edge-clearing pass.
         drop(nodes);
+        crate::gc_census::prune_dead_candidates();
         self.closures.retain(|closure| closure.strong_count() > 0);
         self.closures_prune_at = self
             .closures

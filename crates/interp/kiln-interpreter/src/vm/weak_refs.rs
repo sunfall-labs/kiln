@@ -71,7 +71,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::PrototypeOf(PrototypeTable::WeakRef),
             RealmId::PRIMARY,
         ));
-        Ok(Value::Object(Rc::new(RefCell::new(data))))
+        Ok(Value::Object(tracked_object(data)))
     }
 
     /// `new FinalizationRegistry(cleanupCallback)`.
@@ -94,7 +94,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::PrototypeOf(PrototypeTable::FinalizationRegistry),
             RealmId::PRIMARY,
         ));
-        Ok(Value::Object(Rc::new(RefCell::new(data))))
+        Ok(Value::Object(tracked_object(data)))
     }
 
     /// The reserved slot of a `WeakRef` or a registry, or a `TypeError` naming the receiver.

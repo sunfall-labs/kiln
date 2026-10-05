@@ -2303,7 +2303,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         .map(|port| Value::Number(f64::from(port)))
                         .unwrap_or(Value::Undefined),
                 );
-                Ok(Value::Object(Rc::new(RefCell::new(address))))
+                Ok(Value::Object(tracked_object(address)))
             }
             Native::NodeServerIsListening => {
                 let Some(server) = arguments.first() else {
@@ -3830,11 +3830,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     for (name, value) in headers {
                         header_object.set(&name, Value::String(value.into()));
                     }
-                    response.set(
-                        "headers",
-                        Value::Object(Rc::new(RefCell::new(header_object))),
-                    );
-                    let response = Value::Object(Rc::new(RefCell::new(response)));
+                    response.set("headers", Value::Object(tracked_object(header_object)));
+                    let response = Value::Object(tracked_object(response));
                     if let Some(connection) = owner
                         .borrow_mut()
                         .streams
@@ -4121,8 +4118,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 for (name, value) in head.headers_object() {
                     headers.set(&name, Value::String(value.into()));
                 }
-                incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
-                let incoming = Value::Object(Rc::new(RefCell::new(incoming)));
+                incoming.set("headers", Value::Object(tracked_object(headers)));
+                let incoming = Value::Object(tracked_object(incoming));
                 if let Some(connection) = owner
                     .borrow_mut()
                     .streams
@@ -4378,8 +4375,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         for (name, value) in message_headers {
             headers.set(&name, Value::String(value.into()));
         }
-        incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
-        let incoming = Value::Object(Rc::new(RefCell::new(incoming)));
+        incoming.set("headers", Value::Object(tracked_object(headers)));
+        let incoming = Value::Object(tracked_object(incoming));
         if let Some(connection) = server
             .borrow_mut()
             .streams
@@ -4459,7 +4456,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         for (name, value) in request.headers_object() {
             headers.set(&name, Value::String(value.into()));
         }
-        incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
+        incoming.set("headers", Value::Object(tracked_object(headers)));
         let socket = server
             .borrow()
             .streams
@@ -4469,7 +4466,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             .unwrap_or(Value::Undefined);
         incoming.set("socket", socket.clone());
         incoming.set("connection", socket.clone());
-        let incoming = Value::Object(Rc::new(RefCell::new(incoming)));
+        let incoming = Value::Object(tracked_object(incoming));
         if let Some(connection) = server
             .borrow_mut()
             .streams
@@ -4538,7 +4535,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         response.set("req", incoming.clone());
         response.set("socket", socket.clone());
         response.set("connection", socket);
-        let response_object = Rc::new(RefCell::new(response));
+        let response_object = tracked_object(response);
         response_state.borrow_mut().object = Some(Rc::downgrade(&response_object));
         let response = Value::Object(response_object);
         if let Some(connection) = server
@@ -4646,7 +4643,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 // Node returns a null-prototype dictionary so names such as `constructor` are
                 // headers, never inherited object behavior.
                 headers.set_prototype(Value::Null);
-                Ok(Value::Object(Rc::new(RefCell::new(headers))))
+                Ok(Value::Object(tracked_object(headers)))
             }
             Native::NodeResponseHasHeader => {
                 let name = arguments
@@ -5398,7 +5395,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             let mut result = ObjectData::default();
             result.set("requestId", Value::Number(id.get() as f64));
             result.set("promise", Value::Promise(promise));
-            return Ok(Value::Object(Rc::new(RefCell::new(result))));
+            return Ok(Value::Object(tracked_object(result)));
         }
         if native == Native::ProcessCancelRaw {
             let id = arguments.first().map(Value::as_number).unwrap_or(0.0) as u64;
@@ -6370,7 +6367,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             "isSymbolicLink",
                             Value::Native(Native::NodeStatIsSymbolicLink, RealmId::PRIMARY),
                         );
-                        out.push(Value::Object(Rc::new(RefCell::new(dirent))));
+                        out.push(Value::Object(tracked_object(dirent)));
                     } else {
                         out.push(Value::String(entry.name.into()));
                     }

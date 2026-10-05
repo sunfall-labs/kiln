@@ -85,6 +85,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::ArrayValues, RealmId::PRIMARY),
             Attributes::BUILT_IN,
         );
-        Value::Object(Rc::new(RefCell::new(data)))
+        Value::Object(tracked_object(data))
     }
 }

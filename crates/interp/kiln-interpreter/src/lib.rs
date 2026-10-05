@@ -114,6 +114,8 @@ pub(crate) use async_hooks::{
 };
 mod object_model;
 pub use object_model::*;
+mod gc_census;
+pub(crate) use gc_census::tracked_object;
 mod shared;
 use shared::SharedCache;
 pub use shared::SharedFacade;
@@ -1198,7 +1200,7 @@ struct ExoticElement {
 
 impl ArrayData {
     fn new(items: Vec<Value>) -> Rc<Self> {
-        Rc::new(Self {
+        let array = Rc::new(Self {
             sparse: std::cell::Cell::new(
                 items
                     .iter()
@@ -1210,7 +1212,9 @@ impl ArrayData {
             length_writable: std::cell::Cell::new(true),
             elements: RefCell::new(Vec::new()),
             collection_index: RefCell::new(None),
-        })
+        });
+        gc_census::register_array(&array);
+        array
     }
 
     fn borrow(&self) -> std::cell::Ref<'_, Vec<Value>> {
@@ -2128,7 +2132,7 @@ pub(crate) fn new_engine_private(realm: RealmId) -> Value {
         Value::Native(Native::ProcessExitCodeSet, realm),
     );
     private.set_non_enumerable("gcRequest", Value::Native(Native::GcRequest, realm));
-    Value::Object(Rc::new(RefCell::new(private)))
+    Value::Object(tracked_object(private))
 }
 
 /// What closing a window has to undo.
@@ -2379,7 +2383,7 @@ fn abort_signal() -> Value {
         Value::Native(Native::AbortSignalThrowIfAborted, RealmId::PRIMARY),
     );
     data.set_non_enumerable(ABORT_LISTENERS, Value::Array(ArrayData::new(Vec::new())));
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// `new AbortController()`: a signal, and the one handle that can abort it.
@@ -2393,7 +2397,7 @@ fn abort_controller() -> Value {
         "abort",
         Value::Native(Native::AbortControllerAbort, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// `new TextEncoder()`. UTF-8 and nothing else, which is all the encoder half is defined to do.
@@ -2404,7 +2408,7 @@ fn text_encoder() -> Value {
         "encode",
         Value::Native(Native::TextEncoderEncode, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 fn unary(operator: UnaryOp, value: Value) -> Result<Value, ExecutionError> {

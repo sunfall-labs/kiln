@@ -819,10 +819,10 @@ fn node_response_write_head_reads_headers_after_optional_status_text() {
         disconnected: false,
         object: None,
     }));
-    let response = Value::Object(Rc::new(RefCell::new(ObjectData {
+    let response = Value::Object(tracked_object(ObjectData {
         node_object: Some(NodeObject::HttpResponse(Rc::clone(&state))),
         ..ObjectData::default()
-    })));
+    }));
     let headers = ordinary_object([(
         "location".into(),
         Value::String("/?value=a%23b#fragment".to_owned().into()),

@@ -503,7 +503,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             &[
                 target.clone(),
                 Value::String(key.into()),
-                Value::Object(Rc::new(RefCell::new(data))),
+                Value::Object(tracked_object(data)),
             ],
             instruction,
         )?;

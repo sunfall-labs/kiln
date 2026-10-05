@@ -21,7 +21,7 @@ fn strict_symbol_writes_check_the_symbol_descriptor() {
         Attributes::DEFAULT,
     );
     writable.prevent_extensions();
-    let writable = Value::Object(Rc::new(RefCell::new(writable)));
+    let writable = Value::Object(tracked_object(writable));
     vm.assign_with_strict(&writable, &key, Value::Number(2.0), 0, true)
         .unwrap();
     assert_eq!(vm.read_computed(&writable, &key, 0), Ok(Value::Number(2.0)));
@@ -39,7 +39,7 @@ fn strict_symbol_writes_check_the_symbol_descriptor() {
             ..Attributes::DEFAULT
         },
     );
-    let readonly = Value::Object(Rc::new(RefCell::new(readonly)));
+    let readonly = Value::Object(tracked_object(readonly));
     assert!(
         vm.assign_with_strict(&readonly, &key, Value::Number(2.0), 0, true)
             .is_err()
@@ -159,13 +159,13 @@ fn computed_lone_surrogate_reads_share_ordinary_and_proxy_paths() {
     // A prototype accessor is found by the same lookup as an own value. Its getter is omitted
     // deliberately: the result is `undefined`, but reaching the accessor still matters because
     // a setter-only property is present for `in` and for proxy invariants.
-    let prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let prototype = Value::Object(tracked_object(ObjectData::default()));
     if let Value::Object(prototype) = &prototype {
         prototype
             .borrow_mut()
             .define_accessor_units(&key, None, None, Attributes::DEFAULT);
     }
-    let inherited = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let inherited = Value::Object(tracked_object(ObjectData::default()));
     if let Value::Object(inherited_data) = &inherited {
         inherited_data.borrow_mut().set_prototype(prototype.clone());
     }
@@ -178,7 +178,7 @@ fn computed_lone_surrogate_reads_share_ordinary_and_proxy_paths() {
             .expect("inherited accessor is present")
     );
 
-    let object = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let object = Value::Object(tracked_object(ObjectData::default()));
     if let Value::Object(object_data) = &object {
         object_data.borrow_mut().set_prototype(prototype);
         object_data.borrow_mut().set_units(&key, Value::Number(7.0));
@@ -190,7 +190,7 @@ fn computed_lone_surrogate_reads_share_ordinary_and_proxy_paths() {
 
     // Reflect.get is a real callable trap. Passing the exact key through it exercises the proxy
     // route before the target's unit-preserving lookup, including the UTF-16 key identity.
-    let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let target = Value::Object(tracked_object(ObjectData::default()));
     if let Value::Object(target_data) = &target {
         target_data.borrow_mut().set_units(&key, Value::Number(9.0));
     }
@@ -223,7 +223,7 @@ fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_i
     let key = StringUnits::from_units(&[0xd800]);
     let key_value = Value::String(key.clone());
 
-    let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let target = Value::Object(tracked_object(ObjectData::default()));
     let descriptor = ordinary_object([
         ("value".to_owned(), Value::Number(7.0)),
         ("writable".to_owned(), Value::Boolean(true)),
@@ -264,7 +264,7 @@ fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_i
     // A setter inherited under the exact key is reached by the same walk as an own value. The
     // native callable is intentionally side-effect free; the absence of an own slot proves the
     // write was handed to the setter instead of creating a lossy replacement key.
-    let prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let prototype = Value::Object(tracked_object(ObjectData::default()));
     if let Value::Object(prototype) = &prototype {
         prototype.borrow_mut().define_accessor_units(
             &key,
@@ -273,7 +273,7 @@ fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_i
             Attributes::DEFAULT,
         );
     }
-    let inherited = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let inherited = Value::Object(tracked_object(ObjectData::default()));
     if let Value::Object(inherited) = &inherited {
         inherited.borrow_mut().set_prototype(prototype);
     }
@@ -285,7 +285,7 @@ fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_i
 
     // Reflect.get receives and returns the exact UTF-16 key. The target is locked so the get
     // invariant check has to consult the same unit-preserving descriptor.
-    let locked_target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let locked_target = Value::Object(tracked_object(ObjectData::default()));
     if let Value::Object(locked_target) = &locked_target {
         locked_target.borrow_mut().define_value_units(
             &key,
@@ -370,7 +370,7 @@ fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_i
         properties: RefCell::new(ObjectData::default()),
     }));
     let coercion_object = ordinary_object([("toString".to_owned(), coercion)]);
-    let strict_target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let strict_target = Value::Object(tracked_object(ObjectData::default()));
     vm.assign_with_strict(
         &strict_target,
         &coercion_object,
@@ -440,7 +440,7 @@ fn non_ascii_property_reads_follow_stored_properties_and_prototype_chain() {
 
     let mut child_data = ObjectData::default();
     child_data.set_prototype(Value::Object(parent));
-    let child = Value::Object(Rc::new(RefCell::new(child_data)));
+    let child = Value::Object(tracked_object(child_data));
 
     let read = vm.read_property_key(&child, PropertyKeyRef::Units(&unicode_units), 0);
     assert_eq!(read.unwrap(), Value::Number(42.0));
@@ -692,7 +692,7 @@ fn proxy_own_key_invariant_source_includes_exotic_and_native_keys() {
         primitive: Some(Value::String("ab".to_owned().into())),
         ..ObjectData::default()
     };
-    let boxed = Value::Object(Rc::new(RefCell::new(boxed_data)));
+    let boxed = Value::Object(tracked_object(boxed_data));
     assert_eq!(
         own_property_keys_including_symbols(&intrinsics, &boxed),
         vec!["0", "1", "length"]
@@ -946,7 +946,7 @@ fn regexp_escape_appears_in_constructor_own_property_names() {
 /// unrelated classes with identical shapes must not be confused for one another.
 #[test]
 fn instanceof_walks_the_chain_by_identity() {
-    let parent_prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let parent_prototype = Value::Object(tracked_object(ObjectData::default()));
     let parent = Rc::new(Closure {
         inferred_name: None,
         realm: RealmId::PRIMARY,
@@ -967,7 +967,7 @@ fn instanceof_walks_the_chain_by_identity() {
 
     let mut child_prototype_data = ObjectData::default();
     child_prototype_data.set_prototype(parent_prototype);
-    let child_prototype = Value::Object(Rc::new(RefCell::new(child_prototype_data)));
+    let child_prototype = Value::Object(tracked_object(child_prototype_data));
     let child = Rc::new(Closure {
         inferred_name: None,
         realm: RealmId::PRIMARY,
@@ -988,7 +988,7 @@ fn instanceof_walks_the_chain_by_identity() {
 
     let mut instance_data = ObjectData::default();
     instance_data.set_prototype(child_prototype);
-    let instance = Value::Object(Rc::new(RefCell::new(instance_data)));
+    let instance = Value::Object(tracked_object(instance_data));
 
     assert!(instance_of(
         &instance,
@@ -1015,9 +1015,7 @@ fn instanceof_walks_the_chain_by_identity() {
         upvalues: Vec::new(),
         captured_this: None,
         captured_arguments: None,
-        prototype: RefCell::new(Some(Value::Object(Rc::new(RefCell::new(
-            ObjectData::default(),
-        ))))),
+        prototype: RefCell::new(Some(Value::Object(tracked_object(ObjectData::default())))),
         properties: RefCell::new(ObjectData::default()),
     });
     assert!(!instance_of(&instance, &Value::Function(unrelated), None));
@@ -1294,7 +1292,7 @@ fn json_quotes_and_keys_preserve_utf16_units() {
     let value = Value::String(key.clone());
     let mut data = ObjectData::default();
     data.set_units(&key, value);
-    let object = Value::Object(Rc::new(RefCell::new(data)));
+    let object = Value::Object(tracked_object(data));
     let text = serialize_units(&object, &StringUnits::default())
         .expect("serialize")
         .expect("object result");
@@ -1345,7 +1343,7 @@ fn json_replacer_key_matching_uses_exact_units() {
     data.set_units(&key, Value::Number(7.0));
     let replacement = StringUnits::from_units(&[0xfffd]);
     data.set_units(&replacement, Value::Number(8.0));
-    let object = Value::Object(Rc::new(RefCell::new(data)));
+    let object = Value::Object(tracked_object(data));
     let allowed = vec![key.clone()];
     let mut callback_keys = Vec::new();
     let mut unreachable_getter = |call: crate::JsonCall<'_>| match call {
@@ -1602,7 +1600,7 @@ fn a_symbol_key_and_a_colliding_string_are_distinct_own_properties() {
         object.get_own_property_key(PropertyKeyRef::SymbolUnits(&spelling)),
         Some(&Property::Value(Value::Number(2.0)))
     );
-    let source = Value::Object(Rc::new(RefCell::new(object)));
+    let source = Value::Object(tracked_object(object));
     assert_eq!(
         own_property_keys_units(&Intrinsics::default(), &source),
         vec![spelling.clone()]
@@ -1616,7 +1614,7 @@ fn a_symbol_key_and_a_colliding_string_are_distinct_own_properties() {
         locale: None,
     };
     let mut vm = test_vm(&program, &mut host);
-    let receiver = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let receiver = Value::Object(tracked_object(ObjectData::default()));
     vm.assign_with_strict(
         &receiver,
         &Value::String(spelling.clone()),
@@ -1648,7 +1646,7 @@ fn a_symbol_key_and_a_colliding_string_are_distinct_own_properties() {
     let mut string_only = ObjectData::default();
     string_only.set_units(&spelling, Value::Number(3.0));
     assert!(
-        vm.share_value(Value::Object(Rc::new(RefCell::new(string_only))))
+        vm.share_value(Value::Object(tracked_object(string_only)))
             .is_ok(),
         "the colliding string is accepted"
     );
@@ -1761,7 +1759,7 @@ fn weak_ref_does_not_keep_a_shared_graph_alive() {
     };
     let mut vm = test_vm(&program, &mut host);
     let shared = vm
-        .share_value(Value::Object(Rc::new(RefCell::new(ObjectData::default()))))
+        .share_value(Value::Object(tracked_object(ObjectData::default())))
         .unwrap();
     let Value::Shared(facade) = &shared else {
         panic!("sharing an object must return a facade");
@@ -1788,7 +1786,7 @@ fn weak_ref_object_target_lives_only_through_the_current_job() {
         locale: None,
     };
     let mut vm = test_vm(&program, &mut host);
-    let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let target = Value::Object(tracked_object(ObjectData::default()));
     let reference = vm.construct_weak_ref(&[target.clone()], 0).unwrap();
     drop(target);
 
@@ -1837,6 +1835,153 @@ fn weak_ref_collection_reclaims_unreachable_object_cycles() {
 }
 
 #[test]
+fn weak_ref_collection_discovers_unreachable_object_and_array_owner_cycles() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+
+    let target = tracked_object(ObjectData::default());
+    let target_weak = Rc::downgrade(&target);
+    let weak_ref = vm
+        .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
+        .unwrap();
+    let owner = tracked_object(ObjectData::default());
+    owner
+        .borrow_mut()
+        .set("self", Value::Object(Rc::clone(&owner)));
+    owner
+        .borrow_mut()
+        .set("target", Value::Object(Rc::clone(&target)));
+    let owner_weak = Rc::downgrade(&owner);
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+    drop(owner);
+    drop(target);
+    vm.collect_closure_cycles();
+    assert!(owner_weak.upgrade().is_none());
+    assert!(target_weak.upgrade().is_none());
+    assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+
+    let target = tracked_object(ObjectData::default());
+    let target_weak = Rc::downgrade(&target);
+    let weak_ref = vm
+        .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
+        .unwrap();
+    let owner = ArrayData::new(Vec::new());
+    owner.borrow_mut().push(Value::Array(Rc::clone(&owner)));
+    owner.borrow_mut().push(Value::Object(Rc::clone(&target)));
+    let owner_weak = Rc::downgrade(&owner);
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+    drop(owner);
+    drop(target);
+    vm.collect_closure_cycles();
+    assert!(owner_weak.upgrade().is_none());
+    assert!(target_weak.upgrade().is_none());
+    assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+
+    let target = tracked_object(ObjectData::default());
+    let target_weak = Rc::downgrade(&target);
+    let weak_ref = vm
+        .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
+        .unwrap();
+    let object = tracked_object(ObjectData::default());
+    let array = ArrayData::new(Vec::new());
+    object
+        .borrow_mut()
+        .set("array", Value::Array(Rc::clone(&array)));
+    array.borrow_mut().push(Value::Object(Rc::clone(&object)));
+    array.borrow_mut().push(Value::Object(Rc::clone(&target)));
+    let object_weak = Rc::downgrade(&object);
+    let array_weak = Rc::downgrade(&array);
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+    drop(object);
+    drop(array);
+    drop(target);
+    vm.collect_closure_cycles();
+    assert!(object_weak.upgrade().is_none());
+    assert!(array_weak.upgrade().is_none());
+    assert!(target_weak.upgrade().is_none());
+    assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+
+    let acyclic = tracked_object(ObjectData::default());
+    let acyclic_weak = Rc::downgrade(&acyclic);
+    let acyclic_ref = vm
+        .construct_weak_ref(&[Value::Object(Rc::clone(&acyclic))], 0)
+        .unwrap();
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+    drop(acyclic);
+    vm.collect_closure_cycles();
+    assert!(acyclic_weak.upgrade().is_none());
+    assert_eq!(vm.weak_ref_deref(&acyclic_ref, 0), Ok(Value::Undefined));
+
+    let live_target = tracked_object(ObjectData::default());
+    let live_weak = Rc::downgrade(&live_target);
+    let live_ref = vm
+        .construct_weak_ref(&[Value::Object(Rc::clone(&live_target))], 0)
+        .unwrap();
+    let live_owner = tracked_object(ObjectData::default());
+    live_owner
+        .borrow_mut()
+        .set("self", Value::Object(Rc::clone(&live_owner)));
+    live_owner
+        .borrow_mut()
+        .set("target", Value::Object(Rc::clone(&live_target)));
+    let live_owner_weak = Rc::downgrade(&live_owner);
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+    vm.collect_closure_cycles();
+    assert!(live_owner_weak.upgrade().is_some());
+    assert!(live_weak.upgrade().is_some());
+    drop(live_owner);
+    drop(live_target);
+    vm.collect_closure_cycles();
+    assert!(live_owner_weak.upgrade().is_none());
+    assert!(live_weak.upgrade().is_none());
+    assert_eq!(vm.weak_ref_deref(&live_ref, 0), Ok(Value::Undefined));
+}
+
+#[test]
+fn allocation_census_preserves_another_realms_live_owner_cycle() {
+    let program = no_program();
+    let mut first_host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut second_host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut creator = test_vm(&program, &mut first_host);
+    let mut collector = test_vm(&program, &mut second_host);
+    let target = tracked_object(ObjectData::default());
+    let target_weak = Rc::downgrade(&target);
+    let owner = tracked_object(ObjectData::default());
+    owner
+        .borrow_mut()
+        .set("self", Value::Object(Rc::clone(&owner)));
+    owner.borrow_mut().set("target", Value::Object(target));
+    let owner_weak = Rc::downgrade(&owner);
+    creator.locals.push(Value::Object(owner));
+    collector.collect_closure_cycles();
+    assert!(owner_weak.upgrade().is_some());
+    assert!(target_weak.upgrade().is_some());
+    creator.locals.clear();
+    collector.collect_closure_cycles();
+    assert!(owner_weak.upgrade().is_none());
+    assert!(target_weak.upgrade().is_none());
+}
+
+#[test]
 fn weak_ref_keepalive_and_collection_are_shared_across_module_machines() {
     let program = no_program();
     let mut first_host = TestHost {
@@ -1863,18 +2008,33 @@ fn weak_ref_keepalive_and_collection_are_shared_across_module_machines() {
     // A new VM's local default must not hide the authoritative session census.
     collector.module_map = SharedModuleMap::default();
 
-    let target = Rc::new(RefCell::new(ObjectData::default()));
+    let target = tracked_object(ObjectData::default());
     let weak_target = Rc::downgrade(&target);
     let weak_ref = creator
         .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
         .unwrap();
     drop(target);
 
+    let owner = tracked_object(ObjectData::default());
+    owner
+        .borrow_mut()
+        .set("self", Value::Object(Rc::clone(&owner)));
+    owner.borrow_mut().set(
+        "target",
+        weak_target
+            .upgrade()
+            .map(Value::Object)
+            .unwrap_or(Value::Undefined),
+    );
+    let owner_weak = Rc::downgrade(&owner);
+    drop(owner);
+
     collector.collect_closure_cycles();
     assert!(
         weak_target.upgrade().is_some(),
         "same-job keepalive is realm-wide"
     );
+    assert!(owner_weak.upgrade().is_none());
 
     realm_map.borrow_mut().weak_ref_keepalive.clear();
     collector.collect_closure_cycles();
@@ -2780,7 +2940,7 @@ fn to_property_key_coerces_regexp_and_other_objects_without_recursion() {
         locale: None,
     };
     let mut vm = test_vm(&program, &mut host);
-    let target = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
+    let target = Value::Object(tracked_object(ObjectData::default()));
     let regexp = build_regexp(&StringUnits::from("abc"), "").expect("pattern compiles");
     let desc = vm
         .dispatch_native(

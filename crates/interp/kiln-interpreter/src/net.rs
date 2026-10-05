@@ -11,6 +11,7 @@ use kiln_runtime::node_stream::StreamDriver;
 
 use crate::{
     ExecutionError, Native, NodeObject, ObjectData, RealmId, Value, is_callable, own_data_property,
+    tracked_object,
 };
 
 #[derive(Debug)]
@@ -183,7 +184,7 @@ pub(crate) fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value 
         "removeAllListeners",
         Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
     );
-    let object = Rc::new(RefCell::new(data));
+    let object = tracked_object(data);
     state.borrow_mut().object = Some(Rc::downgrade(&object));
     Value::Object(object)
 }
@@ -260,7 +261,7 @@ pub(crate) fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
         "setEncoding",
         Value::Native(Native::NodeReadableSetEncoding, RealmId::PRIMARY),
     );
-    let object = Rc::new(RefCell::new(data));
+    let object = tracked_object(data);
     state.borrow_mut().object = Some(Rc::downgrade(&object));
     Value::Object(object)
 }
@@ -402,7 +403,7 @@ pub(crate) fn native_capabilities() -> Value {
             module.set_non_enumerable(name, value);
         }
     }
-    Value::Object(Rc::new(RefCell::new(module)))
+    Value::Object(tracked_object(module))
 }
 
 pub(crate) const fn js_name(native: Native) -> Option<&'static str> {

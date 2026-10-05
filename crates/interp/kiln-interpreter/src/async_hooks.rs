@@ -2,10 +2,10 @@
 //!
 //! Provides `AsyncLocalStorage` and `AsyncResource` tracking and state.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 
-use crate::{ExecutionError, Native, NodeObject, ObjectData, RealmId, Value};
+use crate::{ExecutionError, Native, NodeObject, ObjectData, RealmId, Value, tracked_object};
 
 #[derive(Debug)]
 pub(crate) struct AsyncStorage {
@@ -61,7 +61,7 @@ pub(crate) fn node_async_local_storage() -> Value {
         "disable",
         Value::Native(Native::NodeAsyncLocalStorageDisable, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// A context with one storage's binding replaced, or removed when `store` is `None`.

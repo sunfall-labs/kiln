@@ -69,9 +69,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `Iterator` is abstract but deliberately *subclassable*: writing an iterator in
             // JavaScript is what it exists for, and such a class needs `super()` to work. Only a
             // direct `new Iterator()` is refused, and that never reaches here.
-            Native::IteratorConstructor => {
-                Value::Object(Rc::new(RefCell::new(ObjectData::default())))
-            }
+            Native::IteratorConstructor => Value::Object(tracked_object(ObjectData::default())),
             // The rest of the constructible built-ins, each doing through `super()` exactly what
             // it does through `new`. They were reachable one way and not the other, which is not
             // a distinction the language draws: `class MyF64 extends Float64Array {}` is how
@@ -101,7 +99,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Native(Native::WebStub(kind), realm),
                     Attributes::DEFAULT,
                 );
-                Value::Object(Rc::new(RefCell::new(obj)))
+                Value::Object(tracked_object(obj))
             }
             Native::PromiseConstructor => self.construct_promise(arguments, current)?,
             Native::FunctionConstructor => {
@@ -317,7 +315,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // OrdinaryCreateFromConstructor and ignores that argument. The shared tail
                 // below applies `new_target.prototype` (including its realm fallback).
                 let object = if subclassed {
-                    Value::Object(Rc::new(RefCell::new(ObjectData::default())))
+                    Value::Object(tracked_object(ObjectData::default()))
                 } else {
                     call_native(
                         &self.intrinsics,
@@ -451,7 +449,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Native(Native::WebStub(kind), realm),
                     Attributes::DEFAULT,
                 );
-                self.stack.push(Value::Object(Rc::new(RefCell::new(obj))));
+                self.stack.push(Value::Object(tracked_object(obj)));
             }
             // `new Intl.NumberFormat(...)`. The engine builds the formatter; what is decided
             // here is only what the options meant, which is the half the language owns.

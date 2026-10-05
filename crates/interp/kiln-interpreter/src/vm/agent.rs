@@ -261,7 +261,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut record = ObjectData::default();
                 record.set("read", Value::Number(decoded.read as f64));
                 record.set("written", Value::Number(written as f64));
-                Ok(Value::Object(Rc::new(RefCell::new(record))))
+                Ok(Value::Object(tracked_object(record)))
             }
         }
     }

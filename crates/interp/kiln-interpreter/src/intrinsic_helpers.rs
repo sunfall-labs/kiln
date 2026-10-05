@@ -271,7 +271,7 @@ pub(super) fn build_raw_json(text: &StringUnits) -> Result<Value, ExecutionError
     object.set_prototype(Value::Null);
     object.frozen = true;
     object.extensible = false;
-    Ok(Value::Object(Rc::new(RefCell::new(object))))
+    Ok(Value::Object(tracked_object(object)))
 }
 
 /// What a `WeakRef` inherits from `WeakRef.prototype`.
@@ -365,7 +365,7 @@ pub(super) fn new_disposable_stack(flavour: Disposal) -> Value {
         }),
         RealmId::PRIMARY,
     ));
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 pub(super) fn disposable_stack_method(name: &str) -> Value {
@@ -628,7 +628,7 @@ pub(super) fn new_set(values: Vec<Value>) -> Value {
         RealmId::PRIMARY,
     ));
     data.set(COLLECTION_SIZE, Value::Number(size));
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// Whether this value is one of the two weak collections.
@@ -720,7 +720,7 @@ pub(super) fn array_iterator_over(native: Native, iterated: &Value) -> Value {
         WellKnown::Iterator.property_key(),
         Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(iterator)))
+    Value::Object(tracked_object(iterator))
 }
 
 pub(super) fn iterator_state(receiver: &Value) -> Result<Value, ExecutionError> {
@@ -1981,7 +1981,7 @@ pub(super) fn json_value_and_sources_from_tape(
                     });
                     continue;
                 }
-                Value::Object(Rc::new(RefCell::new(ObjectData::default())))
+                Value::Object(tracked_object(ObjectData::default()))
             }
             _ => return Err(ExecutionError::InvalidJson),
         };
@@ -2066,7 +2066,7 @@ pub(super) fn json_value_and_sources_from_tape(
                     Value::Array(array)
                 }
                 Some(Frame::Object { data, sources, .. }) => {
-                    let object = Rc::new(RefCell::new(data));
+                    let object = tracked_object(data);
                     let identity = Rc::as_ptr(&object) as usize;
                     entries.extend(
                         sources

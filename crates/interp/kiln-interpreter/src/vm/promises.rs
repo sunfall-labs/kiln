@@ -772,13 +772,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut data = ObjectData::default();
                 data.set("status", Value::String("fulfilled".to_owned().into()));
                 data.set("value", argument);
-                Value::Object(Rc::new(RefCell::new(data)))
+                Value::Object(tracked_object(data))
             }
             (Native::PromiseAllSettled, true) => {
                 let mut data = ObjectData::default();
                 data.set("status", Value::String("rejected".to_owned().into()));
                 data.set("reason", argument);
-                Value::Object(Rc::new(RefCell::new(data)))
+                Value::Object(tracked_object(data))
             }
             _ => argument,
         };

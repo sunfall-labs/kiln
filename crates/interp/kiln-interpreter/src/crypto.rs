@@ -15,7 +15,7 @@ use kiln_host_abi::HostOps;
 
 use crate::{
     ArrayData, ExecutionError, Native, NodeObject, ObjectData, RealmId, TypedKind, Value, Vm,
-    is_callable, node_body_bytes, node_bytes_value,
+    is_callable, node_body_bytes, node_bytes_value, tracked_object,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -87,7 +87,7 @@ pub(crate) fn node_hash(arguments: &[Value]) -> Result<Value, ExecutionError> {
         "digest",
         Value::Native(Native::NodeHashDigest, RealmId::PRIMARY),
     );
-    Ok(Value::Object(Rc::new(RefCell::new(data))))
+    Ok(Value::Object(tracked_object(data)))
 }
 
 pub(crate) fn node_hmac(arguments: &[Value]) -> Result<Value, ExecutionError> {
@@ -140,7 +140,7 @@ pub(crate) fn node_hmac(arguments: &[Value]) -> Result<Value, ExecutionError> {
         "digest",
         Value::Native(Native::NodeHashDigest, RealmId::PRIMARY),
     );
-    Ok(Value::Object(Rc::new(RefCell::new(data))))
+    Ok(Value::Object(tracked_object(data)))
 }
 
 pub(crate) fn node_hash_state(receiver: &Value) -> Result<Rc<RefCell<HashState>>, ExecutionError> {
@@ -624,9 +624,9 @@ fn node_crypto_key_info(arguments: &[Value]) -> Result<Value, ExecutionError> {
     info.set("asymmetricKeyType", Value::String("rsa".into()));
     info.set(
         "asymmetricKeyDetails",
-        Value::Object(Rc::new(RefCell::new(details))),
+        Value::Object(tracked_object(details)),
     );
-    Ok(Value::Object(Rc::new(RefCell::new(info))))
+    Ok(Value::Object(tracked_object(info)))
 }
 
 fn node_crypto_key_export(arguments: &[Value]) -> Result<Value, ExecutionError> {
@@ -665,7 +665,7 @@ fn crypto_key_value(key: kiln_key_core::ImportedKey) -> Value {
         node_object: Some(NodeObject::CryptoKey(Rc::new(key))),
         ..Default::default()
     };
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 fn crypto_key_argument(

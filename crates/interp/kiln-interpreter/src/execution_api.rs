@@ -400,7 +400,7 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
     // furniture through a module it imported.
     data.set_prototype(Value::Null);
     data.close_as_module_namespace();
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// Reading an export whose declaration has not run yet.
@@ -481,7 +481,7 @@ pub fn ordinary_object(entries: impl IntoIterator<Item = (String, Value)>) -> Va
     for (name, value) in entries {
         data.set(&name, value);
     }
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// Read one own data property from an interpreter object without invoking program code.

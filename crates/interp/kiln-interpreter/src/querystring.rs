@@ -1,9 +1,6 @@
 //! `node:querystring` query string parsing and decoding.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use crate::{ArrayData, ExecutionError, Native, ObjectData, RealmId, Value};
+use crate::{ArrayData, ExecutionError, Native, ObjectData, RealmId, Value, tracked_object};
 
 /// Decodes percent-encoded bytes and converts '+' into space, as required by
 /// URL application/x-www-form-urlencoded component decoding.
@@ -50,7 +47,7 @@ pub(crate) fn parse(input: &str) -> Value {
             }
         }
     }
-    Value::Object(Rc::new(RefCell::new(object)))
+    Value::Object(tracked_object(object))
 }
 
 pub(crate) fn property(prop: &str) -> Option<Value> {

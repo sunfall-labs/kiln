@@ -19,7 +19,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let mut instance = ObjectData::default();
         instance.set_prototype(prototype);
-        Value::Object(Rc::new(RefCell::new(instance)))
+        Value::Object(tracked_object(instance))
     }
 
     /// The same instance, with its prototype taken from `new.target` rather than from the
@@ -49,7 +49,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let mut instance = ObjectData::default();
         instance.set_prototype(prototype);
-        Ok(Value::Object(Rc::new(RefCell::new(instance))))
+        Ok(Value::Object(tracked_object(instance)))
     }
 
     /// Build a closure, resolving each upvalue descriptor against the frame creating it.

@@ -263,7 +263,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::PrototypeOf(PrototypeTable::IteratorFor(IteratorKind::RegExpString)),
             RealmId::PRIMARY,
         ));
-        Ok(Value::Object(Rc::new(RefCell::new(iterator))))
+        Ok(Value::Object(tracked_object(iterator)))
     }
 
     /// One step of the iterator `@@matchAll` produced.

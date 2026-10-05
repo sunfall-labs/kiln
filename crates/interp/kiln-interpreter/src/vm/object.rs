@@ -618,7 +618,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             }
             data.set("configurable", Value::Boolean(false));
-            let descriptor = Value::Object(Rc::new(RefCell::new(data)));
+            let descriptor = Value::Object(tracked_object(data));
             self.dispatch_native(
                 Native::ObjectDefineProperty,
                 &Value::Undefined,
@@ -829,7 +829,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Some(configurable) = described.configurable {
             data.set("configurable", Value::Boolean(configurable));
         }
-        Value::Object(Rc::new(RefCell::new(data)))
+        Value::Object(tracked_object(data))
     }
 
     /// `FromPropertyDescriptor(ToPropertyDescriptor(x))`: every field spelled out.
@@ -853,7 +853,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "configurable",
             Value::Boolean(described.configurable.unwrap_or(false)),
         );
-        Value::Object(Rc::new(RefCell::new(data)))
+        Value::Object(tracked_object(data))
     }
 
     /// The trap `name` names on a proxy's handler, or `None` when the handler does not have one.

@@ -790,7 +790,7 @@ pub(super) fn wrap_primitive(primitive: Value) -> Value {
     let mut data = ObjectData::default();
     data.set_prototype(Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY));
     data.primitive = Some(primitive);
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// The receiver a built-in sees, with a wrapper opened.
@@ -1484,7 +1484,7 @@ impl Intrinsics {
             // right until built-ins can be written in JavaScript (design.md §5).
             data.set_non_enumerable("toString", Value::Native(Native::ErrorToString, realm));
         }
-        let prototype = Value::Object(Rc::new(RefCell::new(data)));
+        let prototype = Value::Object(tracked_object(data));
         if !matches!(kind, ErrorKind::Error) {
             // Recurses, so the borrow above has to be finished before this runs -- it is, and it
             // has to stay that way: building `TypeError.prototype` builds `Error.prototype`.
@@ -1586,7 +1586,7 @@ impl Intrinsics {
         ] {
             data.set(name, Value::Boolean(true));
         }
-        let unscopables = Value::Object(Rc::new(RefCell::new(data)));
+        let unscopables = Value::Object(tracked_object(data));
         if index < self.unscopables.borrow().len() {
             self.unscopables.borrow_mut()[index] = Some(unscopables.clone());
         }
@@ -3674,5 +3674,5 @@ pub(super) fn own_descriptor_key(
     }
     data.set("enumerable", Value::Boolean(attributes.enumerable));
     data.set("configurable", Value::Boolean(attributes.configurable));
-    Some(Value::Object(Rc::new(RefCell::new(data))))
+    Some(Value::Object(tracked_object(data)))
 }

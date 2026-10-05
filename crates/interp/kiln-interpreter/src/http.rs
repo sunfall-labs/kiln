@@ -8,6 +8,7 @@ use std::rc::{Rc, Weak};
 use crate::net::{NetSocketState, NodeServerState};
 use crate::{
     ExecutionError, Native, NodeObject, ObjectData, Property, RealmId, Value, is_callable,
+    tracked_object,
 };
 
 #[derive(Debug)]
@@ -170,7 +171,7 @@ pub(crate) fn node_http_client_request_object(
         "setMaxListeners",
         Value::Native(Native::NodeEventSetMaxListeners, RealmId::PRIMARY),
     );
-    let object = Rc::new(RefCell::new(data));
+    let object = tracked_object(data);
     state.borrow_mut().object = Some(Rc::clone(&object));
     Value::Object(object)
 }
@@ -352,7 +353,7 @@ pub(crate) fn native_capabilities() -> Value {
         "__cancelRequest",
         Value::Native(Native::NodeHttpCancelRequest, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(module)))
+    Value::Object(tracked_object(module))
 }
 
 pub(crate) fn https_property(prop: &str) -> Option<Value> {

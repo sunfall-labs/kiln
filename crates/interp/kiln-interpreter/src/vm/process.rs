@@ -50,7 +50,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Attributes::DEFAULT,
             );
         }
-        process.set("env", Value::Object(Rc::new(RefCell::new(env_obj))));
+        process.set("env", Value::Object(tracked_object(env_obj)));
         // Whatever the host said, verbatim -- including the two leading entries, which node
         // guarantees are there and which `const [, , first] = process.argv` depends on. A host
         // that stated no command line leaves this empty rather than inventing an executable
@@ -230,7 +230,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         process.set_non_enumerable("__kilnNativeModules", native_modules);
-        let value = Value::Object(Rc::new(RefCell::new(process)));
+        let value = Value::Object(tracked_object(process));
         self.process_object = Some(value.clone());
         value
     }

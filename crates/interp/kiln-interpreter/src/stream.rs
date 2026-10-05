@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::intrinsic_members::NamedMembers;
 use crate::{
     ExecutionError, Native, NodeObject, ObjectData, PrototypeTable, RealmId, Value, is_callable,
-    own_data_property,
+    own_data_property, tracked_object,
 };
 
 #[derive(Debug)]
@@ -39,7 +39,7 @@ pub(crate) fn new_readable_state(
     high_water_mark: usize,
     encoding: Option<String>,
 ) -> Rc<RefCell<ReadableState>> {
-    let public = Rc::new(RefCell::new(ObjectData::default()));
+    let public = tracked_object(ObjectData::default());
     Rc::new(RefCell::new(ReadableState {
         buffer: Vec::new(),
         buffered_bytes: 0,
@@ -69,7 +69,7 @@ pub(crate) fn node_readable(arguments: &[Value], receiver: Option<&Value>) -> Va
     let initializes_existing = matches!(receiver, Some(Value::Object(_)));
     let object = match receiver {
         Some(Value::Object(object)) => Rc::clone(object),
-        _ => Rc::new(RefCell::new(ObjectData::default())),
+        _ => tracked_object(ObjectData::default()),
     };
     {
         let mut data = object.borrow_mut();
@@ -129,7 +129,7 @@ pub(crate) fn node_writable(arguments: &[Value], receiver: Option<&Value>) -> Va
     let initializes_existing = matches!(receiver, Some(Value::Object(_)));
     let object = match receiver {
         Some(Value::Object(object)) => Rc::clone(object),
-        _ => Rc::new(RefCell::new(ObjectData::default())),
+        _ => tracked_object(ObjectData::default()),
     };
     let state = Rc::new(RefCell::new(WritableState {
         ended: false,

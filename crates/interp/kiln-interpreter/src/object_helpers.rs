@@ -59,7 +59,7 @@ pub(super) fn clone_plain_data(
                 }
                 entries
             };
-            let copy = Rc::new(RefCell::new(ObjectData::default()));
+            let copy = tracked_object(ObjectData::default());
             seen.insert(identity, Value::Object(Rc::clone(&copy)));
             for (key, item) in entries {
                 let item = clone_plain_data(&item, seen, depth + 1)?;
@@ -163,7 +163,7 @@ pub(super) fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionE
                 "isSymbolicLink",
                 Value::Native(Native::NodeStatIsSymbolicLink, RealmId::PRIMARY),
             );
-            Value::Object(Rc::new(RefCell::new(object)))
+            Value::Object(tracked_object(object))
         }
         AsyncHostValue::Resource(resource) => {
             return Err(ExecutionError::Host {
@@ -211,7 +211,7 @@ pub(super) fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionE
                     .signal
                     .map_or(Value::Null, |signal| Value::Number(signal as f64)),
             );
-            Value::Object(Rc::new(RefCell::new(object)))
+            Value::Object(tracked_object(object))
         }
         AsyncHostValue::ResourceState(state) => {
             return Err(ExecutionError::Host {
@@ -230,7 +230,7 @@ pub(super) fn iteration_result(value: Value, done: bool) -> Value {
     let mut result = ObjectData::default();
     result.set("value", value);
     result.set("done", Value::Boolean(done));
-    Value::Object(Rc::new(RefCell::new(result)))
+    Value::Object(tracked_object(result))
 }
 
 /// The trace recorded on an error object when it was constructed, if it is one.

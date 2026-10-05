@@ -39,7 +39,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             RealmId::PRIMARY,
         ));
         data.set(COLLECTION_SIZE, Value::Number(0.0));
-        let collection = Value::Object(Rc::new(RefCell::new(data)));
+        let collection = Value::Object(tracked_object(data));
         if weak {
             if let Value::Object(object) = &collection {
                 let module_map = self.gc_module_map();

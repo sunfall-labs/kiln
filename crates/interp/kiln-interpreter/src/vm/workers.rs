@@ -663,7 +663,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut result = ObjectData::default();
         result.set("requestId", Value::Number(id.get() as f64));
         result.set("promise", Value::Promise(promise));
-        Ok(Value::Object(Rc::new(RefCell::new(result))))
+        Ok(Value::Object(tracked_object(result)))
     }
 
     /// The tokens of a message the bootstrap flattened. A buffer in it is one the structured

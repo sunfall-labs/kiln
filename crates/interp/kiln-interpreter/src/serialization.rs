@@ -48,7 +48,7 @@ pub(super) fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     {
         data.set_non_enumerable("cause", cause.clone());
     }
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// The `space` argument of `JSON.stringify`, resolved to the literal indent for one level.
@@ -422,7 +422,7 @@ pub(super) fn json_stringify(
                 data.set_units(&key, item);
             }
             return json_stringify(
-                &Value::Object(Rc::new(RefCell::new(data))),
+                &Value::Object(tracked_object(data)),
                 indent,
                 current,
                 seen,
