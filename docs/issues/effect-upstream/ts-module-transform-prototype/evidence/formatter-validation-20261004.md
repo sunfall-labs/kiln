@@ -32,6 +32,9 @@ and
 The four focused TypeScript native parity probes also matched: reference erasure,
 enums, optional-chain DCE, and primitive-delete DCE. Captured output is in
 `.scratch/final-candidate-formatter/native-typescript-probes.log`. The focused
+JavaScript/dynamic-source reflection controls `function-to-string.js` and
+`dynamic-function-string-escapes.js` also matched (2/2); output is in
+`.scratch/final-candidate-formatter/dynamic-source-probes.log`. The focused
 native module-graph test
 `tests::module_graph::native_import_meta_reparse_reuses_static_typescript_source_map`
 passes and executes generated TS with DCE, checks that an unused import is
