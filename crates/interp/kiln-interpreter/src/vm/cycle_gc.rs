@@ -2355,4 +2355,115 @@ mod tests {
         assert!(weak_target.upgrade().is_none());
         assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
     }
+
+    #[test]
+    fn finalization_registry_targets_and_tokens_are_weak_but_holdings_are_strong() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+
+        let target = tracked_object(ObjectData::default());
+        target
+            .borrow_mut()
+            .set("self", Value::Object(Rc::clone(&target)));
+        let weak_target = Rc::downgrade(&target);
+        let token = tracked_object(ObjectData::default());
+        let weak_token = Rc::downgrade(&token);
+
+        let registry = vm
+            .construct_finalization_registry(
+                &[Value::Native(Native::ObjectToStringTag, RealmId::PRIMARY)],
+                0,
+            )
+            .expect("callable cleanup callback constructs a registry");
+        vm.finalization_registry_register(
+            &registry,
+            &[
+                Value::Object(Rc::clone(&target)),
+                Value::String("holding".into()),
+                Value::Object(Rc::clone(&token)),
+            ],
+            0,
+        )
+        .expect("valid target, holding, and unregister token register");
+        assert_eq!(
+            vm.finalization_registry_unregister(&registry, &[Value::Object(Rc::clone(&token))], 0,),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(
+            vm.finalization_registry_unregister(&registry, &[Value::Object(Rc::clone(&token))], 0,),
+            Ok(Value::Boolean(false))
+        );
+        vm.finalization_registry_register(
+            &registry,
+            &[
+                Value::Object(Rc::clone(&target)),
+                Value::String("holding".into()),
+                Value::Object(Rc::clone(&token)),
+            ],
+            0,
+        )
+        .expect("a token can be registered again after unregister");
+        let weak_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
+            .expect("object can be held weakly");
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(target);
+        drop(token);
+
+        vm.collect_closure_cycles();
+        assert!(
+            weak_target.upgrade().is_none(),
+            "weak target cycle is reclaimed"
+        );
+        assert!(weak_token.upgrade().is_none(), "unregister token is weak");
+        assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+
+        // A live holding that points to a target is an ordinary strong path and must keep it
+        // alive. Once that path is removed, the target's self-cycle becomes collectible.
+        let held_target = tracked_object(ObjectData::default());
+        held_target
+            .borrow_mut()
+            .set("self", Value::Object(Rc::clone(&held_target)));
+        let held_target_weak = Rc::downgrade(&held_target);
+        let holding = tracked_object(ObjectData::default());
+        holding
+            .borrow_mut()
+            .set("target", Value::Object(Rc::clone(&held_target)));
+        vm.finalization_registry_register(
+            &registry,
+            &[
+                Value::Object(Rc::clone(&held_target)),
+                Value::Object(Rc::clone(&holding)),
+            ],
+            0,
+        )
+        .expect("holding object registration succeeds");
+        drop(held_target);
+        vm.collect_closure_cycles();
+        assert!(
+            held_target_weak.upgrade().is_some(),
+            "holding value reaches target"
+        );
+        holding.borrow_mut().set("target", Value::Undefined);
+        vm.collect_closure_cycles();
+        assert!(held_target_weak.upgrade().is_none());
+
+        // A target with an ordinary external owner stays live through collection.
+        let rooted = tracked_object(ObjectData::default());
+        let rooted_weak = Rc::downgrade(&rooted);
+        vm.finalization_registry_register(
+            &registry,
+            &[
+                Value::Object(Rc::clone(&rooted)),
+                Value::String("rooted".into()),
+            ],
+            0,
+        )
+        .expect("rooted target registration succeeds");
+        vm.collect_closure_cycles();
+        assert!(
+            rooted_weak.upgrade().is_some(),
+            "external target owner is respected"
+        );
+    }
 }

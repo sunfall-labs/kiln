@@ -162,24 +162,22 @@ impl<'a> PropertyKeyRef<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum WeakCellValue {
-    Shared(Weak<SharedFacade>),
-    Other(Value),
-}
+pub(super) struct WeakCellValue(WeakCollectionKey);
 
 impl WeakCellValue {
     pub(super) fn new(value: Value) -> Self {
-        match value {
-            Value::Shared(facade) => Self::Shared(Rc::downgrade(&facade)),
-            value => Self::Other(value),
-        }
+        // FinalizationRegistry targets and unregister tokens are weak for every JavaScript
+        // object identity. Keeping the fallback Value strongly here made a registered target
+        // look like an unexplained external owner to the cycle collector, so it could never be
+        // reclaimed. `register` validates CanBeHeldWeakly before constructing this handle.
+        Self(
+            WeakCollectionKey::new(&value)
+                .expect("validated weakly-held values have a weak identity handle"),
+        )
     }
 
     pub(super) fn upgrade(&self) -> Option<Value> {
-        match self {
-            Self::Shared(facade) => facade.upgrade().map(Value::Shared),
-            Self::Other(value) => Some(value.clone()),
-        }
+        self.0.upgrade()
     }
 }
 
