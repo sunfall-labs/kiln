@@ -631,11 +631,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )?;
                         continue;
                     }
-                    let read = self.read_computed(&target, &key, current);
+                    let read = self
+                        .prepare_computed_read(&target, &key, &target, current)
+                        .and_then(|read| self.dispatch_property_read(read, current));
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
-                    self.stack.push(value);
+                    if let Some(value) = value {
+                        self.stack.push(value);
+                    }
                 }
                 Instruction::SetComputed => {
                     let value = self.pop(current)?;
@@ -1824,12 +1828,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     // Catchable: a proxy trap and a getter are both ordinary code, and what
                     // they throw is the program's to handle.
-                    let read =
-                        self.read_property_key(&target, PropertyKeyRef::Units(&name), current);
+                    let read = self
+                        .prepare_property_read_key(&target, PropertyKeyRef::Units(&name), current)
+                        .and_then(|read| self.dispatch_property_read(read, current));
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
-                    self.stack.push(value);
+                    if let Some(value) = value {
+                        self.stack.push(value);
+                    }
                 }
                 // `super.x`. The prototype answers *which* property, and `this` answers who a
                 // getter up there is asked about -- which is the whole reason this is not the
@@ -1851,16 +1858,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     }
                     let receiver = self.this_value.clone();
-                    let read = self.read_computed_with_receiver(
-                        &target,
-                        &Value::String(name),
-                        &receiver,
-                        current,
-                    );
+                    let read = self
+                        .prepare_computed_read(&target, &Value::String(name), &receiver, current)
+                        .and_then(|read| self.dispatch_property_read(read, current));
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
-                    self.stack.push(value);
+                    if let Some(value) = value {
+                        self.stack.push(value);
+                    }
                 }
                 Instruction::LoadSuperElement => {
                     let target = self.pop(current)?;
@@ -1878,11 +1884,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     }
                     let receiver = self.this_value.clone();
-                    let read = self.read_computed_with_receiver(&target, &key, &receiver, current);
+                    let read = self
+                        .prepare_computed_read(&target, &key, &receiver, current)
+                        .and_then(|read| self.dispatch_property_read(read, current));
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
-                    self.stack.push(value);
+                    if let Some(value) = value {
+                        self.stack.push(value);
+                    }
                 }
                 Instruction::SetSuperPropertyStrict { name, strict } => {
                     let name = self.string_constant_units(*name, current)?;

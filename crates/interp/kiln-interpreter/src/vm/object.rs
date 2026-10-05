@@ -1,5 +1,12 @@
 use super::*;
 
+/// A resolved ordinary property read. Opcode callers can enter an accessor on the
+/// VM frame stack; synchronous runtime callers consume the same resolution.
+pub(super) enum PropertyRead {
+    Value(Value),
+    Getter { getter: Value, receiver: Value },
+}
+
 impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Read a property, calling a getter when the slot holds one.
     ///
@@ -1041,6 +1048,63 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: PropertyKeyRef<'_>,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        let read = self.prepare_property_inner_key(target, key, instruction)?;
+        self.finish_property_read(read, instruction)
+    }
+
+    pub(super) fn prepare_property_read_key(
+        &mut self,
+        target: &Value,
+        key: PropertyKeyRef<'_>,
+        instruction: usize,
+    ) -> Result<PropertyRead, ExecutionError> {
+        let read = self.prepare_property_inner_key(target, key, instruction)?;
+        if matches!(
+            &read,
+            PropertyRead::Value(Value::Native(Native::Uninitialized, _))
+        ) {
+            return Err(uninitialized_export_error(&key.owned().to_lossy_string()));
+        }
+        Ok(read)
+    }
+
+    fn finish_property_read(
+        &mut self,
+        read: PropertyRead,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        match read {
+            PropertyRead::Value(value) => Ok(value),
+            PropertyRead::Getter { getter, receiver } => {
+                self.call_value(&getter, receiver, Vec::new(), instruction)
+            }
+        }
+    }
+
+    pub(super) fn dispatch_property_read(
+        &mut self,
+        read: PropertyRead,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        match read {
+            PropertyRead::Value(value) => Ok(Some(value)),
+            PropertyRead::Getter { getter, receiver } => {
+                // A compiled getter owns its realm until Return restores the caller's frame.
+                if matches!(&getter, Value::Function(_)) {
+                    self.invoke_dispatch(getter, receiver, Vec::new(), instruction, None)
+                } else {
+                    self.invoke(getter, receiver, Vec::new(), instruction, None)
+                }
+            }
+        }
+    }
+
+    fn prepare_property_inner_key(
+        &mut self,
+        target: &Value,
+        key: PropertyKeyRef<'_>,
+        instruction: usize,
+    ) -> Result<PropertyRead, ExecutionError> {
         if matches!(target, Value::Proxy(_)) {
             let trap_key = key
                 .is_symbol()
@@ -1049,7 +1113,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .and_then(|spelling| self.symbol_of_key(spelling.as_ref()))
                 .map(Value::Symbol)
                 .unwrap_or_else(|| Value::String(key.owned()));
-            return self.proxy_get(target, &trap_key, instruction);
+            return self
+                .proxy_get(target, &trap_key, instruction)
+                .map(PropertyRead::Value);
         }
         self.refresh_namespace_for_read(target);
         // Array `length` is an own data property backed by the dense array header, rather than
@@ -1059,7 +1125,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             && key.matches_ascii("length")
         {
             #[expect(clippy::cast_precision_loss)]
-            return Ok(Value::Number(items.length() as f64));
+            return Ok(PropertyRead::Value(Value::Number(items.length() as f64)));
         }
         // A `DataView` a shrink has left outside its buffer answers neither of its two
         // measurements: the specification checks the view is still in bounds before it reports
@@ -1078,7 +1144,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if key.matches_ascii("__proto__") && stored.is_none() && is_reflect_target(target) {
             // `[[GetPrototypeOf]]`, which a proxy answers with a handler rather than a stored
             // link -- so reading `p.__proto__` reports the proxy's prototype, not its target's.
-            return self.proxy_get_prototype_of(target, instruction);
+            return self
+                .proxy_get_prototype_of(target, instruction)
+                .map(PropertyRead::Value);
         }
         // `Function.prototype.caller` and `.arguments` are the same shape of problem: an
         // accessor on a table that has no room for one. Every function inherits the pair from
@@ -1100,7 +1168,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .known_ascii()
                 .and_then(|name| machine_accessor(target, name.as_ref()))
         {
-            return self.builtin_accessor(builtin, target, instruction);
+            return self
+                .builtin_accessor(builtin, target, instruction)
+                .map(PropertyRead::Value);
         }
         // And once more for `Temporal`, whose forty getters live in a table of the same shape.
         // Reading one off the prototype is the getter's own TypeError -- the prototype is not a
@@ -1111,20 +1181,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .known_ascii()
                 .and_then(|name| temporal::prototype_accessor(*kind, name.as_ref()))
         {
-            return self.temporal_dispatch(
-                temporal::Op::Accessor(*kind, field),
-                target,
-                &[],
-                instruction,
-            );
+            return self
+                .temporal_dispatch(
+                    temporal::Op::Accessor(*kind, field),
+                    target,
+                    &[],
+                    instruction,
+                )
+                .map(PropertyRead::Value);
         }
         match stored {
             Some(Property::Accessor { get, .. }) => match get {
-                Some(getter) => self.call_value(&getter, target.clone(), Vec::new(), instruction),
+                Some(getter) => Ok(PropertyRead::Getter {
+                    getter,
+                    receiver: target.clone(),
+                }),
                 // Setter-only, so there is nothing to read.
-                None => Ok(Value::Undefined),
+                None => Ok(PropertyRead::Value(Value::Undefined)),
             },
-            Some(Property::Value(value)) => Ok(value),
+            Some(Property::Value(value)) => Ok(PropertyRead::Value(value)),
             _ => {
                 let found = self.property_key(target, key);
                 // Nothing in any store, so a proxy further up the chain is the one thing that
@@ -1133,14 +1208,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(found, Value::Undefined)
                     && let Some(proxy) = self.proxy_on_chain(target)
                 {
-                    return self.proxy_get_with_receiver(
-                        &proxy,
-                        &Value::String(key.owned()),
-                        target,
-                        instruction,
-                    );
+                    return self
+                        .proxy_get_with_receiver(
+                            &proxy,
+                            &Value::String(key.owned()),
+                            target,
+                            instruction,
+                        )
+                        .map(PropertyRead::Value);
                 }
-                Ok(found)
+                Ok(PropertyRead::Value(found))
             }
         }
     }
@@ -1535,9 +1612,39 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         receiver: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        let read = self.prepare_computed_inner(target, key, receiver, instruction)?;
+        self.finish_property_read(read, instruction)
+    }
+
+    pub(super) fn prepare_computed_read(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<PropertyRead, ExecutionError> {
+        let read = self.prepare_computed_inner(target, key, receiver, instruction)?;
+        if matches!(
+            &read,
+            PropertyRead::Value(Value::Native(Native::Uninitialized, _))
+        ) {
+            return Err(uninitialized_export_error(&key.to_display_string()));
+        }
+        Ok(read)
+    }
+
+    fn prepare_computed_inner(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<PropertyRead, ExecutionError> {
         let key = &self.computed_key(key, instruction)?;
         if matches!(target, Value::Proxy(_)) {
-            return self.proxy_get_with_receiver(target, key, receiver, instruction);
+            return self
+                .proxy_get_with_receiver(target, key, receiver, instruction)
+                .map(PropertyRead::Value);
         }
         // Computed reads are still ordinary [[Get]] operations. In particular, Object.assign
         // reads namespace exports through this path, so refresh live export cells after
@@ -1549,9 +1656,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // generic path. Invalid numeric indices never consult the prototype or receiver.
         if let (Value::TypedArray(view), Value::Number(number)) = (target, key) {
             let index = if *number == 0.0 { 0.0 } else { *number };
-            return Ok(valid_integer_index(view, index)
-                .and_then(|at| view.get(at))
-                .unwrap_or(Value::Undefined));
+            return Ok(PropertyRead::Value(
+                valid_integer_index(view, index)
+                    .and_then(|at| view.get(at))
+                    .unwrap_or(Value::Undefined),
+            ));
         }
         let property_key_units = key.property_key_units_checked()?;
 
@@ -1564,7 +1673,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .and_then(|name| machine_accessor(target, name.as_ref()))
             && self.stored_property_key(target, property_key).is_none()
         {
-            return self.builtin_accessor(builtin, receiver, instruction);
+            return self
+                .builtin_accessor(builtin, receiver, instruction)
+                .map(PropertyRead::Value);
         }
         // The named read's own walk, on the computed spelling. This was a second copy of it,
         // arm for arm, with two of the arms already delegating here -- and the copy is how the
@@ -1573,11 +1684,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // drift from itself.
         match self.stored_property_key(target, property_key) {
             Some(Property::Accessor { get, .. }) => match get {
-                Some(getter) => self.call_value(&getter, receiver.clone(), Vec::new(), instruction),
-                None => Ok(Value::Undefined),
+                Some(getter) => Ok(PropertyRead::Getter {
+                    getter,
+                    receiver: receiver.clone(),
+                }),
+                None => Ok(PropertyRead::Value(Value::Undefined)),
             },
-            Some(Property::Value(value)) => Ok(value),
-            _ => Ok(self.computed_key_ref(target, property_key)),
+            Some(Property::Value(value)) => Ok(PropertyRead::Value(value)),
+            _ => Ok(PropertyRead::Value(
+                self.computed_key_ref(target, property_key),
+            )),
         }
     }
 
