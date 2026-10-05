@@ -32,3 +32,6 @@ oxc_transformer = { version = "0.147.0", default-features = false }
 serde_json = { workspace = true }
 url = { workspace = true }
 num-bigint = { workspace = true }
+
+[dev-dependencies]
+oxc_codegen = { version = "0.147.0", default-features = false, features = ["sourcemap"] }

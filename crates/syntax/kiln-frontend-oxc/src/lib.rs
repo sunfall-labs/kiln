@@ -6413,6 +6413,139 @@ mod tests {
     use super::*;
 
     #[test]
+    fn static_typescript_codegen_is_parser_input_and_maps_back_to_ts() {
+        use oxc_ast_visit::Visit;
+        use oxc_codegen::{Codegen, CodegenOptions};
+        use std::path::PathBuf;
+
+        let source = "export const format = (value: number) => {\n    return value + 1\n};\n";
+        let path = Path::new("formatter-fixture.ts");
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+        let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+        let transform = Transformer::new(&allocator, path, &TransformOptions::default())
+            .build_with_scoping(semantic.into_scoping(), &mut parsed.program);
+        assert!(
+            transform.diagnostics.is_empty(),
+            "{:?}",
+            transform.diagnostics
+        );
+
+        let generated = Codegen::new()
+            .with_options(CodegenOptions {
+                // Codegen's path labels the original source carried by this Program.
+                source_map_path: Some(PathBuf::from("formatter-fixture.ts")),
+                ..CodegenOptions::default()
+            })
+            .build(&parsed.program);
+        assert!(
+            generated.code.contains("return value + 1;"),
+            "{}",
+            generated.code
+        );
+        assert!(!generated.code.contains(": number"), "{}", generated.code);
+
+        let js_allocator = Allocator::default();
+        let reparsed = Parser::new(&js_allocator, &generated.code, SourceType::mjs()).parse();
+        assert!(
+            reparsed.diagnostics.is_empty(),
+            "{:?}",
+            reparsed.diagnostics
+        );
+
+        struct ArrowSpan(Option<Span>);
+        impl<'a> Visit<'a> for ArrowSpan {
+            fn visit_arrow_function_expression(
+                &mut self,
+                arrow: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+            ) {
+                self.0 = Some(arrow.span);
+            }
+        }
+        let mut arrow_span = ArrowSpan(None);
+        arrow_span.visit_program(&reparsed.program);
+        let arrow_span = arrow_span.0.expect("generated module retains its arrow");
+        let function_source = generated
+            .code
+            .get(arrow_span.start as usize..arrow_span.end as usize)
+            .expect("generated parser spans index generated source");
+        assert!(
+            function_source.starts_with("(value) =>"),
+            "{function_source:?}"
+        );
+        assert!(
+            function_source.contains("\n\treturn value + 1;\n"),
+            "{function_source:?}"
+        );
+
+        let map = generated.map.expect("source maps were requested");
+        assert_eq!(
+            map.get_sources().collect::<Vec<_>>(),
+            ["formatter-fixture.ts"]
+        );
+        assert_eq!(
+            map.get_source_contents().collect::<Vec<_>>(),
+            [Some(source)]
+        );
+    }
+
+    #[test]
+    fn static_typescript_codegen_keeps_module_runtime_syntax_and_erases_types() {
+        use oxc_codegen::{Codegen, CodegenOptions};
+        use std::path::PathBuf;
+
+        let source = r#"import type { Shape } from "./types";
+import { keep } from "./dep";
+namespace Values { export const base = 2; }
+enum Mode { On = 1 }
+export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
+"#;
+        let path = Path::new("fixture.tsx");
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let semantic = SemanticBuilder::new()
+            .with_enum_eval(true)
+            .build(&parsed.program)
+            .semantic;
+        let transform = Transformer::new(
+            &allocator,
+            path,
+            &resolve_transform_options(Some("fixture.tsx")),
+        )
+        .build_with_scoping(semantic.into_scoping(), &mut parsed.program);
+        assert!(
+            transform.diagnostics.is_empty(),
+            "{:?}",
+            transform.diagnostics
+        );
+
+        let generated = Codegen::new()
+            .with_options(CodegenOptions {
+                source_map_path: Some(PathBuf::from("fixture.tsx")),
+                ..CodegenOptions::default()
+            })
+            .build(&parsed.program)
+            .code;
+        assert!(generated.contains("from \"./dep\""), "{generated}");
+        assert!(!generated.contains("from \"./types\""), "{generated}");
+        assert!(!generated.contains(": Shape"), "{generated}");
+        assert!(generated.contains("Values"), "{generated}");
+        assert!(generated.contains("Mode"), "{generated}");
+        assert!(generated.contains("jsx"), "{generated}");
+
+        let js_allocator = Allocator::default();
+        let reparsed = Parser::new(&js_allocator, &generated, SourceType::mjs()).parse();
+        assert!(
+            reparsed.diagnostics.is_empty(),
+            "{:?}\n{generated}",
+            reparsed.diagnostics
+        );
+    }
+
+    #[test]
     fn native_import_meta_uses_the_cached_process_capability() {
         let module = parse_dce_native(
             "entry.mjs",
