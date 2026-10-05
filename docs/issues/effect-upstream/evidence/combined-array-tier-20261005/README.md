@@ -15,3 +15,5 @@ Latest local milestones have not been pushed: main Git metadata is read-only in 
 Runner unit check: `python3 scripts/effect_upstream_test.py`, 28 tests passed on source `08fb033a`. Log SHA-256: `4ce4d15bb1cbb94ceb6d55854ee518dcbd6cd12ac1de64167fdb1e88b20997c0`.
 
 Follow-up review found that the interpreter indexed-prototype fast-path guard was shared across realms but recomputed using only the mutated realm. A realm-local correction is in progress; the earlier crate pass does not prove that cross-realm case.
+
+Integrated realm-guard correction `aa850b1f`, verified on source `152c9f9d` using `mbx test -p kiln-interpreter --offline sparse_array_query_guard_is_scoped_to_the_intrinsic_realm -- --test-threads=1`: 1 passed, 0 failed. Full log SHA-256: `aa01d6f600dcf87853ae6dc1a79b4f509c0bb2c00550a8b5e1a2bd745e314760`. This is the targeted regression, not a repeated complete crate run.
