@@ -2459,6 +2459,7 @@ name = "kiln-frontend-oxc"
 version = "0.1.0"
 dependencies = [
  "kiln-builtin-surface",
+ "kiln-digest",
  "kiln-hir",
  "kiln-host-abi",
  "num-bigint 0.4.8",

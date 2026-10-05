@@ -491,6 +491,13 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
         }
         None => {}
     }
+    if let Some(identity) = &program.static_source_identity {
+        byte(&mut hash, 0x66);
+        word(&mut hash, identity.len() as u64);
+        for value in identity.bytes() {
+            byte(&mut hash, value);
+        }
+    }
     if !program.template_sites.is_empty() {
         byte(&mut hash, 0x64);
         word(&mut hash, program.template_sites.len() as u64);
@@ -597,6 +604,7 @@ pub(super) fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
         &Program {
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: Vec::new(),
             code: function.code.clone(),
             local_count: 0,

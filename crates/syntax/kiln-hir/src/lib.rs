@@ -45,12 +45,11 @@ pub struct Diagnostic {
     pub span: Option<Span>,
 }
 
-/// Lossless source text retained for parser transports whose UTF-8 spelling differs from the
-/// original JavaScript UTF-16 source (for example, a lone surrogate transported as `\\uD800`).
+/// Source identity retained when parser input has a source mapping.
 ///
-/// The origin is shared by the HIR module, compiled program, and nested function metadata. The
-/// offset map translates parser byte spans back to UTF-16 unit boundaries without storing a
-/// separate source copy for every function.
+/// Dynamic UTF-16 transports use `units` and `byte_to_unit` to preserve exact function source.
+/// Static transformed modules retain their separate transform identity on the IR Program; their
+/// richer TypeScript map stays on this transient HIR module for diagnostics and callsite mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceOrigin {
     pub units: StringUnits,
@@ -97,6 +96,47 @@ impl SourceOrigin {
     }
 }
 
+/// One generated-JavaScript byte offset corresponding to an original TypeScript byte offset.
+///
+/// Segments are sorted by `generated_offset`; a lookup uses the nearest preceding segment, which
+/// is the same fallback used by source-map consumers for an unmapped generated column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceMapSegment {
+    pub generated_offset: u32,
+    pub original_offset: u32,
+}
+
+/// Original static TypeScript input and its generated-to-original source locations.
+///
+/// `Module.source` remains the actual JavaScript buffer indexed by every module span. This
+/// sidecar exists only for source-facing diagnostics and stack locations; it is deliberately
+/// separate from [`SourceOrigin`], which translates dynamic UTF-16 transport for source
+/// reflection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticSourceProvenance {
+    pub original_path: Arc<str>,
+    pub original_source: Arc<str>,
+    /// Stable identity for transform options, transformer/codegen versions, and policy.
+    pub transform_fingerprint: Arc<str>,
+    /// Digest over original path/text, transform fingerprint, and every source-map segment.
+    pub identity: Arc<str>,
+    pub source_map: Arc<[SourceMapSegment]>,
+}
+
+impl StaticSourceProvenance {
+    /// Map a generated-JS byte offset to its closest preceding original TS source-map segment.
+    #[must_use]
+    pub fn original_offset(&self, generated_offset: u32) -> Option<u32> {
+        let index = self
+            .source_map
+            .partition_point(|segment| segment.generated_offset <= generated_offset);
+        index
+            .checked_sub(1)
+            .and_then(|index| self.source_map.get(index))
+            .map(|segment| segment.original_offset)
+    }
+}
+
 /// Owned module HIR shared by parser adapters, incremental queries, and execution backends.
 //
 // `items` preserves cheap module-structure information while `body` contains the TypeScript-
@@ -119,6 +159,9 @@ pub struct Module {
     /// it. One buffer per module and a span per function is the same information at a fraction
     /// of the size.
     pub source: Arc<str>,
+    /// Original static TypeScript plus a map for source-facing diagnostics/locations, when this
+    /// module was produced by the opt-in per-file TS transform.
+    pub static_source_provenance: Option<Arc<StaticSourceProvenance>>,
     /// Exact UTF-16 origin when `source` is a parser-safe transport spelling.
     pub source_origin: Option<Arc<SourceOrigin>>,
     pub source_kind: SourceKind,
@@ -1322,6 +1365,7 @@ mod tests {
         let module = Module {
             module_id: "".into(),
             source: "".into(),
+            static_source_provenance: None,
             source_origin: None,
             strict: false,
             source_kind: SourceKind::TypeScript,

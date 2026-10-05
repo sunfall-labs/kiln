@@ -13,6 +13,7 @@ fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -
         source: "".into(),
         version: BYTECODE_VERSION,
         source_origin: None,
+        static_source_identity: None,
         constants,
         code,
         local_count,

@@ -1319,6 +1319,7 @@ impl GraphExecutor<'_> {
         let program = Program {
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: Vec::new(),
             code: vec![Instruction::LoadCell(0), Instruction::Throw],
             local_count: 1,

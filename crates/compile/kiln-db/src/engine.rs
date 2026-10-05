@@ -555,6 +555,7 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
         // comment-only edit now does produce a different `Program`: the bytecode is unchanged but
         // the text `Function.prototype.toString` answers with is not.
         source: "".into(),
+        static_source_provenance: None,
         source_origin: None,
         source_kind: SourceKind::JavaScript,
         source_goal: kiln_hir::SourceGoal::Module,

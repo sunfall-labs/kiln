@@ -615,6 +615,9 @@ pub struct Program {
     /// Spans remain parser-byte offsets; this shared map translates them back when reflecting
     /// function source text. Ordinary modules leave it absent and pay no mapping cost.
     pub source_origin: Option<Arc<SourceOrigin>>,
+    /// Identity of a static source transform and its source map, when present. Kept separate
+    /// from dynamic UTF-16 transport so reflection never has to interpret an empty fake map.
+    pub static_source_identity: Option<Arc<str>>,
     /// Syntactic template literal sites compiled in this program, referenced by
     /// [`Instruction::LoadTemplateObject`].
     pub template_sites: Vec<TemplateSite>,
@@ -632,6 +635,7 @@ impl Default for Program {
             functions: Vec::new(),
             source: "".into(),
             source_origin: None,
+            static_source_identity: None,
             template_sites: Vec::new(),
             debug_call_sites: Vec::new(),
         }

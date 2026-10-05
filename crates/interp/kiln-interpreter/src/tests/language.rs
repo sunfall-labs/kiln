@@ -177,6 +177,7 @@ fn dynamic_source_boundary_preserves_raw_units_and_keeps_parser_errors_distinct(
                 debug_call_sites: Vec::new(),
                 version: kiln_ir::BYTECODE_VERSION,
                 source_origin: None,
+                static_source_identity: None,
                 constants: vec![Constant::Number(7.0f64.to_bits())],
                 code: vec![Instruction::Const(0), Instruction::Return],
                 local_count: request.outer.len() as u32,
@@ -199,6 +200,7 @@ fn dynamic_source_boundary_preserves_raw_units_and_keeps_parser_errors_distinct(
             debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: vec![Constant::String(source)],
             code: vec![
                 Instruction::LoadBuiltin(kiln_ir::Builtin::Eval),
@@ -289,6 +291,7 @@ fn a_captured_dead_zone_read_names_its_source_binding() {
         debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
+        static_source_identity: None,
         constants: vec![Constant::String("later".to_owned().into())],
         code: vec![
             Instruction::NewCell(0),
@@ -359,6 +362,7 @@ fn return_signal_rejected_promise_does_not_surface_as_unhandled_rejection() {
         debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
         source_origin: None,
+        static_source_identity: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,

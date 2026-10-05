@@ -92,6 +92,7 @@ fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
         source: "".into(),
         version: BYTECODE_VERSION,
         source_origin: None,
+        static_source_identity: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -215,6 +216,7 @@ fn decoupled_modules_include_one_external_runtime_header() {
         source: "".into(),
         version: BYTECODE_VERSION,
         source_origin: None,
+        static_source_identity: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -402,6 +404,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
         source: "".into(),
         version: BYTECODE_VERSION,
         source_origin: None,
+        static_source_identity: None,
         constants: vec![Constant::String("f16round".into())],
         code: vec![
             Instruction::MakeFunction(0),
@@ -810,6 +813,21 @@ fn program_hash_covers_lossless_source_origin() {
 }
 
 #[test]
+fn program_hash_covers_static_transform_identity() {
+    let base = program(Vec::new(), vec![Instruction::Return], 0);
+    let with_identity = |identity: &str| {
+        let mut program = base.clone();
+        program.static_source_identity = Some(std::sync::Arc::from(identity));
+        program
+    };
+    assert_ne!(
+        hash_program(&with_identity("transform-a")),
+        hash_program(&with_identity("transform-b")),
+        "transform policy and source-map identity must affect native cache identity"
+    );
+}
+
+#[test]
 fn program_hash_covers_debug_call_site_coordinates() {
     let base = program(Vec::new(), vec![Instruction::Return], 0);
     let with_site = |site: kiln_ir::DebugCallSite| {
@@ -1061,6 +1079,7 @@ fn executable_compact_closure_executes_correctly() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: vec![
                 Constant::Number(0f64.to_bits()),
                 Constant::Number(1f64.to_bits()),
@@ -1568,6 +1587,7 @@ fn compact_module_pools_inline_cache_sites_and_interned_keys_into_dense_tables()
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: vec![
                 Constant::String("foo".to_owned().into()),
                 Constant::String("bar".to_owned().into()),
@@ -1672,6 +1692,7 @@ fn compact_module_with_many_keys_uses_dense_static_key_array_and_loop() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: vec![
                 Constant::String("k0".to_owned().into()),
                 Constant::String("k1".to_owned().into()),

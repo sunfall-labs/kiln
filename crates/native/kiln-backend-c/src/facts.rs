@@ -1348,6 +1348,7 @@ mod tests {
             source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants,
             code: vec![],
             local_count: 0,

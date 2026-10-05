@@ -766,6 +766,9 @@ struct Compiler {
     /// The text being compiled, handed to the [`Program`] so a function can answer with its own
     /// definition. Shared, never copied: see [`Program::source`].
     source: Arc<str>,
+    /// Original-source mapping for statically transformed TypeScript. Function spans still index
+    /// `source`; this sidecar is used only for source-facing diagnostics and call-site locations.
+    source_provenance: Option<Arc<kiln_hir::StaticSourceProvenance>>,
     /// Lossless source units and parser-byte mapping when this source used a transport encoding.
     source_origin: Option<Arc<kiln_hir::SourceOrigin>>,
     constants: Vec<Constant>,

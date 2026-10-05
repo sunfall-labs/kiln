@@ -13,6 +13,7 @@ fn typed_node_querystring_has_a_native_materializer() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: vec![Constant::Number(1_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),

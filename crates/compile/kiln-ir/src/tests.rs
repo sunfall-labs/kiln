@@ -8,6 +8,7 @@ fn module(body: Vec<Statement>) -> Module {
         // point into. A function compiled from one answers `toString` with the empty string,
         // which is what "no source" means here.
         source: "".into(),
+        static_source_provenance: None,
         source_origin: None,
         strict: false,
         source_kind: kiln_hir::SourceKind::JavaScript,
@@ -64,6 +65,41 @@ fn call_debug_sites_keep_expression_coordinates() {
             .unwrap()
     );
     assert_eq!(site.function_span, None);
+}
+
+#[test]
+fn transformed_static_callsite_coordinates_use_original_typescript() {
+    let mut source_module = module(vec![]);
+    source_module.source = "f()".into();
+    source_module.static_source_provenance = Some(std::sync::Arc::new(StaticSourceProvenance {
+        original_path: "mapped.ts".into(),
+        original_source: "header\n  f()".into(),
+        transform_fingerprint: "test-policy".into(),
+        identity: "map-identity".into(),
+        source_map: vec![SourceMapSegment {
+            generated_offset: 0,
+            original_offset: 9,
+        }]
+        .into(),
+    }));
+    let mut invocation = call(identifier("f"), vec![]);
+    invocation.span = Span::new(0, 3);
+    source_module
+        .body
+        .push(statement(StatementKind::Expression(invocation)));
+
+    let program = compile(&source_module).expect("module compiles");
+    let site = program.debug_call_sites.first().expect("callsite exists");
+    assert_eq!((site.line, site.column), (2, 3));
+    assert_eq!(
+        program.source.as_ref(),
+        "f()",
+        "runtime source remains generated JS"
+    );
+    assert_eq!(
+        program.static_source_identity.as_deref(),
+        Some("map-identity")
+    );
 }
 
 fn number(value: f64) -> Expression {

@@ -48,6 +48,7 @@ impl super::Compiler {
     pub(super) fn new(module: &Module) -> Self {
         let mut compiler = Self {
             source: Arc::clone(&module.source),
+            source_provenance: module.static_source_provenance.clone(),
             source_origin: module.source_origin.clone(),
             constants: Vec::new(),
             constant_indices: rustc_hash::FxHashMap::default(),
@@ -227,42 +228,47 @@ impl super::Compiler {
         if self.diagnostics.is_empty() {
             let mut raw_sites = self.debug_call_sites;
             raw_sites.sort_by_key(|(_, _, span)| span.start);
-            let mut debug_call_sites = Vec::with_capacity(raw_sites.len());
-            let mut chars = self.source.char_indices().peekable();
-            let (mut line, mut column) = (1u32, 1u32);
-            for (function_span, instruction, span) in raw_sites {
-                while chars
-                    .peek()
-                    .is_some_and(|(offset, _)| *offset < span.start as usize)
-                {
-                    let (_, ch) = chars.next().expect("peeked source character");
-                    match ch {
-                        '\n' => {
-                            line += 1;
-                            column = 1;
-                        }
-                        '\r' => {
-                            if chars.peek().is_some_and(|(_, next)| *next == '\n') {
-                                chars.next();
-                            }
-                            line += 1;
-                            column = 1;
-                        }
-                        '\u{2028}' | '\u{2029}' => {
-                            line += 1;
-                            column = 1;
-                        }
-                        _ => column += ch.len_utf16() as u32,
-                    }
+            let mut generated_offsets = Vec::with_capacity(raw_sites.len());
+            let mut original_offsets = Vec::with_capacity(raw_sites.len());
+            for (index, (_, _, span)) in raw_sites.iter().enumerate() {
+                let mapped = self
+                    .source_provenance
+                    .as_ref()
+                    .and_then(|origin| origin.original_offset(span.start));
+                if let Some(offset) = mapped {
+                    original_offsets.push((offset, index));
+                } else {
+                    generated_offsets.push((span.start, index));
                 }
-                debug_call_sites.push(DebugCallSite {
-                    function_span,
-                    instruction,
-                    line,
-                    column,
-                });
             }
+            let mut positions = vec![(0, 0); raw_sites.len()];
+            fill_source_positions(&self.source, &mut generated_offsets, &mut positions);
+            if let Some(origin) = &self.source_provenance {
+                fill_source_positions(
+                    &origin.original_source,
+                    &mut original_offsets,
+                    &mut positions,
+                );
+            }
+            let mut debug_call_sites = raw_sites
+                .into_iter()
+                .enumerate()
+                .map(|(index, (function_span, instruction, _))| {
+                    let (line, column) = positions[index];
+                    DebugCallSite {
+                        function_span,
+                        instruction,
+                        line,
+                        column,
+                    }
+                })
+                .collect::<Vec<_>>();
             debug_call_sites.sort_by_key(|site| (site.function_span, site.instruction));
+            let source_origin = self.source_origin;
+            let static_source_identity = self
+                .source_provenance
+                .as_ref()
+                .map(|provenance| Arc::clone(&provenance.identity));
             Ok((
                 Program {
                     version: BYTECODE_VERSION,
@@ -271,7 +277,8 @@ impl super::Compiler {
                     local_count: self.local_count,
                     functions: self.functions,
                     source: self.source,
-                    source_origin: self.source_origin,
+                    source_origin,
+                    static_source_identity,
                     template_sites: self.template_sites,
                     debug_call_sites,
                 },
@@ -281,7 +288,20 @@ impl super::Compiler {
                 },
             ))
         } else {
-            Err(self.diagnostics)
+            let mut diagnostics = self.diagnostics;
+            if let Some(origin) = &self.source_provenance {
+                for diagnostic in &mut diagnostics {
+                    if let Some(span) = &mut diagnostic.span {
+                        if let Some(start) = origin.original_offset(span.start) {
+                            span.start = start;
+                        }
+                        if let Some(end) = origin.original_offset(span.end) {
+                            span.end = end.max(span.start);
+                        }
+                    }
+                }
+            }
+            Err(diagnostics)
         }
     }
 
@@ -521,5 +541,39 @@ impl super::Compiler {
         }
         self.push_private_brand(&brand);
         self.code.push(Instruction::SetPrivate(name));
+    }
+}
+
+/// Compute one-based line and UTF-16 column coordinates for sorted byte offsets.
+fn fill_source_positions(source: &str, offsets: &mut [(u32, usize)], output: &mut [(u32, u32)]) {
+    offsets.sort_unstable_by_key(|(offset, _)| *offset);
+    let mut chars = source.char_indices().peekable();
+    let (mut line, mut column) = (1u32, 1u32);
+    for &(offset, index) in offsets.iter() {
+        while chars
+            .peek()
+            .is_some_and(|(byte_offset, _)| *byte_offset < offset as usize)
+        {
+            let (_, ch) = chars.next().expect("peeked source character");
+            match ch {
+                '\n' => {
+                    line += 1;
+                    column = 1;
+                }
+                '\r' => {
+                    if chars.peek().is_some_and(|(_, next)| *next == '\n') {
+                        chars.next();
+                    }
+                    line += 1;
+                    column = 1;
+                }
+                '\u{2028}' | '\u{2029}' => {
+                    line += 1;
+                    column = 1;
+                }
+                _ => column += ch.len_utf16() as u32,
+            }
+        }
+        output[index] = (line, column);
     }
 }

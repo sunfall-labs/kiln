@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 kiln-builtin-surface = { workspace = true }
+kiln-digest = { workspace = true }
 kiln-hir = { workspace = true }
 kiln-host-abi = { workspace = true }
 oxc_allocator = { workspace = true }
@@ -29,9 +30,7 @@ oxc_span = { workspace = true }
 oxc_str = { workspace = true }
 oxc_syntax = { workspace = true }
 oxc_transformer = { version = "0.147.0", default-features = false }
+oxc_codegen = { version = "0.147.0", default-features = false, features = ["sourcemap"] }
 serde_json = { workspace = true }
 url = { workspace = true }
 num-bigint = { workspace = true }
-
-[dev-dependencies]
-oxc_codegen = { version = "0.147.0", default-features = false, features = ["sourcemap"] }

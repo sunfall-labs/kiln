@@ -4245,6 +4245,7 @@ mod tests {
             source: String::new().into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: Vec::new(),
             code: Vec::new(),
             local_count: 0,

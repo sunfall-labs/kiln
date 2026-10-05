@@ -12,15 +12,16 @@ use std::{
     sync::Arc,
 };
 
+use kiln_digest::Digest;
 use kiln_hir::{
     AssignmentOperator as HirAssignmentOperator, BinaryOperator as HirBinaryOperator, Diagnostic,
     Export, ExportName, ExportOrigin, Expression as HirExpression,
     ExpressionKind as HirExpressionKind, Function as HirFunction, Import, ImportName, Item,
     ItemKind, ListElement, Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module,
     ModuleRequestKind, ModuleRequestOccurrence, NodeRuntimeRequest, Parameter as HirParameter,
-    RequestedModule, SourceGoal, SourceKind, SourceOrigin, Span as HirSpan,
-    Statement as HirStatement, StatementKind as HirStatementKind, StringUnits,
-    TypeAnnotation as HirTypeAnnotation, UnaryOperator as HirUnaryOperator,
+    RequestedModule, SourceGoal, SourceKind, SourceMapSegment, SourceOrigin, Span as HirSpan,
+    Statement as HirStatement, StatementKind as HirStatementKind, StaticSourceProvenance,
+    StringUnits, TypeAnnotation as HirTypeAnnotation, UnaryOperator as HirUnaryOperator,
     VariableDeclarator as HirVariableDeclarator, VariableKind as HirVariableKind,
 };
 use oxc_allocator::{Allocator, TakeIn};
@@ -53,6 +54,18 @@ use oxc_syntax::module_record::{
 use oxc_syntax::operator::UpdateOperator;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
 use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
+
+/// Whether a static TypeScript module is parsed as its authored source or after a real
+/// per-module TypeScript-to-JavaScript transform. The production default remains
+/// `PreserveAuthoredSource` until the transformed-source mode completes semantic validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum StaticTypescriptPolicy {
+    PreserveAuthoredSource,
+    TransformToNode22JavaScript,
+}
+
+const STATIC_TS_TRANSFORM_FINGERPRINT: &str = "kiln-static-ts-v1;oxc=0.147.0;target=node22;typescript=default;jsx=automatic;codegen=0.147.0-default";
 
 /// Convert Oxc's lossless sentinel representation into ECMAScript UTF-16 units.
 ///
@@ -185,6 +198,305 @@ pub fn parse(path: &str, source: &str) -> Module {
         source_type = source_type.with_module(true);
     }
     parse_source(Some(path), source, source_type)
+}
+
+/// Parse a static TypeScript module under an internal source policy.
+///
+/// The transform option is intentionally not selected by [`parse`], CLI flags, or dynamic
+/// source entrypoints. It is a compiler integration seam for controlled validation: the
+/// generated JavaScript becomes the actual parser input and every HIR/IR/function span indexes
+/// that generated buffer. Original TypeScript is retained separately for diagnostics and source
+/// locations.
+#[doc(hidden)]
+pub fn parse_static_typescript(path: &str, source: &str, policy: StaticTypescriptPolicy) -> Module {
+    parse_static_typescript_with(
+        path,
+        source,
+        policy,
+        inferred_static_source_type(path),
+        |text, ty| (parse_source(Some(path), text, ty), ()),
+    )
+    .0
+}
+
+/// Internal DCE-aware static TS entrypoint. The transform policy wraps the same generated-buffer
+/// parser used by ordinary modules, so DCE sees actual JavaScript module records and spans.
+#[doc(hidden)]
+pub fn parse_static_typescript_dce(
+    path: &str,
+    source: &str,
+    demanded_exports: &BTreeSet<String>,
+    policy: StaticTypescriptPolicy,
+) -> Module {
+    let source_type = inferred_static_source_type(path);
+    parse_static_typescript_with(path, source, policy, source_type, |text, ty| {
+        (
+            parse_source_in_context(Some(path), text, ty, None, Some(demanded_exports), None),
+            (),
+        )
+    })
+    .0
+}
+
+/// Internal native DCE route paired with [`parse_dce_native`].
+#[doc(hidden)]
+pub fn parse_static_typescript_dce_native(
+    path: &str,
+    source: &str,
+    demanded_exports: &BTreeSet<String>,
+    is_entry: bool,
+    policy: StaticTypescriptPolicy,
+) -> Module {
+    let source_type = inferred_static_source_type(path);
+    parse_static_typescript_with(path, source, policy, source_type, |text, ty| {
+        (
+            parse_source_in_context(
+                Some(path),
+                text,
+                ty,
+                None,
+                Some(demanded_exports),
+                Some(is_entry),
+            ),
+            (),
+        )
+    })
+    .0
+}
+
+/// CommonJS loader counterpart. The discovered `require` requests come from the generated
+/// JavaScript parser input in transform mode and from authored source in preserve mode.
+#[doc(hidden)]
+pub fn parse_static_typescript_commonjs_with_requires(
+    path: &str,
+    source: &str,
+    policy: StaticTypescriptPolicy,
+) -> (Module, Vec<String>) {
+    let source_type = SourceType::from_path(Path::new(path))
+        .unwrap_or_default()
+        .with_commonjs(true);
+    parse_static_typescript_with(path, source, policy, source_type, |text, ty| {
+        parse_source_with_commonjs_requires(Some(path), text, ty)
+    })
+}
+
+fn inferred_static_source_type(path: &str) -> SourceType {
+    let mut source_type = SourceType::from_path(Path::new(path))
+        .unwrap_or_else(|_| SourceType::default().with_module(true));
+    if !path.ends_with(".cjs") {
+        source_type = source_type.with_module(true);
+    }
+    source_type
+}
+
+fn parse_static_typescript_with<T>(
+    path: &str,
+    source: &str,
+    policy: StaticTypescriptPolicy,
+    original_type: SourceType,
+    parse_buffer: impl FnOnce(&str, SourceType) -> (Module, T),
+) -> (Module, T) {
+    if policy == StaticTypescriptPolicy::PreserveAuthoredSource || !original_type.is_typescript() {
+        return parse_buffer(source, original_type);
+    }
+    match transform_static_typescript(path, source, original_type) {
+        Ok((generated_source, provenance)) => {
+            let mut generated_type = SourceType::mjs()
+                .with_script(true)
+                .with_module(original_type.is_module());
+            if original_type.is_commonjs() {
+                generated_type = generated_type.with_commonjs(true);
+            }
+            let (mut module, side_data) = parse_buffer(&generated_source, generated_type);
+            module.source_kind = source_kind(original_type);
+            for diagnostic in &mut module.diagnostics {
+                if let Some(span) = &mut diagnostic.span {
+                    if let Some(start) = provenance.original_offset(span.start) {
+                        span.start = start;
+                    }
+                    if let Some(end) = provenance.original_offset(span.end) {
+                        span.end = end.max(span.start);
+                    }
+                }
+            }
+            module.static_source_provenance = Some(Arc::new(provenance));
+            (module, side_data)
+        }
+        Err(diagnostics) => {
+            let (mut module, side_data) = parse_buffer(source, original_type);
+            if module.diagnostics.is_empty() {
+                module.diagnostics.extend(diagnostics);
+            }
+            (module, side_data)
+        }
+    }
+}
+
+fn transform_static_typescript(
+    path: &str,
+    source: &str,
+    source_type: SourceType,
+) -> Result<(String, StaticSourceProvenance), Vec<Diagnostic>> {
+    let allocator = Allocator::default();
+    let mut parsed = Parser::new(&allocator, source, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return Err(parsed.diagnostics.iter().map(lower_diagnostic).collect());
+    }
+
+    let semantic = SemanticBuilder::new()
+        .with_enum_eval(true)
+        .build(&parsed.program)
+        .semantic;
+    let mut options = TransformOptions::from_target("node22")
+        .expect("the pinned Oxc target syntax is part of this transform policy");
+    options.jsx = JsxOptions {
+        jsx_plugin: source_type.is_jsx(),
+        runtime: JsxRuntime::Automatic,
+        ..JsxOptions::default()
+    };
+    let transform = Transformer::new(&allocator, Path::new(path), &options)
+        .build_with_scoping(semantic.into_scoping(), &mut parsed.program);
+    if !transform.diagnostics.is_empty() {
+        return Err(transform.diagnostics.iter().map(lower_diagnostic).collect());
+    }
+
+    let generated = oxc_codegen::Codegen::new()
+        .with_options(oxc_codegen::CodegenOptions {
+            source_map_path: Some(Path::new(path).to_path_buf()),
+            ..oxc_codegen::CodegenOptions::default()
+        })
+        .build(&parsed.program);
+    let source_map = generated
+        .map
+        .expect("source map generation is enabled for static TypeScript");
+    let generated_coordinates = SourceCoordinateIndex::new(&generated.code);
+    let original_coordinates = SourceCoordinateIndex::new(source);
+    let mut segments = source_map
+        .get_tokens()
+        .filter_map(|token| {
+            token.get_source_id()?;
+            let generated_offset =
+                generated_coordinates.byte_offset(token.get_dst_line(), token.get_dst_col())?;
+            let original_offset =
+                original_coordinates.byte_offset(token.get_src_line(), token.get_src_col())?;
+            Some(SourceMapSegment {
+                generated_offset,
+                original_offset,
+            })
+        })
+        .collect::<Vec<_>>();
+    segments.sort_by_key(|segment| segment.generated_offset);
+    // Preserve token order among duplicate generated positions, with the final source-map
+    // segment winning as required by the map consumer's greatest-lower-bound lookup.
+    let mut unique_segments: Vec<SourceMapSegment> = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if let Some(previous) = unique_segments.last_mut()
+            && previous.generated_offset == segment.generated_offset
+        {
+            previous.original_offset = segment.original_offset;
+        } else {
+            unique_segments.push(segment);
+        }
+    }
+    let mut segments = unique_segments;
+    if segments
+        .first()
+        .is_none_or(|segment| segment.generated_offset != 0)
+    {
+        segments.insert(
+            0,
+            SourceMapSegment {
+                generated_offset: 0,
+                original_offset: 0,
+            },
+        );
+    }
+
+    let fingerprint: Arc<str> = Arc::from(STATIC_TS_TRANSFORM_FINGERPRINT);
+    let mut identity_bytes =
+        Vec::with_capacity(path.len() + source.len() + fingerprint.len() + segments.len() * 8 + 32);
+    append_identity_field(&mut identity_bytes, path.as_bytes());
+    append_identity_field(&mut identity_bytes, source.as_bytes());
+    append_identity_field(&mut identity_bytes, fingerprint.as_bytes());
+    for segment in &segments {
+        identity_bytes.extend_from_slice(&segment.generated_offset.to_le_bytes());
+        identity_bytes.extend_from_slice(&segment.original_offset.to_le_bytes());
+    }
+    let identity: Arc<str> = Arc::from(Digest::hash(&identity_bytes).to_hex());
+    Ok((
+        generated.code,
+        StaticSourceProvenance {
+            original_path: Arc::from(path),
+            original_source: Arc::from(source),
+            transform_fingerprint: fingerprint,
+            identity,
+            source_map: segments.into(),
+        },
+    ))
+}
+
+fn append_identity_field(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    output.extend_from_slice(bytes);
+}
+
+/// Indexed source-map coordinates. Construction is linear in the source size; each mapping
+/// token then resolves in O(log columns-on-line), avoiding a full-source scan per token.
+struct SourceCoordinateIndex {
+    lines: Vec<Vec<(u32, usize)>>,
+}
+
+impl SourceCoordinateIndex {
+    fn new(source: &str) -> Self {
+        let mut ranges = Vec::new();
+        let mut line_start = 0usize;
+        let mut chars = source.char_indices().peekable();
+        while let Some((offset, ch)) = chars.next() {
+            let line_break_end = match ch {
+                '\r' => {
+                    if chars.peek().is_some_and(|(_, next)| *next == '\n') {
+                        chars.next().expect("peeked CRLF continuation").0 + 1
+                    } else {
+                        offset + ch.len_utf8()
+                    }
+                }
+                '\n' | '\u{2028}' | '\u{2029}' => offset + ch.len_utf8(),
+                _ => continue,
+            };
+            ranges.push((line_start, offset));
+            line_start = line_break_end;
+        }
+        ranges.push((line_start, source.len()));
+
+        let lines = ranges
+            .into_iter()
+            .map(|(start, end)| {
+                let text = &source[start..end];
+                let mut boundaries = Vec::with_capacity(text.len().min(128) + 1);
+                let mut units = 0u32;
+                boundaries.push((units, start));
+                for (offset, ch) in text.char_indices() {
+                    units += ch.len_utf16() as u32;
+                    boundaries.push((units, start + offset + ch.len_utf8()));
+                }
+                boundaries
+            })
+            .collect();
+        Self { lines }
+    }
+
+    fn byte_offset(&self, line: u32, column: u32) -> Option<u32> {
+        let boundaries = self.lines.get(line as usize)?;
+        let index = boundaries
+            .binary_search_by_key(&column, |(unit, _)| *unit)
+            .ok()?;
+        u32::try_from(boundaries.get(index)?.1).ok()
+    }
 }
 
 /// Parse an ESM module after specializing its directly declared exports to a
@@ -2656,6 +2968,7 @@ fn lower_parsed_in_context(
         module_id: Arc::from(path.unwrap_or_default()),
         // The one copy of the text every span in this module points into.
         source: Arc::from(source),
+        static_source_provenance: None,
         source_origin,
         source_kind: source_kind(source_type),
         source_goal: if source_type.is_module() {
@@ -6411,6 +6724,142 @@ fn name_anonymous_default(inner: &kiln_hir::Pattern, default: &mut kiln_hir::Exp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_coordinate_index_handles_multiline_unicode_and_rejects_invalid_columns() {
+        let index = SourceCoordinateIndex::new("a😀b\r\nq\u{2028}z\u{2029}");
+        assert_eq!(index.byte_offset(0, 0), Some(0));
+        assert_eq!(index.byte_offset(0, 1), Some(1));
+        assert_eq!(
+            index.byte_offset(0, 2),
+            None,
+            "halfway through a surrogate pair"
+        );
+        assert_eq!(index.byte_offset(0, 3), Some(5));
+        assert_eq!(index.byte_offset(0, 4), Some(6), "end of line before CRLF");
+        assert_eq!(index.byte_offset(1, 1), Some(9));
+        assert_eq!(index.byte_offset(2, 1), Some(13));
+        assert_eq!(index.byte_offset(3, 0), Some(16), "trailing empty line");
+        assert_eq!(index.byte_offset(0, 5), None, "column past line end");
+        assert_eq!(index.byte_offset(4, 0), None, "line past source end");
+
+        let long = format!("{}\r\n{}", "x".repeat(32_768), "y".repeat(32_768));
+        let long_index = SourceCoordinateIndex::new(&long);
+        assert_eq!(long_index.byte_offset(1, 32_768), Some(65_538));
+    }
+
+    #[test]
+    fn opt_in_static_typescript_uses_generated_parser_buffer_and_retains_provenance() {
+        let path = "formatter-fixture.ts";
+        let source = "export const format = (value: number) => {\n  return value + 1;\n};\n";
+        let authored =
+            parse_static_typescript(path, source, StaticTypescriptPolicy::PreserveAuthoredSource);
+        assert_eq!(authored.source.as_ref(), source);
+        assert!(authored.static_source_provenance.is_none());
+
+        let transformed = parse_static_typescript(
+            path,
+            source,
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(
+            transformed.diagnostics.is_empty(),
+            "{:?}",
+            transformed.diagnostics
+        );
+        assert_eq!(transformed.source_kind, SourceKind::TypeScript);
+        assert_eq!(transformed.source_goal, SourceGoal::Module);
+        assert!(
+            !transformed.source.contains(": number"),
+            "{}",
+            transformed.source
+        );
+        assert!(
+            transformed.source.contains("return value + 1"),
+            "{}",
+            transformed.source
+        );
+
+        let provenance = transformed
+            .static_source_provenance
+            .as_ref()
+            .expect("the opt-in transformed parser path records its origin");
+        assert_eq!(provenance.original_path.as_ref(), path);
+        assert_eq!(provenance.original_source.as_ref(), source);
+        assert!(provenance.transform_fingerprint.contains("target=node22"));
+        let generated_return = transformed
+            .source
+            .find("return value + 1")
+            .expect("generated JavaScript return");
+        let original_return = source.find("return value + 1").unwrap() as u32;
+        let mapped_return = provenance
+            .original_offset(generated_return as u32)
+            .expect("generated source location maps to authored TypeScript");
+        assert!(
+            mapped_return.abs_diff(original_return) <= 2,
+            "{mapped_return} != {original_return}"
+        );
+
+        let changed = parse_static_typescript(
+            path,
+            &source.replace("value + 1", "value + 2"),
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert_ne!(
+            provenance.identity,
+            changed.static_source_provenance.unwrap().identity,
+            "original source text participates in the static transform identity"
+        );
+    }
+
+    #[test]
+    fn opt_in_static_tsx_preserves_runtime_module_edges_and_erases_type_only_edges() {
+        let source = r#"import type { Shape } from "./types";
+import { keep } from "./dep";
+namespace Values { export const base = 2; }
+enum Mode { On = 1 }
+export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
+"#;
+        let module = parse_static_typescript(
+            "fixture.tsx",
+            source,
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(module.source_kind, SourceKind::Tsx);
+        assert_eq!(module.source_goal, SourceGoal::Module);
+        assert!(
+            module.source.contains("from \"./dep\""),
+            "{}",
+            module.source
+        );
+        assert!(!module.source.contains("./types"), "{}", module.source);
+        assert!(!module.source.contains(": Shape"), "{}", module.source);
+        assert!(
+            !module.source.contains("namespace Values"),
+            "{}",
+            module.source
+        );
+        assert!(!module.source.contains("enum Mode"), "{}", module.source);
+        assert!(module.source.contains("jsx-runtime"), "{}", module.source);
+        assert_eq!(module.requested_modules.len(), 2);
+    }
+
+    #[test]
+    fn opt_in_static_commonjs_discovers_requires_from_generated_buffer() {
+        let source =
+            "const value: number = 3; const dep = require('./dep'); module.exports = value + dep;";
+        let (module, requires) = parse_static_typescript_commonjs_with_requires(
+            "fixture.cts",
+            source,
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(module.source_kind, SourceKind::TypeScript);
+        assert_eq!(module.source_goal, SourceGoal::Script);
+        assert!(!module.source.contains(": number"), "{}", module.source);
+        assert_eq!(requires, ["./dep"]);
+    }
 
     #[test]
     fn static_typescript_codegen_is_parser_input_and_maps_back_to_ts() {

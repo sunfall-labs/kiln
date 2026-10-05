@@ -4006,6 +4006,7 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
         source: "".into(),
         version: BYTECODE_VERSION,
         source_origin: None,
+        static_source_identity: None,
         constants: vec![
             Constant::String("embedded\0tail=".into()),
             Constant::Number(0.1_f64.to_bits()),
@@ -4252,6 +4253,7 @@ fn owned_result_graph_api_preserves_uncaught_thrown_scalars() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: vec![Constant::String("thrown\0value".into())],
             code: vec![Instruction::Const(0), Instruction::Throw],
             local_count: 0,
@@ -4368,6 +4370,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: vec![Constant::Number(42.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -4394,6 +4397,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: vec![Constant::Number(99.0_f64.to_bits())],
             code: vec![
                 Instruction::LoadLocal(0),
@@ -4552,6 +4556,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: vec![Constant::Number(43.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -4765,6 +4770,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: vec![Constant::Number(7.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -4791,6 +4797,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: Vec::new(),
             code: vec![Instruction::LoadLocal(0), Instruction::Return],
             local_count: 1,
@@ -5024,6 +5031,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: Vec::new(),
             code: vec![
                 Instruction::HostCall {
@@ -5053,6 +5061,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             source: "".into(),
             version: BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
             constants: Vec::new(),
             code: vec![
                 Instruction::LoadLocal(0),
@@ -5260,6 +5269,7 @@ fn content_named_loaders_allow_same_basename_libraries_in_one_host() {
         source: "".into(),
         version: BYTECODE_VERSION,
         source_origin: None,
+        static_source_identity: None,
         constants: vec![Constant::Number(value.to_bits())],
         code: vec![Instruction::Const(0), Instruction::Return],
         local_count: 0,
