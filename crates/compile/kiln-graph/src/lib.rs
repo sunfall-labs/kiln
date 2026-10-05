@@ -12,7 +12,7 @@ pub mod verifier;
 pub use closed_world::{
     closed_world_function_liveness, closed_world_module_live_slots,
     closed_world_module_live_slots_with_declarations, closed_world_namespace_members,
-    retained_module_instructions, retained_module_size,
+    closed_world_namespace_members_for_slots, retained_module_instructions, retained_module_size,
 };
 pub use demanded::{
     CORE_METHOD_GROUPS, DemandedMembers, PRUNABLE_METHOD_GROUPS, analyze_demanded_members,

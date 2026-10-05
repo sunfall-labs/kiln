@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use kiln_ir::{
     Constant, FunctionProto, Instruction, ModuleProgram, Program, RemovableDeclaration, Upvalue,
@@ -492,11 +492,39 @@ fn namespace_alias_reaches(
     false
 }
 
+/// Resolve namespace reads for several import slots using one verified graph construction.
+/// Graphs live only for this batch; callers retain the compact answers, not program graphs.
+pub fn closed_world_namespace_members_for_slots(
+    program: &Program,
+    slots: impl IntoIterator<Item = u32>,
+    direct_eval: bool,
+) -> BTreeMap<u32, Option<BTreeSet<String>>> {
+    let slots = slots.into_iter().collect::<BTreeSet<_>>();
+    if slots.is_empty() {
+        return BTreeMap::new();
+    }
+    let graphs = namespace_graphs(program, direct_eval);
+    slots
+        .into_iter()
+        .map(|slot| {
+            let members = graphs
+                .as_ref()
+                .and_then(|graphs| namespace_members(program, slot, graphs));
+            (slot, members)
+        })
+        .collect()
+}
+
 pub fn closed_world_namespace_members(
     program: &Program,
     slot: u32,
     direct_eval: bool,
 ) -> Option<BTreeSet<String>> {
+    let graphs = namespace_graphs(program, direct_eval)?;
+    namespace_members(program, slot, &graphs)
+}
+
+fn namespace_graphs(program: &Program, direct_eval: bool) -> Option<NamespaceGraphs> {
     if direct_eval {
         return None;
     }
@@ -519,12 +547,34 @@ pub fn closed_world_namespace_members(
     let functions = program
         .functions
         .iter()
-        .enumerate()
-        .map(|(_, function)| graph_for(function, program).ok_or(()))
+        .map(|function| graph_for(function, program).ok_or(()))
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
+    Some(NamespaceGraphs {
+        entry,
+        functions,
+        module_upvalues,
+    })
+}
+
+struct NamespaceGraphs {
+    entry: FunctionGraph,
+    functions: Vec<FunctionGraph>,
+    module_upvalues: Vec<Vec<Option<u32>>>,
+}
+
+fn namespace_members(
+    program: &Program,
+    slot: u32,
+    graphs: &NamespaceGraphs,
+) -> Option<BTreeSet<String>> {
+    let NamespaceGraphs {
+        entry,
+        functions,
+        module_upvalues,
+    } = graphs;
     let mut members = BTreeSet::new();
-    for (graph, function_index) in std::iter::once((&entry, None)).chain(
+    for (graph, function_index) in std::iter::once((entry, None)).chain(
         functions
             .iter()
             .enumerate()
@@ -624,4 +674,52 @@ pub fn closed_world_namespace_members(
         }
     }
     Some(members)
+}
+
+#[cfg(test)]
+mod namespace_batch_tests {
+    use super::*;
+
+    #[test]
+    fn independent_namespace_slots_keep_named_reads_and_escapes_separate() {
+        let program = Program {
+            source: "".into(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            constants: vec![
+                Constant::String("alpha".into()),
+                Constant::String("beta".into()),
+            ],
+            code: vec![
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(0),
+                Instruction::Pop,
+                Instruction::LoadLocal(1),
+                Instruction::GetProperty(1),
+                Instruction::Pop,
+                Instruction::LoadLocal(2),
+                Instruction::Return,
+            ],
+            local_count: 3,
+            functions: Vec::new(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+        };
+        let expected = [
+            (0, Some(["alpha".to_owned()].into_iter().collect())),
+            (1, Some(["beta".to_owned()].into_iter().collect())),
+            (2, None),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            closed_world_namespace_members_for_slots(&program, [2, 0, 1, 0], false),
+            expected
+        );
+        assert_eq!(
+            closed_world_namespace_members_for_slots(&program, [0, 1, 2], true),
+            [(0, None), (1, None), (2, None)].into_iter().collect()
+        );
+        assert!(closed_world_namespace_members_for_slots(&program, [], false).is_empty());
+    }
 }

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use kiln_graph::{
     CORE_METHOD_GROUPS, DemandedMembers, PRUNABLE_METHOD_GROUPS,
-    closed_world_module_live_slots_with_declarations, closed_world_namespace_members,
+    closed_world_module_live_slots_with_declarations, closed_world_namespace_members_for_slots,
     method_groups as groups, retained_module_instructions,
 };
 use kiln_module_graph::{
@@ -264,6 +264,32 @@ fn demand_namespace_members(
     Ok(())
 }
 
+type NamespaceMemberCache = BTreeMap<PathBuf, BTreeMap<u32, Option<BTreeSet<String>>>>;
+
+fn namespace_members_cached(
+    consumer: &ModuleNode,
+    slot: u32,
+    direct_eval: bool,
+    cache: &mut NamespaceMemberCache,
+) -> Option<BTreeSet<String>> {
+    cache
+        .entry(consumer.path.clone())
+        .or_insert_with(|| {
+            closed_world_namespace_members_for_slots(
+                &consumer.program.program,
+                consumer
+                    .program
+                    .imports
+                    .iter()
+                    .map(|import| import.local_slot),
+                direct_eval,
+            )
+        })
+        .get(&slot)
+        .cloned()
+        .flatten()
+}
+
 /// Carry a consumer's member reads through a named export whose value is an imported namespace.
 /// A local export can be the namespace object itself (for example `export { ns }` where `ns` is
 /// `import * as ns`). Looking only at reads in that intermediate module incorrectly concludes
@@ -272,9 +298,10 @@ fn demand_exported_namespace_members(
     graph: &ModuleGraph,
     origin: &Path,
     local_slot: u32,
-    consumer_program: &kiln_ir::Program,
+    consumer: &ModuleNode,
     consumer_slot: u32,
     consumer_direct_eval: bool,
+    namespace_member_cache: &mut NamespaceMemberCache,
     live: &mut BTreeSet<PathBuf>,
     live_imports: &mut BTreeSet<(PathBuf, usize)>,
     live_export_slots: &mut BTreeMap<PathBuf, BTreeSet<u32>>,
@@ -311,9 +338,12 @@ fn demand_exported_namespace_members(
         queue.push_back(node.path.clone());
     }
 
-    if let Some(members) =
-        closed_world_namespace_members(consumer_program, consumer_slot, consumer_direct_eval)
-    {
+    if let Some(members) = namespace_members_cached(
+        consumer,
+        consumer_slot,
+        consumer_direct_eval,
+        namespace_member_cache,
+    ) {
         partial_namespace_members
             .entry(target.clone())
             .or_default()
@@ -656,16 +686,12 @@ pub fn select_executable_modules<'a>(
             }
             live_imports.insert((node.path.clone(), import_index));
             if import.imported == kiln_ir::NAMESPACE_IMPORT {
-                let static_members = namespace_member_cache
-                    .entry((node.path.clone(), import.local_slot))
-                    .or_insert_with(|| {
-                        closed_world_namespace_members(
-                            &node.program.program,
-                            import.local_slot,
-                            direct_eval,
-                        )
-                    })
-                    .clone();
+                let static_members = namespace_members_cached(
+                    node,
+                    import.local_slot,
+                    direct_eval,
+                    &mut namespace_member_cache,
+                );
                 if let Some(members) = static_members {
                     mark_live(&dependency.target, &mut live, &mut queue);
                     partial_namespace_members
@@ -715,9 +741,10 @@ pub fn select_executable_modules<'a>(
                         graph,
                         module,
                         *local_slot,
-                        &node.program.program,
+                        node,
                         import.local_slot,
                         direct_eval,
+                        &mut namespace_member_cache,
                         &mut live,
                         &mut live_imports,
                         &mut live_export_slots,
@@ -755,16 +782,12 @@ pub fn select_executable_modules<'a>(
                         &mut live_export_slots,
                         &mut queue,
                     );
-                    let static_members = namespace_member_cache
-                        .entry((node.path.clone(), import.local_slot))
-                        .or_insert_with(|| {
-                            closed_world_namespace_members(
-                                &node.program.program,
-                                import.local_slot,
-                                direct_eval,
-                            )
-                        })
-                        .clone();
+                    let static_members = namespace_members_cached(
+                        node,
+                        import.local_slot,
+                        direct_eval,
+                        &mut namespace_member_cache,
+                    );
                     if let Some(members) = static_members {
                         mark_live(module, &mut live, &mut queue);
                         partial_namespace_members
