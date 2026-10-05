@@ -686,6 +686,8 @@ mod namespace_batch_tests {
             source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![
                 Constant::String("alpha".into()),
                 Constant::String("beta".into()),
