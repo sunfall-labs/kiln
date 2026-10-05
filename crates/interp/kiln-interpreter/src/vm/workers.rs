@@ -9,6 +9,7 @@
 //! more than a translation, a transferred `ArrayBuffer`, whose bytes move with the message.
 
 use super::*;
+use crate::gc_census::{internal_array_weak_counts, internal_object_weak_counts};
 use kiln_runtime::signals;
 use kiln_runtime::workers::{self, Message, Token, WorkerEntry, WorkerSpec};
 use std::collections::HashMap;
@@ -38,12 +39,17 @@ impl InterpreterPlainSource {
 /* `encode_plain` retains one handle for the root and one for every object/array edge it
  * traverses, including repeated references. A closed graph has one escrow root and exactly
  * those internal edges. With the encoder's temporary handles still live, each node must have
- * twice as many strong Rc owners as handle occurrences. Any additional owner is a sender
- * alias; a weak owner could become one after this check, so it also refuses the move. */
+ * twice as many strong Rc owners as handle occurrences. A weak owner outside the interpreter's
+ * allocation census could become a sender alias, so it still refuses the move. */
 fn plain_graph_exclusive(source: &InterpreterPlainSource) -> bool {
-    let mut owners: HashMap<usize, (usize, usize, usize)> = HashMap::new();
+    // Copy numeric allocation identities once. Calling back into the thread-local census for
+    // every edge would add TLS/refcell work to large transfers; cloning Weak values here would
+    // itself change the counts this proof is examining.
+    let object_census_weak = internal_object_weak_counts();
+    let array_census_weak = internal_array_weak_counts();
+    let mut owners: HashMap<usize, (usize, usize, usize, usize)> = HashMap::new();
     for value in &source.handles {
-        let (identity, strong, weak) = match value {
+        let (identity, strong, weak, census_weak) = match value {
             Value::Object(object) => {
                 let data = object.borrow();
                 if data.weak_shared_target.is_some()
@@ -58,6 +64,10 @@ fn plain_graph_exclusive(source: &InterpreterPlainSource) -> bool {
                     Rc::as_ptr(object) as usize,
                     Rc::strong_count(object),
                     Rc::weak_count(object),
+                    object_census_weak
+                        .get(&(Rc::as_ptr(object) as usize))
+                        .copied()
+                        .unwrap_or(0),
                 )
             }
             Value::Array(array) => {
@@ -76,17 +86,23 @@ fn plain_graph_exclusive(source: &InterpreterPlainSource) -> bool {
                     Rc::as_ptr(array) as usize,
                     Rc::strong_count(array),
                     Rc::weak_count(array),
+                    array_census_weak
+                        .get(&(Rc::as_ptr(array) as usize))
+                        .copied()
+                        .unwrap_or(0),
                 )
             }
             _ => continue,
         };
-        let entry = owners.entry(identity).or_insert((0, strong, weak));
+        let entry = owners
+            .entry(identity)
+            .or_insert((0, strong, weak, census_weak));
         entry.0 += 1;
     }
     !owners.is_empty()
-        && owners
-            .values()
-            .all(|(handles, strong, weak)| *weak == 0 && handles.checked_mul(2) == Some(*strong))
+        && owners.values().all(|(handles, strong, weak, census_weak)| {
+            weak.checked_sub(*census_weak) == Some(0) && handles.checked_mul(2) == Some(*strong)
+        })
 }
 
 fn plain_object_array_index(key: &kiln_string::StringUnits) -> Option<u32> {
@@ -826,4 +842,28 @@ fn buffer_value(bytes: Bytes, max_byte_length: Option<usize>, shared: bool) -> V
         immutable: false,
         properties: RefCell::new(ObjectData::default()),
     }))
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn allocation_census_weak_edges_do_not_masquerade_as_sender_aliases() {
+        let object = crate::tracked_object(ObjectData::default());
+        let source = InterpreterPlainSource::new(Value::Object(object.clone()));
+        assert!(plain_graph_exclusive(&source));
+
+        let user_weak = Rc::downgrade(&object);
+        assert!(!plain_graph_exclusive(&source));
+        drop(user_weak);
+        assert!(plain_graph_exclusive(&source));
+
+        let array = ArrayData::new(Vec::new());
+        let source = InterpreterPlainSource::new(Value::Array(array.clone()));
+        assert!(plain_graph_exclusive(&source));
+
+        let _user_weak = Rc::downgrade(&array);
+        assert!(!plain_graph_exclusive(&source));
+    }
 }

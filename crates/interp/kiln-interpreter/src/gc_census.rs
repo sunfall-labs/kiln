@@ -7,10 +7,15 @@
 
 use super::{ArrayData, ObjectData};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 struct WeakCensus<T> {
     entries: Vec<Weak<T>>,
+    /// Counts only the weak references owned by `entries`, indexed by stable allocation
+    /// identity. These are excluded from actor move-eligibility checks; user WeakRefs remain
+    /// observable and still prevent moving a graph.
+    internal_weak_counts: HashMap<usize, usize>,
     prune_at: usize,
 }
 
@@ -18,6 +23,7 @@ impl<T> Default for WeakCensus<T> {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            internal_weak_counts: HashMap::new(),
             prune_at: 0,
         }
     }
@@ -29,10 +35,21 @@ impl<T> WeakCensus<T> {
             self.prune();
         }
         self.entries.push(Rc::downgrade(value));
+        *self
+            .internal_weak_counts
+            .entry(Rc::as_ptr(value) as usize)
+            .or_default() += 1;
     }
 
     fn prune(&mut self) {
         self.entries.retain(|entry| entry.strong_count() > 0);
+        self.internal_weak_counts.clear();
+        for entry in &self.entries {
+            *self
+                .internal_weak_counts
+                .entry(entry.as_ptr() as usize)
+                .or_default() += 1;
+        }
         self.prune_at = self
             .entries
             .len()
@@ -41,6 +58,10 @@ impl<T> WeakCensus<T> {
 
     fn snapshot(&self) -> Vec<Weak<T>> {
         self.entries.clone()
+    }
+
+    fn internal_weak_counts(&self) -> HashMap<usize, usize> {
+        self.internal_weak_counts.clone()
     }
 }
 
@@ -76,6 +97,14 @@ pub(crate) fn array_candidates() -> Vec<Weak<ArrayData>> {
     CENSUS.with(|census| census.borrow().arrays.snapshot())
 }
 
+pub(crate) fn internal_object_weak_counts() -> HashMap<usize, usize> {
+    CENSUS.with(|census| census.borrow().objects.internal_weak_counts())
+}
+
+pub(crate) fn internal_array_weak_counts() -> HashMap<usize, usize> {
+    CENSUS.with(|census| census.borrow().arrays.internal_weak_counts())
+}
+
 pub(crate) fn prune_dead_candidates() {
     CENSUS.with(|census| {
         let mut census = census.borrow_mut();
@@ -97,11 +126,25 @@ mod tests {
             census.register(&Rc::new(value));
         }
         assert_eq!(Rc::strong_count(&live), 1);
+        assert_eq!(
+            census
+                .internal_weak_counts()
+                .get(&(Rc::as_ptr(&live) as usize)),
+            Some(&1)
+        );
+        assert_eq!(Rc::weak_count(&live), 1);
         assert!(census.entries.len() <= 1025);
         census.prune();
         assert_eq!(census.entries.len(), 1);
+        assert_eq!(
+            census
+                .internal_weak_counts()
+                .get(&(Rc::as_ptr(&live) as usize)),
+            Some(&1)
+        );
         drop(live);
         census.prune();
         assert!(census.entries.is_empty());
+        assert_eq!(census.internal_weak_counts.len(), 0);
     }
 }
