@@ -11,41 +11,42 @@ The last verified public main commit is `bc82ca8f`. Its compiler milestone has a
 crate passes and zero Test262 chunk regressions across 102,522 selected routine
 variants; 116 expensive variants were explicitly deferred.
 
-The committed clock candidate makes explicit interpreter wall-clock execution read
-actual system time instead of the output-capture host's synthetic clock.
-[Original Formatter, Pool and Layer acceptance](evidence/interpreter-wall-clock-20261005/)
-is 153/153, including all 39 Layer cases with unchanged deadlines.
-[Native Formatter acceptance](evidence/native-formatter-clock-20261005/) is separately
-67/67, exactly mapped to the official Node/Vitest oracle. Those focused reports are
-not a fresh full 322-file result. A compiler-owned Oxc disposal helper separately
-[passes all nine original ManagedRuntime cases in both engines](evidence/oxc-usingctx-20261005/);
-its final disposal edge-case follow-up and shared Array callback changes are still
-under validation and have not been landed.
+The combined local candidate contains real interpreter wall-clock capture, Array callback fixes,
+bounded native compiler tiers, Oxc disposal and constructor/newTarget fixes, and stable-index
+namespace refresh. It is preserved in an isolated writable integration clone because main's
+`.git` and sibling worktrees are read-only in this execution environment. Git push still fails
+with `Could not resolve host: github.com`; the GitHub connector reports repository 404. These
+local commits are not published main milestones.
 
-The disposal follow-up is now locally committed with
-[final 9/9 ManagedRuntime evidence in both engines](../oxc-using-context/evidence/20261005/).
-One general constructor default-prototype mismatch remains under repair; it is
-recorded rather than hidden by rereading a Proxy's prototype.
-[Deadline adapter checks](evidence/harness-deadlines-20261005/) match actual
-Vitest 5.0.3 in Node, Bun, interpreter and native for cleanup continuation,
-independent hook budgets, synchronous overruns and falsy thrown values.
-The [complete original Cluster interpreter replay](evidence/interpreter-cluster-deadlines-20261005/)
-now records all 47 cases: 36 pass and 11 fail at original deadlines, with exact
-oracle mapping and no missing cases. This uses the older frozen clock binary,
-before final Array/disposal changes, and is negative evidence requiring repair.
+The [complete 322-file interpreter diagnostic](evidence/interpreter-full-diagnostic-20261005/)
+records all 11,019 oracle cases: 10,908 pass, 66 fail and 45 skip. It has no missing, duplicate,
+incomplete or unmapped cases. Fifty-eight failures exceed original five-second test budgets;
+eight HttpClient failures arise in the environment that denies listener creation. This frozen
+snapshot predates the final constructor and namespace fixes and is not final acceptance.
 
-The clock milestone's next gate was
-[interrupted by an environment transition](evidence/clock-gate-interrupted-20261005/).
-Its completed workspace, native parity, thirdparty and Node/server/regression lanes
-passed, but it has no aggregate verdict, complete Test262, facts or performance
-result and does not authorize landing. Current permissions make main's `.git` and
-sibling worktrees read-only and GitHub access is unavailable; source and evidence
-are preserved in an isolated writable clone pending validation and publication.
+[Combined clock verification](evidence/combined-clock-contract-20261005/) rejects the older
+synthetic-2020 CLI, verifies the new CLI's epoch against host time, and matches the expected
+five-case deadline outcomes in Node/Vitest, Bun, interpreter and native-release. A real epoch
+is a sanity check; it is not alone proof of clock rate or full-suite deadline correctness.
 
-Native Sharding's six original five-second timeouts and ClusterWorkflow's one timeout
-remain unresolved. Complete final-source 322-file native and interpreter acceptance,
-the required gate, and a quiet 22-microbenchmark/four-real-world direct-TypeScript
-comparison against Bun are still required before completion.
+The [real-clock namespace milestone](evidence/namespace-realclock-20261005/) passes all 48
+Channel cases. Its separately completed Hash replay records 15 passes and ten original-deadline
+timeouts out of 25 exactly mapped cases. Older namespace measurements using a synthetic
+interpreter clock do not establish deadline acceptance. A new public descriptor-before-Get
+probe confirms a remaining interpreter namespace defect: descriptors return stale exports
+until another Get refreshes the namespace. Node and native already return the live values;
+a coherent per-property live-cell resolver is under repair.
+
+[Combined constructor parity and GC stress](evidence/combined-constructor-parity-20261005/)
+pass the focused Oxc disposal probe in native-release. Ordinary two-probe parity is also
+recorded, with the namespace probe using dev and predating its stronger descriptor coverage.
+These checks do not claim a full native stress corpus.
+
+A frozen full-322 native diagnostic is running with unchanged case deadlines and the corrected
+harness. Partial counts are intentionally excluded from acceptance. Native Sharding deadline
+failures and the ClusterWorkflow timeout remain unresolved. Complete final-source 322-file
+native and interpreter acceptance, the required gate, and a quiet 22-microbenchmark/four-real-world
+direct-TypeScript comparison against Bun are still required before completion.
 
 ## Earlier checkpoints, 2026-10-04
 
