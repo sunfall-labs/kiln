@@ -22,6 +22,18 @@ not a fresh full 322-file result. A compiler-owned Oxc disposal helper separatel
 its final disposal edge-case follow-up and shared Array callback changes are still
 under validation and have not been landed.
 
+The disposal follow-up is now locally committed with
+[final 9/9 ManagedRuntime evidence in both engines](../oxc-using-context/evidence/20261005/).
+One general constructor default-prototype mismatch remains under repair; it is
+recorded rather than hidden by rereading a Proxy's prototype.
+[Deadline adapter checks](evidence/harness-deadlines-20261005/) match actual
+Vitest 5.0.3 in Node, Bun, interpreter and native for cleanup continuation,
+independent hook budgets, synchronous overruns and falsy thrown values.
+The [complete original Cluster interpreter replay](evidence/interpreter-cluster-deadlines-20261005/)
+now records all 47 cases: 36 pass and 11 fail at original deadlines, with exact
+oracle mapping and no missing cases. This uses the older frozen clock binary,
+before final Array/disposal changes, and is negative evidence requiring repair.
+
 The clock milestone's next gate was
 [interrupted by an environment transition](evidence/clock-gate-interrupted-20261005/).
 Its completed workspace, native parity, thirdparty and Node/server/regression lanes
