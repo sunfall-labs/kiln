@@ -2097,11 +2097,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             };
                             self.stack.push(result);
                         }
-                        // Both defer to `call_value`: a bound function knows its own receiver,
-                        // and a proxy has to consult its `apply` trap before anything else can
-                        // happen.
-                        Value::Bound(_)
-                        | Value::Proxy(_)
+                        // A bound target can be a compiled function. Normalize its receiver
+                        // and arguments through the frame dispatcher rather than recursively
+                        // driving another interpreter loop for every bound call.
+                        Value::Bound(_) => {
+                            let callee = callee.clone();
+                            let arguments = self.take_arguments(argc, current)?;
+                            let called = self.invoke(
+                                callee,
+                                Value::Undefined,
+                                arguments,
+                                current,
+                                None,
+                            );
+                            let Some(result) = self.catchable(called, current)? else {
+                                continue;
+                            };
+                            if let Some(result) = result {
+                                self.stack.push(result);
+                            }
+                        }
+                        // A proxy has to consult its `apply` trap before anything else can happen.
+                        Value::Proxy(_)
                         // A wrapped function defers for the strongest reason of the four: the
                         // call has to cross a realm boundary in both directions, and
                         // `call_value` is where entering the callee's realm happens.

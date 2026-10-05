@@ -134,6 +134,29 @@ fn static_then_dynamic_links_to_the_static_record() {
 }
 
 #[test]
+fn bound_and_uncurried_calls_keep_javascript_recursion_on_vm_frames() {
+    let project = Project::new();
+    expect_lines(
+        &project,
+        r#"
+        const call = Function.prototype.call.bind(Function.prototype.call);
+        function descend(n) { return n === 0 ? 0 : call(descend, null, n - 1) + 1; }
+        function descendBound(n) { return n === 0 ? 0 : bound(n - 1) + 1; }
+        const bound = descendBound.bind(null);
+        console.log(descend(256), bound(256));
+        function collect(a, b, c) { return [this.label, a, b, c].join(':'); }
+        console.log(collect.bind({label: 'first'}, 1).bind({label: 'second'}, 2)(3));
+        const marker = {};
+        try { call(() => { throw marker; }, null); }
+        catch (error) { console.log(error === marker); }
+        function readThis() { return this; }
+        console.log(readThis.bind(null)() === null);
+        "#,
+        &["256 256", "first:1:2:3", "true", "true"],
+    );
+}
+
+#[test]
 fn dynamic_then_static_links_to_the_dynamic_record() {
     let project = Project::new();
     project.write("a.mjs", "export const early = await import('./b.mjs');");

@@ -27,12 +27,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         method_name: Option<StringUnits>,
     ) -> Result<Option<Value>, ExecutionError> {
         let mut forwarded_call = false;
-        // Resolve `.call` and `.apply` before entering the final callee. A compiled target
+        // Resolve bound calls, `.call` and `.apply` before entering the final callee. A compiled target
         // pushes a frame whose realm must stay current until that frame returns; entering it
         // through a temporary native-method scope would restore the old realm too early.
-        while let Value::Native(native @ (Native::FunctionCall | Native::FunctionApply), _) =
-            &method
-        {
+        loop {
+            if let Value::Bound(bound) = &method {
+                let mut forwarded = bound.arguments.clone();
+                forwarded.extend(arguments);
+                receiver = bound.this_value.clone();
+                method = bound.target.clone();
+                arguments = forwarded;
+                forwarded_call = true;
+                continue;
+            }
+            let Value::Native(native @ (Native::FunctionCall | Native::FunctionApply), _) = &method
+            else {
+                break;
+            };
             forwarded_call = true;
             let realm = value_realm(&method);
             let (this_value, forwarded) = self.entering(realm, |vm| {
