@@ -224,6 +224,38 @@ pub trait Backend: Send {
             other => Err(mismatch("Run", &other)),
         }
     }
+
+    fn node_run_at_view(
+        &mut self,
+        path: String,
+        project_root: String,
+        args: Vec<String>,
+        preloads: Vec<String>,
+        exec_argv: Vec<String>,
+        disallow_string_code_generation: bool,
+        steps: StepBudget,
+        source_view: SourceView,
+    ) -> Result<SourceResponse<RunSummary>> {
+        match self.request_streaming(
+            Request::NodeRun {
+                path,
+                project_root,
+                args,
+                preloads,
+                exec_argv,
+                disallow_string_code_generation,
+                wall_clock: true,
+                steps,
+                source_view,
+                stream_output: true,
+            },
+            &mut write_to_process_streams,
+        )? {
+            Response::Ran(summary) => Ok(SourceResponse::Ready(summary)),
+            Response::StaleSourceView { current } => Ok(SourceResponse::Stale(current)),
+            other => Err(mismatch("NodeRun", &other)),
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     fn native_build_at_view(
         &mut self,

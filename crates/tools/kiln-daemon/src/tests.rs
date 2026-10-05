@@ -88,6 +88,7 @@ impl Client {
                 Request::SetSource { .. }
                     | Request::Check { .. }
                     | Request::Run { .. }
+                    | Request::NodeRun { .. }
                     | Request::NativeBuild { .. }
                     | Request::NativeBuildAtRevision { .. }
                     | Request::NativeSharedBuild { .. }
@@ -2316,6 +2317,270 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[cfg(unix)]
+#[test]
+fn node_launch_evaluates_preloads_and_runtime_created_esm_in_one_module_realm() {
+    let fixture = Fixture::empty();
+    let entry = fixture.dir.join("entry.mjs");
+    let preload = fixture.dir.join("preload.mjs");
+    let generated = fixture.dir.join("generated.mjs");
+    let entry_source = "import { execFileSync } from 'node:child_process';\n\
+        globalThis.__startup.push('entry');\n\
+        const target = './generated.mjs';\n\
+        const generated = await import(target);\n\
+        let codegen = 'allowed';\n\
+        try { new Function('return 1')(); } catch { codegen = 'blocked'; }\n\
+        const child = execFileSync('/bin/sh', ['-c', 'printf child'], { encoding: 'utf8' });\n\
+        console.log(globalThis.__startup.join(','), generated.value, codegen, child, process.execArgv.join(','));\n";
+    let preload_source = "globalThis.__startup = ['preload'];\n";
+    std::fs::write(&entry, entry_source).expect("write entry");
+    std::fs::write(&preload, preload_source).expect("write preload");
+    // This is deliberately absent from the synchronized source snapshot. The runtime loader must
+    // resolve it from the dynamic import's referrer and load it into the existing realm.
+    std::fs::write(&generated, "export const value = 42;\n").expect("write runtime module");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+    for (path, text) in [(&entry, entry_source), (&preload, preload_source)] {
+        let path = std::fs::canonicalize(path).expect("canonical source path");
+        client
+            .request(&Request::SetSource {
+                source_view: client.source_view(),
+                path: path.to_string_lossy().into_owned(),
+                text: text.to_owned(),
+            })
+            .expect("synchronize launch source");
+    }
+    let response = client
+        .request(&Request::NodeRun {
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root,
+            args: Vec::new(),
+            preloads: vec!["./preload.mjs".to_owned()],
+            exec_argv: vec![
+                "--disallow-code-generation-from-strings".to_owned(),
+                "--import".to_owned(),
+                "./preload.mjs".to_owned(),
+            ],
+            disallow_string_code_generation: true,
+            wall_clock: false,
+            steps: StepBudget::Unmetered,
+            source_view: client.source_view(),
+            stream_output: false,
+        })
+        .expect("execute Node-style launch");
+    let Response::Ran(summary) = response else {
+        panic!("expected run response, got {response:?}");
+    };
+    assert!(summary.succeeded, "{:?}", summary.diagnostics);
+    assert_eq!(
+        summary.stdout,
+        "preload,entry 42 blocked child --disallow-code-generation-from-strings,--import,./preload.mjs\n"
+    );
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_file_url_queries_keep_distinct_source_graphs_after_a_file_changes() {
+    let fixture = Fixture::empty();
+    let entry = fixture.dir.join("entry.mjs");
+    let generated = fixture.dir.join("generated.mjs");
+    let entry_source = "import { writeFileSync } from 'node:fs';\n\
+        import { fileURLToPath } from 'node:url';\n\
+        const url = new URL('./generated.mjs', import.meta.url).href;\n\
+        const first = await import(url + '?one');\n\
+        writeFileSync(fileURLToPath(url), \"export const value = 'two';\\n\");\n\
+        const second = await import(url + '?two');\n\
+        const firstAgain = await import(url + '?one');\n\
+        console.log(first.value, second.value, firstAgain.value, firstAgain === first);\n";
+    std::fs::write(&entry, entry_source).expect("write runtime-query entry");
+    std::fs::write(&generated, "export const value = 'one';\n")
+        .expect("write runtime-query target");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+    let path = std::fs::canonicalize(&entry).expect("canonical entry");
+    client
+        .request(&Request::SetSource {
+            source_view: client.source_view(),
+            path: path.to_string_lossy().into_owned(),
+            text: entry_source.to_owned(),
+        })
+        .expect("synchronize runtime-query entry");
+    let response = client
+        .request(&Request::NodeRun {
+            path: path.to_string_lossy().into_owned(),
+            project_root: root,
+            args: Vec::new(),
+            preloads: Vec::new(),
+            exec_argv: Vec::new(),
+            disallow_string_code_generation: false,
+            wall_clock: false,
+            steps: StepBudget::Unmetered,
+            source_view: client.source_view(),
+            stream_output: false,
+        })
+        .expect("execute runtime-query imports");
+    let Response::Ran(summary) = response else {
+        panic!("expected run response, got {response:?}");
+    };
+    assert!(summary.succeeded, "{:?}", summary.diagnostics);
+    assert_eq!(summary.stdout, "one two one true\n");
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[cfg(unix)]
+#[test]
+fn node_run_graph_cache_tracks_ordered_preloads_and_their_dependencies() {
+    fn run(client: &mut Client, path: &str, root: &str, preloads: Vec<String>) -> String {
+        let response = client
+            .request(&Request::NodeRun {
+                path: path.to_owned(),
+                project_root: root.to_owned(),
+                args: Vec::new(),
+                preloads,
+                exec_argv: Vec::new(),
+                disallow_string_code_generation: false,
+                wall_clock: false,
+                steps: StepBudget::Unmetered,
+                source_view: client.source_view(),
+                stream_output: false,
+            })
+            .expect("run with startup preloads");
+        let Response::Ran(summary) = response else {
+            panic!("expected run response, got {response:?}");
+        };
+        assert!(summary.succeeded, "{:?}", summary.diagnostics);
+        summary.stdout
+    }
+
+    let fixture = Fixture::empty();
+    let entry = fixture.dir.join("entry.mjs");
+    let first = fixture.dir.join("preload-first.mjs");
+    let second = fixture.dir.join("preload-second.mjs");
+    let dependency = fixture.dir.join("shared.mjs");
+    let entry_source = "console.log(globalThis.order.join(','));\n";
+    let first_source = "globalThis.order ??= []; import { version } from './shared.mjs'; globalThis.order.push('first:' + version);\n";
+    let second_source = "globalThis.order ??= []; import { version } from './shared.mjs'; globalThis.order.push('second:' + version);\n";
+    std::fs::write(&entry, entry_source).expect("write entry");
+    std::fs::write(&first, first_source).expect("write first preload");
+    std::fs::write(&second, second_source).expect("write second preload");
+    std::fs::write(&dependency, "export const version = 'one';\n")
+        .expect("write preload dependency");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+    let entry_path = std::fs::canonicalize(entry).expect("canonical entry");
+    for (path, text) in [
+        (entry_path.clone(), entry_source),
+        (
+            std::fs::canonicalize(first).expect("canonical first preload"),
+            first_source,
+        ),
+        (
+            std::fs::canonicalize(second).expect("canonical second preload"),
+            second_source,
+        ),
+        (
+            std::fs::canonicalize(&dependency).expect("canonical preload dependency"),
+            "export const version = 'one';\n",
+        ),
+    ] {
+        client
+            .request(&Request::SetSource {
+                source_view: client.source_view(),
+                path: path.to_string_lossy().into_owned(),
+                text: text.to_owned(),
+            })
+            .expect("synchronize startup graph source");
+    }
+    let entry_path = entry_path.to_string_lossy().into_owned();
+    let ordered = vec![
+        "./preload-first.mjs".to_owned(),
+        "./preload-second.mjs".to_owned(),
+    ];
+    assert_eq!(
+        run(&mut client, &entry_path, &root, ordered.clone()),
+        "first:one,second:one\n"
+    );
+    assert_eq!(
+        run(&mut client, &entry_path, &root, ordered.clone()),
+        "first:one,second:one\n"
+    );
+    let Response::Stats(after_hit) = client.request(&Request::Stats).expect("cache hit stats")
+    else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_hit.graph_cache_hits, 1);
+
+    client
+        .request(&Request::SetSource {
+            source_view: client.source_view(),
+            path: std::fs::canonicalize(&dependency)
+                .expect("canonical preload dependency")
+                .to_string_lossy()
+                .into_owned(),
+            text: "export const version = 'two';\n".to_owned(),
+        })
+        .expect("edit preload dependency");
+    assert_eq!(
+        run(&mut client, &entry_path, &root, ordered.clone()),
+        "first:two,second:two\n"
+    );
+    let Response::Stats(after_edit) = client.request(&Request::Stats).expect("edit stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_edit.graph_cache_hits, 2);
+    assert_eq!(after_edit.graph_cache_partial_hits, 1);
+
+    let reversed = vec![
+        "./preload-second.mjs".to_owned(),
+        "./preload-first.mjs".to_owned(),
+    ];
+    assert_eq!(
+        run(&mut client, &entry_path, &root, reversed),
+        "second:two,first:two\n"
+    );
+    let Response::Stats(after_reversal) = client.request(&Request::Stats).expect("order stats")
+    else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_reversal.graph_cache_hits, 2);
+    assert_eq!(after_reversal.graph_cache_entries, 2);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
 }
 
 #[test]

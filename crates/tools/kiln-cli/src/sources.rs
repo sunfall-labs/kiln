@@ -1175,6 +1175,48 @@ mod tests {
     }
 
     #[test]
+    fn node_launch_preload_root_contributes_format_and_transitive_resolution_metadata() {
+        let tree = Tree::new("node-preload-root");
+        tree.file("src/main.mjs");
+        std::fs::write(tree.0.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package format");
+        std::fs::write(
+            tree.0.join("preload.ts"),
+            "import { value } from './preload-dependency.ts'; globalThis.preloaded = value;\n",
+        )
+        .expect("write preload");
+        std::fs::write(
+            tree.0.join("preload-dependency.ts"),
+            "export const value = 42;\n",
+        )
+        .expect("write preload dependency");
+
+        let root = tree.0.canonicalize().expect("canonical root");
+        let entry = root.join("src/main.mjs");
+        let preload = root.join("preload.ts").to_string_lossy().into_owned();
+        let mut texts = Vec::new();
+        let (resolutions, formats, includes, _) =
+            include_reachable_dependencies_with_extra_includes(
+                &root,
+                entry.to_str().expect("UTF-8 entry"),
+                &mut texts,
+                true,
+                &[preload.clone()],
+            )
+            .expect("collect entry and preload roots");
+
+        assert!(includes.iter().any(|include| include.target == preload));
+        for path in [root.join("preload.ts"), root.join("preload-dependency.ts")] {
+            let path = path.to_string_lossy();
+            assert!(texts.iter().any(|(captured, _)| captured == &path));
+            assert!(formats.iter().any(|format| format.path == path));
+        }
+        assert!(resolutions.iter().any(|resolution| {
+            resolution.importer == preload && resolution.specifier == "./preload-dependency.ts"
+        }));
+    }
+
+    #[test]
     fn invalid_declared_include_names_its_package_and_entry() {
         let tree = Tree::new("invalid-declared-include");
         tree.file("main.cjs");

@@ -458,9 +458,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// A non-string argument comes straight back. That is not a shortcut -- the specification
     /// says an eval of anything but a string *is* that value, which is what makes
     /// `eval(someObject)` harmless.
-    pub(super) fn indirect_eval(&mut self, arguments: &[Value]) -> Result<Value, ExecutionError> {
+    pub(super) fn indirect_eval(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
         match arguments.first() {
-            Some(Value::String(source)) => self.drive_eval_units(source, None, false),
+            Some(Value::String(source)) => {
+                if !self.string_code_generation_allowed {
+                    self.throw_error(
+                        ErrorKind::Eval,
+                        "Code generation from strings disallowed for this context".into(),
+                        instruction,
+                    )?;
+                    return Ok(Value::Undefined);
+                }
+                self.drive_eval_units(source, None, false)
+            }
             Some(value) => Ok(value.clone()),
             None => Ok(Value::Undefined),
         }
@@ -507,6 +521,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             source.push_ascii("\n) {\n\n})")?;
         }
         let source = source.finish();
+        if !self.string_code_generation_allowed {
+            self.throw_error(
+                ErrorKind::Eval,
+                "Code generation from strings disallowed for this context".into(),
+                instruction,
+            )?;
+            return Ok(Value::Undefined);
+        }
         self.drive_eval_units(&source, None, false)
     }
 

@@ -112,6 +112,138 @@ pub fn run_with_clock(
     )
 }
 
+pub(crate) fn run_node_launch(
+    backend: &mut dyn Backend,
+    path: &Path,
+    args: &[String],
+    preloads: &[String],
+    exec_argv: &[String],
+    disallow_string_code_generation: bool,
+    project_root: &Path,
+) -> Result<Output> {
+    let canonical = canonical_path(path)?;
+    let text = read_source(path)?;
+    let launch_cwd = std::env::current_dir()
+        .map_err(|source| Error::io("cannot read the working directory", source))?;
+    let resolver = kiln_module_resolver::NodePackageResolver::new(project_root)
+        .map_err(|error| Error::BadInput(format!("cannot resolve preload modules: {error}")))?;
+    // Startup preloads are graph roots too. Their transitive edges need pinned package
+    // resolutions and Node-format metadata before the daemon builds the immutable graph. Resolve
+    // them once using Node CLI rules from cwd, then send the same canonical identities to both
+    // the source synchronizer and the daemon graph builder.
+    let preload_roots = preloads
+        .iter()
+        .map(|preload| {
+            let path = if let Ok(url) = url::Url::parse(preload)
+                && url.scheme() == "file"
+            {
+                if url.query().is_some() || url.fragment().is_some() {
+                    return Err(Error::BadInput(format!(
+                        "Node preload query/fragment identity is not supported yet: `{preload}`"
+                    )));
+                }
+                url.to_file_path().map_err(|()| {
+                    Error::BadInput(format!("invalid file URL preload `{preload}`"))
+                })?
+            } else if Path::new(preload).is_absolute()
+                || preload.starts_with("./")
+                || preload.starts_with("../")
+            {
+                let path = Path::new(preload);
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    launch_cwd.join(path)
+                }
+            } else {
+                resolver
+                    .resolve_package_from_directory(
+                        preload,
+                        &launch_cwd,
+                        kiln_module_resolver::NodeRequestKind::Import,
+                    )
+                    .map_err(|error| {
+                        Error::BadInput(format!("cannot resolve Node preload `{preload}`: {error}"))
+                    })?
+                    .module
+                    .path
+            };
+            canonical_path(&path)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let (mut notes, synced, _manifest, truncated, mut source_view) =
+        sync_project_sources_with_includes(
+            backend,
+            project_root,
+            Some((&canonical, &text)),
+            true,
+            &preload_roots,
+        )?;
+    if !synced.contains(&canonical) {
+        source_view = set_external_source_with_one_resync(
+            backend,
+            project_root,
+            &canonical,
+            &text,
+            source_view,
+        )?;
+    }
+    let run = |backend: &mut dyn Backend, source_view| {
+        backend.node_run_at_view(
+            canonical.clone(),
+            project_root_string(project_root)?,
+            args.to_vec(),
+            preload_roots.clone(),
+            exec_argv.to_vec(),
+            disallow_string_code_generation,
+            StepBudget::Unmetered,
+            source_view,
+        )
+    };
+    let mut output = match run(backend, source_view)? {
+        SourceResponse::Ready(summary) => finish_run_summary(path, summary, notes, Some(&text)),
+        SourceResponse::Stale(_) => {
+            let (retry_notes, paths, manifest, truncated, view) =
+                sync_project_sources_with_includes(
+                    backend,
+                    project_root,
+                    Some((&canonical, &text)),
+                    true,
+                    &preload_roots,
+                )?;
+            let mut source_view = if paths.contains(&canonical) {
+                view
+            } else {
+                set_external_source_with_one_resync(backend, project_root, &canonical, &text, view)?
+            };
+            let snapshot = Snapshot {
+                notes: retry_notes,
+                synced_paths: paths,
+                manifest,
+                truncated,
+                source_view,
+            };
+            notes.extend(snapshot.notes);
+            source_view = snapshot.source_view;
+            match run(backend, source_view)? {
+                SourceResponse::Ready(summary) => {
+                    finish_run_summary(path, summary, notes, Some(&text))
+                }
+                SourceResponse::Stale(current) => {
+                    return Err(Error::Protocol(format!("stale source view {}", current.0)));
+                }
+            }
+        }
+    };
+    if truncated {
+        output
+            .notes
+            .push("project source walk was truncated".to_owned());
+    }
+    output.source_view = Some(source_view);
+    Ok(output)
+}
+
 /// Compile and execute a source snapshot that the caller has already read. This is used by
 /// `watch`: its byte comparison and the execution must refer to the same save, even if an
 /// editor replaces the file again while project synchronization is walking the tree.
@@ -1615,6 +1747,7 @@ mod tests {
                     Request::CommitSync { .. } => "CommitSync",
                     Request::Check { .. } => "Check",
                     Request::Run { .. } => "Run",
+                    Request::NodeRun { .. } => "NodeRun",
                     Request::NativeBuild { .. } => "NativeBuild",
                     Request::NativeBuildAtRevision { .. } => "NativeBuildAtRevision",
                     Request::NativeSharedBuild { .. } => "NativeSharedBuild",
@@ -1676,6 +1809,23 @@ mod tests {
                     })
                 }
                 Request::Run { path, .. } => Response::Ran(RunSummary {
+                    revision: self.stats.revision,
+                    path,
+                    file: FileId(1),
+                    succeeded: self.diagnostics.is_empty(),
+                    exit_code: None,
+                    signal: None,
+                    stdout: "hello from kiln\n".to_string(),
+                    stderr: String::new(),
+                    value: Some("undefined".to_string()),
+                    scalar_value: self
+                        .diagnostics
+                        .is_empty()
+                        .then_some(kiln_proto::ScalarValueSummary::Undefined),
+                    instructions: 4,
+                    diagnostics: self.diagnostics.clone(),
+                }),
+                Request::NodeRun { path, .. } => Response::Ran(RunSummary {
                     revision: self.stats.revision,
                     path,
                     file: FileId(1),
@@ -1854,6 +2004,13 @@ mod tests {
                     })
                 }
                 Request::Run { .. } if self.stale_runs > 0 => {
+                    self.stale_runs -= 1;
+                    self.inner.seen.push(request);
+                    Ok(Response::StaleSourceView {
+                        current: SourceView(99),
+                    })
+                }
+                Request::NodeRun { .. } if self.stale_runs > 0 => {
                     self.stale_runs -= 1;
                     self.inner.seen.push(request);
                     Ok(Response::StaleSourceView {

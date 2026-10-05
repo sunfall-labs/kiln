@@ -915,6 +915,29 @@ fn handle<E: QueryEngine>(
             steps,
             source_view,
         ),
+        Request::NodeRun {
+            path,
+            project_root,
+            args,
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+            wall_clock,
+            steps,
+            source_view,
+            stream_output: _,
+        } => handle_node_run(
+            state,
+            path,
+            project_root,
+            args,
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+            wall_clock,
+            steps,
+            source_view,
+        ),
         Request::TestInventory { root } => {
             run_without_engine_lock(|| match tests.inventory(&root) {
                 Ok(tests) => Response::TestInventory(tests),
@@ -1241,6 +1264,9 @@ fn handle_run<E: QueryEngine>(
                 graph: Ok(graph),
                 path,
                 args,
+                exec_argv: Vec::new(),
+                disallow_string_code_generation: false,
+                has_preloads: false,
                 file,
                 revision,
                 overlay,
@@ -1293,6 +1319,9 @@ fn handle_run<E: QueryEngine>(
                         graph: Ok(graph),
                         path,
                         args,
+                        exec_argv: Vec::new(),
+                        disallow_string_code_generation: false,
+                        has_preloads: false,
                         file,
                         revision,
                         overlay,
@@ -1306,6 +1335,9 @@ fn handle_run<E: QueryEngine>(
                         graph: Err(error),
                         path,
                         args,
+                        exec_argv: Vec::new(),
+                        disallow_string_code_generation: false,
+                        has_preloads: false,
                         file,
                         revision,
                         overlay: std::collections::HashMap::new(),
@@ -1315,6 +1347,70 @@ fn handle_run<E: QueryEngine>(
         }
     };
     run_without_engine_lock(|| execute_prepared_run(prepared, node, wall_clock, steps))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_node_run<E: QueryEngine>(
+    state: &Mutex<DaemonState<E>>,
+    path: String,
+    project_root: String,
+    args: Vec<String>,
+    preloads: Vec<String>,
+    exec_argv: Vec<String>,
+    disallow_string_code_generation: bool,
+    wall_clock: bool,
+    steps: StepBudget,
+    source_view: SourceView,
+) -> (Response, Next) {
+    let prepared = {
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.source_view != source_view {
+            return (
+                Response::StaleSourceView {
+                    current: guard.source_view,
+                },
+                Next::Continue,
+            );
+        }
+        let revision = guard.engine.revision().0;
+        let resolutions = guard.resolutions.clone();
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            let DaemonState {
+                engine,
+                graph_cache,
+                ..
+            } = &mut *guard;
+            crate::dispatch::prepare_run_with_launch_options(
+                engine,
+                Some(graph_cache),
+                path,
+                args,
+                project_root,
+                resolutions.as_ref(),
+                true,
+                preloads,
+                exec_argv,
+                disallow_string_code_generation,
+            )
+        })) {
+            Ok(Ok(prepared)) if guard.engine.revision().0 == revision => prepared,
+            Ok(Ok(_)) => {
+                match next_source_view(guard.source_view) {
+                    Ok(view) => guard.source_view = view,
+                    Err(message) => return (Response::Error { message }, Next::Continue),
+                }
+                return (
+                    Response::StaleSourceView {
+                        current: guard.source_view,
+                    },
+                    Next::Continue,
+                );
+            }
+            Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
+            Err(payload) => return (internal_error(&*payload), Next::Continue),
+        }
+    };
+    run_without_engine_lock(|| execute_prepared_run(prepared, true, wall_clock, steps))
 }
 
 /// Prepare a native build against one exact engine snapshot, compile without the lock, and

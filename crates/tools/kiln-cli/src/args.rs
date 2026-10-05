@@ -116,6 +116,14 @@ pub enum Command {
         binary: String,
         args: Vec<String>,
     },
+    /// Node-compatible source launch used when this executable is `process.execPath`.
+    NodeLaunch {
+        path: PathBuf,
+        args: Vec<String>,
+        preloads: Vec<String>,
+        exec_argv: Vec<String>,
+        disallow_string_code_generation: bool,
+    },
 }
 
 /// What `kiln cache` was asked to do. One action today, spelled as an action rather than as a
@@ -140,6 +148,14 @@ pub fn parse<I>(args: I) -> Result<Parsed>
 where
     I: IntoIterator<Item = String>,
 {
+    let args = args.into_iter().collect::<Vec<_>>();
+    if args.first().is_some_and(|arg| {
+        arg == "--import"
+            || arg.starts_with("--import=")
+            || arg == "--disallow-code-generation-from-strings"
+    }) {
+        return parse_node_launch(args);
+    }
     let mut positional: Vec<String> = Vec::new();
     let mut one_shot = false;
     let mut socket: Option<PathBuf> = None;
@@ -591,6 +607,59 @@ where
     }))
 }
 
+fn parse_node_launch(args: Vec<String>) -> Result<Parsed> {
+    let mut cursor = 0;
+    let mut preloads = Vec::new();
+    let mut exec_argv = Vec::new();
+    let mut disallow_string_code_generation = false;
+    while cursor < args.len() && args[cursor].starts_with('-') {
+        let flag = &args[cursor];
+        if flag == "--disallow-code-generation-from-strings" {
+            disallow_string_code_generation = true;
+            exec_argv.push(flag.clone());
+            cursor += 1;
+        } else if flag == "--import" {
+            let Some(preload) = args.get(cursor + 1) else {
+                return Err(Error::usage("--import requires a module path"));
+            };
+            if preload.starts_with('-') {
+                return Err(Error::usage("--import requires a module path"));
+            }
+            preloads.push(preload.clone());
+            exec_argv.extend([flag.clone(), preload.clone()]);
+            cursor += 2;
+        } else if let Some(preload) = flag.strip_prefix("--import=") {
+            if preload.is_empty() {
+                return Err(Error::usage("--import requires a module path"));
+            }
+            preloads.push(preload.to_owned());
+            exec_argv.push(flag.clone());
+            cursor += 1;
+        } else {
+            return Err(Error::usage(format!(
+                "unsupported Node source execution flag `{flag}`"
+            )));
+        }
+    }
+    let Some(path) = args.get(cursor) else {
+        return Err(Error::usage(
+            "Node source execution flags require an entry module path",
+        ));
+    };
+    cursor += 1;
+    Ok(Parsed::Run(Invocation {
+        command: Command::NodeLaunch {
+            path: PathBuf::from(path),
+            args: args[cursor..].to_vec(),
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+        },
+        one_shot: true,
+        socket: None,
+    }))
+}
+
 fn value_for<I>(flag: &str, inline: Option<String>, rest: &mut I) -> Result<String>
 where
     I: Iterator<Item = String>,
@@ -793,6 +862,56 @@ mod tests {
             Err(Error::Usage(message)) => message,
             other => panic!("expected a usage error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn node_source_launch_preserves_ordered_preloads_flags_and_script_args() {
+        let parsed = parse([
+            "--import".to_owned(),
+            "./first.ts".to_owned(),
+            "--disallow-code-generation-from-strings".to_owned(),
+            "--import=./second.ts".to_owned(),
+            "./entry.ts".to_owned(),
+            "--program-flag".to_owned(),
+            "value".to_owned(),
+        ])
+        .expect("Node source launch parses");
+        let Parsed::Run(invocation) = parsed else {
+            panic!("source launch becomes a run");
+        };
+        assert!(invocation.one_shot);
+        let Command::NodeLaunch {
+            path,
+            args,
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+        } = invocation.command
+        else {
+            panic!("Node source launch keeps its options");
+        };
+        assert_eq!(path, PathBuf::from("./entry.ts"));
+        assert_eq!(args, ["--program-flag", "value"]);
+        assert_eq!(preloads, ["./first.ts", "./second.ts"]);
+        assert_eq!(
+            exec_argv,
+            [
+                "--import",
+                "./first.ts",
+                "--disallow-code-generation-from-strings",
+                "--import=./second.ts"
+            ]
+        );
+        assert!(disallow_string_code_generation);
+    }
+
+    #[test]
+    fn node_source_launch_refuses_unknown_flags_and_missing_entry() {
+        assert!(
+            usage_error(&["--import", "preload.ts", "--experimental-flag", "entry.ts"])
+                .contains("unsupported Node source execution flag")
+        );
+        assert!(usage_error(&["--import", "preload.ts"]).contains("require an entry module path"));
     }
 
     #[test]

@@ -472,6 +472,22 @@ pub fn transfer_region_op(ptr: u64) -> Result<HostValue, HostError> {
 pub trait HostOps {
     fn call(&mut self, operation: HostOp, arguments: &[HostValue]) -> Result<HostValue, HostError>;
 
+    /// Run a child process synchronously for Node's `child_process.execFileSync` adapter.
+    ///
+    /// This is a separate capability from [`AsyncHostOps`]: JavaScript observes this operation
+    /// before the current call returns, so adapting an asynchronous request by scheduling a
+    /// Promise would change the API. Hosts that do not expose synchronous process execution
+    /// keep the default named refusal.
+    fn run_process_sync(
+        &mut self,
+        _command: &str,
+        _args: &[String],
+    ) -> Result<SyncProcessOutput, HostError> {
+        Err(HostError::new(
+            "synchronous process execution is unavailable in this host",
+        ))
+    }
+
     /// Optional synchronous filesystem capability.
     fn fs(&mut self) -> Option<&mut (dyn FileSystemOps + '_)> {
         None
@@ -481,6 +497,17 @@ pub trait HostOps {
     fn clone_fs(&self) -> Option<Box<dyn FileSystemOps>> {
         None
     }
+}
+
+/// Owned result of a synchronous child process launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncProcessOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub status: Option<i32>,
+    pub signal: Option<String>,
+    pub pid: Option<u32>,
+    pub error: Option<String>,
 }
 
 /// Portable metadata about a filesystem entry, usable by both OS and virtual filesystems.

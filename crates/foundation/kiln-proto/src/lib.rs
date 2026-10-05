@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 41;
+pub const PROTOCOL_VERSION: u32 = 42;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -737,6 +737,27 @@ pub enum Request {
         #[serde(default)]
         stream_output: bool,
     },
+    /// Run a source entry with Node-style startup imports and string-code-generation policy.
+    /// This is the process.execPath child-launch path, distinct from an ordinary editor/run
+    /// request so existing clients retain their original defaults.
+    NodeRun {
+        path: String,
+        project_root: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        preloads: Vec<String>,
+        #[serde(default)]
+        exec_argv: Vec<String>,
+        #[serde(default)]
+        disallow_string_code_generation: bool,
+        #[serde(default)]
+        wall_clock: bool,
+        steps: StepBudget,
+        source_view: SourceView,
+        #[serde(default)]
+        stream_output: bool,
+    },
     /// Emit, compile, and link one module through the native backend.
     NativeBuild {
         path: String,
@@ -1262,7 +1283,7 @@ mod tests {
 
     #[test]
     fn current_protocol_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 41);
+        assert_eq!(PROTOCOL_VERSION, 42);
 
         let requests = [
             (
@@ -1347,6 +1368,32 @@ mod tests {
                     "steps": {"Limited": 1_000_000},
                     "source_view": 12,
                     "stream_output": false
+                }}),
+            ),
+            (
+                Request::NodeRun {
+                    path: "runner.ts".to_owned(),
+                    project_root: "/project".to_owned(),
+                    args: vec!["work".to_owned()],
+                    preloads: vec!["guard.ts".to_owned()],
+                    exec_argv: vec!["--import".to_owned(), "guard.ts".to_owned()],
+                    disallow_string_code_generation: true,
+                    wall_clock: true,
+                    steps: StepBudget::Unmetered,
+                    source_view: SourceView(12),
+                    stream_output: true,
+                },
+                serde_json::json!({"NodeRun": {
+                    "path": "runner.ts",
+                    "project_root": "/project",
+                    "args": ["work"],
+                    "preloads": ["guard.ts"],
+                    "exec_argv": ["--import", "guard.ts"],
+                    "disallow_string_code_generation": true,
+                    "wall_clock": true,
+                    "steps": "Unmetered",
+                    "source_view": 12,
+                    "stream_output": true
                 }}),
             ),
             (

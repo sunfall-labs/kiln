@@ -2982,6 +2982,7 @@ pub(crate) fn call_native(
         | Native::GcRequest
         | Native::ProcessStartRaw
         | Native::ProcessCancelRaw
+        | Native::NodeChildProcessExecFileSync
         | Native::UrlParseRaw
         | Native::UrlSetRaw
         | Native::UrlFastRaw

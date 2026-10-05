@@ -1679,6 +1679,7 @@ pub struct ExecutionCapabilities {
     source_compiler: Option<SourceCompiler>,
     realm_bootstrap: Option<RealmBootstrap>,
     module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
+    disallow_string_code_generation: bool,
     host_realms: bool,
     host_agents: Option<&'static str>,
     /// The command line this execution's `process.argv` reports, exactly as the host spelled it.
@@ -1688,6 +1689,8 @@ pub struct ExecutionCapabilities {
     /// would put a made-up executable path in front of a program that asked where it came from.
     /// A host that has one states it, which is the same bargain as every other entry here.
     argv: Vec<String>,
+    /// Runtime flags this execution reports through `process.execArgv`.
+    exec_argv: Vec<String>,
     /// How this execution starts a `node:worker_threads` worker's realm, when it can.
     worker_host: Option<Arc<dyn WorkerHost>>,
 }
@@ -1704,6 +1707,17 @@ pub trait WorkerHost: Send + Sync {
 }
 
 impl ExecutionCapabilities {
+    /// Disallow `eval` and function constructors when this execution is launched with Node's
+    /// `--disallow-code-generation-from-strings` policy.
+    pub const fn with_string_code_generation(mut self, allowed: bool) -> Self {
+        self.disallow_string_code_generation = !allowed;
+        self
+    }
+
+    pub const fn string_code_generation_allowed(&self) -> bool {
+        !self.disallow_string_code_generation
+    }
+
     pub const fn with_source_compiler(mut self, compiler: SourceCompiler) -> Self {
         self.source_compiler = Some(compiler);
         self
@@ -1780,8 +1794,18 @@ impl ExecutionCapabilities {
         self
     }
 
+    /// State the startup flags this execution reports through `process.execArgv`.
+    pub fn with_exec_argv(mut self, exec_argv: Vec<String>) -> Self {
+        self.exec_argv = exec_argv;
+        self
+    }
+
     pub fn argv(&self) -> &[String] {
         &self.argv
+    }
+
+    pub fn exec_argv(&self) -> &[String] {
+        &self.exec_argv
     }
 
     /// Let this execution start workers, through `host`.

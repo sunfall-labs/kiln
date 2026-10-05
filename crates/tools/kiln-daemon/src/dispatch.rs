@@ -35,6 +35,9 @@ pub(crate) enum PreparedRun {
         graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
         path: String,
         args: Vec<String>,
+        exec_argv: Vec<String>,
+        disallow_string_code_generation: bool,
+        has_preloads: bool,
         file: kiln_db::FileId,
         revision: u64,
         overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
@@ -43,6 +46,8 @@ pub(crate) enum PreparedRun {
         program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
         path: String,
         args: Vec<String>,
+        exec_argv: Vec<String>,
+        disallow_string_code_generation: bool,
         file: kiln_db::FileId,
         revision: u64,
         overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
@@ -104,6 +109,7 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
         Request::SetSource { .. }
             | Request::Check { .. }
             | Request::Run { .. }
+            | Request::NodeRun { .. }
             | Request::NativeBuild { .. }
             | Request::NativeBuildAtRevision { .. }
             | Request::NativeSharedBuild { .. }
@@ -195,6 +201,32 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                 project_root,
                 args,
                 node,
+                wall_clock,
+                steps,
+            ),
+            Next::Continue,
+        ),
+        Request::NodeRun {
+            path,
+            project_root,
+            args,
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+            wall_clock,
+            steps,
+            source_view: _,
+            stream_output: _,
+        } => (
+            node_run(
+                engine,
+                resolutions,
+                path,
+                project_root,
+                args,
+                preloads,
+                exec_argv,
+                disallow_string_code_generation,
                 wall_clock,
                 steps,
             ),
@@ -520,24 +552,77 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
     resolutions: Option<&kiln_proto::ResolutionMap>,
     node: bool,
 ) -> Result<PreparedRun, String> {
+    prepare_run_with_launch_options(
+        engine,
+        cache,
+        path,
+        args,
+        project_root,
+        resolutions,
+        node,
+        Vec::new(),
+        Vec::new(),
+        false,
+    )
+}
+
+pub(crate) fn prepare_run_with_launch_options<E: QueryEngine>(
+    engine: &mut E,
+    cache: Option<&mut GraphCache>,
+    path: String,
+    args: Vec<String>,
+    project_root: String,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
+    node: bool,
+    preloads: Vec<String>,
+    exec_argv: Vec<String>,
+    disallow_string_code_generation: bool,
+) -> Result<PreparedRun, String> {
     let overlay = build_vfs_overlay(engine);
     let entry = resolve_source_path(&path, &project_root);
     let prepared = if let Some(entry) = entry {
         let file = ensure_canonical_source(engine, &path, &entry, &project_root)?;
+        let preload_paths = preloads
+            .iter()
+            .map(|preload| {
+                let resolved = resolve_source_path(preload, &project_root).ok_or_else(|| {
+                    format!("cannot resolve source preload `{preload}` from `{project_root}`")
+                })?;
+                ensure_canonical_source(engine, preload, &resolved, &project_root)?;
+                Ok::<_, String>(resolved)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_preloads = !preload_paths.is_empty();
         PreparedRun::Graph {
-            graph: graph_snapshot(engine, cache, &entry, &project_root, resolutions, node),
+            graph: graph_snapshot_with_preloads(
+                engine,
+                cache,
+                &entry,
+                &project_root,
+                resolutions,
+                node,
+                &preload_paths,
+            ),
             path,
             args,
+            exec_argv,
+            disallow_string_code_generation,
+            has_preloads,
             file,
             revision: engine.revision().0,
             overlay,
         }
     } else {
+        if !preloads.is_empty() {
+            return Err("source preloads require a module-graph entry".to_owned());
+        }
         let file = ensure_source(engine, &path)?;
         PreparedRun::Program {
             program: engine.ir(file),
             path,
             args,
+            exec_argv,
+            disallow_string_code_generation,
             file,
             revision: engine.revision().0,
             overlay,
@@ -930,21 +1015,47 @@ pub(crate) fn execute_prepared_run(
             graph,
             path,
             args,
+            exec_argv,
+            disallow_string_code_generation,
+            has_preloads,
             file,
             revision,
             overlay,
         } => execute_graph(
-            graph, path, args, file, revision, node, wall_clock, limits, overlay,
+            graph,
+            path,
+            args,
+            exec_argv,
+            disallow_string_code_generation,
+            has_preloads,
+            file,
+            revision,
+            node,
+            wall_clock,
+            limits,
+            overlay,
         ),
         PreparedRun::Program {
             program,
             path,
             args,
+            exec_argv,
+            disallow_string_code_generation,
             file,
             revision,
             overlay,
         } => execute_program(
-            program, path, args, file, revision, node, wall_clock, limits, overlay,
+            program,
+            path,
+            args,
+            exec_argv,
+            disallow_string_code_generation,
+            file,
+            revision,
+            node,
+            wall_clock,
+            limits,
+            overlay,
         ),
     };
     if let (Some(signal), Response::Ran(summary)) = (hosted.terminated_by(), &mut response) {
@@ -1106,6 +1217,36 @@ fn run<E: QueryEngine>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn node_run<E: QueryEngine>(
+    engine: &mut E,
+    resolutions: Option<&ResolutionMap>,
+    path: String,
+    project_root: String,
+    args: Vec<String>,
+    preloads: Vec<String>,
+    exec_argv: Vec<String>,
+    disallow_string_code_generation: bool,
+    wall_clock: bool,
+    steps: StepBudget,
+) -> Response {
+    match prepare_run_with_launch_options(
+        engine,
+        None,
+        path,
+        args,
+        project_root,
+        resolutions,
+        true,
+        preloads,
+        exec_argv,
+        disallow_string_code_generation,
+    ) {
+        Ok(prepared) => execute_prepared_run(prepared, true, wall_clock, steps),
+        Err(message) => Response::Error { message },
+    }
+}
+
 /// What `process.argv` reports for an interpreted run, in node's spelling: the executable that
 /// is running, then the entry it was pointed at, followed by any arguments passed to the script.
 ///
@@ -1146,6 +1287,9 @@ fn execute_graph(
     graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
     path: String,
     args: Vec<String>,
+    exec_argv: Vec<String>,
+    disallow_string_code_generation: bool,
+    has_preloads: bool,
     file: kiln_db::FileId,
     revision: u64,
     node: bool,
@@ -1153,16 +1297,26 @@ fn execute_graph(
     limits: kiln_interpreter::ExecutionLimits,
     overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
 ) -> Response {
-    let capabilities =
-        kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path, &args));
-    let mut host = streaming_host(kiln_runtime::CaptureHost::new().with_fs(Box::new(
-        kiln_host_abi::OverlayFileSystem::new(kiln_host_abi::OsFileSystem, overlay),
-    )));
+    let capabilities = kiln_conformance::source_compiler_capability()
+        .with_argv(interpreted_argv(&path, &args))
+        .with_exec_argv(exec_argv)
+        .with_string_code_generation(!disallow_string_code_generation);
+    let mut host = streaming_host(
+        kiln_runtime::CaptureHost::new()
+            .with_fs(Box::new(kiln_host_abi::OverlayFileSystem::new(
+                kiln_host_abi::OsFileSystem,
+                overlay,
+            )))
+            .with_sync_process(node),
+    );
     // One shaken graph feeds execution: reduce to the closed-world live
     // subset first, so dead modules never evaluate. Development selection
     // keeps the interpreter conservative; a reduction failure runs the full
     // graph rather than refusing a program liveness could not classify.
     let graph = graph.map(|graph| {
+        if has_preloads {
+            return graph;
+        }
         kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
             .and_then(|demand| {
                 graph
@@ -1254,6 +1408,7 @@ fn build_graph<E: QueryEngine>(
     entry: &Path,
     project_root: &str,
     node: bool,
+    preloads: &[PathBuf],
 ) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
     let declared_includes = declared_include_sources(resolutions)?;
     let entries = resolutions
@@ -1325,7 +1480,17 @@ fn build_graph<E: QueryEngine>(
         error,
     })?
     .with_runtime_package_aliases(runtime_package_aliases);
-    ModuleGraph::build_with_typed_policy_includes(entry, resolver, provider, declared_includes)
+    if !preloads.is_empty() {
+        ModuleGraph::build_with_typed_policy_preloads_and_includes(
+            entry,
+            resolver,
+            provider,
+            preloads.to_vec(),
+            declared_includes,
+        )
+    } else {
+        ModuleGraph::build_with_typed_policy_includes(entry, resolver, provider, declared_includes)
+    }
 }
 
 fn module_payload<E: QueryEngine>(
@@ -1501,6 +1666,18 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
     resolutions: Option<&kiln_proto::ResolutionMap>,
     node: bool,
 ) -> Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError> {
+    graph_snapshot_with_preloads(engine, cache, entry, project_root, resolutions, node, &[])
+}
+
+fn graph_snapshot_with_preloads<E: QueryEngine>(
+    engine: &mut E,
+    cache: Option<&mut GraphCache>,
+    entry: &Path,
+    project_root: &str,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
+    node: bool,
+    preloads: &[PathBuf],
+) -> Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError> {
     let canonical_root = std::fs::canonicalize(project_root).map_err(|error| {
         kiln_module_graph::ModuleGraphError::Source {
             path: PathBuf::from(project_root),
@@ -1525,7 +1702,24 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
             kind: error.kind(),
         }
     })?;
-    let key = GraphCacheKey::new(canonical_root, canonical_entry.clone(), resolutions, node);
+    let canonical_preloads = preloads
+        .iter()
+        .map(|path| {
+            std::fs::canonicalize(path).map_err(|error| {
+                kiln_module_graph::ModuleGraphError::Entry {
+                    path: path.clone(),
+                    kind: error.kind(),
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = GraphCacheKey::new_with_startup_roots(
+        canonical_root,
+        canonical_entry.clone(),
+        resolutions,
+        node,
+        canonical_preloads,
+    );
     if let Some(cache) = cache {
         match cache.lookup(&key, |file| engine.source_revision(file)) {
             GraphCacheLookup::Hit(graph) => return Ok(graph),
@@ -1573,7 +1767,14 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
             GraphCacheLookup::Stale { .. } => cache.record_miss(),
             GraphCacheLookup::Miss => {}
         }
-        let graph = build_graph(engine, resolutions, &canonical_entry, project_root, node)?;
+        let graph = build_graph(
+            engine,
+            resolutions,
+            &canonical_entry,
+            project_root,
+            node,
+            &key.startup_roots,
+        )?;
         return Ok(match graph_sources(engine, &graph) {
             Some(sources) => cache.insert(key, sources, graph),
             // Graph construction rejects non-UTF-8 and unsynchronized modules, so this is a
@@ -1581,7 +1782,15 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
             None => Arc::new(graph),
         });
     }
-    build_graph(engine, resolutions, &canonical_entry, project_root, node).map(Arc::new)
+    build_graph(
+        engine,
+        resolutions,
+        &canonical_entry,
+        project_root,
+        node,
+        &key.startup_roots,
+    )
+    .map(Arc::new)
 }
 
 fn module_evaluation_diagnostics(error: ModuleEvaluationError) -> Vec<Diagnostic> {
@@ -1682,6 +1891,8 @@ fn execute_program(
     program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
     path: String,
     args: Vec<String>,
+    exec_argv: Vec<String>,
+    disallow_string_code_generation: bool,
     file: kiln_db::FileId,
     revision: u64,
     node: bool,
@@ -1691,6 +1902,8 @@ fn execute_program(
 ) -> Response {
     let capabilities = kiln_conformance::source_compiler_capability()
         .with_argv(interpreted_argv(&path, &args))
+        .with_exec_argv(exec_argv)
+        .with_string_code_generation(!disallow_string_code_generation)
         .with_realm_bootstrap(kiln_module_eval::realm_bootstrap(node));
     let program = match program {
         Ok(program) => program,
@@ -1720,9 +1933,14 @@ fn execute_program(
         }
     };
 
-    let mut host = streaming_host(kiln_runtime::CaptureHost::new().with_fs(Box::new(
-        kiln_host_abi::OverlayFileSystem::new(kiln_host_abi::OsFileSystem, overlay),
-    )));
+    let mut host = streaming_host(
+        kiln_runtime::CaptureHost::new()
+            .with_fs(Box::new(kiln_host_abi::OverlayFileSystem::new(
+                kiln_host_abi::OsFileSystem,
+                overlay,
+            )))
+            .with_sync_process(node),
+    );
     let result = if node {
         if wall_clock {
             let strictness = std::rc::Rc::new(kiln_ir::Strictness::sloppy(&program));

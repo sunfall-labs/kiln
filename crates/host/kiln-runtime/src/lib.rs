@@ -5859,6 +5859,7 @@ pub struct CaptureHost {
     /// ordinary, and against a constant clock it would wait forever.
     clock_ms: f64,
     fs: Option<Box<dyn kiln_host_abi::FileSystemOps>>,
+    sync_process: bool,
     /// When set, each write is handed here (`true` for stderr) the moment it happens and is not
     /// retained in `stdout`/`stderr`. A program that never finishes, a server, would otherwise
     /// say nothing until it was killed.
@@ -5872,6 +5873,7 @@ impl std::fmt::Debug for CaptureHost {
             .field("stderr", &self.stderr)
             .field("clock_ms", &self.clock_ms)
             .field("has_fs", &self.fs.is_some())
+            .field("sync_process", &self.sync_process)
             .finish()
     }
 }
@@ -5883,6 +5885,7 @@ impl Default for CaptureHost {
             stderr: String::new(),
             clock_ms: CAPTURE_HOST_CLOCK_START_MS,
             fs: None,
+            sync_process: false,
             stream: None,
         }
     }
@@ -5902,6 +5905,12 @@ impl CaptureHost {
 
     pub fn with_fs(mut self, fs: Box<dyn kiln_host_abi::FileSystemOps>) -> Self {
         self.fs = Some(fs);
+        self
+    }
+
+    /// Grant the Node adapter synchronous child-process authority for this host.
+    pub fn with_sync_process(mut self, enabled: bool) -> Self {
+        self.sync_process = enabled;
         self
     }
 
@@ -5984,6 +5993,77 @@ impl HostOps for CaptureHost {
     fn clone_fs(&self) -> Option<Box<dyn kiln_host_abi::FileSystemOps>> {
         self.fs.as_ref().and_then(|f| f.clone_box())
     }
+
+    fn run_process_sync(
+        &mut self,
+        command: &str,
+        args: &[String],
+    ) -> Result<kiln_host_abi::SyncProcessOutput, HostError> {
+        use std::process::{Command, Stdio};
+
+        if !self.sync_process {
+            return Err(HostError::new(
+                "synchronous process execution is unavailable in this host",
+            ));
+        }
+
+        let child = match Command::new(command)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                return Ok(kiln_host_abi::SyncProcessOutput {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    status: None,
+                    signal: None,
+                    pid: None,
+                    error: Some(error.to_string()),
+                });
+            }
+        };
+        let pid = Some(child.id());
+        let output = child.wait_with_output().map_err(|error| {
+            HostError::new(format!("failed waiting for child process: {error}"))
+        })?;
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt;
+            output.status.signal().map(sync_signal_name)
+        };
+        #[cfg(not(unix))]
+        let signal: Option<String> = None;
+
+        Ok(kiln_host_abi::SyncProcessOutput {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            status: output.status.code(),
+            signal,
+            pid,
+            error: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+fn sync_signal_name(signal: i32) -> String {
+    match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        6 => "SIGABRT",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => return format!("SIG{signal}"),
+    }
+    .to_owned()
 }
 
 /// Converts a JavaScript millisecond delay into the Realm's virtual duration.

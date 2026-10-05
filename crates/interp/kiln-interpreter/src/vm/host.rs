@@ -5339,6 +5339,62 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        if native == Native::NodeChildProcessExecFileSync {
+            let Some(Value::String(command)) = arguments.first() else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "child process file must be a string".into(),
+                });
+            };
+            let args = arguments
+                .iter()
+                .skip(1)
+                .map(|argument| match argument {
+                    Value::String(argument) => Ok(argument.to_lossy_string()),
+                    value => Err(ExecutionError::TypeErrorMessage {
+                        message: format!(
+                            "child process argument must be a string, received {}",
+                            value.type_name()
+                        ),
+                    }),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let output = self
+                .host
+                .run_process_sync(&command.to_lossy_string(), &args)
+                .map_err(|error| ExecutionError::Host {
+                    instruction,
+                    message: error.to_string(),
+                })?;
+            let latin1 = |bytes: &[u8]| bytes.iter().copied().map(char::from).collect::<String>();
+            let mut result = ObjectData::default();
+            result.set("stdout", Value::String(latin1(&output.stdout).into()));
+            result.set("stderr", Value::String(latin1(&output.stderr).into()));
+            result.set(
+                "status",
+                output
+                    .status
+                    .map_or(Value::Null, |status| Value::Number(status as f64)),
+            );
+            result.set(
+                "pid",
+                output
+                    .pid
+                    .map_or(Value::Undefined, |pid| Value::Number(pid as f64)),
+            );
+            result.set(
+                "error",
+                output
+                    .error
+                    .map_or(Value::Null, |error| Value::String(error.into())),
+            );
+            result.set(
+                "signal",
+                output
+                    .signal
+                    .map_or(Value::Null, |signal| Value::String(signal.into())),
+            );
+            return Ok(Value::Object(Rc::new(RefCell::new(result))));
+        }
         if native == Native::ProcessStartRaw {
             let bytes = match arguments.first() {
                 Some(Value::TypedArray(bytes)) => bytes.bytes(),

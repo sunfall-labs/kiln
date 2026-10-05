@@ -156,6 +156,7 @@ pub(super) fn native_js_name(native: &Native) -> String {
     match native {
         Native::ProcessStartRaw => "__kilnHostProcessStart".to_owned(),
         Native::ProcessCancelRaw => "__kilnHostProcessCancel".to_owned(),
+        Native::NodeChildProcessExecFileSync => "__execFileSync".to_owned(),
         Native::ProcessExitCodeGet => "processExitCodeGet".to_owned(),
         Native::ProcessExitCodeSet => "processExitCodeSet".to_owned(),
         Native::GcRequest => "gcRequest".to_owned(),

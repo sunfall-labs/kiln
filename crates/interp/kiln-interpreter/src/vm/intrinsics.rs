@@ -364,6 +364,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             native,
             Native::ProcessStartRaw
                 | Native::ProcessCancelRaw
+                | Native::NodeChildProcessExecFileSync
                 | Native::NodeFsReadFile
                 | Native::NodeFsWriteFile
                 | Native::NodeFsAppendFile
@@ -3517,7 +3518,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // The two built-ins that compile. Both need the machine -- a compiled program is
             // entered as a frame and run -- so neither can live in `call_native`, which is a
             // free function with no VM to enter one on.
-            Native::Eval => self.indirect_eval(arguments),
+            Native::Eval => self.indirect_eval(arguments, instruction),
             Native::FunctionConstructor => {
                 self.function_from_source(arguments, instruction, "function")
             }

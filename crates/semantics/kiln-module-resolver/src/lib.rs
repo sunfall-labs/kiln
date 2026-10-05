@@ -912,6 +912,61 @@ impl NodePackageResolver {
         self.resolve_with_metadata_for_request(specifier, importer, NodeRequestKind::Import)
     }
 
+    /// Resolve a bare package request from a Node CLI working directory.
+    ///
+    /// Unlike a source import, a CLI preload has no importing file. Node resolves its bare
+    /// package names from `process.cwd()`, so accepting a directory here avoids inventing a
+    /// package.json importer or resolving from the entry module's directory.
+    pub fn resolve_package_from_directory(
+        &self,
+        specifier: &str,
+        importer_directory: impl AsRef<Path>,
+        request: NodeRequestKind,
+    ) -> Result<ResolvedRequest, ResolveError> {
+        if !matches!(
+            classify_specifier(specifier),
+            Err(ResolveError::InvalidSpecifier {
+                reason: InvalidSpecifierReason::BarePackage,
+                ..
+            })
+        ) {
+            return Err(ResolveError::InvalidSpecifier {
+                specifier: specifier.to_owned(),
+                reason: InvalidSpecifierReason::BarePackage,
+            });
+        }
+        let importer_directory = importer_directory.as_ref();
+        let canonical_directory = canonical_path(importer_directory, PathRole::Importer)?;
+        if !canonical_directory.starts_with(self.project_root()) {
+            return Err(ResolveError::OutsideProject {
+                path: canonical_directory,
+                project_root: self.project_root().to_path_buf(),
+            });
+        }
+        if !metadata_is_dir(&canonical_directory, PathRole::Importer)? {
+            return Err(ResolveError::NotDirectory {
+                role: PathRole::Importer,
+                path: canonical_directory,
+            });
+        }
+        let packages = match request {
+            NodeRequestKind::Import => &self.import_packages,
+            NodeRequestKind::Require => &self.require_packages,
+        };
+        let resolution = packages
+            .resolve(&canonical_directory, specifier)
+            .map_err(|error| map_package_error(specifier, &canonical_directory, error))?;
+        let package_json = resolution
+            .package_json()
+            .map(|manifest| manifest.path().to_path_buf());
+        validate_node_target(
+            resolution.into_path_buf(),
+            ResolutionKind::Package,
+            package_json,
+            self.project_root(),
+        )
+    }
+
     /// Resolve one request and retain metadata while selecting import or require conditions.
     pub fn resolve_with_metadata_for_request(
         &self,
@@ -2114,6 +2169,42 @@ mod tests {
         assert_eq!(resolved.kind, ResolutionKind::Relative);
         assert_eq!(resolved.path, fs::canonicalize(target).unwrap());
         assert!(resolved.path.is_absolute());
+    }
+
+    #[test]
+    fn resolves_cli_package_preload_from_working_directory() {
+        let project = TempProject::new();
+        project.write(
+            "node_modules/preload-target/package.json",
+            r#"{"exports":"./root.mjs"}"#,
+        );
+        project.write(
+            "node_modules/preload-target/root.mjs",
+            "export const where = 'root';",
+        );
+        project.write(
+            "tools/node_modules/preload-target/package.json",
+            r#"{"exports":"./cwd.mjs"}"#,
+        );
+        let working_target = project.write(
+            "tools/node_modules/preload-target/cwd.mjs",
+            "export const where = 'cwd';",
+        );
+        fs::create_dir_all(project.root.join("tools")).expect("create working directory");
+
+        let resolver = NodePackageResolver::new(&project.root).expect("Node resolver");
+        let resolved = resolver
+            .resolve_package_from_directory(
+                "preload-target",
+                project.root.join("tools"),
+                NodeRequestKind::Import,
+            )
+            .expect("resolve preload from CLI cwd");
+        assert_eq!(resolved.module.kind, ResolutionKind::Package);
+        assert_eq!(
+            resolved.module.path,
+            fs::canonicalize(working_target).unwrap()
+        );
     }
 
     #[test]

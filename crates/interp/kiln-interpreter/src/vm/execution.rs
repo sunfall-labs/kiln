@@ -1059,6 +1059,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             continue;
                         }
                     };
+                    if !self.string_code_generation_allowed {
+                        self.throw_error(
+                            ErrorKind::Eval,
+                            "Code generation from strings disallowed for this context".into(),
+                            current,
+                        )?;
+                        continue;
+                    }
                     // Entered rather than driven: the interpreter loop runs the eval's frame
                     // next, and its `Return` leaves the completion value where this instruction's
                     // result belongs. Nothing is pushed here.

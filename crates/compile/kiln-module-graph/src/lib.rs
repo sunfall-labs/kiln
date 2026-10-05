@@ -197,6 +197,8 @@ pub struct ModuleGraph {
     /// Modules named by the project's closed-world include declaration. They are compiled and
     /// retained as possible runtime entries, but are never evaluated at program startup.
     declared_includes: Arc<BTreeSet<PathBuf>>,
+    /// Explicit source preloads, evaluated before the entry in command-line order.
+    startup_modules: Arc<Vec<PathBuf>>,
     modules: Arc<BTreeMap<PathBuf, ModuleNode>>,
     /// Dependencies-first, deterministic (source-occurrence ordered) module order. CommonJS
     /// cycles appear once in the order, with the back-edge omitted from traversal.
@@ -576,6 +578,7 @@ impl ModuleGraph {
             entry: self.entry.clone(),
             project_root: self.project_root.clone(),
             declared_includes: Arc::clone(&self.declared_includes),
+            startup_modules: Arc::clone(&self.startup_modules),
             modules: Arc::new(modules),
             order: Arc::new(order),
             export_resolutions: Arc::new(export_resolutions),
@@ -826,6 +829,24 @@ impl ModuleGraph {
         )
     }
 
+    /// Build with an explicit set of startup roots and the same typed module provider used by
+    /// the ordinary graph constructor. Startup roots run in order before the entry graph.
+    pub fn build_with_typed_policy_preloads_and_includes<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+        preloads: Vec<PathBuf>,
+        includes: Vec<(PathBuf, ModuleSource)>,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
+        Self::build_with_policy_provider_entry_and_preloads(
+            entry, resolver, provider, true, false, includes, preloads,
+        )
+    }
+
     /// Node-format graph with already-resolved declared modules that may be loaded at runtime.
     pub fn build_node_with_includes<L, F, R>(
         entry: impl AsRef<Path>,
@@ -845,6 +866,59 @@ impl ModuleGraph {
             resolver,
             Self::node_provider(loader, frontend, logical_root),
             includes,
+        )
+    }
+
+    /// Build a Node-format graph whose source preloads are evaluated before `entry`.
+    ///
+    /// The preload paths are graph roots, not source concatenation: their modules retain their
+    /// own URL, `import.meta`, lexical environment, and static dependencies. They are visited in
+    /// argument order, followed by the entry graph.
+    pub fn build_node_with_preloads<L, F, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        loader: L,
+        frontend: F,
+        preloads: Vec<PathBuf>,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        L: SourceLoader,
+        F: Frontend,
+        R: ResolutionPolicy,
+    {
+        Self::build_node_with_preloads_and_includes(
+            entry,
+            resolver,
+            loader,
+            frontend,
+            preloads,
+            Vec::new(),
+        )
+    }
+
+    /// [`Self::build_node_with_preloads`] while retaining declared runtime includes.
+    pub fn build_node_with_preloads_and_includes<L, F, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        loader: L,
+        frontend: F,
+        preloads: Vec<PathBuf>,
+        includes: Vec<(PathBuf, ModuleSource)>,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        L: SourceLoader,
+        F: Frontend,
+        R: ResolutionPolicy,
+    {
+        let logical_root = resolver.project_root().to_path_buf();
+        Self::build_with_policy_provider_entry_and_preloads(
+            entry,
+            resolver,
+            Self::node_provider(loader, frontend, logical_root),
+            true,
+            false,
+            includes,
+            preloads,
         )
     }
 
@@ -1035,6 +1109,30 @@ impl ModuleGraph {
         P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
         R: ResolutionPolicy,
     {
+        Self::build_with_policy_provider_entry_and_preloads(
+            entry,
+            resolver,
+            provider,
+            typed_sources,
+            virtual_entry,
+            includes,
+            Vec::new(),
+        )
+    }
+
+    fn build_with_policy_provider_entry_and_preloads<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+        typed_sources: bool,
+        virtual_entry: bool,
+        includes: Vec<(PathBuf, ModuleSource)>,
+        preloads: Vec<PathBuf>,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
         if !entry.as_ref().is_absolute() {
             return Err(ModuleGraphError::NonAbsoluteEntry {
                 path: entry.as_ref().to_path_buf(),
@@ -1112,7 +1210,19 @@ impl ModuleGraph {
             }
             declared_includes.insert(path.clone());
         }
-        builder.visit_with_includes(entry_path.clone(), includes)?;
+        for preload in &preloads {
+            if !preload.is_absolute() || !preload.starts_with(&root) {
+                return Err(ModuleGraphError::Resolve {
+                    importer: entry_path.clone(),
+                    specifier: preload.display().to_string(),
+                    error: ResolveError::OutsideProject {
+                        path: preload.clone(),
+                        project_root: root.clone(),
+                    },
+                });
+            }
+        }
+        builder.visit_with_startup(entry_path.clone(), preloads.clone(), includes)?;
         let runtime_package_aliases = builder
             .resolver
             .runtime_package_aliases_for_targets(
@@ -1133,6 +1243,7 @@ impl ModuleGraph {
             entry: entry_path,
             project_root: builder.resolver.project_root().to_path_buf(),
             declared_includes: Arc::new(declared_includes),
+            startup_modules: Arc::new(preloads),
             modules: Arc::new(builder.modules),
             order: Arc::new(builder.order),
             export_resolutions: Arc::new(export_resolutions),
@@ -1251,7 +1362,13 @@ impl ModuleGraph {
     /// evaluation and may materialize dynamic targets lazily.
     pub fn statically_reachable(&self) -> BTreeSet<PathBuf> {
         let mut reachable = BTreeSet::new();
-        let mut pending = vec![self.entry.clone()];
+        let mut pending = self
+            .startup_modules
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        pending.push(self.entry.clone());
         while let Some(path) = pending.pop() {
             if !reachable.insert(path.clone()) {
                 continue;
@@ -1332,6 +1449,7 @@ impl ModuleGraph {
             entry: self.entry.clone(),
             project_root: self.project_root.clone(),
             declared_includes: Arc::clone(&self.declared_includes),
+            startup_modules: Arc::clone(&self.startup_modules),
             modules: Arc::new(modules),
             order: Arc::clone(&self.order),
             export_resolutions: Arc::new(export_resolutions),
@@ -1643,6 +1761,7 @@ impl ModuleGraph {
                         .cloned()
                         .collect(),
                 ),
+                startup_modules: Arc::clone(&self.startup_modules),
                 modules: Arc::new(modules),
                 order: Arc::new(order),
                 export_resolutions: Arc::new(export_resolutions),
@@ -1879,6 +1998,18 @@ where
         path: PathBuf,
         includes: Vec<(PathBuf, ModuleSource)>,
     ) -> Result<(), ModuleGraphError> {
+        self.visit_with_startup(path, Vec::new(), includes)
+    }
+
+    fn visit_with_startup(
+        &mut self,
+        path: PathBuf,
+        startup: Vec<PathBuf>,
+        includes: Vec<(PathBuf, ModuleSource)>,
+    ) -> Result<(), ModuleGraphError> {
+        for preload in startup {
+            self.visit_static(preload, None)?;
+        }
         self.visit_static(path, None)?;
         for (path, source) in includes {
             self.visit_static(path, Some(source))?;

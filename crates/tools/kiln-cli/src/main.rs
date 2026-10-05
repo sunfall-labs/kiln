@@ -126,6 +126,7 @@ fn version() -> String {
 fn target_for_command(command: &Command) -> Option<&Path> {
     match command {
         Command::Run { path, .. }
+        | Command::NodeLaunch { path, .. }
         | Command::Build { path, .. }
         | Command::Check { path, .. }
         | Command::Watch { path, .. } => Some(path.as_path()),
@@ -247,6 +248,24 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
     };
 
     match invocation.command {
+        Command::NodeLaunch {
+            path,
+            args,
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+        } => {
+            let mut backend = open(one_shot, &socket)?;
+            report(commands::run_node_launch(
+                backend.as_mut(),
+                &path,
+                &args,
+                &preloads,
+                &exec_argv,
+                disallow_string_code_generation,
+                &root,
+            )?)
+        }
         Command::Run {
             path,
             args,

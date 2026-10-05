@@ -374,6 +374,8 @@ pub enum Native {
     ProcessExit,
     ProcessStartRaw,
     ProcessCancelRaw,
+    /// Synchronous child-process authority for `node:child_process.execFileSync`.
+    NodeChildProcessExecFileSync,
     /// Private realm status access used by the shared TypeScript `process.exitCode` policy.
     ProcessExitCodeGet,
     ProcessExitCodeSet,

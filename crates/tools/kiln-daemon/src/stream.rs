@@ -85,6 +85,9 @@ pub(crate) fn wants_stream(request: &Request) -> bool {
         Request::Run {
             stream_output: true,
             ..
+        } | Request::NodeRun {
+            stream_output: true,
+            ..
         } | Request::NativeRun {
             stream_output: true,
             ..

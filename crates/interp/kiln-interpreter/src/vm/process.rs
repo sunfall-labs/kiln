@@ -65,9 +65,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .collect(),
             )),
         );
-        // The runtime does not forward its own command-line flags to a user's worker. Node
-        // packages such as pino still inspect this array before creating one.
-        process.set("execArgv", Value::Array(ArrayData::new(Vec::new())));
+        process.set(
+            "execArgv",
+            Value::Array(ArrayData::new(
+                self.exec_argv
+                    .iter()
+                    .cloned()
+                    .map(|value| Value::String(value.into()))
+                    .collect(),
+            )),
+        );
         if let Some(executable) = self.argv.first() {
             process.set("execPath", Value::String(executable.clone().into()));
         }
@@ -200,6 +207,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             (
                 "fs_promises".to_owned(),
                 Value::Native(Native::NodeFsPromises, RealmId::PRIMARY),
+            ),
+            (
+                "child_process".to_owned(),
+                ordinary_object([(
+                    "__execFileSync".to_owned(),
+                    Value::Native(Native::NodeChildProcessExecFileSync, RealmId::PRIMARY),
+                )]),
             ),
             ("http".to_owned(), crate::http::native_capabilities()),
             ("net".to_owned(), crate::net::native_capabilities()),

@@ -287,6 +287,7 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// execution's host granted agents at all. `None` disables `$262AgentStart` and its siblings.
     pub(super) host_agents: Option<&'static str>,
     pub(super) module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
+    pub(super) string_code_generation_allowed: bool,
     /// How this execution starts a worker, if it can (`node:worker_threads`).
     pub(super) worker_host: Option<Arc<dyn crate::WorkerHost>>,
     /// Whether this machine runs in a worker, whose parent may stop it at any checkpoint.
@@ -298,6 +299,7 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) module_generation_owner: Option<crate::module_map::ModuleGenerationHandle>,
     /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
     pub(super) argv: Vec<String>,
+    pub(super) exec_argv: Vec<String>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pub(super) pending_host: Vec<PendingHostRequest>,
     /// Persistent Node resource requests routed to provider-neutral server/stream drivers.
