@@ -47,6 +47,22 @@ missing case or unsupported runner capability fails the run. A selected subset
 reports deferred files. Aggregate counts distinguish pending files, incomplete
 files and their partial case records from complete files. These are correctness
 results, not workload timings; build and launch time are not benchmark scores.
+
+The adapter uses Vitest's separate test and hook deadlines: a test defaults to
+5,000 ms, a hook to 10,000 ms, and explicit per-test/per-hook values are honored.
+Synchronous overruns are checked when the callback returns. Finished callbacks
+run in reverse order and continue after a cleanup failure. To compare these
+contracts against the pinned Vitest installation in a prepared, owned workspace:
+
+```sh
+python scripts/check-effect-harness-contract.py --workspace <workspace> --kiln <kiln-binary> --native
+```
+
+Set `KILN_NATIVE_PROVIDER_MANIFEST` to the provider for that binary when needed.
+The contract intentionally contains three failing cases; success means all five
+case outcomes and the complete inventory match Vitest in Node, Bun, and each
+requested kiln engine. Evidence remains in `<workspace>/.effect-harness-contract`.
+
 `runtime-targets.json` declares the pinned tests' literal `require` and
 `importActual` targets. The require adapter resolves against each original test
 file and keeps those targets lazy for native linking.
