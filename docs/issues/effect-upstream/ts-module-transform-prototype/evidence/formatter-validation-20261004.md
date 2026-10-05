@@ -10,7 +10,7 @@ candidate diff. Before the Formatter acceptance runs, only a Rust doc comment
 and this PRD's status text changed; neither changes compiled behavior. The
 source module hash is `9d816f3751b14da252a9fa3c5082668a08d8d2b683bd4878ae5da3d87f503399`.
 
-Pinned input: Effect commit `67ba4e46a11ccda0b6761578bfd22c04ae00167`;
+Pinned input: Effect commit `67ba4e46a11ccda0b6761578bfd22c04ae00167d`;
 Formatter selected as one complete file, 67 registered cases. The independent
 Node/Vitest oracle is Node 26.8.1 / Vitest 5.0.3. Both runs kept original case
 budgets; the runner outer timeout was 2400 seconds.
@@ -48,3 +48,7 @@ is tested separately and is not expected to reuse an identical artifact.
 The release CLI candidate is the acceptance binary. A previous debug-CLI native
 Formatter run also passed 67/67, but its long graph-build time makes it diagnostic
 only and it is not used for performance claims.
+
+Complete focused report JSON, case JSON, build/execution logs and checksums are
+archived beside this receipt in `formatter-acceptance/`. Original binaries remain
+in the candidate worktree scratch toolchain; no full-suite result is implied.
