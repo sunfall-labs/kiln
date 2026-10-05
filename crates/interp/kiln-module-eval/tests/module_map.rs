@@ -984,3 +984,29 @@ fn recursive_getters_use_vm_frames_and_preserve_receiver_and_exceptions() {
         &["256 256", "7 1 1", "true", "18"],
     );
 }
+
+#[test]
+fn spread_calls_use_vm_frames_and_preserve_call_semantics() {
+    let project = Project::new();
+    expect_lines(
+        &project,
+        r#"
+        function descend(n) { return n ? 1 + descend(...[n - 1]) : 0; }
+        const bound = descend.bind(null);
+        console.log(descend(256), bound(...[256]));
+        const receiver = { marker: 7, method(a, b) { return this.marker + a + b; } };
+        console.log(receiver.method(...[2, 3]));
+        class Parent { method(a, b) { return this.marker + a + b; } }
+        class Child extends Parent { constructor() { super(); this.marker = 11; }
+            method(...args) { return super.method(...args); } }
+        console.log(new Child().method(...[2, 3]));
+        const failure = {};
+        function throws() { throw failure; }
+        try { throws(...[]); } catch (error) { console.log(error === failure); }
+        function strict() { 'use strict'; return this === undefined; }
+        console.log(strict(...[]));
+        console.log(Math.max(...[3, 9, 1]));
+    "#,
+        &["256 256", "12", "16", "true", "true", "9"],
+    );
+}

@@ -1232,16 +1232,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     };
                     let arguments = arguments.borrow().clone();
-                    // Through `catchable`, like every other call: a throw from inside `f(...xs)`
-                    // reaches this as `ThrownAcrossNative` and has to be handed to the handler
-                    // that is now reachable again. A bare `?` made `try { f(...xs) } catch {}`
-                    // end the run instead of catching -- the exact trap the comment on
-                    // `ExecutionError::CyclicJson` warns about.
-                    let called = self.call_value(&callee, this_value, arguments, current);
+                    // Use the same frame dispatch as an ordinary call. Compiled callees return
+                    // through `Return`; immediate native results and failures still pass through
+                    // the instruction's catchable boundary. Synchronously driving a compiled
+                    // callee here made recursive spread calls consume the Rust stack.
+                    let called = self.invoke(callee, this_value, arguments, current, None);
                     let Some(result) = self.catchable(called, current)? else {
                         continue;
                     };
-                    self.stack.push(result);
+                    if let Some(result) = result {
+                        self.stack.push(result);
+                    }
                 }
                 Instruction::ConstructSpread => {
                     let arguments = self.pop(current)?;
