@@ -1,10 +1,41 @@
 # Direct TypeScript Effect suite
 
 Goal: execute every pinned Effect test directly in kiln, prioritizing native, without
-bundling sources. Bun is the primary direct-TypeScript reference. The official
-Node/Vitest runner checks runner fidelity separately.
+bundling sources. Bun supplies the direct-TypeScript performance comparison; the official
+Node/Vitest inventory and per-case outcomes establish correctness and runner fidelity.
 
-## Current checkpoint, 2026-10-04
+## Current checkpoint, 2026-10-05
+
+The last verified public main commit is `bc82ca8f`. Its compiler milestone has a
+[passing ten-step routine gate](evidence/spread-child-gate-20261005/), with 2,670
+crate passes and zero Test262 chunk regressions across 102,522 selected routine
+variants; 116 expensive variants were explicitly deferred.
+
+The committed clock candidate makes explicit interpreter wall-clock execution read
+actual system time instead of the output-capture host's synthetic clock.
+[Original Formatter, Pool and Layer acceptance](evidence/interpreter-wall-clock-20261005/)
+is 153/153, including all 39 Layer cases with unchanged deadlines.
+[Native Formatter acceptance](evidence/native-formatter-clock-20261005/) is separately
+67/67, exactly mapped to the official Node/Vitest oracle. Those focused reports are
+not a fresh full 322-file result. A compiler-owned Oxc disposal helper separately
+[passes all nine original ManagedRuntime cases in both engines](evidence/oxc-usingctx-20261005/);
+its final disposal edge-case follow-up and shared Array callback changes are still
+under validation and have not been landed.
+
+The clock milestone's next gate was
+[interrupted by an environment transition](evidence/clock-gate-interrupted-20261005/).
+Its completed workspace, native parity, thirdparty and Node/server/regression lanes
+passed, but it has no aggregate verdict, complete Test262, facts or performance
+result and does not authorize landing. Current permissions make main's `.git` and
+sibling worktrees read-only and GitHub access is unavailable; source and evidence
+are preserved in an isolated writable clone pending validation and publication.
+
+Native Sharding's six original five-second timeouts and ClusterWorkflow's one timeout
+remain unresolved. Complete final-source 322-file native and interpreter acceptance,
+the required gate, and a quiet 22-microbenchmark/four-real-world direct-TypeScript
+comparison against Bun are still required before completion.
+
+## Earlier checkpoints, 2026-10-04
 
 The latest integrated module-generation and top-level-await candidate passes 255 interpreter tests
 (one ignored), 29 module-evaluation tests and all 195 unchanged cases in `Config`,
