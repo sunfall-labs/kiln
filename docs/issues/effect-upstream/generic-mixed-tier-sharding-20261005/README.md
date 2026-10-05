@@ -29,12 +29,13 @@ object, prelude, runtime, launcher, and final executable artifacts; its AOT bina
 build above. This was one quiet replay only, so it does not establish a stable throughput gain.
 
 Cache inspection found 165 mixed-tier generated-C module/chunk records totaling about 150.8 MB of
-source payload in this workspace. Across those records there were 5,114 emitted O0 conditional
-sites. These counts are raw cache-record observations; they do not identify unique functions or
-measure the amount of O1 support code. The build report's total C/object sizes above are the
-authoritative graph-wide size figures. In particular, this experiment does not demonstrate that
-O1 is limited to a small set of application function bodies: generated support code is compiled
-alongside selected bodies, and its size can scale with the module.
+source payload in this workspace. The generated source contains 10,547 frontend-function body
+annotations: 5,114 O0 attribute blocks and 5,433 bodies without the O0 block, matching the selected
+body count computed as `frontend function` comments minus one O0 block per unselected body. No
+record selected more than 64 bodies. These are body-selection counts, not a measure of O1 compiler
+work: generated support code is compiled in the same O1 translation unit, and its size can scale
+with the module. The build report's total C/object sizes above are the authoritative graph-wide
+size figures.
 
 The full build, replay report, complete native case log, and build log are retained beside this
 note. The tier remains experimental: one fewer timeout is a concrete result, but the additional
