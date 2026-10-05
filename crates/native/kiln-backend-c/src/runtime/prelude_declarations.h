@@ -303,6 +303,11 @@ extern int kiln_c99_array_get_index(kiln_host *host, kiln_value array, size_t in
                                     kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_c99_array_has_index(kiln_host *host, kiln_value array, size_t index,
                                     int *answer, int depth, kiln_value *thrown);
+/* Private HasProperty acceleration used only by shared Array callback built-ins. The result is
+ * number (next index), null (exhausted), or undefined (ordinary operator fallback required). */
+extern int kiln_c99_array_next_present_index(kiln_value array, kiln_value cursor,
+                                             kiln_value limit, kiln_value reverse,
+                                             kiln_value *result);
 extern kiln_value kiln_c99_inspect(kiln_value value);
 extern kiln_value kiln_c99_console_inspect(kiln_host *host, kiln_value value);
 extern int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event, void *host, void *thrown);

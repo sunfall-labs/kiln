@@ -789,6 +789,11 @@ pub enum Native {
     DataViewStateRaw,
     /// Side-effect-free ECMAScript IsConstructor predicate for shared built-ins.
     IsConstructorRaw,
+    /// Whether a constructable value is exactly another realm's intrinsic Array constructor.
+    IsOtherRealmArrayConstructorRaw,
+    /// Find the next present indexed slot on an ordinary array without charging a VM instruction
+    /// for every dense hole. Returns undefined to request ordinary HasProperty fallback.
+    ArrayNextPresentIndexRaw,
     /// `__kilnCloneData(value)`: the structured clone's plain-data fast path, which this engine
     /// never takes (it answers `undefined`, "not handled").
     CloneDataRaw,

@@ -790,6 +790,40 @@ pub(crate) fn call_native(
             _ => Value::Boolean(false),
         },
         Native::IsConstructorRaw => Value::Boolean(arguments.first().is_some_and(is_constructor)),
+        Native::IsOtherRealmArrayConstructorRaw => {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "GetFunctionRealm reached the machine-free dispatch path".to_owned(),
+            });
+        }
+        Native::ArrayNextPresentIndexRaw => {
+            let object = arguments.first().unwrap_or(&Value::Undefined);
+            let cursor = match arguments.get(1) {
+                Some(Value::Number(value)) => *value,
+                _ => f64::NAN,
+            };
+            let limit = match arguments.get(2) {
+                Some(Value::Number(value)) => *value,
+                _ => f64::NAN,
+            };
+            let reverse = matches!(arguments.get(3), Some(Value::Boolean(true)));
+            if !cursor.is_finite() || !limit.is_finite() || cursor < 0.0 {
+                Value::Boolean(false)
+            } else {
+                let cursor = cursor as usize;
+                let limit = if reverse {
+                    if limit < 0.0 { 0 } else { limit as usize }
+                } else if limit < 0.0 {
+                    0
+                } else {
+                    limit as usize
+                };
+                match next_array_present_index(intrinsics, object, cursor, limit, reverse) {
+                    None => Value::Boolean(false),
+                    Some(None) => Value::Null,
+                Some(Some(index)) => Value::Number(index as f64),
+            }
+            }
+        }
         Native::DataViewStateRaw => Value::Number(match arguments.first() {
             Some(Value::DataView(view)) if view.buffer.immutable => 2.0,
             Some(Value::DataView(_)) => 1.0,

@@ -542,17 +542,25 @@ pub(super) fn array_inherited_index_key(
     if let Some(found) = items.properties.borrow().lookup_key(key) {
         return Some(found);
     }
-    // A chain the program moved has already been walked by `lookup`; only an array still linked
-    // to `Array.prototype` reaches the realm's own store.
+    // An array's indexed lookup starts at its actual realm's Array.prototype. Continue along the
+    // links as they stand now: assuming Object.prototype is next invents inherited indices after
+    // the program has replaced Array.prototype's parent with a null-prototype object.
     if items.properties.borrow().prototype().is_some() {
         return None;
     }
-    for table in [PrototypeTable::Array, PrototypeTable::Object] {
-        if let Overridden::Held(property, _) = intrinsics.overridden_key(
-            &Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY),
-            key,
-        ) {
+    let mut current = Value::Native(Native::PrototypeOf(PrototypeTable::Array), RealmId::PRIMARY);
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        // A proxy in this chain needs the VM's observable [[Get]]/[[HasProperty]] path. Returning
+        // no stored property lets that path preserve traps and the original array receiver.
+        if matches!(current, Value::Proxy(_)) {
+            return None;
+        }
+        if let Some((property, _)) = own_property_state_key(intrinsics, &current, key) {
             return Some(property);
+        }
+        current = prototype_of_in(intrinsics, &current);
+        if matches!(current, Value::Null | Value::Undefined) {
+            return None;
         }
     }
     None
@@ -1383,6 +1391,10 @@ pub(super) struct Intrinsics {
     /// Monotonic across all realms: a numeric property on either default array prototype
     /// invalidates the strict indexed-write shortcut, even after that property is deleted.
     pub(super) indexed_array_prototype: std::cell::Cell<bool>,
+    /// Monotonic guard for sparse array shortcuts after either indexed prototype link changes.
+    /// This is cached because map/reduce ask once per callback, and walking every materialized
+    /// intrinsic entry there turns a dense map into quadratic work.
+    indexed_prototype_chain_custom: std::cell::Cell<bool>,
     /// Each realm's nine error prototypes, indexed by realm and then by kind.
     ///
     /// Here rather than on the machine because `Error.prototype` is an own property of `Error`
@@ -1427,6 +1439,7 @@ impl Default for Intrinsics {
                             .is_some()
                     }),
             ),
+            indexed_prototype_chain_custom: std::cell::Cell::new(false),
             error_prototypes: RefCell::new(vec![[const { None }; ErrorKind::ALL.len()]]),
             error_stack_accessors: RefCell::new(vec![None]),
             unscopables: RefCell::new(vec![None]),
@@ -1450,9 +1463,43 @@ impl Intrinsics {
         let Some(identity) = intrinsic_key(target) else {
             return false;
         };
+        let realm = match target {
+            Value::Native(Native::PrototypeOf(_), realm) => *realm,
+            _ => RealmId::PRIMARY,
+        };
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();
         Self::data(&mut entries, identity).set_prototype(prototype);
+        let mut array_parent = None;
+        let mut object_parent = None;
+        for (key, data) in entries.iter() {
+            match key {
+                IntrinsicKey::Native(Native::PrototypeOf(PrototypeTable::Array), owner_realm)
+                    if *owner_realm == realm =>
+                {
+                    array_parent = data.prototype()
+                }
+                IntrinsicKey::Native(Native::PrototypeOf(PrototypeTable::Object), owner_realm)
+                    if *owner_realm == realm =>
+                {
+                    object_parent = data.prototype()
+                }
+                _ => {}
+            }
+        }
+        let default_array_parent = array_parent.is_none_or(|parent| {
+            matches!(
+                parent,
+                Value::Native(
+                    Native::PrototypeOf(PrototypeTable::Object),
+                    owner_realm
+                ) if *owner_realm == realm
+            )
+        });
+        let default_object_parent =
+            object_parent.is_none_or(|parent| matches!(parent, Value::Null));
+        self.indexed_prototype_chain_custom
+            .set(!default_array_parent || !default_object_parent);
         true
     }
 
@@ -1660,6 +1707,15 @@ impl Intrinsics {
     /// read that misses a value's own store.
     pub(super) fn any_accessor(&self) -> bool {
         self.accessors.get()
+    }
+
+    /// Whether the default array-index lookup chain has been given an ordinary prototype link.
+    /// A dense-array index search can skip holes only when both built-in links still match the
+    /// chain it models: Array.prototype -> Object.prototype -> null. Direct numeric definitions
+    /// have their own monotonic flag; this catches a custom prototype whose indexed properties
+    /// live outside either intrinsic store.
+    pub(super) fn indexed_prototype_chain_is_custom(&self) -> bool {
+        self.indexed_prototype_chain_custom.get()
     }
 
     /// Whether this built-in still accepts new properties.

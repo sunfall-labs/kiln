@@ -613,6 +613,8 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"__kilnTypedArraySort", KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW},
                      {"__kilnDataViewState", KILN_C99_METHOD_DATA_VIEW_STATE_RAW},
                      {"__kilnIsConstructor", KILN_C99_METHOD_IS_CONSTRUCTOR_RAW},
+                     {"__kilnIsOtherRealmArrayConstructor", KILN_C99_METHOD_IS_OTHER_REALM_ARRAY_CONSTRUCTOR_RAW},
+                     {"__kilnArrayNextPresentIndex", KILN_C99_METHOD_ARRAY_NEXT_PRESENT_INDEX_RAW},
                      /* Message delivery's checkpoint question, captured the same way. */
                      {"__kilnJobsPending", KILN_C99_METHOD_JOBS_PENDING_RAW},
                      {"__kilnQueueIo", KILN_C99_METHOD_QUEUE_IO_RAW},

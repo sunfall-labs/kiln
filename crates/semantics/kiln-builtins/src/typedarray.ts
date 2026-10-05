@@ -1,7 +1,6 @@
 // IsConstructor inspects engine callable metadata without invoking a constructor or reading
 // observable properties. The static algorithm below has the same owner in both engines.
 const __kilnIsConstructor: (value: any) => boolean = (globalThis as any).__kilnIsConstructor;
-delete (globalThis as any).__kilnIsConstructor;
 
 // kiln-builtins: `%TypedArray%.prototype` (ADR 0005, ADR 0063 rule 4, Phase 5.1).
 //

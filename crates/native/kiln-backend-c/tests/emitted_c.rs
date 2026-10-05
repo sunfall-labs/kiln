@@ -1212,7 +1212,12 @@ fn runtime_prelude_size() {
     // method-name index, and object-owner/finalizer fixes add 105 net runtime lines.
     // The minimal unit is 84,572 lines; these extend existing kernels, with no
     // duplicated section or new public C builtin implementation.
-    const CEILING_LINES: usize = 85_000;
+    // Reviewed 2026-10-05: shared ToPropertyDescriptor/FromPropertyDescriptor handling
+    // and proxy defineProperty invariant checks add 440 lines to existing kernels. The
+    // descriptor parser is shared by ordinary definitions, defineProperties staging, and
+    // proxy traps; prepared descriptor values are rooted across allocations. No new public
+    // C builtin or repeated runtime section was added.
+    const CEILING_LINES: usize = 85_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

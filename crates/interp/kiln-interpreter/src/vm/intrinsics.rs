@@ -29,6 +29,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        if native == Native::IsOtherRealmArrayConstructorRaw {
+            let constructor = arguments.first().unwrap_or(&Value::Undefined);
+            // This helper is installed as a realm-local native, so current_realm is the realm
+            // whose `%Array%` the shared ArraySpeciesCreate is comparing against. Resolve the
+            // complete GetFunctionRealm chain first: even though bound/proxy wrappers cannot be
+            // identical to an intrinsic Array constructor, a revoked proxy must still throw.
+            return Ok(Value::Boolean(is_other_realm_array_constructor(
+                constructor,
+                self.current_realm,
+            )?));
+        }
         if native == Native::ShareRaw {
             return self.share_value(arguments.first().cloned().unwrap_or(Value::Undefined));
         }
@@ -2633,14 +2644,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let inner = proxy.target.clone();
                 let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 let descriptor = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+                // The caller performs ToPropertyDescriptor before entering
+                // [[DefineOwnProperty]], including when the proxy is already revoked.
+                let described = self.read_descriptor(&descriptor, instruction)?;
                 match self.proxy_trap(&proxy, "defineProperty", instruction)? {
                     Some(trap) => {
                         // Read before the trap runs, which is the order the specification
                         // gives: a handler that mutates the descriptor object cannot change
                         // what it is checked against afterwards.
-                        let described = self.read_descriptor(&descriptor, instruction)?;
+                        let trap_descriptor = Self::descriptor_object(&described);
                         let handler = proxy.handler.clone();
-                        let list = vec![inner.clone(), self.trap_key(&key), descriptor];
+                        let list = vec![inner.clone(), self.trap_key(&key), trap_descriptor];
                         let answered = self.call_value(&trap, handler, list, instruction)?;
                         if !answered.is_truthy() {
                             if matches!(native, Native::ReflectDefineProperty) {
@@ -2656,7 +2670,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.dispatch_native(
                             native,
                             receiver,
-                            &[inner, key, descriptor],
+                            &[inner, key, Self::descriptor_object(&described)],
                             instruction,
                         )?;
                     }

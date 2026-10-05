@@ -622,46 +622,17 @@ static int kiln_c99_reflect_define_property(kiln_host *host, kiln_value target,
                                             kiln_value key, kiln_value descriptor,
                                             int *accepted, int depth,
                                             kiln_value *thrown) {
-    if (target.tag == KILN_VALUE_PROXY) {
-        kiln_value trap;
-        kiln_value inner = kiln_c99_proxy_of(target)->target;
-        kiln_value handler = kiln_c99_proxy_of(target)->handler;
-        int status = kiln_c99_proxy_trap(host, target, "defineProperty", &trap, depth, thrown);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        if (trap.tag == KILN_VALUE_UNDEFINED) {
-            return kiln_c99_reflect_define_property(host, inner, key, descriptor, accepted, depth,
-                                                    thrown);
-        }
-        {
-            kiln_value arguments[3];
-            kiln_value answered;
-            arguments[0] = inner;
-            arguments[1] = key;
-            arguments[2] = descriptor;
-            status = kiln_c99_call(host, &answered, trap, handler, arguments, 3, depth, thrown);
-            if (status == KILN_C99_OK) {
-                *accepted = kiln_c99_truthy(answered);
-            }
-            return status;
-        }
-    }
     kiln_value text = kiln_c99_property_key(key);
     if (text.tag != KILN_VALUE_STRING) {
         KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol slot");
     }
     const kiln_string *name_key = (const kiln_string *)text.ptr;
     int refused = 0;
-    int status = kiln_c99_define_property_key_answer(host, target, name_key, NULL, descriptor,
+    int status = kiln_c99_define_property_key_answer(host, target, name_key,
+                                                     kiln_c99_property_ikey(key), descriptor,
                                                      depth, thrown, &refused);
     if (status == KILN_C99_OK) {
         *accepted = !refused;
-        return KILN_C99_OK;
-    }
-    if (status == KILN_C99_CONTROL_ERROR && thrown != NULL && thrown->tag != KILN_VALUE_UNDEFINED) {
-        *thrown = kiln_c99_undefined();
-        *accepted = 0;
         return KILN_C99_OK;
     }
     *accepted = 0;

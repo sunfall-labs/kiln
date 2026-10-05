@@ -153,9 +153,9 @@ static int kiln_c99_prototype_store_read_with_receiver(
 /* A builtin's intrinsic members are resolved by the readers below, but a program may relink the
  * callable object itself. Before reporting an intrinsic absence, consult that explicit parent
  * with the builtin as receiver, so accessors and inherited members observe the real [[Get]]. */
-static int kiln_c99_builtin_custom_prototype_read(
-    kiln_host *host, kiln_value target, const kiln_string *key, const kiln_string *ikey,
-    kiln_value *out, int depth, kiln_value *thrown, int *found) {
+static int kiln_c99_builtin_custom_prototype_read_with_receiver(
+    kiln_host *host, kiln_value target, kiln_value receiver, const kiln_string *key,
+    const kiln_string *ikey, kiln_value *out, int depth, kiln_value *thrown, int *found) {
     kiln_value store;
     kiln_value prototype;
     int present = 0;
@@ -169,7 +169,37 @@ static int kiln_c99_builtin_custom_prototype_read(
     status = kiln_c99_has_property_key(host, prototype, key, ikey, &present, depth, thrown);
     if (status != KILN_C99_OK || !present) return status;
     *found = 1;
-    return kiln_c99_get_with_receiver(host, prototype, kiln_c99_key_value(key, NULL), target,
+    return kiln_c99_get_with_receiver(host, prototype, kiln_c99_key_value(key, NULL), receiver,
+                                      out, depth, thrown);
+}
+
+static int kiln_c99_builtin_custom_prototype_read(
+    kiln_host *host, kiln_value target, const kiln_string *key, const kiln_string *ikey,
+    kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    return kiln_c99_builtin_custom_prototype_read_with_receiver(
+        host, target, target, key, ikey, out, depth, thrown, found);
+}
+
+/* The Array prototype's mutable parent replaces its implicit Object.prototype link. Once that
+ * parent is explicit, it owns the remainder of lookup even when the requested member is absent;
+ * call Get directly so a Proxy parent observes `get` without a spurious `has` trap. */
+static int kiln_c99_array_custom_parent_read(
+    kiln_host *host, kiln_value receiver, const kiln_string *key, const kiln_string *ikey,
+    kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    kiln_value store;
+    kiln_value parent;
+    int status = kiln_c99_callable_store(
+        kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE), &store, 0);
+    *found = 0;
+    if (status != KILN_C99_OK || store.tag != KILN_VALUE_OBJECT) return status;
+    parent = kiln_c99_object_prototype_read(store);
+    if (parent.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    *found = 1;
+    if (parent.tag == KILN_VALUE_NULL) {
+        KILN_C99_ABSENT("Array.prototype has a null custom parent, so no inherited property exists",
+                        out);
+    }
+    return kiln_c99_get_with_receiver(host, parent, kiln_c99_key_value(key, NULL), receiver,
                                       out, depth, thrown);
 }
 
@@ -1268,6 +1298,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             int found;
             int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_PROTOTYPE, key,
                                                        ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        {
+            /* `Array.prototype` can itself inherit through a Proxy. Table and own-store lookups
+             * above cover the default chain; continue OrdinaryGet through a custom parent only
+             * after those answers miss, and retain the original array as the receiver. */
+            int found = 0;
+            int status = kiln_c99_array_custom_parent_read(
+                host, target, key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
         if (kiln_c99_same_name_key(key, "toLocaleString")) {

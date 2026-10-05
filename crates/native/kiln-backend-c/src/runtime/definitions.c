@@ -268,6 +268,89 @@ static int kiln_c99_descriptor_field(kiln_host *host, kiln_value descriptor, con
     return kiln_c99_get(host, descriptor, name, len, out, depth, thrown);
 }
 
+/* One ToPropertyDescriptor authority shared by ordinary definitions and proxy traps. Keep
+ * presence separate from value: a missing field and an explicitly undefined field differ, and
+ * FromPropertyDescriptor must preserve that distinction. */
+static int kiln_c99_to_property_descriptor(kiln_host *host, kiln_value source,
+                                            kiln_c99_property_descriptor *out, int depth,
+                                            kiln_value *thrown) {
+    static const char *const names[] = {
+        "enumerable", "configurable", "value", "writable", "get", "set",
+    };
+    kiln_value *values[] = {
+        &out->enumerable, &out->configurable, &out->value,
+        &out->writable, &out->getter, &out->setter,
+    };
+    int *present[] = {
+        &out->has_enumerable, &out->has_configurable, &out->has_value,
+        &out->has_writable, &out->has_getter, &out->has_setter,
+    };
+    memset(out, 0, sizeof *out);
+    for (size_t index = 0; index < 6; ++index) *values[index] = kiln_c99_undefined();
+    if (source.tag != KILN_VALUE_OBJECT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Property description must be an object");
+    }
+    for (size_t index = 0; index < 6; ++index) {
+        int status = kiln_c99_descriptor_field(host, source, names[index], values[index],
+                                                present[index], depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (*present[index] && (index < 2 || index == 3)) {
+            *values[index] = kiln_c99_boolean(kiln_c99_truthy(*values[index]));
+        }
+        /* ToPropertyDescriptor validates get before it even asks for set. */
+        if (*present[index] && index == 4 && values[index]->tag != KILN_VALUE_UNDEFINED &&
+            !kiln_c99_is_callable(*values[index])) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Getter must be a function");
+        }
+        if (*present[index] && index == 5 && values[index]->tag != KILN_VALUE_UNDEFINED &&
+            !kiln_c99_is_callable(*values[index])) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Setter must be a function");
+        }
+    }
+    if ((out->has_value || out->has_writable) && (out->has_getter || out->has_setter)) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Invalid property descriptor");
+    }
+    kiln_c99_gc_keep_alive(&source);
+    kiln_c99_gc_keep_alive(&out->value);
+    kiln_c99_gc_keep_alive(&out->writable);
+    kiln_c99_gc_keep_alive(&out->getter);
+    kiln_c99_gc_keep_alive(&out->setter);
+    kiln_c99_gc_keep_alive(&out->enumerable);
+    kiln_c99_gc_keep_alive(&out->configurable);
+    return KILN_C99_OK;
+}
+
+/* FromPropertyDescriptor creates a fresh ordinary object containing only present fields. */
+static int kiln_c99_from_property_descriptor(kiln_c99_property_descriptor *descriptor,
+                                              kiln_value *out) {
+    static const char *const names[] = {
+        "value", "writable", "get", "set", "enumerable", "configurable",
+    };
+    static const size_t name_lengths[] = {5, 8, 3, 3, 10, 12};
+    kiln_value *values[] = {
+        &descriptor->value, &descriptor->writable, &descriptor->getter,
+        &descriptor->setter, &descriptor->enumerable, &descriptor->configurable,
+    };
+    int present[] = {
+        descriptor->has_value, descriptor->has_writable, descriptor->has_getter,
+        descriptor->has_setter, descriptor->has_enumerable, descriptor->has_configurable,
+    };
+    int status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    for (size_t index = 0; index < 6; ++index) {
+        if (!present[index]) continue;
+        status = kiln_c99_own_data(*out, names[index], name_lengths[index], *values[index]);
+        if (status != KILN_C99_OK) return status;
+    }
+    for (size_t index = 0; index < 6; ++index) kiln_c99_gc_keep_alive(values[index]);
+    kiln_c99_gc_keep_alive(out);
+    return KILN_C99_OK;
+}
+
 /* The callable `name` and `length` descriptors are virtual until a program explicitly defines
  * them. Keep their value and attributes in one authority for both descriptor reads and
  * defineProperty's merge. `preventExtensions` leaves configurable unchanged; freeze records its
@@ -358,6 +441,7 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
     int intrinsic_callable_name_length = 0;
     int intrinsic_builtin_member = 0;
     int status;
+    kiln_c99_property_descriptor parsed;
     /* Protocol slots are owned by their native adapters, never by JavaScript definitions. */
     if (kiln_c99_is_node_hidden_key_key(view)) {
         return KILN_C99_OK;
@@ -375,7 +459,8 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
         if (stable_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
         if (!kiln_c99_symbol_of_key_view(view, &key_value))
             key_value = stable_value;
-        return kiln_c99_proxy_define(host, target, key_value, descriptor, depth, thrown);
+        return kiln_c99_proxy_define(host, target, key_value, descriptor, depth, thrown,
+                                    refusal);
     }
     if (target.tag != KILN_VALUE_SHARED && target.tag != KILN_VALUE_OBJECT &&
         target.tag != KILN_VALUE_FUNCTION && target.tag != KILN_VALUE_BUILTIN &&
@@ -387,34 +472,23 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
          * hook on a constructor with `Object.defineProperty`. */
         KILN_C99_REFUSE("a property definition on a value with no property store");
     }
-    /* Every field is read before anything is written, because a descriptor may be a program's
-     * object with getters on it: one of them running mid-update could reallocate the very
-     * property list the slot below points into. */
-    status = kiln_c99_descriptor_field(host, descriptor, "get", &getter, &has_getter, depth,
-                                       thrown);
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_descriptor_field(host, descriptor, "set", &setter, &has_setter, depth,
-                                           thrown);
-    }
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_descriptor_field(host, descriptor, "value", &value, &has_value, depth,
-                                           thrown);
-    }
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_descriptor_field(host, descriptor, "writable", &writable, &has_writable,
-                                           depth, thrown);
-    }
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_descriptor_field(host, descriptor, "enumerable", &enumerable,
-                                           &has_enumerable, depth, thrown);
-    }
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_descriptor_field(host, descriptor, "configurable", &configurable,
-                                           &has_configurable, depth, thrown);
-    }
+    /* Parse once through the same authority used by Proxy trap snapshots. */
+    status = kiln_c99_to_property_descriptor(host, descriptor, &parsed, depth, thrown);
     if (status != KILN_C99_OK) {
         return status;
     }
+    getter = parsed.getter;
+    setter = parsed.setter;
+    value = parsed.value;
+    writable = parsed.writable;
+    enumerable = parsed.enumerable;
+    configurable = parsed.configurable;
+    has_getter = parsed.has_getter;
+    has_setter = parsed.has_setter;
+    has_value = parsed.has_value;
+    has_writable = parsed.has_writable;
+    has_enumerable = parsed.has_enumerable;
+    has_configurable = parsed.has_configurable;
     if (target.tag == KILN_VALUE_FUNCTION && kiln_c99_same_name_key(view, "prototype") &&
         kiln_c99_function_owns_prototype(kiln_c99_closure_of(target))) {
         kiln_closure *closure = kiln_c99_closure_of(target);
@@ -826,6 +900,7 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
                                       int depth, kiln_value *thrown) {
     kiln_object *source;
     kiln_value keys;
+    kiln_value prepared;
     size_t index;
     int pass;
     int status;
@@ -838,10 +913,13 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
     source = kiln_c99_object_of(descriptors);
     status = kiln_c99_property_key_snapshot(source, &keys);
     if (status != KILN_C99_OK) return status;
+    status = kiln_c99_new_array(&prepared);
+    if (status != KILN_C99_OK) return status;
     /* OrdinaryOwnPropertyKeys: the string keys in walk order, then the symbol keys,
      * mirroring the two passes in `keys.c`. The order is observable -- a later
      * descriptor overwrites an earlier one, and a proxy trap sees every call in
-     * order -- so walk order is not close enough. */
+     * order -- so walk order is not close enough. First convert every descriptor before
+     * defining anything; a later getter or invalid descriptor must not observe earlier traps. */
     for (pass = 0; pass < 2; ++pass) {
     for (index = 0; index < kiln_c99_array_of(keys)->count; ++index) {
         /* Only the enumerable own ones, which is what the language walks. A symbol key's
@@ -853,6 +931,8 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
             kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[index]).ptr;
         kiln_property property;
         kiln_value descriptor;
+        kiln_value snapshot;
+        kiln_value entry;
         kiln_value symbol;
         int is_symbol = kiln_c99_symbol_of_key_view(key, &symbol);
         if (!is_symbol && kiln_c99_key_is_reserved(key))
@@ -864,10 +944,15 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
         if (is_symbol ? property.symbol_hidden : !property.enumerable)
             continue;
         status = kiln_c99_get_key(host, descriptors, key, key, &descriptor, depth, thrown);
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_define_property_key(host, target, key, key, descriptor, depth,
-                                                  thrown);
-        }
+        kiln_c99_property_descriptor parsed;
+        if (status == KILN_C99_OK)
+            status = kiln_c99_to_property_descriptor(host, descriptor, &parsed, depth, thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_from_property_descriptor(&parsed, &snapshot);
+        if (status == KILN_C99_OK) status = kiln_c99_new_array(&entry);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(entry, kiln_c99_stable_key_value(key));
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(entry, snapshot);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(prepared, entry);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -875,6 +960,26 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
          * snapshot's, while its current descriptor is rechecked above. */
     }
     }
+    for (index = 0; index < kiln_c99_array_of(prepared)->count; ++index) {
+        kiln_value entry_value = kiln_val_to_boundary(kiln_c99_array_of(prepared)->elements[index]);
+        kiln_array *entry = kiln_c99_array_of(entry_value);
+        kiln_value key_value = kiln_val_to_boundary(entry->elements[0]);
+        kiln_value descriptor = kiln_val_to_boundary(entry->elements[1]);
+        const kiln_string *key = key_value.tag == KILN_VALUE_STRING
+                                     ? (const kiln_string *)key_value.ptr
+                                     : NULL;
+        const kiln_string *canonical = key_value.tag == KILN_VALUE_STRING
+                                           ? (const kiln_string *)key_value.ptr
+                                           : NULL;
+        if (key == NULL) KILN_C99_REFUSE("a descriptor key without a string slot");
+        status = kiln_c99_define_property_key(host, target, key, canonical, descriptor, depth,
+                                              thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+    kiln_c99_gc_keep_alive(&descriptors);
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&keys);
+    kiln_c99_gc_keep_alive(&prepared);
     return KILN_C99_OK;
 }
 

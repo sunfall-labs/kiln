@@ -239,6 +239,25 @@ static int kiln_c99_describe_property_key(kiln_host *host, kiln_value target,
 static int kiln_c99_descriptor_field(kiln_host *host, kiln_value descriptor, const char *name,
                                      kiln_value *out, int *present, int depth,
                                      kiln_value *thrown);
+typedef struct kiln_c99_property_descriptor {
+    kiln_value value;
+    kiln_value writable;
+    kiln_value getter;
+    kiln_value setter;
+    kiln_value enumerable;
+    kiln_value configurable;
+    int has_value;
+    int has_writable;
+    int has_getter;
+    int has_setter;
+    int has_enumerable;
+    int has_configurable;
+} kiln_c99_property_descriptor;
+static int kiln_c99_to_property_descriptor(kiln_host *host, kiln_value source,
+                                            kiln_c99_property_descriptor *out, int depth,
+                                            kiln_value *thrown);
+static int kiln_c99_from_property_descriptor(kiln_c99_property_descriptor *descriptor,
+                                              kiln_value *out);
 static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
                                          const kiln_string *view,
                                          const kiln_string *canonical, kiln_value descriptor,
@@ -451,7 +470,8 @@ static int kiln_c99_proxy_own_keys(kiln_host *host, kiln_value proxy, kiln_value
 static int kiln_c99_proxy_describe(kiln_host *host, kiln_value proxy, kiln_value key,
                                    kiln_value *out, int *found, int depth, kiln_value *thrown);
 static int kiln_c99_proxy_define(kiln_host *host, kiln_value proxy, kiln_value key,
-                                 kiln_value descriptor, int depth, kiln_value *thrown);
+                                 kiln_value descriptor, int depth, kiln_value *thrown,
+                                 int *refusal);
 static int kiln_c99_proxy_all_keys(kiln_host *host, kiln_value proxy, kiln_value *out, int depth,
                                    kiln_value *thrown);
 static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,

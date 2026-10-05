@@ -178,6 +178,8 @@ pub(super) fn native_js_name(native: &Native) -> String {
         Native::TypedArraySortRaw => "__kilnTypedArraySort".to_owned(),
         Native::DataViewStateRaw => "__kilnDataViewState".to_owned(),
         Native::IsConstructorRaw => "__kilnIsConstructor".to_owned(),
+        Native::IsOtherRealmArrayConstructorRaw => "__kilnIsOtherRealmArrayConstructor".to_owned(),
+        Native::ArrayNextPresentIndexRaw => "__kilnArrayNextPresentIndex".to_owned(),
         Native::JobsPendingRaw => "__kilnJobsPending".to_owned(),
         Native::QueueIoRaw => "__kilnQueueIo".to_owned(),
         Native::TimerRefRaw => "__kilnTimerRef".to_owned(),

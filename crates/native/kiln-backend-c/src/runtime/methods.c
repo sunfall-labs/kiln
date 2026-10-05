@@ -129,6 +129,126 @@ static uint64_t kiln_c99_array_prototype_method(const char *key, size_t key_len)
     return code;
 }
 
+/* `Array.prototype.map`/`reduce` are shared TypeScript now. Their sparse-array loop asks for a
+ * candidate only on a concrete array whose indexed prototype chain is unchanged. In that case
+ * HasProperty for a hole is false and the dense backing can skip a run of holes without one VM
+ * instruction per index. Any array side store, index descriptor, indexed prototype mutation, or
+ * custom prototype chain asks TypeScript to use ordinary `in` instead. */
+static int kiln_c99_store_has_indexed_property(kiln_value store, int *answer) {
+    kiln_object *object;
+    size_t index;
+    *answer = 0;
+    if (store.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    if (store.tag != KILN_VALUE_OBJECT) return KILN_C99_INVALID_ARGUMENT;
+    object = kiln_c99_object_of(store);
+    if (object->prototype.tag != KILN_VALUE_UNDEFINED) {
+        *answer = 1;
+        return KILN_C99_OK;
+    }
+    for (index = 0; index < object->count; ++index) {
+        if (object->properties[index].key != NULL &&
+            kiln_c99_key_index_key(object->properties[index].key) >= 0.0) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
+    }
+    return KILN_C99_OK;
+}
+
+int kiln_c99_array_next_present_index(kiln_value value, kiln_value cursor_value,
+                                      kiln_value limit_value, kiln_value reverse_value,
+                                      kiln_value *result) {
+    kiln_array *array;
+    double cursor_number;
+    double limit_number;
+    int reverse;
+    int has_index = 0;
+    size_t index;
+    size_t stop;
+    kiln_value prototype_store;
+    int status;
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *result = kiln_c99_boolean(0);
+    if (value.tag != KILN_VALUE_ARRAY || cursor_value.tag != KILN_VALUE_NUMBER ||
+        limit_value.tag != KILN_VALUE_NUMBER || reverse_value.tag != KILN_VALUE_BOOLEAN) {
+        return KILN_C99_OK;
+    }
+    cursor_number = kiln_c99_as_number(cursor_value);
+    limit_number = kiln_c99_as_number(limit_value);
+    reverse = kiln_c99_truthy(reverse_value);
+    if (!isfinite(cursor_number) || cursor_number < 0.0 || floor(cursor_number) != cursor_number ||
+        !isfinite(limit_number) || floor(limit_number) != limit_number) {
+        return KILN_C99_OK;
+    }
+    array = kiln_c99_array_of(value);
+    if (!reverse && cursor_number < (double)array->count &&
+        array->elements[(size_t)cursor_number] != KILN_VAL_HOLE) {
+        *result = kiln_c99_number(cursor_number);
+        return KILN_C99_OK;
+    }
+    if (reverse && cursor_number < (double)array->count) {
+        size_t current = (size_t)cursor_number;
+        if (array->elements[current] != KILN_VAL_HOLE) {
+            *result = kiln_c99_number(cursor_number);
+            return KILN_C99_OK;
+        }
+    }
+    if (array->properties.tag != KILN_VALUE_UNDEFINED || array->has_index_descriptors) {
+        return KILN_C99_OK;
+    }
+    /* These two tables make up every default indexed-prototype lookup for an array in this
+     * representation. If a program added an index, or moved either prototype onto a custom
+     * chain, the fast query declines and the ordinary `in` operator remains authoritative. */
+    status = kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE),
+                                     &prototype_store, 0);
+    if (status != KILN_C99_OK) return KILN_C99_OK;
+    status = kiln_c99_store_has_indexed_property(prototype_store, &has_index);
+    if (status != KILN_C99_OK || has_index) return KILN_C99_OK;
+    status = kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
+                                     &prototype_store, 0);
+    if (status != KILN_C99_OK) return KILN_C99_OK;
+    status = kiln_c99_store_has_indexed_property(prototype_store, &has_index);
+    if (status != KILN_C99_OK || has_index) return KILN_C99_OK;
+    if (!reverse) {
+        if (limit_number <= cursor_number) {
+            *result = kiln_c99_null();
+            return KILN_C99_OK;
+        }
+        if (cursor_number > (double)SIZE_MAX || limit_number > (double)SIZE_MAX) {
+            *result = kiln_c99_null();
+            return KILN_C99_OK;
+        }
+        index = (size_t)cursor_number;
+        stop = (size_t)limit_number;
+        if (stop > array->count) stop = array->count;
+        while (index < stop) {
+            if (array->elements[index] != KILN_VAL_HOLE) {
+                *result = kiln_c99_number((double)index);
+                return KILN_C99_OK;
+            }
+            ++index;
+        }
+        *result = kiln_c99_null();
+        return KILN_C99_OK;
+    }
+    if (limit_number != -1.0) return KILN_C99_OK;
+    if (array->count == 0) {
+        *result = kiln_c99_null();
+        return KILN_C99_OK;
+    }
+    index = cursor_number >= (double)array->count ? array->count - 1 : (size_t)cursor_number;
+    for (;;) {
+        if (array->elements[index] != KILN_VAL_HOLE) {
+            *result = kiln_c99_number((double)index);
+            return KILN_C99_OK;
+        }
+        if (index == 0) break;
+        --index;
+    }
+    *result = kiln_c99_null();
+    return KILN_C99_OK;
+}
+
 static kiln_value kiln_c99_method(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_METHOD, code, NULL, 0);
 }
@@ -285,6 +405,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW: return "__kilnTypedArraySort";
     case KILN_C99_METHOD_DATA_VIEW_STATE_RAW: return "__kilnDataViewState";
     case KILN_C99_METHOD_IS_CONSTRUCTOR_RAW: return "__kilnIsConstructor";
+    case KILN_C99_METHOD_IS_OTHER_REALM_ARRAY_CONSTRUCTOR_RAW: return "__kilnIsOtherRealmArrayConstructor";
+    case KILN_C99_METHOD_ARRAY_NEXT_PRESENT_INDEX_RAW: return "__kilnArrayNextPresentIndex";
     case KILN_C99_METHOD_WORKER_OP_RAW: return "__kilnWorkerOp";
     case KILN_C99_METHOD_PORT_WAIT_RAW: return "__kilnPortWait";
     case KILN_C99_METHOD_SHARED_BUFFER_RAW: return "__kilnSharedBuffer";

@@ -1313,10 +1313,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: &Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
-        let mut current = prototype_of(target);
+        let mut current = match target {
+            Value::Date(date) => date
+                .properties
+                .borrow()
+                .prototype()
+                .cloned()
+                .unwrap_or_else(|| prototype_of_in(&self.intrinsics, target)),
+            _ => prototype_of_in(&self.intrinsics, target),
+        };
         for _ in 0..MAX_PROTOTYPE_DEPTH {
             if matches!(current, Value::Null | Value::Undefined) {
                 return Ok(false);
+            }
+            if matches!(current, Value::Proxy(_)) {
+                let property_key = if key.is_symbol() {
+                    self.symbol_of_key(&key.owned().to_lossy_string())
+                        .map(Value::Symbol)
+                        .unwrap_or_else(|| Value::String(key.owned()))
+                } else {
+                    Value::String(key.owned())
+                };
+                let _ =
+                    self.set_reflect(&current, &property_key, value.clone(), target, instruction)?;
+                return Ok(true);
             }
             match own_property_state_key(&self.intrinsics, &current, key) {
                 Some((Property::Accessor { set, .. }, _)) => {
@@ -1330,7 +1350,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // A data property up the chain does not take the write -- an own one is created
                 // to shadow it -- unless it refused to be written at all.
                 Some((Property::Value(_), attributes)) => return Ok(!attributes.writable),
-                None => current = prototype_of(&current),
+                None => current = prototype_of_in(&self.intrinsics, &current),
             }
         }
         Ok(false)
@@ -1566,12 +1586,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// `false` for every `in` -- the traps never ran, and a proxy used as a prototype is how a
     /// library gives an object dynamic members it cannot enumerate in advance.
     pub(crate) fn proxy_on_chain(&self, target: &Value) -> Option<Value> {
-        let mut current = prototype_of(target);
+        let mut current = prototype_of_in(&self.intrinsics, target);
         for _ in 0..MAX_PROTOTYPE_DEPTH {
             match current {
                 Value::Proxy(_) => return Some(current),
                 Value::Null | Value::Undefined => return None,
-                other => current = prototype_of(&other),
+                other => current = prototype_of_in(&self.intrinsics, &other),
             }
         }
         None
@@ -1736,9 +1756,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => Ok(PropertyRead::Value(Value::Undefined)),
             },
             Some(Property::Value(value)) => Ok(PropertyRead::Value(value)),
-            _ => Ok(PropertyRead::Value(
-                self.computed_key_ref(target, property_key),
-            )),
+            _ => {
+                let found = self.computed_key_ref(target, property_key);
+                // Continue observable prototype lookup when the pure indexed-storage lookup
+                // reaches a Proxy. An own undefined still shadows inherited properties.
+                if matches!(found, Value::Undefined)
+                    && own_property_state_key(&self.intrinsics, target, property_key).is_none()
+                    && let Some(proxy) = self.proxy_on_chain(target)
+                {
+                    return self
+                        .proxy_get_with_receiver(&proxy, key, receiver, instruction)
+                        .map(PropertyRead::Value);
+                }
+                Ok(PropertyRead::Value(found))
+            }
         }
     }
 

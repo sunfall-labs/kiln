@@ -3537,12 +3537,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             let read = self.read_property_key(source, key_ref, instruction)?;
             let descriptor = self.read_descriptor(&read, instruction)?;
-            descriptors.push((key, key_ref, read, descriptor));
+            descriptors.push((key, key_ref, descriptor));
         }
-        for (key, key_ref, read, descriptor) in descriptors {
-            // A proxy's `defineProperty` trap takes the descriptor object the program wrote, not
-            // the fields it was read into, so it keeps the route it already had. The trap names
-            // its key as the language does: a reserved spelling resolves back into the symbol,
+        for (key, key_ref, descriptor) in descriptors {
+            // `DefinePropertyOrThrow` applies the internal descriptor record, so a proxy sees a
+            // fresh `FromPropertyDescriptor` object rather than the source descriptor. The trap
+            // names its key as the language does: a reserved spelling resolves back into the symbol,
             // mirroring `own_keys_reflected`, so a symbol descriptor arrives as the symbol
             // rather than `"@@symbol:N"`. String keys pass through unchanged, and an
             // unresolvable spelling keeps the string it already had rather than inventing a key.
@@ -3557,7 +3557,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.dispatch_native(
                     Native::ObjectDefineProperty,
                     &Value::Undefined,
-                    &[target.clone(), trap_arg, read],
+                    &[
+                        target.clone(),
+                        trap_arg,
+                        Self::descriptor_object(&descriptor),
+                    ],
                     instruction,
                 )?;
                 continue;

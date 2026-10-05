@@ -1355,6 +1355,8 @@ method_ids! {
     // arguments; unlike calling a numeric accessor, this does not inspect detachment or bounds.
     (KILN_C99_METHOD_DATA_VIEW_STATE_RAW, 572, Direct; 0, 0),
     (KILN_C99_METHOD_IS_CONSTRUCTOR_RAW, 578, Direct; 0, 0),
+    (KILN_C99_METHOD_IS_OTHER_REALM_ARRAY_CONSTRUCTOR_RAW, 586, Direct; 0, 0),
+    (KILN_C99_METHOD_ARRAY_NEXT_PRESENT_INDEX_RAW, 587, Direct; 0, 0),
     // The runtime's cross-realm ports and workers (realms issue 06), captured and deleted by
     // `kiln-builtins/src/web_events_streams.ts`: every synchronous operation, and the wait.
     (KILN_C99_METHOD_WORKER_OP_RAW, 539, Direct; 0, 0),
@@ -2437,6 +2439,11 @@ pub struct AbsentAnswer {
 /// does deleting a predicate's last site and leaving the row. `absent_answers_are_where_they_say`
 /// checks the half a `const` cannot -- that the sites are in the functions claimed here.
 pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
+    AbsentAnswer {
+        function: "kiln_c99_array_custom_parent_read",
+        sites: 1,
+        proved_by: "Array.prototype has an explicit null parent, so no inherited property exists",
+    },
     AbsentAnswer {
         function: "kiln_c99_prototype_store_read_with_receiver",
         sites: 1,

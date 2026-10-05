@@ -449,15 +449,101 @@ static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *i
     return kiln_c99_own_index_key(object, ikey, &view);
 }
 
+static int kiln_c99_property_store_at_prototype(kiln_value current, kiln_value *store) {
+    if (current.tag == KILN_VALUE_OBJECT) {
+        *store = current;
+        return 1;
+    }
+    if (current.tag == KILN_VALUE_FUNCTION || current.tag == KILN_VALUE_BUILTIN || current.tag == KILN_VALUE_METHOD ||
+        current.tag == KILN_VALUE_BOUND || current.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        return kiln_c99_callable_store(current, store, 0) == KILN_C99_OK &&
+               store->tag == KILN_VALUE_OBJECT;
+    }
+    return 0;
+}
+
+static int kiln_c99_property_storage_commit(kiln_value target, const kiln_string *key,
+                                             const kiln_string *ikey,
+                                             const kiln_property *desired);
+
+static int kiln_c99_date_set_with_prototype(kiln_host *host, kiln_value target,
+                                            const kiln_string *key,
+                                            const kiln_string *ikey, kiln_value value,
+                                            int strict, int depth, kiln_value *thrown) {
+    kiln_date *date = (kiln_date *)(uintptr_t)target.bits;
+    kiln_value current;
+    kiln_property property;
+    size_t steps;
+    int status;
+    if (date->properties.tag != KILN_VALUE_OBJECT) {
+        status = kiln_c99_new_object_for_owner(&date->properties, date);
+        if (status != KILN_C99_OK) return status;
+    }
+    if (kiln_c99_property_read_own_value(date->properties, key, ikey, &property)) {
+        if (property.accessor) {
+            if (property.setter.tag == KILN_VALUE_UNDEFINED)
+                return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+            {
+                kiln_value ignored;
+                return kiln_c99_call(host, &ignored, property.setter, target, &value, 1,
+                                     depth, thrown);
+            }
+        }
+        return kiln_c99_put_mode_key(host, date->properties, key, ikey, value, strict,
+                                     depth, thrown);
+    }
+    /* The Date sidecar store carries an explicit instance [[Prototype]] when one was assigned.
+     * An absent link means the intrinsic Date.prototype; explicit null/custom links must not be
+     * bypassed by the Date exotic setter path. */
+    current = kiln_c99_object_of(date->properties)->prototype;
+    if (current.tag == KILN_VALUE_UNDEFINED)
+        current = kiln_c99_builtin(KILN_C99_BUILTIN_DATE_PROTOTYPE);
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        kiln_value store;
+        kiln_object *object;
+        if (current.tag == KILN_VALUE_PROXY) {
+            kiln_value property_key;
+            if (!kiln_c99_symbol_of_key_view(key, &property_key))
+                property_key = kiln_c99_stable_key_value(ikey != NULL ? ikey : key);
+            return kiln_c99_set_with_receiver(host, current, property_key, value, target,
+                                              strict, depth + (int)steps, thrown);
+        }
+        if (!kiln_c99_property_store_at_prototype(current, &store)) break;
+        if (kiln_c99_property_read_own_value(store, key, ikey, &property)) {
+            if (property.accessor) {
+                if (property.setter.tag == KILN_VALUE_UNDEFINED)
+                    return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+                {
+                    kiln_value ignored;
+                    return kiln_c99_call(host, &ignored, property.setter, target, &value, 1,
+                                         depth, thrown);
+                }
+            }
+            if (!property.writable)
+                return strict ? kiln_c99_throw_read_only_key(thrown, key) : KILN_C99_OK;
+            break;
+        }
+        object = kiln_c99_object_of(store);
+        current = object->prototype;
+    }
+    {
+        kiln_property desired = {0};
+        desired.value = value;
+        desired.enumerable = ikey == NULL || !kiln_c99_key_is_reserved(ikey);
+        desired.writable = 1;
+        desired.configurable = 1;
+        return kiln_c99_property_storage_commit(date->properties, key, ikey, &desired);
+    }
+}
+
 static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
     kiln_value current = proto;
     size_t steps;
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         kiln_object *walked;
-        if (current.tag != KILN_VALUE_OBJECT) {
-            break;
-        }
-        walked = kiln_c99_object_of(current);
+        kiln_value store;
+        if (!kiln_c99_property_store_at_prototype(current, &store)) break;
+        walked = kiln_c99_object_of(store);
         if (walked->accessor_count != 0 || walked->read_only_seen) {
             return 1;
         }
@@ -520,8 +606,9 @@ static int kiln_c99_inherited_write_blocked(kiln_value proto, const kiln_string 
     size_t steps;
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         kiln_object *walked;
-        if (current.tag != KILN_VALUE_OBJECT) return 0;
-        walked = kiln_c99_object_of(current);
+        kiln_value store;
+        if (!kiln_c99_property_store_at_prototype(current, &store)) return 0;
+        walked = kiln_c99_object_of(store);
         if (walked->accessor_count != 0 || walked->read_only_seen) {
             kiln_value setter;
             int answer = kiln_c99_level_write_answer(walked, ikey, key, &setter);
@@ -875,15 +962,8 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
                                      thrown);
     }
     if (target.tag == KILN_VALUE_DATE) {
-        kiln_date *date = (kiln_date *)(uintptr_t)target.bits;
-        if (date->properties.tag != KILN_VALUE_OBJECT) {
-            status = kiln_c99_new_object_for_owner(&date->properties, date);
-            if (status != KILN_C99_OK) return status;
-        }
-        const kiln_string *canonical = ikey;
-        kiln_value key_value = kiln_c99_key_value(key, &canonical);
-        return kiln_c99_set_with_receiver(host, date->properties, key_value, value,
-                                          target, strict, depth, thrown);
+        return kiln_c99_date_set_with_prototype(host, target, key, ikey, value,
+                                                strict, depth, thrown);
     }
     if (target.tag == KILN_VALUE_COLLECTION) {
         kiln_collection *collection = kiln_c99_collection_of(target);
@@ -1114,10 +1194,9 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         size_t steps;
         for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
             kiln_object *walked;
-            if (current.tag != KILN_VALUE_OBJECT) {
-                break;
-            }
-            walked = kiln_c99_object_of(current);
+            kiln_value store;
+            if (!kiln_c99_property_store_at_prototype(current, &store)) break;
+            walked = kiln_c99_object_of(store);
             if (walked->accessor_count != 0 || walked->read_only_seen) {
                 kiln_value setter;
                 int answer = kiln_c99_level_write_answer(walked, ikey, key, &setter);

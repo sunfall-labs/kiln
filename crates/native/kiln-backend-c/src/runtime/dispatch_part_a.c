@@ -2062,6 +2062,41 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = kiln_c99_boolean(argc > 0 && kiln_c99_is_constructor(args[0]));
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_IS_OTHER_REALM_ARRAY_CONSTRUCTOR_RAW) {
+        if (argc == 0 || !kiln_c99_is_constructor(args[0])) {
+            *result = kiln_c99_boolean(0);
+            return KILN_C99_OK;
+        }
+        /* Native execution currently has one JavaScript realm. Still perform the observable
+         * GetFunctionRealm failure check on revoked proxies; bound functions and live proxies
+         * delegate the realm query to their targets, but are not identity-equal to Array. */
+        kiln_value current = args[0];
+        for (;;) {
+            if (current.tag == KILN_VALUE_BOUND) {
+                current = ((kiln_bound *)(uintptr_t)current.bits)->target;
+                continue;
+            }
+            if (current.tag == KILN_VALUE_PROXY) {
+                kiln_proxy *proxy = kiln_c99_proxy_of(current);
+                if (proxy->revoked)
+                    return kiln_c99_throw_error(
+                        thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                        "Cannot perform operation on a proxy that has been revoked");
+                current = proxy->target;
+                continue;
+            }
+            break;
+        }
+        *result = kiln_c99_boolean(0);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_ARRAY_NEXT_PRESENT_INDEX_RAW) {
+        return kiln_c99_array_next_present_index(
+            argc > 0 ? args[0] : kiln_c99_undefined(),
+            argc > 1 ? args[1] : kiln_c99_undefined(),
+            argc > 2 ? args[2] : kiln_c99_undefined(),
+            argc > 3 ? args[3] : kiln_c99_undefined(), result);
+    }
     if (code == KILN_C99_METHOD_DATA_VIEW_STATE_RAW) {
         /* Native ArrayBuffers cannot yet be immutable. State 2 is reserved for that
          * representation; 0 is a non-view and 1 a mutable view, regardless of detachment. */

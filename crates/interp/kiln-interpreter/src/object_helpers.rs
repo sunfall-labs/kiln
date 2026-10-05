@@ -448,6 +448,106 @@ pub(super) fn value_realm(value: &Value) -> RealmId {
     }
 }
 
+/// `GetFunctionRealm` for the callable kinds represented by this VM. The other-realm Array
+/// species check uses this only after IsConstructor succeeded; following bound functions and
+/// proxies is required even though the final identity test rejects those wrappers. A revoked
+/// proxy throws here as the specification requires.
+pub(super) fn get_function_realm(value: &Value) -> Result<RealmId, ExecutionError> {
+    match value {
+        Value::Native(_, realm) | Value::Callback(_, realm) => Ok(*realm),
+        Value::Function(closure) => Ok(closure.realm),
+        Value::Bound(bound) => get_function_realm(&bound.target),
+        Value::Proxy(proxy) if proxy.revoked.get() => Err(ExecutionError::RevokedProxy),
+        Value::Proxy(proxy) => get_function_realm(&proxy.target),
+        Value::Wrapped(wrapped) => Ok(wrapped.realm),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "GetFunctionRealm requires a callable object".to_owned(),
+        }),
+    }
+}
+
+/// Whether `value` is the exact intrinsic Array constructor for a realm other than the currently
+/// executing Array built-in. The query is intentionally about identity, not a function's name,
+/// prototype or target: proxies and bound functions still have their realm chain checked above,
+/// then remain ordinary custom species by identity.
+pub(super) fn is_other_realm_array_constructor(
+    value: &Value,
+    current_realm: RealmId,
+) -> Result<bool, ExecutionError> {
+    if !is_constructor(value) {
+        return Ok(false);
+    }
+    let function_realm = get_function_realm(value)?;
+    Ok(matches!(
+        value,
+        Value::Native(Native::ArrayConstructor, realm)
+            if *realm == function_realm && *realm != current_realm
+    ))
+}
+
+#[cfg(test)]
+mod function_realm_tests {
+    use super::*;
+
+    fn bound(target: Value) -> Value {
+        Value::Bound(Rc::new(BoundFunction {
+            target,
+            this_value: Value::Undefined,
+            arguments: Vec::new(),
+            properties: RefCell::new(ObjectData::default()),
+        }))
+    }
+
+    #[test]
+    fn array_species_realm_predicate_checks_identity_and_revocation() {
+        let primary_array = Value::Native(Native::ArrayConstructor, RealmId::PRIMARY);
+        let foreign_array = Value::Native(Native::ArrayConstructor, RealmId(1));
+        let foreign_date = Value::Native(Native::DateConstructor, RealmId(1));
+        assert!(
+            !is_other_realm_array_constructor(&primary_array, RealmId::PRIMARY)
+                .expect("same-realm Array is not foreign")
+        );
+        assert!(
+            is_other_realm_array_constructor(&foreign_array, RealmId::PRIMARY)
+                .expect("foreign intrinsic Array is foreign")
+        );
+        assert!(
+            !is_other_realm_array_constructor(&foreign_date, RealmId::PRIMARY)
+                .expect("a foreign constructor is not foreign Array")
+        );
+
+        let bound_array = bound(foreign_array.clone());
+        assert!(
+            !is_other_realm_array_constructor(&bound_array, RealmId::PRIMARY)
+                .expect("bound Array is not the intrinsic by identity")
+        );
+
+        let live_proxy = Value::Proxy(Rc::new(ProxyData {
+            target: foreign_array.clone(),
+            handler: Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            revoked: std::cell::Cell::new(false),
+        }));
+        assert!(
+            !is_other_realm_array_constructor(&live_proxy, RealmId::PRIMARY)
+                .expect("proxy Array is not the intrinsic by identity")
+        );
+
+        let revoked_proxy = Value::Proxy(Rc::new(ProxyData {
+            target: foreign_array,
+            handler: Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            revoked: std::cell::Cell::new(true),
+        }));
+        assert!(matches!(
+            is_other_realm_array_constructor(&revoked_proxy, RealmId::PRIMARY),
+            Err(ExecutionError::RevokedProxy)
+        ));
+        assert!(matches!(
+            is_other_realm_array_constructor(&bound(revoked_proxy), RealmId::PRIMARY),
+            Err(ExecutionError::RevokedProxy)
+        ));
+    }
+}
+
 /// Rewrite an intrinsic minted by a table so that it names `realm`'s copy of that built-in.
 ///
 /// The property tables are pure and realm-blind by design -- `Native::property` cannot be handed
@@ -885,7 +985,7 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
         other if exotic_properties(other).is_some() => {
             exotic_properties(target).is_some_and(|store| store.borrow().lookup(&name).is_some())
                 || exotic_reserved_name(target, &name)
-                || has_property_ascii(intrinsics, &prototype_of(target), &name)
+                || has_property_ascii(intrinsics, &prototype_of_in(intrinsics, target), &name)
         }
         // Mirrors the read: the realm's store first, then the table, then the `name` and
         // `length` every callable owns. A property a program deleted is absent here too, or
@@ -924,7 +1024,7 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
             // is every constructor and method table but that one. Answering from the built-in's
             // own names alone denied them `hasOwnProperty`, and denied `Math` a property the
             // program had put on `Object.prototype` and could read straight off it.
-            own || has_property_ascii(intrinsics, &prototype_of(target), name)
+            own || has_property_ascii(intrinsics, &prototype_of_in(intrinsics, target), name)
         }
         // Callable methods belong to the actual prototype chain. In particular, setting a
         // function's prototype to null removes inherited methods without removing its own
@@ -933,10 +1033,75 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
             closure.properties.borrow().lookup(&name).is_some()
                 || matches!(name, "name" | "length")
                 || (name == "prototype" && has_prototype_property(closure))
-                || has_property_ascii(intrinsics, &prototype_of(target), name)
+                || has_property_ascii(intrinsics, &prototype_of_in(intrinsics, target), name)
         }
         _ => false,
     }
+}
+
+/// Returns `None` when ordinary HasProperty must run (a Proxy, non-array or prototype condition
+/// that this representation cannot search without user code), otherwise `Some(None)` when no
+/// present index remains, or `Some(Some(index))` for the next own present slot. Indexed properties
+/// on Array/Object.prototype disable the shortcut monotonically, so inherited numeric keys always
+/// continue through HasProperty.
+pub(super) fn next_array_present_index(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    cursor: usize,
+    limit: usize,
+    reverse: bool,
+) -> Option<Option<usize>> {
+    let Value::Array(array) = target else {
+        return None;
+    };
+    let items = array.items.borrow();
+    if reverse {
+        if cursor < items.len() {
+            let index = cursor;
+            if array_exotic_element(array, index).is_some()
+                || !matches!(items[index], Value::Native(Native::Hole, _))
+            {
+                return Some(Some(index));
+            }
+        }
+    } else if cursor < items.len()
+        && (array_exotic_element(array, cursor).is_some()
+            || !matches!(items[cursor], Value::Native(Native::Hole, _)))
+    {
+        return Some(Some(cursor));
+    }
+    if intrinsics.indexed_array_prototype.get()
+        || intrinsics.indexed_prototype_chain_is_custom()
+        || array.properties.borrow().prototype().is_some()
+    {
+        return None;
+    }
+    if reverse {
+        if items.is_empty() {
+            return Some(None);
+        }
+        let mut index = cursor.min(items.len() - 1);
+        loop {
+            if array_exotic_element(array, index).is_some()
+                || !matches!(items[index], Value::Native(Native::Hole, _))
+            {
+                return Some(Some(index));
+            }
+            if index == 0 {
+                return Some(None);
+            }
+            index -= 1;
+        }
+    }
+    let end = limit.min(items.len());
+    for index in cursor.min(end)..end {
+        if array_exotic_element(array, index).is_some()
+            || !matches!(items[index], Value::Native(Native::Hole, _))
+        {
+            return Some(Some(index));
+        }
+    }
+    Some(None)
 }
 
 #[derive(Clone, Debug)]

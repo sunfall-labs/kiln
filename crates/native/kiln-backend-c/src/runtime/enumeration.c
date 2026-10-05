@@ -329,6 +329,12 @@ kiln_has_next_prototype:
         }
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         *answer = kiln_c99_builtin_has_member(target.bits, intrinsic_key, intrinsic_len);
+        if (!*answer && kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
+            store.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_object_of(store)->prototype.tag != KILN_VALUE_UNDEFINED) {
+            return kiln_c99_has_property_key(
+                host, kiln_c99_object_of(store)->prototype, key, ikey, answer, depth, thrown);
+        }
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_GENERATOR) {
@@ -553,18 +559,24 @@ kiln_has_next_prototype:
                 *answer = 1;
                 return KILN_C99_OK;
             }
+            if (array->properties.tag == KILN_VALUE_OBJECT) {
+                int inherited = 0;
+                int status = kiln_c99_has_property_key(host, array->properties, key, ikey,
+                                                       &inherited, depth, thrown);
+                if (status != KILN_C99_OK || inherited) {
+                    *answer = inherited;
+                    return status;
+                }
+            }
             /* A sparse or out-of-range index can still be inherited from Array.prototype.
              * Array iteration methods use this same [[HasProperty]] path before [[Get]], so
-             * checking only the dense vector made `1 in array` false while a direct read found
-             * the inherited value. */
-            {
-                kiln_value store;
-                if (kiln_c99_callable_store(
-                        kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE), &store, 0) ==
-                    KILN_C99_OK && kiln_c99_store_has(store, key, ikey)) {
-                    *answer = 1;
-                    return KILN_C99_OK;
-                }
+             * checking only the dense vector and named-property store made `1 in array` false
+             * while a direct read found an inherited value. */
+            if (array->properties.tag != KILN_VALUE_OBJECT ||
+                kiln_c99_object_of(array->properties)->prototype.tag == KILN_VALUE_UNDEFINED) {
+                return kiln_c99_has_property_key(
+                    host, kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE), key, ikey,
+                    answer, depth, thrown);
             }
             *answer = 0;
             return KILN_C99_OK;

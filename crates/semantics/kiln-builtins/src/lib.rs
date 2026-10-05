@@ -1506,6 +1506,10 @@ pub const DATE_BOOTSTRAP_SOURCE: &str = include_str!("date.ts");
 
 /// `%TypedArray%.prototype` (ADR 0005, ADR 0063 rule 4, Phase 5.1).
 pub const TYPEDARRAY_BOOTSTRAP_SOURCE: &str = include_str!("typedarray.ts");
+
+/// `Array.prototype.map`, `reduce`, and `reduceRight` are shared TypeScript callbacks so their
+/// calls enter the ordinary VM instruction loop in both engines.
+pub const ARRAY_CALLBACK_BOOTSTRAP_SOURCE: &str = include_str!("array_callbacks.ts");
 /// `Math.f16round` over the existing Float16Array element conversion.
 pub const NUMERIC_MATH_BOOTSTRAP_SOURCE: &str = include_str!("numeric_math.ts");
 /// BigInt width truncation over existing arbitrary-precision operators.
@@ -1614,6 +1618,7 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         FUNCTION_KINDS_BOOTSTRAP_SOURCE,
         selected(family::DATE, DATE_BOOTSTRAP_SOURCE),
         selected(family::TYPED_ARRAY, TYPEDARRAY_BOOTSTRAP_SOURCE),
+        ARRAY_CALLBACK_BOOTSTRAP_SOURCE,
         selected(family::NUMERIC_MATH, NUMERIC_MATH_BOOTSTRAP_SOURCE),
         selected(family::NUMERIC_BIGINT, NUMERIC_BIGINT_BOOTSTRAP_SOURCE),
         PARALLEL_BOOTSTRAP_SOURCE,
@@ -1646,7 +1651,6 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
         (family::JSON, "__kilnJsonUnbox"),
         (family::TYPED_ARRAY, "__kilnTypedArrayOutOfBounds"),
         (family::TYPED_ARRAY, "__kilnDataViewState"),
-        (family::TYPED_ARRAY, "__kilnIsConstructor"),
         (family::TYPED_ARRAY, "__kilnTypedArrayCopy"),
         (family::TYPED_ARRAY, "__kilnTypedArraySort"),
         (family::WEAK_REFS, "__kilnSharedWeak"),
@@ -1691,6 +1695,19 @@ pub fn common_bootstrap_source() -> String {
 #[cfg(test)]
 mod web_tests {
     use super::*;
+
+    #[test]
+    fn array_callback_methods_are_installed_before_parallel_captures_them() {
+        let source = common_bootstrap_source();
+        let callbacks = source
+            .find("installArrayCallbackMethods")
+            .expect("Array callback bootstrap should be present");
+        let parallel = source
+            .find("installParallelFamily")
+            .expect("parallel bootstrap should be present");
+        assert!(callbacks < parallel);
+        assert!(source.contains("__kilnIsOtherRealmArrayConstructor"));
+    }
 
     #[test]
     fn common_bootstrap_compiles_as_single_unit() {

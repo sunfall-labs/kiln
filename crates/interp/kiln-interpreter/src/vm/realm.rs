@@ -922,6 +922,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ),
             ("__kilnDataViewState", Native::DataViewStateRaw),
             ("__kilnIsConstructor", Native::IsConstructorRaw),
+            (
+                "__kilnIsOtherRealmArrayConstructor",
+                Native::IsOtherRealmArrayConstructorRaw,
+            ),
+            (
+                "__kilnArrayNextPresentIndex",
+                Native::ArrayNextPresentIndexRaw,
+            ),
             ("__kilnCollectionSize", Native::CollectionSizeRaw),
             // A same-type element copy and the default-order sort (`typedarray.ts`, every realm).
             ("__kilnTypedArrayCopy", Native::TypedArrayCopyRaw),
