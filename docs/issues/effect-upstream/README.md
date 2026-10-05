@@ -47,8 +47,7 @@ Those HTTP failures exposed a full-GUI provider package built without `realm-htt
 advertising HTTP capability. The feature contract is repaired with a red/green regression,
 and the [corrected package's focused checks](allocator-full-stress-20261004/http-provider-fix-focused/)
 match all 20 HTTP probes and three GUI probes under allocation stress, with one declared
-GUI stress skip. This full stress run remains failed until a complete corrected run proves
-otherwise. The [fresh full integration gate](allocator-gate-green-20261004/)
+GUI stress skip. The historical failed run remains retained. The [fresh full integration gate](allocator-gate-green-20261004/)
 (`run.zqPsS00h`) passed all ten steps in 1,307 seconds with an eight-CPU budget and a
 4 GiB Test262 cap: 2,635 crate tests passed with zero failures, native parity matched
 645 probes with five named refusals and zero divergences, and all 102,638 Test262
@@ -56,8 +55,9 @@ variants were selected with no chunk baseline regression. All 17 present third-p
 bundles matched and all 13 present unchanged performance baselines passed, including
 PostCSS. The candidate CLI is frozen as
 `16958abcd29f328d23bb789fc188f0e55a065e349b0b77736ce0354ba1820ceb`.
-The complete corrected-provider 650-probe allocation-stress run is now executing
-separately with two workers. Its result is required before this compiler milestone lands.
+The [complete corrected-provider allocation-stress run](allocator-full-stress-corrected-20261004/)
+exited 0: 600 matched, five named refusals, 45 declared stress skips and zero divergences.
+All 650 entries are accounted for, using the same frozen CLI and unchanged probe runner.
 
 The runner's opt-in artifact compression and shared-cache collection have also been
 [validated against 43 unchanged Boolean cases in native and Bun](runner-resource-policy-validation/).
@@ -68,9 +68,9 @@ pruning through its supported configuration interface after an automatic pruning
 The stopped older native survey covers 257 of 322 files; 65 remain unmeasured. It is not
 final-candidate coverage. [Resource coordination evidence](resource-coordination-20261004/)
 records the preserved survey and verified binary archives. Full 322-file interpreter and
-native validation, final quiet Bun benchmark comparison and complete corrected allocation
-stress remain required before completion. The full integration gate is now green; the
-compiler milestone has not been pushed.
+native validation and final quiet Bun benchmark comparison remain required before
+completion. Full integration and corrected native allocation-stress validation are green;
+this compiler milestone is ready to land.
 
 ## Corpus and measurement
 
