@@ -82,6 +82,11 @@ fn transformed_static_callsite_coordinates_use_original_typescript() {
         }]
         .into(),
     }));
+    let provenance = source_module
+        .static_source_provenance
+        .as_ref()
+        .unwrap()
+        .clone();
     let mut invocation = call(identifier("f"), vec![]);
     invocation.span = Span::new(0, 3);
     source_module
@@ -100,6 +105,10 @@ fn transformed_static_callsite_coordinates_use_original_typescript() {
         program.static_source_identity.as_deref(),
         Some("map-identity")
     );
+    assert!(std::sync::Arc::ptr_eq(
+        program.static_source_provenance.as_ref().unwrap(),
+        &provenance
+    ));
 }
 
 fn number(value: f64) -> Expression {

@@ -93,6 +93,7 @@ fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -217,6 +218,7 @@ fn decoupled_modules_include_one_external_runtime_header() {
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
@@ -405,6 +407,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("f16round".into())],
         code: vec![
             Instruction::MakeFunction(0),
@@ -825,6 +828,25 @@ fn program_hash_covers_static_transform_identity() {
         hash_program(&with_identity("transform-b")),
         "transform policy and source-map identity must affect native cache identity"
     );
+
+    let source = "export const add = (left: number, right: number) => left + right;";
+    let compile_at = |path: &str| {
+        let hir = kiln_frontend_oxc::parse(path, source);
+        kiln_ir::compile_module(&hir)
+            .expect("static TypeScript compiles")
+            .program
+    };
+    let first = compile_at("/checkout-one/src/entry.ts");
+    let second = compile_at("/checkout-two/src/entry.ts");
+    assert_eq!(
+        first.static_source_identity, second.static_source_identity,
+        "absolute diagnostic paths do not participate in content identity"
+    );
+    assert_eq!(
+        hash_program(&first),
+        hash_program(&second),
+        "identical transformed programs and maps should share native artifacts across roots"
+    );
 }
 
 #[test]
@@ -1080,6 +1102,7 @@ fn executable_compact_closure_executes_correctly() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![
                 Constant::Number(0f64.to_bits()),
                 Constant::Number(1f64.to_bits()),
@@ -1588,6 +1611,7 @@ fn compact_module_pools_inline_cache_sites_and_interned_keys_into_dense_tables()
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![
                 Constant::String("foo".to_owned().into()),
                 Constant::String("bar".to_owned().into()),
@@ -1693,6 +1717,7 @@ fn compact_module_with_many_keys_uses_dense_static_key_array_and_loop() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![
                 Constant::String("k0".to_owned().into()),
                 Constant::String("k1".to_owned().into()),

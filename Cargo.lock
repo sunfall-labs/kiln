@@ -2285,6 +2285,7 @@ dependencies = [
  "kiln-builtin-surface",
  "kiln-db",
  "kiln-digest",
+ "kiln-frontend-oxc",
  "kiln-graph",
  "kiln-host-abi",
  "kiln-ir",

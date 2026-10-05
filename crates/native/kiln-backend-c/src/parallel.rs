@@ -2367,6 +2367,7 @@ mod tests {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![
                 Constant::Number(1.0f64.to_bits()),
                 Constant::String("sqrt".into()),
@@ -3221,6 +3222,7 @@ mod tests {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: constants
                 .iter()
                 .map(|c| Constant::String((*c).into()))

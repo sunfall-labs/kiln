@@ -293,6 +293,123 @@ fn native_import_meta_reparse_remaps_export_demand_after_slot_compaction() {
 }
 
 #[test]
+fn native_import_meta_reparse_reuses_static_typescript_source_map() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-import-meta-static-ts-map");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create project");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { plugin } from './provider.ts'; console.log(plugin(5));",
+    )
+    .expect("write entry");
+    let provider = project.join("provider.ts");
+    let authored = "import { unused } from './unused.mjs';\nimport { live } from './live.mjs';\nif (false) console.log(unused);\nexport function plugin(value: number): string { console.log(value); return live + import.meta.url; }\n";
+    fs::write(&provider, authored).expect("write TypeScript provider");
+    fs::write(project.join("unused.mjs"), "export const unused = 1;").expect("write unused");
+    fs::write(project.join("live.mjs"), "export const live = 2;").expect("write live");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph containing static TypeScript");
+    let original = graph
+        .module(&provider)
+        .expect("TypeScript provider")
+        .program
+        .program
+        .static_source_provenance
+        .as_ref()
+        .expect("static TypeScript transform provenance");
+    let original_node = graph.module(&provider).unwrap();
+    assert!(
+        !original_node.program.program.source.contains(": number"),
+        "the generated JavaScript is the graph parser input"
+    );
+    assert_eq!(original_node.program.imports.len(), 2);
+    let original_identity = Arc::clone(&original.identity);
+
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
+            .expect("compute graph demand");
+    let (reparsed, _) = native_import_meta_reparse(&graph, &demand);
+    let reparsed_provider = reparsed.module(&provider).expect("reparsed TS provider");
+    assert_eq!(
+        reparsed_provider.program.imports.len(),
+        1,
+        "the native DCE/reparse path must remove the unused import"
+    );
+    assert_eq!(reparsed_provider.program.imports[0].local, "live");
+    assert!(
+        !reparsed_provider
+            .program
+            .program
+            .source
+            .contains(": number"),
+        "native import.meta reparsing consumes prepared JavaScript rather than transforming twice"
+    );
+    assert_eq!(
+        reparsed_provider
+            .program
+            .program
+            .static_source_identity
+            .as_deref(),
+        Some(original_identity.as_ref())
+    );
+    let reparsed_provenance = reparsed_provider
+        .program
+        .program
+        .static_source_provenance
+        .as_ref()
+        .expect("prepared reparse retains source map");
+    assert!(Arc::ptr_eq(reparsed_provenance, original));
+    assert!(
+        reparsed_provider
+            .program
+            .program
+            .debug_call_sites
+            .iter()
+            .any(|site| site.line == 4),
+        "call-site coordinates still refer to the authored TypeScript line"
+    );
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping static TypeScript import.meta execution: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native TS import.meta graph builds after prepared-source DCE");
+    let output = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run TS import.meta graph");
+    assert!(
+        output.status.success(),
+        "native TS graph failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 native output");
+    assert!(
+        stdout.starts_with("5\n2file://") && stdout.contains("provider.ts"),
+        "import.meta.url should use the original TypeScript module URL; got {stdout:?}"
+    );
+}
+
+#[test]
 fn native_import_meta_reparse_preserves_indirect_export_origin() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -4007,6 +4124,7 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String("embedded\0tail=".into()),
             Constant::Number(0.1_f64.to_bits()),
@@ -4254,6 +4372,7 @@ fn owned_result_graph_api_preserves_uncaught_thrown_scalars() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::String("thrown\0value".into())],
             code: vec![Instruction::Const(0), Instruction::Throw],
             local_count: 0,
@@ -4371,6 +4490,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(42.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -4398,6 +4518,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(99.0_f64.to_bits())],
             code: vec![
                 Instruction::LoadLocal(0),
@@ -4557,6 +4678,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(43.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -4771,6 +4893,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(7.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -4798,6 +4921,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![Instruction::LoadLocal(0), Instruction::Return],
             local_count: 1,
@@ -5032,6 +5156,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![
                 Instruction::HostCall {
@@ -5062,6 +5187,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![
                 Instruction::LoadLocal(0),
@@ -5270,6 +5396,7 @@ fn content_named_loaders_allow_same_basename_libraries_in_one_host() {
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::Number(value.to_bits())],
         code: vec![Instruction::Const(0), Instruction::Return],
         local_count: 0,

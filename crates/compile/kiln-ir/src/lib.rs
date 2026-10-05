@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-pub use kiln_hir::{SourceOrigin, Span, TypeAnnotation, VariableKind};
+pub use kiln_hir::{SourceOrigin, Span, StaticSourceProvenance, TypeAnnotation, VariableKind};
 pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
@@ -618,6 +618,9 @@ pub struct Program {
     /// Identity of a static source transform and its source map, when present. Kept separate
     /// from dynamic UTF-16 transport so reflection never has to interpret an empty fake map.
     pub static_source_identity: Option<Arc<str>>,
+    /// Shared static TS source/map retained for prepared-source native DCE reparses. Ordinary
+    /// calls map diagnostics and call sites during compilation and carry no extra source owner.
+    pub static_source_provenance: Option<Arc<StaticSourceProvenance>>,
     /// Syntactic template literal sites compiled in this program, referenced by
     /// [`Instruction::LoadTemplateObject`].
     pub template_sites: Vec<TemplateSite>,
@@ -636,6 +639,7 @@ impl Default for Program {
             source: "".into(),
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             template_sites: Vec::new(),
             debug_call_sites: Vec::new(),
         }

@@ -56,8 +56,9 @@ use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, 
 use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
 
 /// Whether a static TypeScript module is parsed as its authored source or after a real
-/// per-module TypeScript-to-JavaScript transform. The production default remains
-/// `PreserveAuthoredSource` until the transformed-source mode completes semantic validation.
+/// per-module TypeScript-to-JavaScript transform. Static parser entrypoints use
+/// `TransformToNode22JavaScript`; authored-source parsing remains available to focused
+/// frontend tests that exercise the legacy HIR lowering directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
 pub enum StaticTypescriptPolicy {
@@ -185,28 +186,29 @@ fn oxc_static_key_units(key: &oxc_ast::ast::PropertyKey<'_>) -> Option<StringUni
         .map(|name| StringUnits::from(name.as_ref()))
 }
 
-/// Parse one JavaScript or TypeScript module and lower its module-level structure into Kiln HIR.
+/// Parse one static JavaScript or TypeScript module and lower its module-level structure into Kiln HIR.
 ///
 /// Parser diagnostics are data, not a transport error: Oxc can recover and produce a useful
 /// module after many syntax errors, and the query database must cache that result just like a
-/// clean parse. An unknown extension falls back to module-mode JavaScript; CLI source discovery
-/// already restricts ordinary project files to known JS/TS extensions.
+/// clean parse. Static TypeScript is transformed per file to the pinned Node 22 JavaScript
+/// target before HIR lowering. An unknown extension falls back to module-mode JavaScript; CLI
+/// source discovery already restricts ordinary project files to known JS/TS extensions.
 pub fn parse(path: &str, source: &str) -> Module {
-    let mut source_type = SourceType::from_path(Path::new(path))
-        .unwrap_or_else(|_| SourceType::default().with_module(true));
-    if !path.ends_with(".cjs") {
-        source_type = source_type.with_module(true);
-    }
-    parse_source(Some(path), source, source_type)
+    parse_static_typescript_with(
+        path,
+        source,
+        StaticTypescriptPolicy::TransformToNode22JavaScript,
+        inferred_static_source_type(path),
+        |text, ty| (parse_source(Some(path), text, ty), ()),
+    )
+    .0
 }
 
 /// Parse a static TypeScript module under an internal source policy.
 ///
-/// The transform option is intentionally not selected by [`parse`], CLI flags, or dynamic
-/// source entrypoints. It is a compiler integration seam for controlled validation: the
-/// generated JavaScript becomes the actual parser input and every HIR/IR/function span indexes
-/// that generated buffer. Original TypeScript is retained separately for diagnostics and source
-/// locations.
+/// This policy entrypoint is retained for focused validation. Production [`parse`] selects the
+/// transform policy for static TypeScript; JS modules take the unchanged parser path. Dynamic
+/// source and explicit-goal entrypoints do not call this function.
 #[doc(hidden)]
 pub fn parse_static_typescript(path: &str, source: &str, policy: StaticTypescriptPolicy) -> Module {
     parse_static_typescript_with(
@@ -309,16 +311,7 @@ fn parse_static_typescript_with<T>(
             }
             let (mut module, side_data) = parse_buffer(&generated_source, generated_type);
             module.source_kind = source_kind(original_type);
-            for diagnostic in &mut module.diagnostics {
-                if let Some(span) = &mut diagnostic.span {
-                    if let Some(start) = provenance.original_offset(span.start) {
-                        span.start = start;
-                    }
-                    if let Some(end) = provenance.original_offset(span.end) {
-                        span.end = end.max(span.start);
-                    }
-                }
-            }
+            map_static_diagnostics_to_original(&mut module, &provenance);
             module.static_source_provenance = Some(Arc::new(provenance));
             (module, side_data)
         }
@@ -328,6 +321,19 @@ fn parse_static_typescript_with<T>(
                 module.diagnostics.extend(diagnostics);
             }
             (module, side_data)
+        }
+    }
+}
+
+fn map_static_diagnostics_to_original(module: &mut Module, provenance: &StaticSourceProvenance) {
+    for diagnostic in &mut module.diagnostics {
+        if let Some(span) = &mut diagnostic.span {
+            if let Some(start) = provenance.original_offset(span.start) {
+                span.start = start;
+            }
+            if let Some(end) = provenance.original_offset(span.end) {
+                span.end = end.max(span.start);
+            }
         }
     }
 }
@@ -417,10 +423,15 @@ fn transform_static_typescript(
         );
     }
 
-    let fingerprint: Arc<str> = Arc::from(STATIC_TS_TRANSFORM_FINGERPRINT);
+    let fingerprint: Arc<str> = Arc::from(format!(
+        "{STATIC_TS_TRANSFORM_FINGERPRINT};source-kind={:?};module={};commonjs={};jsx={}",
+        source_kind(source_type),
+        source_type.is_module(),
+        source_type.is_commonjs(),
+        source_type.is_jsx(),
+    ));
     let mut identity_bytes =
-        Vec::with_capacity(path.len() + source.len() + fingerprint.len() + segments.len() * 8 + 32);
-    append_identity_field(&mut identity_bytes, path.as_bytes());
+        Vec::with_capacity(source.len() + fingerprint.len() + segments.len() * 8 + 24);
     append_identity_field(&mut identity_bytes, source.as_bytes());
     append_identity_field(&mut identity_bytes, fingerprint.as_bytes());
     for segment in &segments {
@@ -506,18 +517,11 @@ impl SourceCoordinateIndex {
 /// declaration remain observable roots. The caller must relink the returned
 /// module because its import and export interface may be smaller.
 pub fn parse_dce(path: &str, source: &str, demanded_exports: &BTreeSet<String>) -> Module {
-    let mut source_type = SourceType::from_path(Path::new(path))
-        .unwrap_or_else(|_| SourceType::default().with_module(true));
-    if !path.ends_with(".cjs") {
-        source_type = source_type.with_module(true);
-    }
-    parse_source_in_context(
-        Some(path),
+    parse_static_typescript_dce(
+        path,
         source,
-        source_type,
-        None,
-        Some(demanded_exports),
-        None,
+        demanded_exports,
+        StaticTypescriptPolicy::TransformToNode22JavaScript,
     )
 }
 
@@ -530,19 +534,45 @@ pub fn parse_dce_native(
     demanded_exports: &BTreeSet<String>,
     is_entry: bool,
 ) -> Module {
-    let mut source_type = SourceType::from_path(Path::new(path))
-        .unwrap_or_else(|_| SourceType::default().with_module(true));
-    if !path.ends_with(".cjs") {
-        source_type = source_type.with_module(true);
-    }
-    parse_source_in_context(
-        Some(path),
+    parse_static_typescript_dce_native(
+        path,
         source,
-        source_type,
+        demanded_exports,
+        is_entry,
+        StaticTypescriptPolicy::TransformToNode22JavaScript,
+    )
+}
+
+/// Reparse a previously transformed static TS module for native DCE without transforming its
+/// generated JavaScript again. The retained provenance is prepared-source metadata from the
+/// graph's original parse; DCE preserves AST byte spans, so the original mapping remains valid.
+#[doc(hidden)]
+pub fn parse_dce_native_prepared(
+    path: &str,
+    generated_source: &str,
+    demanded_exports: &BTreeSet<String>,
+    is_entry: bool,
+    provenance: Arc<StaticSourceProvenance>,
+) -> Module {
+    let original_type = inferred_static_source_type(path);
+    let mut generated_type = SourceType::mjs()
+        .with_script(true)
+        .with_module(original_type.is_module());
+    if original_type.is_commonjs() {
+        generated_type = generated_type.with_commonjs(true);
+    }
+    let mut module = parse_source_in_context(
+        Some(path),
+        generated_source,
+        generated_type,
         None,
         Some(demanded_exports),
         Some(is_entry),
-    )
+    );
+    module.source_kind = source_kind(original_type);
+    map_static_diagnostics_to_original(&mut module, &provenance);
+    module.static_source_provenance = Some(provenance);
+    module
 }
 
 /// Parse with an explicit ECMAScript goal, independent of Oxc's extension convention.
@@ -716,7 +746,14 @@ fn append_source_scalar(
 /// `new.target` while continuing to reject top-level `await`.
 pub fn parse_commonjs(path: &str, source: &str) -> Module {
     let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
-    parse_source(Some(path), source, inferred.with_commonjs(true))
+    parse_static_typescript_with(
+        path,
+        source,
+        StaticTypescriptPolicy::TransformToNode22JavaScript,
+        inferred.with_commonjs(true),
+        |text, ty| (parse_source(Some(path), text, ty), ()),
+    )
+    .0
 }
 
 /// Parse CommonJS and return the literal dependencies identified by Oxc's own scope graph.
@@ -724,8 +761,11 @@ pub fn parse_commonjs(path: &str, source: &str) -> Module {
 /// Keeping this fact beside parsing avoids reimplementing JavaScript hoisting and shadowing in
 /// Kiln HIR. Only owned strings cross the frontend boundary; Oxc nodes and arena lifetimes do not.
 pub fn parse_commonjs_with_requires(path: &str, source: &str) -> (Module, Vec<String>) {
-    let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
-    parse_source_with_commonjs_requires(Some(path), source, inferred.with_commonjs(true))
+    parse_static_typescript_commonjs_with_requires(
+        path,
+        source,
+        StaticTypescriptPolicy::TransformToNode22JavaScript,
+    )
 }
 
 /// Discover literal Node loader requests without guessing from identifier spelling.
@@ -6725,6 +6765,10 @@ fn name_anonymous_default(inner: &kiln_hir::Pattern, default: &mut kiln_hir::Exp
 mod tests {
     use super::*;
 
+    fn parse_authored_ts(path: &str, source: &str) -> Module {
+        parse_static_typescript(path, source, StaticTypescriptPolicy::PreserveAuthoredSource)
+    }
+
     #[test]
     fn source_coordinate_index_handles_multiline_unicode_and_rejects_invalid_columns() {
         let index = SourceCoordinateIndex::new("a😀b\r\nq\u{2028}z\u{2029}");
@@ -6810,6 +6854,89 @@ mod tests {
             changed.static_source_provenance.unwrap().identity,
             "original source text participates in the static transform identity"
         );
+        let same_input_different_path = parse_static_typescript(
+            "another-checkout/src/entry.ts",
+            source,
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert_eq!(
+            provenance.identity,
+            same_input_different_path
+                .static_source_provenance
+                .unwrap()
+                .identity,
+            "diagnostic paths are not part of generated-program content identity"
+        );
+    }
+
+    #[test]
+    fn static_parse_transforms_typescript_but_explicit_goal_keeps_authored_source() {
+        let path = "entry.ts";
+        let source = "export const add = (left: number, right: number) => left + right;";
+        let static_module = parse(path, source);
+        assert!(
+            static_module.diagnostics.is_empty(),
+            "{:?}",
+            static_module.diagnostics
+        );
+        assert_ne!(static_module.source.as_ref(), source);
+        assert!(static_module.static_source_provenance.is_some());
+        assert!(static_module.source_origin.is_none());
+
+        let explicit_module = parse_with_goal(path, source, SourceGoal::Module);
+        assert!(
+            explicit_module.diagnostics.is_empty(),
+            "{:?}",
+            explicit_module.diagnostics
+        );
+        assert_eq!(explicit_module.source.as_ref(), source);
+        assert!(explicit_module.static_source_provenance.is_none());
+
+        let demanded = BTreeSet::from(["add".to_owned()]);
+        let dce_module = parse_dce(path, source, &demanded);
+        assert!(
+            dce_module.diagnostics.is_empty(),
+            "{:?}",
+            dce_module.diagnostics
+        );
+        assert!(dce_module.static_source_provenance.is_some());
+        assert!(
+            !dce_module.source.contains(": number"),
+            "{}",
+            dce_module.source
+        );
+
+        let native_dce_module = parse_dce_native(path, source, &demanded, true);
+        assert!(
+            native_dce_module.diagnostics.is_empty(),
+            "{:?}",
+            native_dce_module.diagnostics
+        );
+        assert!(native_dce_module.static_source_provenance.is_some());
+        assert!(
+            !native_dce_module.source.contains(": number"),
+            "{}",
+            native_dce_module.source
+        );
+
+        let generated_source = static_module.source.clone();
+        let provenance = static_module
+            .static_source_provenance
+            .as_ref()
+            .expect("static parse retained its provenance")
+            .clone();
+        let prepared =
+            parse_dce_native_prepared(path, &generated_source, &demanded, true, provenance.clone());
+        assert!(
+            prepared.diagnostics.is_empty(),
+            "{:?}",
+            prepared.diagnostics
+        );
+        assert_eq!(prepared.source.as_ref(), generated_source.as_ref());
+        assert!(Arc::ptr_eq(
+            prepared.static_source_provenance.as_ref().unwrap(),
+            &provenance
+        ));
     }
 
     #[test]
@@ -6859,6 +6986,20 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
         assert_eq!(module.source_goal, SourceGoal::Script);
         assert!(!module.source.contains(": number"), "{}", module.source);
         assert_eq!(requires, ["./dep"]);
+
+        let (default_module, default_requires) =
+            parse_commonjs_with_requires("fixture.cts", source);
+        assert!(
+            default_module.diagnostics.is_empty(),
+            "{:?}",
+            default_module.diagnostics
+        );
+        assert!(
+            !default_module.source.contains(": number"),
+            "{}",
+            default_module.source
+        );
+        assert_eq!(default_requires, ["./dep"]);
     }
 
     #[test]
@@ -7982,7 +8123,7 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
 
     #[test]
     fn erases_only_type_only_typescript_namespaces_and_their_exports() {
-        let module = parse(
+        let module = parse_authored_ts(
             "namespace.ts",
             r#"
                 export namespace Empty {}
@@ -8002,7 +8143,7 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
 
         assert_eq!(module.source_kind, SourceKind::TypeScript);
         assert_eq!(module.runtime_export_names(), ["Runtime", "RuntimeAlias"]);
-        let declared_member = parse(
+        let declared_member = parse_authored_ts(
             "declared.ts",
             "export namespace Declared { export declare const value: number; }",
         );
@@ -8078,7 +8219,7 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
 
     #[test]
     fn preserves_aliases_defaults_namespaces_and_type_only_bindings() {
-        let module = parse(
+        let module = parse_authored_ts(
             "module.ts",
             r#"
                 import primary, { value as local, type Shape } from "./dep.ts";
@@ -8632,7 +8773,7 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
 
     #[test]
     fn lowers_numeric_and_string_enums_to_ordered_runtime_operations() {
-        let module = parse(
+        let module = parse_authored_ts(
             "enum.ts",
             r#"enum Fruits { Apple, Banana, "Golden Pear" = "pear" }"#,
         );
@@ -8669,7 +8810,7 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
             }) if property == "Golden Pear"
         ));
 
-        let constant = parse("enum.ts", "const enum Flags { Read, Write }");
+        let constant = parse_authored_ts("enum.ts", "const enum Flags { Read, Write }");
         assert!(matches!(&constant.body[0].kind, HirStatementKind::Block(_)));
     }
 
@@ -9065,7 +9206,7 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
     fn typescript_parameter_and_return_annotations_are_extracted() {
         use kiln_hir::TypeAnnotation;
 
-        let module = parse(
+        let module = parse_authored_ts(
             "dist.ts",
             "function dist(x: number, y: number): number { return x + y; }",
         );
@@ -9085,7 +9226,7 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
         );
         assert_eq!(dist_fn.return_type, Some(TypeAnnotation::Number));
 
-        let module2 = parse(
+        let module2 = parse_authored_ts(
             "arrow.ts",
             "const f = (a: boolean, b: string, c: int): void => {};",
         );
@@ -9116,7 +9257,7 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
         );
         assert_eq!(arrow_fn.return_type, Some(TypeAnnotation::Void));
 
-        let module3 = parse("untyped.ts", "function untyped(a, b) {}");
+        let module3 = parse_authored_ts("untyped.ts", "function untyped(a, b) {}");
         assert!(module3.diagnostics.is_empty(), "{:?}", module3.diagnostics);
         let Some(kiln_hir::StatementKind::Function(untyped_fn)) =
             module3.body.first().map(|s| &s.kind)
@@ -9127,7 +9268,7 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
         assert_eq!(untyped_fn.parameters[1].type_annotation, None);
         assert_eq!(untyped_fn.return_type, None);
 
-        let module4 = parse(
+        let module4 = parse_authored_ts(
             "custom.ts",
             "function custom(x: MyType, y: any): CustomReturn {}",
         );

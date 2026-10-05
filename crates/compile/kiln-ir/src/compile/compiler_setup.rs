@@ -265,8 +265,8 @@ impl super::Compiler {
                 .collect::<Vec<_>>();
             debug_call_sites.sort_by_key(|site| (site.function_span, site.instruction));
             let source_origin = self.source_origin;
-            let static_source_identity = self
-                .source_provenance
+            let static_source_provenance = self.source_provenance;
+            let static_source_identity = static_source_provenance
                 .as_ref()
                 .map(|provenance| Arc::clone(&provenance.identity));
             Ok((
@@ -279,6 +279,7 @@ impl super::Compiler {
                     source: self.source,
                     source_origin,
                     static_source_identity,
+                    static_source_provenance,
                     template_sites: self.template_sites,
                     debug_call_sites,
                 },

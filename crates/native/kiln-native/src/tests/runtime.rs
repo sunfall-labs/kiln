@@ -1262,6 +1262,7 @@ fn a_second_build_reuses_every_material_artifact_and_runs() {
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String("native".into()),
             Constant::Number(42.0_f64.to_bits()),
@@ -1340,6 +1341,7 @@ fn owned_result_scalar_api_copies_strings_and_is_idempotent() {
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("left\0right".into())],
         code: vec![Instruction::Const(0), Instruction::Return],
         local_count: 0,
@@ -1478,6 +1480,7 @@ fn owned_result_scalar_api_rejects_malformed_host_strings() {
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![
             Instruction::HostCall {
@@ -1800,6 +1803,7 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("now".into())],
         code: vec![
             Instruction::LoadBuiltin(kiln_ir::Builtin::Date),
@@ -1924,6 +1928,7 @@ fn native_entropy_policy_is_reproducible_or_explicitly_host_backed() {
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("random".into())],
         code: vec![
             Instruction::LoadBuiltin(kiln_ir::Builtin::Math),

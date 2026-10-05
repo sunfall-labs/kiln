@@ -118,7 +118,8 @@ pub struct StaticSourceProvenance {
     pub original_source: Arc<str>,
     /// Stable identity for transform options, transformer/codegen versions, and policy.
     pub transform_fingerprint: Arc<str>,
-    /// Digest over original path/text, transform fingerprint, and every source-map segment.
+    /// Digest over original text, transform/source-kind fingerprint, and every source-map segment.
+    /// The original path is retained separately for diagnostics and does not affect reusable code.
     pub identity: Arc<str>,
     pub source_map: Arc<[SourceMapSegment]>,
 }

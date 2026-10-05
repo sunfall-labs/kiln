@@ -441,12 +441,21 @@ fn dce_release_graph(
             continue;
         };
         let is_entry = node.path == graph.entry();
-        let hir = kiln_frontend_oxc::parse_dce_native(
-            path,
-            &node.program.program.source,
-            &demanded_names,
-            is_entry,
-        );
+        let hir = match &node.program.program.static_source_provenance {
+            Some(provenance) => kiln_frontend_oxc::parse_dce_native_prepared(
+                path,
+                &node.program.program.source,
+                &demanded_names,
+                is_entry,
+                Arc::clone(provenance),
+            ),
+            None => kiln_frontend_oxc::parse_dce_native(
+                path,
+                &node.program.program.source,
+                &demanded_names,
+                is_entry,
+            ),
+        };
         let Ok(mut program) = kiln_ir::compile_module(&hir) else {
             continue;
         };
@@ -579,12 +588,21 @@ fn native_import_meta_reparse(
             continue;
         };
         let is_entry = node.path == graph.entry();
-        let hir = kiln_frontend_oxc::parse_dce_native(
-            path,
-            &node.program.program.source,
-            &demanded_names,
-            is_entry,
-        );
+        let hir = match &node.program.program.static_source_provenance {
+            Some(provenance) => kiln_frontend_oxc::parse_dce_native_prepared(
+                path,
+                &node.program.program.source,
+                &demanded_names,
+                is_entry,
+                Arc::clone(provenance),
+            ),
+            None => kiln_frontend_oxc::parse_dce_native(
+                path,
+                &node.program.program.source,
+                &demanded_names,
+                is_entry,
+            ),
+        };
         let Ok(mut program) = kiln_ir::compile_module(&hir) else {
             continue;
         };

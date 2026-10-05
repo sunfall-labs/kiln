@@ -2578,6 +2578,7 @@ fn json_module_program() -> ModuleProgram {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![],
             code: vec![Instruction::Return],
             local_count: 1,

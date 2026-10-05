@@ -605,6 +605,7 @@ pub(super) fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: function.code.clone(),
             local_count: 0,

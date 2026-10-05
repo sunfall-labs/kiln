@@ -14,6 +14,7 @@ fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -
         version: BYTECODE_VERSION,
         source_origin: None,
         static_source_identity: None,
+        static_source_provenance: None,
         constants,
         code,
         local_count,

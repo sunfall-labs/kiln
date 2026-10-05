@@ -14,6 +14,7 @@ fn typed_node_querystring_has_a_native_materializer() {
             version: BYTECODE_VERSION,
             source_origin: None,
             static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(1_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
