@@ -87,6 +87,17 @@
                 /* The callback takes `(value, key, collection)`. A Set passes its value twice,
                  * which is the specification's way of giving both one signature.
                  * Newly added entries during iteration must also be visited per ES spec. */
+                if (!kiln_c99_is_callable(first)) {
+                    return kiln_c99_throw_not_a(thrown, first, "function");
+                }
+                /* `count` retains deleted-entry history so an active iterator can keep its
+                 * cursor semantics. With no live entries there is no callback or mutation to
+                 * observe, so avoid scanning that historical prefix. Callback validation must
+                 * precede this check even for an empty collection. */
+                if (collection->live == 0) {
+                    *result = kiln_c99_undefined();
+                    return KILN_C99_OK;
+                }
                 for (index = 0; index < collection->count; ++index) {
                     kiln_value visit[3];
                     kiln_value ignored;

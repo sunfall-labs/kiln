@@ -2707,6 +2707,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::CollectionForEach(_) => {
                 let (entries, is_map) = require_collection(receiver, native)?;
                 let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&callback) {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: callback.type_name(),
+                    });
+                }
                 let this_value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 let mut index = 0;
                 // The length is re-read each step: entries added while iterating are visited,

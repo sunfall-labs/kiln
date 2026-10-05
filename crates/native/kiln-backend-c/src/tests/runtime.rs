@@ -1,6 +1,68 @@
 use super::*;
 
 #[test]
+fn collection_for_each_validates_callback_before_empty_history_fast_return() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value map = kiln_c99_undefined();
+    kiln_value set = kiln_c99_undefined();
+    kiln_value args[1];
+    kiln_value result = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value for_each = kiln_c99_method(KILN_C99_METHOD_COLLECTION_FOR_EACH);
+    int status;
+    if (kiln_c99_new_collection(&map, 1, 0) != KILN_C99_OK ||
+        kiln_c99_new_collection(&set, 0, 0) != KILN_C99_OK) return 1;
+
+    args[0] = kiln_c99_number(1.0);
+    status = kiln_c99_call(NULL, &result, for_each, map, args, 1, 0, &thrown);
+    if (status != KILN_C99_THROWN) return 2;
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_call(NULL, &result, for_each, set, args, 1, 0, &thrown);
+    if (status != KILN_C99_THROWN) return 3;
+
+    if (kiln_c99_collection_put(map, kiln_c99_number(1.0), kiln_c99_number(10.0)) != KILN_C99_OK ||
+        kiln_c99_collection_put(map, kiln_c99_number(2.0), kiln_c99_number(20.0)) != KILN_C99_OK ||
+        kiln_c99_collection_put(set, kiln_c99_number(1.0), kiln_c99_number(1.0)) != KILN_C99_OK ||
+        kiln_c99_collection_put(set, kiln_c99_number(2.0), kiln_c99_number(2.0)) != KILN_C99_OK) return 4;
+    args[0] = kiln_c99_number(1.0);
+    if (kiln_c99_call(NULL, &result, kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE),
+                      map, args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 5;
+    if (kiln_c99_call(NULL, &result, kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE),
+                      set, args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 6;
+    args[0] = kiln_c99_number(2.0);
+    if (kiln_c99_call(NULL, &result, kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE),
+                      map, args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 7;
+    if (kiln_c99_call(NULL, &result, kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE),
+                      set, args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 8;
+
+    args[0] = kiln_c99_number(1.0);
+    if (kiln_c99_call(NULL, &result, for_each, map, args, 1, 0, &thrown) != KILN_C99_THROWN) return 9;
+    thrown = kiln_c99_undefined();
+    if (kiln_c99_call(NULL, &result, for_each, set, args, 1, 0, &thrown) != KILN_C99_THROWN) return 10;
+
+    /* This callable would throw if called on the callback arguments, but an empty history must
+     * return normally without invoking it. */
+    args[0] = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_STRING);
+    if (kiln_c99_call(NULL, &result, for_each, map, args, 1, 0, &thrown) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_UNDEFINED) return 11;
+    if (kiln_c99_call(NULL, &result, for_each, set, args, 1, 0, &thrown) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_UNDEFINED) return 12;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "collection-for-each-empty-history");
+    assert!(
+        run.status.success(),
+        "forEach callback validation / empty history fast path failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn text_decoder_rejects_other_external_owner_context_before_reading_it() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
