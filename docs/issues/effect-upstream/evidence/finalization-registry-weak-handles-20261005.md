@@ -35,8 +35,13 @@ Validation:
 
 The complete interpreter receipt (full report, per-file report, and raw log) is archived at
 `atom-interpreter-20261005.tar.zst`, SHA-256
-`0adec4b65b4f65fdde628e730d3b4ce9c526c4c07b49a221f2896619cc3c8fc9`. It can be inspected with
-`tar --zstd -tf` and restored with `tar --zstd -xf`. The exact CLI snapshot is retained outside the
+`0ea96d006a281f8a3fe436caf0a4fe208c4c0a26ed2c439c1c48a54219581682`. It contains the full Atom interpreter receipt plus the focused native GC logs. It can be inspected with
+`tar --zstd -tf` and restored with `tar --zstd -xf`. The selected native GC probes (`weak-references-basic`, `weak-references-job-rooting`, and the
+three saved-generator GC probes) matched in both ordinary and `KILN_GC_STRESS=1` runs: 5/5
+matched, 0 refused, 0 diverged, and no stress skips. Raw logs are included in the archive. Both
+runs used the same verified CLI SHA `403d9b682677ff94a9c149fd92ac8dfc8a96467d5369f1cefb63f4b538bd7117`.
+
+The exact CLI snapshot is retained outside the
 archive at `.scratch/finalization-atom-interpreter-validation/toolchain/kiln-403d9b682677ff94a9c149fd92ac8dfc8a96467d5369f1cefb63f4b538bd7117`; its SHA-256 is recorded above. The source workspace and generated report are
 also retained locally under `.scratch/finalization-atom-interpreter-validation/`. The incomplete
 native attempt remains local under `.scratch/temporal-now-atom-native-validation/` and is not
