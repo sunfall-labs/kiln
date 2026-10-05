@@ -33,9 +33,26 @@ All three original parallel-allocation probes now match. The expanded small GC-s
 companion also matches, retaining nested flatMap children across a sequential allocation
 replay. These targeted checks do not replace final-candidate native stress.
 
-A fresh full gate is running on the combined allocator, async-module and memory-floor
-repairs in an isolated checkout, with an eight-CPU budget and a 4 GiB Test262 cap. The prior
-failed gate remains the latest completed integration result until that run finishes.
+The subsequent full gate (`run.VO6m36gX`) completed with full Test262 coverage:
+102,638 selected variants, zero deferred, and no baseline regression across 122 chunks.
+It failed overall after disk exhaustion disrupted crate, native, third-party and regression
+lanes. Its one identified source-level snapshot failure is now repaired and passes its
+focused test. [The aggregate and disk recovery record](resource-coordination-20261004/post-gate/)
+retain that failed integration result. A quiet five-bundle performance replay passes the
+unchanged thresholds; this does not replace a fresh passing full gate.
+
+The [complete 650-probe native allocation-stress run](allocator-full-stress-20261004/)
+records 580 matches, five named refusals, 45 declared stress skips and 20 HTTP divergences.
+Those HTTP failures exposed a full-GUI provider package built without `realm-http` despite
+advertising HTTP capability. The feature contract is repaired with a red/green regression,
+and a corrected package is undergoing focused HTTP-stress and GUI checks. This full stress
+run remains failed until a complete corrected run proves otherwise.
+
+The runner's opt-in artifact compression and shared-cache collection have also been
+[validated against 43 unchanged Boolean cases in native and Bun](runner-resource-policy-validation/).
+Archives are verified before deleting raw binaries; cache sweeps address the same first
+writable layer as native builds. Resource recovery disabled mbx's automatic shared-target
+pruning through its supported configuration interface after an automatic pruning incident.
 
 The stopped older native survey covers 257 of 322 files; 65 remain unmeasured. It is not
 final-candidate coverage. [Resource coordination evidence](resource-coordination-20261004/)
