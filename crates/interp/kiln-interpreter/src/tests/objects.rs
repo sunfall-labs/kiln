@@ -81,6 +81,111 @@ fn temporal_now_namespace_member_has_the_replaceable_builtin_descriptor() {
 }
 
 #[test]
+fn proto_accessor_only_applies_when_the_prototype_chain_reaches_object_prototype() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let proto_key = Value::String("__proto__".into());
+    let replacement = Value::Object(tracked_object(ObjectData::default()));
+
+    let mut bare_data = ObjectData::default();
+    bare_data.set_prototype(Value::Null);
+    let bare = Value::Object(tracked_object(bare_data));
+    assert_eq!(
+        vm.read_property(&bare, "__proto__", 0),
+        Ok(Value::Undefined)
+    );
+    vm.assign_with_strict(&bare, &proto_key, replacement.clone(), 0, true)
+        .expect("a null-prototype dictionary stores __proto__ as a data property");
+    assert_eq!(
+        vm.read_property(&bare, "__proto__", 0),
+        Ok(replacement.clone())
+    );
+    let next_value = Value::Number(17.0);
+    vm.assign_with_strict(&bare, &proto_key, next_value.clone(), 0, true)
+        .expect("an own __proto__ data property shadows the inherited accessor");
+    assert_eq!(vm.read_property(&bare, "__proto__", 0), Ok(next_value));
+    assert!(matches!(
+        &bare,
+        Value::Object(object) if matches!(object.borrow().prototype(), Some(Value::Null))
+    ));
+
+    // An ordinary object does inherit the synthetic accessor and assignment changes its link.
+    let ordinary = Value::Object(tracked_object(ObjectData::default()));
+    assert!(matches!(
+        vm.read_property(&ordinary, "__proto__", 0),
+        Ok(Value::Native(
+            Native::PrototypeOf(PrototypeTable::Object),
+            _
+        ))
+    ));
+    vm.assign_with_strict(&ordinary, &proto_key, replacement.clone(), 0, true)
+        .expect("the inherited Object.prototype setter updates the link");
+    assert!(matches!(
+        &ordinary,
+        Value::Object(object) if matches!(object.borrow().prototype(), Some(Value::Object(_)))
+    ));
+
+    // An intermediate ordinary prototype's own data property shadows the synthetic accessor.
+    let mut data_proto = ObjectData::default();
+    data_proto.set_prototype(Value::Native(
+        Native::PrototypeOf(PrototypeTable::Object),
+        RealmId::PRIMARY,
+    ));
+    data_proto.define_value("__proto__", Value::Number(23.0), Attributes::DEFAULT);
+    let data_proto = Value::Object(tracked_object(data_proto));
+    let mut data_child = ObjectData::default();
+    data_child.set_prototype(data_proto.clone());
+    let data_child = Value::Object(tracked_object(data_child));
+    assert_eq!(
+        vm.read_property(&data_child, "__proto__", 0),
+        Ok(Value::Number(23.0))
+    );
+    vm.assign_with_strict(&data_child, &proto_key, Value::Number(24.0), 0, true)
+        .expect("an inherited data property does not invoke the built-in setter");
+    assert_eq!(
+        vm.read_property(&data_child, "__proto__", 0),
+        Ok(Value::Number(24.0))
+    );
+    assert!(matches!(
+        &data_child,
+        Value::Object(object) if matches!(object.borrow().prototype(), Some(Value::Object(_)))
+    ));
+
+    // A custom accessor shadows the built-in pair even when its getter and setter are absent.
+    let mut accessor_proto = ObjectData::default();
+    accessor_proto.set_prototype(Value::Native(
+        Native::PrototypeOf(PrototypeTable::Object),
+        RealmId::PRIMARY,
+    ));
+    accessor_proto.define_accessor("__proto__", None, None, Attributes::DEFAULT);
+    let accessor_proto = Value::Object(tracked_object(accessor_proto));
+    let mut accessor_child = ObjectData::default();
+    accessor_child.set_prototype(accessor_proto);
+    let accessor_child = Value::Object(tracked_object(accessor_child));
+    assert_eq!(
+        vm.read_property(&accessor_child, "__proto__", 0),
+        Ok(Value::Undefined)
+    );
+    vm.assign_with_strict(&accessor_child, &proto_key, replacement.clone(), 0, true)
+        .expect("an inherited getter-only accessor consumes the write");
+    assert_eq!(
+        vm.read_property(&accessor_child, "__proto__", 0),
+        Ok(Value::Undefined)
+    );
+    assert!(matches!(
+        &accessor_child,
+        Value::Object(object) if matches!(object.borrow().prototype(), Some(Value::Object(_)))
+    ));
+}
+
+#[test]
 fn numeric_array_writes_preserve_property_key_boundaries_and_refusals() {
     let program = no_program();
     let mut host = TestHost {

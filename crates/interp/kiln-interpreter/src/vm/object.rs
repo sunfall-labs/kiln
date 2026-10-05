@@ -1141,7 +1141,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // the read reaches it here. An own or inherited property of that name shadows it exactly
         // as it would shadow any accessor further up the chain, which is why this runs only when
         // the walk above found nothing.
-        if key.matches_ascii("__proto__") && stored.is_none() && is_reflect_target(target) {
+        if key.matches_ascii("__proto__")
+            && stored.is_none()
+            && is_reflect_target(target)
+            && self.object_prototype_accessor_in_chain(target, instruction)?
+        {
             // `[[GetPrototypeOf]]`, which a proxy answers with a handler rather than a stored
             // link -- so reading `p.__proto__` reports the proxy's prototype, not its target's.
             return self
@@ -1250,6 +1254,47 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         self.call_value(&setter, target.clone(), vec![value.clone()], instruction)?;
         Ok(true)
+    }
+
+    /// Whether an ordinary `__proto__` lookup reaches the synthetic accessor on
+    /// `Object.prototype`. The accessor is not a property on every object: null-prototype
+    /// dictionaries, and objects whose custom prototype chain ends before Object.prototype,
+    /// treat the name as an ordinary absent property. A stored property on an intermediate
+    /// prototype also shadows the synthetic accessor and must be handled by the ordinary walk.
+    fn object_prototype_accessor_in_chain(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let key = PropertyKeyRef::Utf8("__proto__");
+        let mut current = self.prototype_for(target, instruction)?;
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            match &current {
+                Value::Null | Value::Undefined => return Ok(false),
+                // A proxy in the chain gets the ordinary get/set opportunity below. Jumping to
+                // the synthetic accessor here would skip its traps.
+                Value::Proxy(_) => return Ok(false),
+                _ => {}
+            }
+            if matches!(
+                current,
+                Value::Native(Native::PrototypeOf(PrototypeTable::Object), _)
+            ) {
+                return Ok(match self.stored_property_key(&current, key) {
+                    Some(Property::Accessor {
+                        get: Some(Value::Native(Native::ProtoGetter, _)),
+                        set: Some(Value::Native(Native::ProtoSetter, _)),
+                    })
+                    | None => true,
+                    Some(_) => false,
+                });
+            }
+            if self.own_stored_property_key(&current, key).is_some() {
+                return Ok(false);
+            }
+            current = self.prototype_for(&current, instruction)?;
+        }
+        Ok(false)
     }
 
     /// Route a write up the prototype chain a value's *kind* gives it, answering whether the
@@ -2012,7 +2057,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The other half of `Object.prototype.__proto__`. A value that is neither an object nor
         // null is *ignored* rather than refused -- the setter has no error to raise for one --
         // and either way nothing is stored under the name.
-        if property_key.matches_ascii("__proto__") && is_reflect_target(target) {
+        if property_key.matches_ascii("__proto__")
+            && is_reflect_target(target)
+            && self.own_stored_property_key(target, property_key).is_none()
+            && self.object_prototype_accessor_in_chain(target, instruction)?
+        {
             match (&value, target) {
                 (Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::Null, _) => {}
                 _ => return Ok(()),
