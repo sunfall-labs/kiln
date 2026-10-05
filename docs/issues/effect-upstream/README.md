@@ -70,7 +70,16 @@ final-candidate coverage. [Resource coordination evidence](resource-coordination
 records the preserved survey and verified binary archives. Full 322-file interpreter and
 native validation and final quiet Bun benchmark comparison remain required before
 completion. Full integration and corrected native allocation-stress validation are green;
-this compiler milestone is ready to land.
+the validated compiler milestone was pushed to main as `2b83b0b5` (remote hash verified).
+The fresh serial run selects all 322 files, native first followed by Bun and the interpreter,
+with no deferred files and unchanged upstream case deadlines. Its first file, `Array`,
+records 146 passes in each engine, with complete official-oracle mappings for kiln.
+That early result is not a full-suite score.
+
+A [quiet replay and attributable native profile](sharding-current-symbolized-build-20261004/)
+confirm all 66 current Sharding cases were recorded: 60 pass and the same six fail at their
+original 5-second deadlines. The profile retains the exact ELF Build ID and local symbols;
+CPU hotspots are evidence to investigate, not yet a diagnosis or optimization result.
 
 ## Corpus and measurement
 
@@ -136,9 +145,10 @@ that case as a pass by normalization.
  `--experimental-strip-types` and kiln preserve that source text; Bun 1.4.2 emits a different
  space-indented form with a semicolon. The official Node/Vitest case passes because Vite transforms
  the source before execution. The mismatch therefore describes the transformed Vitest fixture,
- not a direct-source function-string contract. Do not
-change source fidelity or rewrite this assertion to make this case appear compatible; it needs
-an upstream/runtime contract decision. The pinned Bun failure remains recorded in
+ not a direct-source function-string contract. Preserve the spelling of the executed buffer
+and the assertion itself. A real per-module TypeScript transform can make emitted JavaScript
+the parser/span buffer and keep original TypeScript plus mappings separately for diagnostics;
+that compiler-stage prototype is isolated and has not changed production defaults. The pinned Bun failure remains recorded in
 `bun-reference.json`, and the native failure remains in
 `native-diagnostic-reference.json`.
 
