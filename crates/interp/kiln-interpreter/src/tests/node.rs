@@ -317,7 +317,7 @@ fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
 
     assert_eq!(
         vm.dispatch_native(Native::DateNow, &Value::Undefined, &[], 7),
-        Ok(Value::Number(1_725_000_123_456.25))
+        Ok(Value::Number(1_725_000_123_456.0))
     );
     // Compared by instant rather than by value: a date is an object, so two of them are
     // never equal, and what this asserts is which clock the constructor read.

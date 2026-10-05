@@ -1307,7 +1307,12 @@ fn execute_graph(
                 kiln_host_abi::OsFileSystem,
                 overlay,
             )))
-            .with_sync_process(node),
+            .with_sync_process(node)
+            .with_clock(if wall_clock {
+                kiln_runtime::ClockCapability::Host
+            } else {
+                kiln_runtime::ClockCapability::Virtual
+            }),
     );
     // One shaken graph feeds execution: reduce to the closed-world live
     // subset first, so dead modules never evaluate. Development selection
@@ -1939,7 +1944,12 @@ fn execute_program(
                 kiln_host_abi::OsFileSystem,
                 overlay,
             )))
-            .with_sync_process(node),
+            .with_sync_process(node)
+            .with_clock(if wall_clock {
+                kiln_runtime::ClockCapability::Host
+            } else {
+                kiln_runtime::ClockCapability::Virtual
+            }),
     );
     let result = if node {
         if wall_clock {

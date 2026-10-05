@@ -2319,6 +2319,85 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
     within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
 }
 
+#[test]
+fn production_wall_clock_reads_system_time_across_immediate_turns() {
+    let fixture = Fixture::empty();
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let epoch_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current epoch")
+            .as_secs_f64()
+            * 1000.0
+    };
+    for (path, prefix) in [
+        ("clock.cjs", ""),
+        ("clock-module.mjs", "import 'node:timers';\n"),
+    ] {
+        let text = format!(
+            "{prefix}console.log(Date.now());\n\
+            let count = 0; function next() {{\n\
+                if (++count < 250) setImmediate(next); else console.log(Date.now());\n\
+            }} setImmediate(next);\n"
+        );
+        std::fs::write(fixture.dir.join(path), &text).expect("write clock source");
+        client
+            .request(&Request::SetSource {
+                source_view: client.source_view(),
+                path: path.to_owned(),
+                text,
+            })
+            .expect("set clock source");
+        for wall_clock in [true, false] {
+            let before = epoch_ms().floor();
+            let response = client
+                .request(&Request::Run {
+                    stream_output: false,
+                    steps: StepBudget::Unmetered,
+                    source_view: client.source_view(),
+                    path: path.to_owned(),
+                    project_root: fixture.dir.to_string_lossy().into_owned(),
+                    node: true,
+                    wall_clock,
+                    args: Vec::new(),
+                })
+                .expect("run clock source");
+            let after = epoch_ms().ceil();
+            let Response::Ran(summary) = response else {
+                panic!("expected run response, got {response:?}");
+            };
+            assert!(summary.succeeded, "{:?}", summary.diagnostics);
+            let readings: Vec<f64> = summary
+                .stdout
+                .lines()
+                .map(|line| line.parse().expect("numeric epoch time"))
+                .collect();
+            assert_eq!(readings.len(), 2);
+            if wall_clock {
+                for reading in readings {
+                    assert_eq!(reading.fract(), 0.0, "Date.now has integral milliseconds");
+                    assert!(
+                        reading >= before && reading <= after,
+                        "{path}: epoch {reading} outside {before}..={after}"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    readings,
+                    [0.0, 0.0],
+                    "immediates do not advance virtual time"
+                );
+            }
+        }
+    }
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
 #[cfg(unix)]
 #[test]
 fn node_launch_evaluates_preloads_and_runtime_created_esm_in_one_module_realm() {

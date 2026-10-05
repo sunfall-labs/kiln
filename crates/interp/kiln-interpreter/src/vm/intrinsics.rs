@@ -2202,7 +2202,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )
             }
             Native::DateNow => Ok(Value::Number(
-                self.wall_clock_milliseconds(self.clock_capability, instruction)?,
+                self.wall_clock_milliseconds(self.clock_capability, instruction)?
+                    .trunc(),
             )),
             // Monotonic measurement stays on the Tokio-owned virtual clock. A host-backed Date
             // must not make elapsed-time APIs jump when the operating-system wall clock changes.

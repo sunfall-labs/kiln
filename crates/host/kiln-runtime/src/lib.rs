@@ -5839,25 +5839,22 @@ const CAPTURE_HOST_CLOCK_START_MS: f64 = 1_577_836_800_000.0;
 /// How far it moves per read. One millisecond keeps ordinary elapsed-time code sane.
 const CAPTURE_HOST_CLOCK_STEP_MS: f64 = 1.0;
 
-/// A deterministic host used by the interpreter, tests, and CLI execution mode.
+#[derive(Debug)]
+enum CaptureClock {
+    Synthetic(f64),
+    Host,
+}
+
+/// A host that captures output, with a deterministic clock unless explicitly configured otherwise.
 pub struct CaptureHost {
     stdout: String,
     /* Separate from `stdout`, because which stream a line went to is observable: a caller that
      * redirects one and not the other sees the difference, and node puts `console.error` on this
      * one. Kept as its own buffer rather than interleaved so a test can assert either alone. */
     stderr: String,
-    /// Epoch milliseconds this host will answer `ClockNow` with next.
-    ///
-    /// A deterministic host still has to *have* a clock. `--node` asks for
-    /// [`ClockCapability::Host`], because a Node program expects real time (ADR 0044), and a host
-    /// that refuses the question leaves the realm asking for time from something that has none --
-    /// which is how `fastify` and `express` came to be unrunnable here: any real library
-    /// timestamps something.
-    ///
-    /// Fixed start, fixed step, so a run is reproducible and two reads never return the same
-    /// value. Monotonic rather than constant because code that waits for the clock to move is
-    /// ordinary, and against a constant clock it would wait forever.
-    clock_ms: f64,
+    /// The synthetic clock is reproducible; a CLI wall-clock request must opt into the host
+    /// clock rather than charge one synthetic millisecond for every event-loop checkpoint.
+    clock: CaptureClock,
     fs: Option<Box<dyn kiln_host_abi::FileSystemOps>>,
     sync_process: bool,
     /// When set, each write is handed here (`true` for stderr) the moment it happens and is not
@@ -5871,7 +5868,7 @@ impl std::fmt::Debug for CaptureHost {
         f.debug_struct("CaptureHost")
             .field("stdout", &self.stdout)
             .field("stderr", &self.stderr)
-            .field("clock_ms", &self.clock_ms)
+            .field("clock", &self.clock)
             .field("has_fs", &self.fs.is_some())
             .field("sync_process", &self.sync_process)
             .finish()
@@ -5883,7 +5880,7 @@ impl Default for CaptureHost {
         Self {
             stdout: String::new(),
             stderr: String::new(),
-            clock_ms: CAPTURE_HOST_CLOCK_START_MS,
+            clock: CaptureClock::Synthetic(CAPTURE_HOST_CLOCK_START_MS),
             fs: None,
             sync_process: false,
             stream: None,
@@ -5894,6 +5891,17 @@ impl Default for CaptureHost {
 impl CaptureHost {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Use the clock authority selected for this run. Output capture is independent of time:
+    /// explicit host-clock execution reads epoch time from the system; virtual execution keeps
+    /// the deterministic capture-host clock for any host calls a test makes directly.
+    pub fn with_clock(mut self, capability: ClockCapability) -> Self {
+        self.clock = match capability {
+            ClockCapability::Virtual => CaptureClock::Synthetic(CAPTURE_HOST_CLOCK_START_MS),
+            ClockCapability::Host => CaptureClock::Host,
+        };
+        self
     }
 
     /// Deliver standard-stream writes to `stream(is_stderr, text)` as they happen instead of
@@ -5970,8 +5978,22 @@ impl HostOps for CaptureHost {
                 Ok(HostValue::Undefined)
             }
             HostOp::ClockNow => {
-                let now = self.clock_ms;
-                self.clock_ms += CAPTURE_HOST_CLOCK_STEP_MS;
+                let now = match &mut self.clock {
+                    CaptureClock::Synthetic(next) => {
+                        let now = *next;
+                        *next += CAPTURE_HOST_CLOCK_STEP_MS;
+                        now
+                    }
+                    CaptureClock::Host => {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(|error| {
+                                HostError::new(format!("host clock precedes Unix epoch: {error}"))
+                            })?
+                            .as_secs_f64()
+                            * 1000.0
+                    }
+                };
                 Ok(HostValue::number(now))
             }
             HostOp::TransferRegion => {

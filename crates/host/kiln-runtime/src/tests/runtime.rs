@@ -2888,6 +2888,44 @@ fn captures_console_style_lines() {
 }
 
 #[test]
+fn capture_host_clock_is_synthetic_unless_host_time_is_selected() {
+    let mut deterministic = CaptureHost::new();
+    for step in 0..3 {
+        assert_eq!(
+            deterministic.call(HostOp::ClockNow, &[]).expect("clock"),
+            HostValue::number(CAPTURE_HOST_CLOCK_START_MS + f64::from(step)),
+        );
+    }
+
+    let epoch_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current epoch")
+            .as_secs_f64()
+            * 1000.0
+    };
+    let before = epoch_ms();
+    let mut host = CaptureHost::new().with_clock(ClockCapability::Host);
+    for _ in 0..1000 {
+        let reading = host
+            .call(HostOp::ClockNow, &[])
+            .expect("clock")
+            .as_number()
+            .expect("numeric clock");
+        let after = epoch_ms();
+        assert!(
+            reading >= before && reading <= after,
+            "{reading} outside {before}..={after}"
+        );
+    }
+    host = host.with_clock(ClockCapability::Virtual);
+    assert_eq!(
+        host.call(HostOp::ClockNow, &[]).expect("clock"),
+        HostValue::number(CAPTURE_HOST_CLOCK_START_MS)
+    );
+}
+
+#[test]
 fn empty_write_still_terminates_a_line() {
     let mut host = CaptureHost::default();
     host.call(HostOp::WriteStdout, &[]).expect("write succeeds");
