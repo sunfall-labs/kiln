@@ -410,6 +410,91 @@ fn native_import_meta_reparse_reuses_static_typescript_source_map() {
 }
 
 #[test]
+fn native_dce_keeps_package_metadata_commonjs_goal_for_typescript() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-dce-package-commonjs-ts-goal");
+    fs::write(root.path.join("package.json"), r#"{"type":"commonjs"}"#)
+        .expect("write CommonJS package metadata");
+    let entry = root.path.join("main.ts");
+    fs::write(
+        &entry,
+        "function sloppy(){ return this === globalThis; } const dep: number = require('./dep.cjs'); console.log(sloppy(), dep); module.exports = dep;",
+    )
+    .expect("write CommonJS TypeScript entry");
+    fs::write(root.path.join("dep.cjs"), "module.exports = 42;")
+        .expect("write required CommonJS dependency");
+
+    let resolver = NodeRuntimeResolver::new(&root.path).expect("Node resolver");
+    let node_format = kiln_module_resolver::ResolutionPolicy::node_format(
+        &resolver,
+        &kiln_module_resolver::ResolvedModule::new(
+            entry.clone(),
+            kiln_module_resolver::ResolutionKind::Relative,
+        ),
+    )
+    .expect("classify package metadata");
+    assert_eq!(
+        node_format,
+        Some(kiln_module_resolver::NodeModuleFormat::CommonJs)
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("package metadata selects CommonJS parsing for .ts");
+    let original = graph.module(&entry).expect("CommonJS TS entry");
+    let provenance = original
+        .program
+        .program
+        .static_source_provenance
+        .as_ref()
+        .expect("static TS source provenance")
+        .clone();
+    assert_eq!(provenance.original_type.goal, kiln_hir::SourceGoal::Script);
+    assert!(provenance.original_type.commonjs);
+    assert!(
+        !original.program.strictness.body,
+        "package-metadata CommonJS TypeScript retains its sloppy wrapper semantics"
+    );
+
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
+            .expect("compute graph demand");
+    let (reparsed, _) = native_import_meta_reparse(&graph, &demand);
+    let reparsed_entry = reparsed.module(&entry).expect("reparsed CommonJS TS entry");
+    assert_eq!(
+        reparsed_entry
+            .program
+            .program
+            .static_source_provenance
+            .as_ref()
+            .unwrap()
+            .original_type,
+        provenance.original_type
+    );
+    assert!(
+        !reparsed_entry.program.strictness.body,
+        "prepared native DCE must preserve CommonJS strictness"
+    );
+    assert!(
+        !reparsed_entry.program.program.source.contains(": number"),
+        "prepared native DCE consumes generated JavaScript, not authored TypeScript"
+    );
+    assert!(
+        reparsed_entry
+            .program
+            .program
+            .source
+            .contains("module.exports = dep"),
+        "prepared native DCE must retain CommonJS exports: {}",
+        reparsed_entry.program.program.source
+    );
+}
+
+#[test]
 fn native_import_meta_reparse_preserves_indirect_export_origin() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

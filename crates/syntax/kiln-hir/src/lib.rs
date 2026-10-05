@@ -106,6 +106,17 @@ pub struct SourceMapSegment {
     pub original_offset: u32,
 }
 
+/// The original parser goal and syntax modes of a statically transformed TypeScript module.
+///
+/// This is kept as typed metadata so prepared parses (for example native DCE) do not have to
+/// reconstruct parser behavior from a filename or interpret the transform fingerprint string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StaticSourceType {
+    pub goal: SourceGoal,
+    pub commonjs: bool,
+    pub jsx: bool,
+}
+
 /// Original static TypeScript input and its generated-to-original source locations.
 ///
 /// `Module.source` remains the actual JavaScript buffer indexed by every module span. This
@@ -116,6 +127,7 @@ pub struct SourceMapSegment {
 pub struct StaticSourceProvenance {
     pub original_path: Arc<str>,
     pub original_source: Arc<str>,
+    pub original_type: StaticSourceType,
     /// Stable identity for transform options, transformer/codegen versions, and policy.
     pub transform_fingerprint: Arc<str>,
     /// Digest over original text, transform/source-kind fingerprint, and every source-map segment.

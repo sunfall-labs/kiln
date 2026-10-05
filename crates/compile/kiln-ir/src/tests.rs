@@ -74,6 +74,11 @@ fn transformed_static_callsite_coordinates_use_original_typescript() {
     source_module.static_source_provenance = Some(std::sync::Arc::new(StaticSourceProvenance {
         original_path: "mapped.ts".into(),
         original_source: "header\n  f()".into(),
+        original_type: kiln_hir::StaticSourceType {
+            goal: kiln_hir::SourceGoal::Module,
+            commonjs: false,
+            jsx: false,
+        },
         transform_fingerprint: "test-policy".into(),
         identity: "map-identity".into(),
         source_map: vec![SourceMapSegment {

@@ -21,8 +21,9 @@ use kiln_hir::{
     ModuleRequestKind, ModuleRequestOccurrence, NodeRuntimeRequest, Parameter as HirParameter,
     RequestedModule, SourceGoal, SourceKind, SourceMapSegment, SourceOrigin, Span as HirSpan,
     Statement as HirStatement, StatementKind as HirStatementKind, StaticSourceProvenance,
-    StringUnits, TypeAnnotation as HirTypeAnnotation, UnaryOperator as HirUnaryOperator,
-    VariableDeclarator as HirVariableDeclarator, VariableKind as HirVariableKind,
+    StaticSourceType, StringUnits, TypeAnnotation as HirTypeAnnotation,
+    UnaryOperator as HirUnaryOperator, VariableDeclarator as HirVariableDeclarator,
+    VariableKind as HirVariableKind,
 };
 use oxc_allocator::{Allocator, TakeIn};
 use oxc_ast::ast::{
@@ -274,12 +275,18 @@ pub fn parse_static_typescript_commonjs_with_requires(
     source: &str,
     policy: StaticTypescriptPolicy,
 ) -> (Module, Vec<String>) {
-    let source_type = SourceType::from_path(Path::new(path))
-        .unwrap_or_default()
-        .with_commonjs(true);
+    let source_type = commonjs_source_type(path);
     parse_static_typescript_with(path, source, policy, source_type, |text, ty| {
         parse_source_with_commonjs_requires(Some(path), text, ty)
     })
+}
+
+fn commonjs_source_type(path: &str) -> SourceType {
+    SourceType::from_path(Path::new(path))
+        .unwrap_or_default()
+        .with_script(true)
+        .with_module(false)
+        .with_commonjs(true)
 }
 
 fn inferred_static_source_type(path: &str) -> SourceType {
@@ -444,6 +451,15 @@ fn transform_static_typescript(
         StaticSourceProvenance {
             original_path: Arc::from(path),
             original_source: Arc::from(source),
+            original_type: StaticSourceType {
+                goal: if source_type.is_module() {
+                    SourceGoal::Module
+                } else {
+                    SourceGoal::Script
+                },
+                commonjs: source_type.is_commonjs(),
+                jsx: source_type.is_jsx(),
+            },
             transform_fingerprint: fingerprint,
             identity,
             source_map: segments.into(),
@@ -554,13 +570,8 @@ pub fn parse_dce_native_prepared(
     is_entry: bool,
     provenance: Arc<StaticSourceProvenance>,
 ) -> Module {
-    let original_type = inferred_static_source_type(path);
-    let mut generated_type = SourceType::mjs()
-        .with_script(true)
-        .with_module(original_type.is_module());
-    if original_type.is_commonjs() {
-        generated_type = generated_type.with_commonjs(true);
-    }
+    let original_type = provenance.original_type;
+    let generated_type = generated_javascript_source_type(original_type);
     let mut module = parse_source_in_context(
         Some(path),
         generated_source,
@@ -569,10 +580,28 @@ pub fn parse_dce_native_prepared(
         Some(demanded_exports),
         Some(is_entry),
     );
-    module.source_kind = source_kind(original_type);
+    module.source_kind = source_kind_from_static_provenance(&provenance);
     map_static_diagnostics_to_original(&mut module, &provenance);
     module.static_source_provenance = Some(provenance);
     module
+}
+
+fn generated_javascript_source_type(original_type: StaticSourceType) -> SourceType {
+    let mut generated_type = SourceType::mjs()
+        .with_script(true)
+        .with_module(original_type.goal == SourceGoal::Module);
+    if original_type.commonjs {
+        generated_type = generated_type.with_commonjs(true);
+    }
+    generated_type
+}
+
+fn source_kind_from_static_provenance(provenance: &StaticSourceProvenance) -> SourceKind {
+    if provenance.original_type.jsx {
+        SourceKind::Tsx
+    } else {
+        SourceKind::TypeScript
+    }
 }
 
 /// Parse with an explicit ECMAScript goal, independent of Oxc's extension convention.
@@ -745,12 +774,11 @@ fn append_source_scalar(
 /// grammar. Unlike an ordinary Script goal, this admits the wrapper's top-level `return` and
 /// `new.target` while continuing to reject top-level `await`.
 pub fn parse_commonjs(path: &str, source: &str) -> Module {
-    let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
     parse_static_typescript_with(
         path,
         source,
         StaticTypescriptPolicy::TransformToNode22JavaScript,
-        inferred.with_commonjs(true),
+        commonjs_source_type(path),
         |text, ty| (parse_source(Some(path), text, ty), ()),
     )
     .0
@@ -6955,6 +6983,18 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         assert_eq!(module.source_kind, SourceKind::Tsx);
         assert_eq!(module.source_goal, SourceGoal::Module);
+        assert_eq!(
+            module
+                .static_source_provenance
+                .as_ref()
+                .unwrap()
+                .original_type,
+            StaticSourceType {
+                goal: SourceGoal::Module,
+                commonjs: false,
+                jsx: true,
+            }
+        );
         assert!(
             module.source.contains("from \"./dep\""),
             "{}",
@@ -7000,6 +7040,54 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
             default_module.source
         );
         assert_eq!(default_requires, ["./dep"]);
+    }
+
+    #[test]
+    fn prepared_native_dce_preserves_explicit_commonjs_goal_for_ts_path() {
+        // Package metadata can classify a `.ts` file as CommonJS. A filename-only reparse
+        // silently changes this to module goal, where top-level return is rejected.
+        let source = "const dep: number = require('./dep'); return dep;";
+        let (module, requires) = parse_static_typescript_commonjs_with_requires(
+            "package-metadata.ts",
+            source,
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(requires, ["./dep"]);
+        let provenance = module
+            .static_source_provenance
+            .as_ref()
+            .expect("transformed CommonJS TS has provenance")
+            .clone();
+        assert_eq!(
+            provenance.original_type,
+            StaticSourceType {
+                goal: SourceGoal::Script,
+                commonjs: true,
+                jsx: false,
+            }
+        );
+
+        let prepared = parse_dce_native_prepared(
+            "package-metadata.ts",
+            &module.source,
+            &BTreeSet::new(),
+            false,
+            provenance,
+        );
+        assert!(
+            prepared.diagnostics.is_empty(),
+            "{:?}",
+            prepared.diagnostics
+        );
+        assert_eq!(prepared.source_goal, SourceGoal::Script);
+        assert!(
+            prepared.source.contains("return dep"),
+            "{}",
+            prepared.source
+        );
+        assert!(prepared.source.contains("require("), "{}", prepared.source);
+        assert!(prepared.source.contains("./dep"), "{}", prepared.source);
     }
 
     #[test]
