@@ -233,7 +233,7 @@ impl InterpreterInspector {
         if object.error_brand
             || object.arguments_brand
             || object.module_namespace
-            || !object.namespace_cells.is_empty()
+            || object.namespace_bindings.is_some()
             || object.primitive.is_some()
             || object.node_events.is_some()
             || object.node_object.is_some()

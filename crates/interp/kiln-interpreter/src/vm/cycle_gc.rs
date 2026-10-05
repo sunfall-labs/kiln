@@ -1144,7 +1144,11 @@ fn object_children(data: &ObjectData) -> Vec<Value> {
             Property::Accessor { get, set } => values.extend(get.iter().chain(set.iter()).cloned()),
         }
     }
-    values.extend(data.namespace_cells.iter().map(|(_, value)| value.clone()));
+    values.extend(
+        data.namespace_bindings
+            .iter()
+            .flat_map(|bindings| bindings.cells.iter().cloned()),
+    );
     values.extend(data.prototype.iter().cloned());
     values.extend(data.primitive.iter().cloned());
     values.extend(data.error_stack_frames.iter().cloned());

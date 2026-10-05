@@ -3406,7 +3406,7 @@ fn module_namespace_definitions_compare_live_bindings_with_same_value() {
 }
 
 #[test]
-fn namespace_refresh_updates_many_fixed_slots_without_changing_their_descriptors() {
+fn namespace_reads_many_fixed_slots_without_changing_their_descriptors() {
     let exports: Vec<_> = (0..128)
         .map(|index| {
             (
@@ -3430,13 +3430,11 @@ fn namespace_refresh_updates_many_fixed_slots_without_changing_their_descriptors
     for (index, value) in [(0, 1000.0), (64, 1064.0), (127, 1127.0)] {
         *cells[index].borrow_mut() = Value::Number(value);
     }
-    object.borrow_mut().refresh_namespace();
-
     for (index, expected) in [(0, 1000.0), (64, 1064.0), (127, 1127.0)] {
         let key = format!("export_{index:03}");
         assert_eq!(
-            object.borrow().get_own(&key).cloned(),
-            Some(Value::Number(expected)),
+            object.borrow().lookup(&key),
+            Some(Property::Value(Value::Number(expected))),
             "export {key} must read its current cell"
         );
         let attrs = object
@@ -3450,7 +3448,7 @@ fn namespace_refresh_updates_many_fixed_slots_without_changing_their_descriptors
 }
 
 #[test]
-fn namespace_refresh_keeps_the_replacement_slot_for_duplicate_input_names() {
+fn namespace_keeps_the_replacement_slot_for_duplicate_input_names() {
     let first = Rc::new(RefCell::new(Value::Number(1.0)));
     let replacement = Rc::new(RefCell::new(Value::Number(2.0)));
     let namespace = namespace_object([
@@ -3464,16 +3462,14 @@ fn namespace_refresh_keeps_the_replacement_slot_for_duplicate_input_names() {
 
     *first.borrow_mut() = Value::Number(10.0);
     *replacement.borrow_mut() = Value::Number(20.0);
-    object.borrow_mut().refresh_namespace();
-
     assert_eq!(
-        object.borrow().get_own("duplicate"),
-        Some(&Value::Number(20.0))
+        object.borrow().lookup("duplicate"),
+        Some(Property::Value(Value::Number(20.0)))
     );
 }
 
 #[test]
-fn namespace_refresh_resolves_slots_after_index_keys_are_ordered() {
+fn namespace_resolves_slots_after_index_keys_are_ordered() {
     let ordinary = Rc::new(RefCell::new(Value::Number(1.0)));
     let ten = Rc::new(RefCell::new(Value::Number(10.0)));
     let two = Rc::new(RefCell::new(Value::Number(2.0)));
@@ -3504,12 +3500,166 @@ fn namespace_refresh_resolves_slots_after_index_keys_are_ordered() {
     *ordinary.borrow_mut() = Value::Number(101.0);
     *ten.borrow_mut() = Value::Number(110.0);
     *two.borrow_mut() = Value::Number(102.0);
-    object.borrow_mut().refresh_namespace();
-
     assert_eq!(
-        object.borrow().get_own("ordinary"),
-        Some(&Value::Number(101.0))
+        object.borrow().lookup("ordinary"),
+        Some(Property::Value(Value::Number(101.0)))
     );
-    assert_eq!(object.borrow().get_own("10"), Some(&Value::Number(110.0)));
-    assert_eq!(object.borrow().get_own("2"), Some(&Value::Number(102.0)));
+    assert_eq!(
+        object.borrow().lookup("10"),
+        Some(Property::Value(Value::Number(110.0)))
+    );
+    assert_eq!(
+        object.borrow().lookup("2"),
+        Some(Property::Value(Value::Number(102.0)))
+    );
+}
+
+#[test]
+fn namespace_descriptor_reads_the_cell_without_an_intervening_get() {
+    let first = Rc::new(RefCell::new(Value::Number(1.0)));
+    let second = Rc::new(RefCell::new(Value::Number(10.0)));
+    let namespace = namespace_object([
+        ("first".to_owned(), Value::Cell(first.clone())),
+        ("second".to_owned(), Value::Cell(second.clone())),
+    ]);
+    let Value::Object(object) = &namespace else {
+        panic!("module namespace must be an object");
+    };
+    let intrinsics = Intrinsics::default();
+
+    *first.borrow_mut() = Value::Number(2.0);
+    let descriptor = own_descriptor_key(&intrinsics, &namespace, PropertyKeyRef::Utf8("first"))
+        .expect("export descriptor exists");
+    let Value::Object(descriptor) = descriptor else {
+        panic!("data descriptor must be an object");
+    };
+    assert_eq!(
+        descriptor.borrow().get_own("value"),
+        Some(&Value::Number(2.0))
+    );
+
+    *first.borrow_mut() = Value::Number(3.0);
+    *second.borrow_mut() = Value::Number(20.0);
+    assert_eq!(
+        object.borrow().lookup("second"),
+        Some(Property::Value(Value::Number(20.0)))
+    );
+    assert_eq!(
+        own_property_state_key(&intrinsics, &namespace, PropertyKeyRef::Utf8("first"))
+            .map(|(property, _)| property),
+        Some(Property::Value(Value::Number(3.0)))
+    );
+    assert_eq!(
+        namespace_entries(&namespace),
+        vec![
+            ("first".to_owned(), Value::Number(3.0)),
+            ("second".to_owned(), Value::Number(20.0)),
+        ]
+    );
+    for properties in [
+        own_properties_units(&intrinsics, &namespace),
+        own_string_properties_units(&intrinsics, &namespace),
+    ] {
+        assert!(properties.iter().any(|(key, property)| {
+            key == "first" && *property == Property::Value(Value::Number(3.0))
+        }));
+        assert!(properties.iter().any(|(key, property)| {
+            key == "second" && *property == Property::Value(Value::Number(20.0))
+        }));
+    }
+    assert_eq!(
+        define_own_property_key(
+            &intrinsics,
+            &namespace,
+            PropertyKeyRef::Utf8("first"),
+            &Descriptor {
+                value: Some(Value::Number(3.0)),
+                ..Descriptor::default()
+            },
+        ),
+        Ok(true)
+    );
+
+    let mut child = ObjectData::default();
+    child.set_prototype(namespace.clone());
+    assert_eq!(
+        child.lookup("first"),
+        Some(Property::Value(Value::Number(3.0)))
+    );
+    *first.borrow_mut() = Value::Cell(second.clone());
+    assert_eq!(
+        object.borrow().lookup("first"),
+        Some(Property::Value(Value::Number(20.0)))
+    );
+}
+
+#[test]
+fn namespace_does_not_keep_replaced_export_values_alive() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let old = Value::Object(tracked_object(ObjectData::default()));
+    let old_weak = match &old {
+        Value::Object(object) => Rc::downgrade(object),
+        _ => unreachable!(),
+    };
+    let weak_ref = vm.construct_weak_ref(&[old.clone()], 0).unwrap();
+    let cell = Rc::new(RefCell::new(old));
+    let namespace = namespace_object([("value".to_owned(), Value::Cell(Rc::clone(&cell)))]);
+
+    *cell.borrow_mut() = Value::Number(42.0);
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+    vm.collect_closure_cycles();
+
+    assert!(old_weak.upgrade().is_none());
+    assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    assert_eq!(
+        own_data_property(&namespace, "value"),
+        Some(Value::Number(42.0))
+    );
+}
+
+#[test]
+fn namespace_cell_cycle_is_collected_without_dropping_a_live_namespace() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+
+    let cell = Rc::new(RefCell::new(Value::Undefined));
+    let namespace = namespace_object([("live".to_owned(), Value::Cell(Rc::clone(&cell)))]);
+    *cell.borrow_mut() = namespace.clone();
+    let weak_namespace = match &namespace {
+        Value::Object(namespace) => Rc::downgrade(namespace),
+        _ => panic!("module namespace must be an object"),
+    };
+    let weak_ref = vm.construct_weak_ref(&[namespace.clone()], 0).unwrap();
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+
+    // An independently reachable namespace remains live through its cell edge.
+    vm.collect_closure_cycles();
+    assert!(weak_namespace.upgrade().is_some());
+    assert!(matches!(
+        vm.weak_ref_deref(&weak_ref, 0),
+        Ok(Value::Object(_))
+    ));
+    vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+
+    drop(namespace);
+    drop(cell);
+    vm.collect_closure_cycles();
+
+    assert!(weak_namespace.upgrade().is_none());
+    assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
 }

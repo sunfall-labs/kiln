@@ -930,8 +930,10 @@ mod tests {
             panic!("published exports link through their stable cells");
         };
         assert_eq!(*binding.borrow(), replacement);
-        object.borrow_mut().refresh_namespace();
-        assert_eq!(object.borrow().get_own("run"), Some(&replacement));
+        assert_eq!(
+            object.borrow().lookup("run"),
+            Some(Property::Value(replacement))
+        );
         assert_eq!(object.borrow().get_own_attributes("run"), attributes);
         assert!(!object.borrow().is_extensible());
         assert!(object.borrow().is_module_namespace());

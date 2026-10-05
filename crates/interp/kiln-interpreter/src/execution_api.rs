@@ -365,8 +365,9 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
     let mut data = ObjectData::default();
     let mut namespace_cells = Vec::new();
     for (name, value) in exports {
-        // A namespace object holds values, so an exported cell is read through here. Node's
-        // namespace objects are live; this one is a snapshot taken when the provider finished.
+        // Keep the ordinary slot shape separate from the exporting cell. Program-visible own
+        // property resolution reads the cell for this slot, so descriptors and reads stay live
+        // without storing `Value::Cell` in the reflected property itself.
         //
         // Writable and non-configurable, which is the one combination no ordinary object is
         // built with and the one the specification gives every export: the binding cannot be
@@ -469,15 +470,18 @@ pub fn namespace_entries(value: &Value) -> Vec<(String, Value)> {
     let Value::Object(object) = value else {
         return Vec::new();
     };
+    let object = object.borrow();
     object
-        .borrow()
-        .entries()
-        .filter_map(|(name, property)| match property {
+        .properties
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| match object.property_at_slot(index, slot) {
             // The tag is the namespace's own furniture, not one of the module's exports. A star
             // re-export expanded through here would otherwise hand `@@toStringTag` on to the
             // importer as a name the provider had exported.
-            _ if name == WellKnown::ToStringTag.property_key() => None,
-            Property::Value(value) => Some((name.to_lossy_string(), value.clone())),
+            _ if slot.key == WellKnown::ToStringTag.property_key() => None,
+            Property::Value(value) if !slot.internal => Some((slot.key.to_lossy_string(), value)),
+            Property::Value(_) => None,
             Property::Accessor { .. } => None,
         })
         .collect()
@@ -497,7 +501,7 @@ pub fn own_data_property(value: &Value, name: &str) -> Option<Value> {
     let Value::Object(object) = value else {
         return None;
     };
-    object.borrow().get_own(name).cloned()
+    object.borrow().get_own_value(name)
 }
 
 /// What `node:worker_threads` reads about the exception that ended a worker (realms issue 06):

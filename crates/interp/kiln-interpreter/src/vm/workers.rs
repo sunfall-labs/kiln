@@ -54,7 +54,7 @@ fn plain_graph_exclusive(source: &InterpreterPlainSource) -> bool {
                 let data = object.borrow();
                 if data.weak_shared_target.is_some()
                     || !data.finalization_cells.is_empty()
-                    || !data.namespace_cells.is_empty()
+                    || data.namespace_bindings.is_some()
                     || !data.extensible
                     || data.frozen
                 {
@@ -74,7 +74,7 @@ fn plain_graph_exclusive(source: &InterpreterPlainSource) -> bool {
                 let properties = array.properties.borrow();
                 if properties.weak_shared_target.is_some()
                     || !properties.finalization_cells.is_empty()
-                    || !properties.namespace_cells.is_empty()
+                    || properties.namespace_bindings.is_some()
                     || !properties.extensible
                     || properties.frozen
                     || !array.length_writable.get()

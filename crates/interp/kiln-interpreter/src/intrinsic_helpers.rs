@@ -1400,15 +1400,21 @@ pub(super) fn own_properties_units(
             .entries()
             .map(|(key, property)| (key.clone(), property.clone()))
             .collect(),
-        Value::Object(object) => string_wrapper_entries_units(value)
-            .into_iter()
-            .chain(
+        Value::Object(object) => {
+            let object = object.borrow();
+            let entries = if object.namespace_bindings.is_some() {
+                object.resolved_entries()
+            } else {
                 object
-                    .borrow()
                     .entries()
-                    .map(|(key, property)| (key.clone(), property.clone())),
-            )
-            .collect(),
+                    .map(|(key, property)| (key.clone(), property.clone()))
+                    .collect()
+            };
+            string_wrapper_entries_units(value)
+                .into_iter()
+                .chain(entries)
+                .collect()
+        }
         // The indices first and then whatever the program hung on the array by name, which is
         // the order `OrdinaryOwnPropertyKeys` gives and the order `Object.keys` already used
         // here. Stopping at the indices made this function disagree with the own-key walk beside
@@ -1490,9 +1496,13 @@ pub(super) fn own_string_properties_units(
     value: &Value,
 ) -> Vec<(StringUnits, Property)> {
     let stored = |data: &ObjectData| {
-        data.string_entries()
-            .map(|(key, property)| (key.clone(), property.clone()))
-            .collect::<Vec<_>>()
+        if data.namespace_bindings.is_some() {
+            data.resolved_string_entries()
+        } else {
+            data.string_entries()
+                .map(|(key, property)| (key.clone(), property.clone()))
+                .collect::<Vec<_>>()
+        }
     };
     match value {
         Value::Object(object) => string_wrapper_entries_units(value)
@@ -2325,8 +2335,16 @@ fn inspect_object_at(
         return format!("{label}({}) {{ {} }}", live.len(), parts.join(", "));
     }
 
-    let entries = object
-        .entries()
+    let entries: Vec<(StringUnits, Property)> = if object.namespace_bindings.is_some() {
+        object.resolved_entries()
+    } else {
+        object
+            .entries()
+            .map(|(key, property)| (key.clone(), property.clone()))
+            .collect()
+    };
+    let entries = entries
+        .into_iter()
         // Reserved keys are the VM's own and symbol-keyed properties; node shows the latter as
         // `[Symbol(x)]: v`, which needs a key-to-symbol map this VM does not keep.
         .filter(|(key, _)| !symbol::is_reserved(&key.to_lossy_string()))
@@ -2348,7 +2366,7 @@ fn inspect_object_at(
         let key = inspect_key(&key.to_lossy_string());
         let shown = match property {
             Property::Value(value) => inspect_nested_at(
-                value,
+                &value,
                 depth + 1,
                 seen,
                 column

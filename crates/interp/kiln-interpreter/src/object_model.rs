@@ -81,6 +81,14 @@ pub(super) struct Slot {
     pub(super) attributes: Attributes,
 }
 
+/// Live bindings owned by a module namespace. Boxed so ordinary objects pay only the size of an
+/// `Option` pointer for namespace-specific state.
+#[derive(Clone, Debug, Default)]
+pub(super) struct NamespaceBindings {
+    pub(super) cells: Vec<Value>,
+    pub(super) cell_slots: Vec<Option<usize>>,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum PropertyKeyRef<'a> {
     Utf8(&'a str),
@@ -333,11 +341,9 @@ pub struct ObjectData {
     pub(super) module_namespace: bool,
     /// The exporting module's cells, for a namespace built over live bindings.
     ///
-    /// Held beside the properties rather than *in* them: a `Value::Cell` stored as a property
-    /// value would reach `Object.keys`, a descriptor read, a spread and `JSON.stringify` as
-    /// itself, which is a wrong answer everywhere it appeared. The slots keep ordinary values
-    /// and are caught up from these before a read.
-    pub(super) namespace_cells: Vec<(usize, Value)>,
+    /// The exporting module's cells, held separately from properties so they are never reflected
+    /// as values. Ordinary objects pay only this optional pointer; namespace data is boxed.
+    pub(super) namespace_bindings: Option<Box<NamespaceBindings>>,
     /// Strong generation owner for namespace objects created from an inactive generation. This
     /// edge keeps their source records available while the namespace is externally reachable.
     pub(super) module_generation: Option<crate::module_map::ModuleGenerationHandle>,
@@ -445,7 +451,7 @@ impl Default for ObjectData {
             extensible: true,
             frozen: false,
             module_namespace: false,
-            namespace_cells: Vec::new(),
+            namespace_bindings: None,
             module_generation: None,
             shadow_realm: None,
             prototype: None,

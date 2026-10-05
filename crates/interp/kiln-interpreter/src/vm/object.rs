@@ -1117,7 +1117,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .proxy_get(target, &trap_key, instruction)
                 .map(PropertyRead::Value);
         }
-        self.refresh_namespace_for_read(target);
         // Array `length` is an own data property backed by the dense array header, rather than
         // by its ordinary property store. Resolve it before walking any stored or inherited
         // properties so a custom prototype's `length` cannot shadow the array's own value.
@@ -1712,9 +1711,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .map(PropertyRead::Value);
         }
         // Computed reads are still ordinary [[Get]] operations. In particular, Object.assign
-        // reads namespace exports through this path, so refresh live export cells after
-        // ToPropertyKey has run and before looking up the property's stored snapshot.
-        self.refresh_namespace_for_read(target);
+        // reads namespace exports through this path; stored_property_key resolves an export's
+        // current cell through the same own-property state used by descriptors.
         // A numeric key on an integer-indexed exotic already identifies the canonical
         // numeric string. Avoid formatting and reparsing it for every byte of a view copy.
         // ToPropertyKey maps numeric -0 to "0"; the distinct string "-0" still takes the
@@ -1770,17 +1768,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Ok(PropertyRead::Value(found))
             }
-        }
-    }
-
-    fn refresh_namespace_for_read(&mut self, target: &Value) {
-        // A namespace names the exporting module's bindings, so it is caught up before it is
-        // read: the module may have assigned to an export since the link ran. The shared borrow
-        // decides first, so an ordinary object never takes the exclusive one.
-        if let Value::Object(object) = target
-            && object.borrow().tracks_namespace_cells()
-        {
-            object.borrow_mut().refresh_namespace();
         }
     }
 

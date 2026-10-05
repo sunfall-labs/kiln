@@ -2362,9 +2362,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 for (key, property) in own_string_properties_units(&self.intrinsics, &source) {
                     let value = if module_namespace {
-                        // Namespace slots are snapshots of export cells for reflection. The
-                        // language-visible value operation is [[Get]], which refreshes that
-                        // snapshot from the live cell before returning it.
+                        // This operation reads values, so use the namespace's ordinary [[Get]]
+                        // path and its current export cell rather than the stored slot shape.
                         self.read_property_key(&source, PropertyKeyRef::Units(&key), instruction)?
                     } else {
                         match property {

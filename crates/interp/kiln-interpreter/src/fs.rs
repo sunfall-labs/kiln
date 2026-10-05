@@ -84,7 +84,7 @@ pub(crate) fn node_encoding(option: Option<&Value>) -> Result<bool, ExecutionErr
                 }
             })?)
         }
-        Some(Value::Object(options)) => match options.borrow().get_own("encoding") {
+        Some(Value::Object(options)) => match options.borrow().get_own_value("encoding") {
             None | Some(Value::Undefined) | Some(Value::Null) => Ok(false),
             Some(Value::String(encoding)) => {
                 parse_node_encoding(&encoding.to_scalar_string().map_err(|_| {
@@ -394,10 +394,12 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             };
             let mode = match arguments.get(2) {
                 Some(Value::Number(n)) => Some(*n as u32),
-                Some(Value::Object(obj)) => obj.borrow().get_own("mode").and_then(|v| match v {
-                    Value::Number(n) => Some(*n as u32),
-                    _ => None,
-                }),
+                Some(Value::Object(obj)) => {
+                    obj.borrow().get_own_value("mode").and_then(|v| match v {
+                        Value::Number(n) => Some(n as u32),
+                        _ => None,
+                    })
+                }
                 _ => None,
             };
             let write_res = with_fs(vm, |fs| {
@@ -444,8 +446,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 Some(Value::Boolean(b)) => *b,
                 Some(Value::Object(obj)) => obj
                     .borrow()
-                    .get_own("recursive")
-                    .map_or(false, Value::is_truthy),
+                    .get_own_value("recursive")
+                    .is_some_and(|value| value.is_truthy()),
                 _ => false,
             };
             let res = with_fs(vm, |fs| {
@@ -468,8 +470,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let throw_if_no_entry = match arguments.get(1) {
                 Some(Value::Object(obj)) => obj
                     .borrow()
-                    .get_own("throwIfNoEntry")
-                    .map_or(true, Value::is_truthy),
+                    .get_own_value("throwIfNoEntry")
+                    .is_none_or(|value| value.is_truthy()),
                 _ => true,
             };
             let is_lstat = matches!(native, Native::NodeFsLstatSync);
@@ -521,8 +523,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let with_file_types = match arguments.get(1) {
                 Some(Value::Object(obj)) => obj
                     .borrow()
-                    .get_own("withFileTypes")
-                    .map_or(false, Value::is_truthy),
+                    .get_own_value("withFileTypes")
+                    .is_some_and(|value| value.is_truthy()),
                 _ => false,
             };
             let read_dir_res = with_fs(vm, |fs| fs.read_dir(std::path::Path::new(&path_str)));
@@ -572,12 +574,12 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 Some(Value::Object(obj)) => {
                     let rec = obj
                         .borrow()
-                        .get_own("recursive")
-                        .map_or(false, Value::is_truthy);
+                        .get_own_value("recursive")
+                        .is_some_and(|value| value.is_truthy());
                     let frc = obj
                         .borrow()
-                        .get_own("force")
-                        .map_or(false, Value::is_truthy);
+                        .get_own_value("force")
+                        .is_some_and(|value| value.is_truthy());
                     (rec, frc)
                 }
                 _ => (false, false),

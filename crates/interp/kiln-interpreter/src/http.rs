@@ -220,7 +220,11 @@ pub(crate) fn node_http_request_arguments(
             });
         }
     };
-    let own = |name: &str| options.as_ref().and_then(|options| options.get_own(name));
+    let own = |name: &str| {
+        options
+            .as_ref()
+            .and_then(|options| options.get_own_value(name))
+    };
     let (url_host, url_port, url_path) = from_url
         .clone()
         .unwrap_or_else(|| ("localhost".into(), 80.0, "/".into()));

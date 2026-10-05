@@ -5524,8 +5524,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let recursive = arguments.get(1).map_or(false, |opt| {
                     if let Value::Object(obj) = opt {
                         obj.borrow()
-                            .get_own("recursive")
-                            .map_or(false, Value::is_truthy)
+                            .get_own_value("recursive")
+                            .is_some_and(|value| value.is_truthy())
                     } else if let Value::Boolean(b) = opt {
                         *b
                     } else {
@@ -5541,8 +5541,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let with_types = arguments.get(1).map_or(false, |opt| {
                     if let Value::Object(obj) = opt {
                         obj.borrow()
-                            .get_own("withFileTypes")
-                            .map_or(false, Value::is_truthy)
+                            .get_own_value("withFileTypes")
+                            .is_some_and(|value| value.is_truthy())
                     } else {
                         false
                     }
@@ -5591,12 +5591,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     Some(Value::Object(obj)) => {
                         let rec = obj
                             .borrow()
-                            .get_own("recursive")
-                            .map_or(false, Value::is_truthy);
+                            .get_own_value("recursive")
+                            .is_some_and(|value| value.is_truthy());
                         let frc = obj
                             .borrow()
-                            .get_own("force")
-                            .map_or(false, Value::is_truthy);
+                            .get_own_value("force")
+                            .is_some_and(|value| value.is_truthy());
                         (rec, frc)
                     }
                     _ => (false, false),
@@ -5670,8 +5670,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let with_file_types = arguments.get(1).map_or(false, |opt| {
                     if let Value::Object(obj) = opt {
                         obj.borrow()
-                            .get_own("withFileTypes")
-                            .map_or(false, Value::is_truthy)
+                            .get_own_value("withFileTypes")
+                            .is_some_and(|value| value.is_truthy())
                     } else {
                         false
                     }

@@ -35,7 +35,7 @@ pub(super) fn clone_plain_data(
                     || !data.extensible
                     || data.frozen
                     || data.module_namespace
-                    || !data.namespace_cells.is_empty()
+                    || data.namespace_bindings.is_some()
                     || data.primitive.is_some()
                     || data.node_events.is_some()
                     || data.node_object.is_some()
