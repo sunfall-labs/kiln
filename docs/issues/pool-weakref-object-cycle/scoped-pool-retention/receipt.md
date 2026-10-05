@@ -97,8 +97,36 @@ anonymous thread-stack mappings. Its stop is before a WeakRef upgrade but is not
 the WeakRef for this selected Scope. Consequently the 12 matches are leads only; this run does not
 identify the retained strong owner or establish a production fix.
 
+## Diagnostic weak ordinary-object registry
+
+The next private diagnostic added an opt-in Weak registry of ordinary `Rc<RefCell<ObjectData>>`
+instances encountered at VM instruction boundaries. It is not part of collector roots or edge
+accounting. At the target checkpoint it upgrades one registered object at a time, checks direct
+`Value::Object` fields against the target pointer without cloning child values, and drops the
+temporary owner before continuing. The exact binary SHA-256 is
+`2416d931de24a424930a1c7a27dbeb235682fbaa42590dc5dfe5412881c114bc`; the probe output SHA-256 is
+`22c57f74567a9742df96e1fce80dca05ce3ab70b15a938ad40c821efdf8e5526`. The logs and earlier
+allocation/strong-count traces are preserved in `object-registry/`.
+
+The registry held 3,953 Weak handles. It found two direct object parents for the outer scope
+control, and one for the active current-scope control, while finding zero direct `ObjectData`
+parents for either retained inner scope. Target strong counts were unchanged before and after each
+registry traversal. This is useful negative evidence with positive controls: it rules out direct
+object fields among objects seen at the observed VM boundaries, but does not cover Cell values,
+array elements, closures, host sidecars, or objects never observed at those boundaries. It does not
+identify the Pool owner and does not establish a conformance result.
+
+The private diagnostic source was subsequently extended to register additional current VM
+activation fields after this binary was built. That later source diff was not rebuilt, so the
+binary hash above applies only to the object-registry run as logged. The next bounded diagnostic
+combines the expanded activation coverage with a Weak Cell registry, then follows any matching
+Cell to its real Closure/frame/module owner. No production collector change follows from this
+object-only result.
+
 ## Next diagnostic
 
-The next diagnostic will identify live parent fields using a private, nonowning allocation
-registry and type-aware edge inspection. Raw pointer matches alone cannot distinguish a strong
-owner from weak handles or stale storage. No production collector change is justified yet.
+Register physical Cells through VM values, saved frames, closure upvalues, and module bindings in
+the same opt-in registry. At the target checkpoint, inspect each borrowed Cell value for the
+target identity without cloning it; report the Cell's strong count and whether production owner
+census accounts for it. If a Cell matches, identify its Closure/upvalue or frame/module owner
+before changing collector behavior.
