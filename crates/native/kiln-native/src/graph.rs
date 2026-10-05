@@ -841,7 +841,7 @@ fn cached_emitted_module(
 ) -> Result<(kiln_backend_c::CModule, bool), NativeError> {
     let cache_key = NativeArtifactFamily::ModuleSource.source_key(
         target,
-        Digest::hash(b"native-graph-emission-input-v6"),
+        Digest::hash(b"native-graph-emission-input-v7"),
         [
             input,
             prelude_header_digest(),
@@ -856,7 +856,9 @@ fn cached_emitted_module(
                 symbol,
                 source,
                 generic_only,
+                generic_mixed_optimization,
                 chunks,
+                chunk_generic_mixed_optimization,
                 parallel_workers,
                 instantiation,
             ): (
@@ -864,7 +866,9 @@ fn cached_emitted_module(
                 String,
                 String,
                 bool,
+                bool,
                 Vec<String>,
+                Vec<bool>,
                 Option<String>,
                 Option<kiln_backend_c::CModuleUnit>,
             ) = serde_json::from_slice(&artifact.bytes).map_err(|error| CacheError::Corrupt {
@@ -877,7 +881,9 @@ fn cached_emitted_module(
                     symbol,
                     source,
                     generic_only,
+                    generic_mixed_optimization,
                     chunks,
+                    chunk_generic_mixed_optimization,
                     parallel_workers,
                     instantiation,
                 },
@@ -891,7 +897,9 @@ fn cached_emitted_module(
                 &module.symbol,
                 &module.source,
                 module.generic_only,
+                module.generic_mixed_optimization,
                 &module.chunks,
+                &module.chunk_generic_mixed_optimization,
                 &module.parallel_workers,
                 &module.instantiation,
             ))

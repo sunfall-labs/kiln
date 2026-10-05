@@ -487,7 +487,9 @@ pub fn emit_function_from_graph_with_profile(
     // the arguments are numbers and passed exactly the parameter count.
     match kind {
         EntryKind::Boxed => {
-            let optnone = if proto.code.len() > 3000 {
+            let optnone = if plan.generic_only && !plan.generic_function_optimized {
+                "#if defined(KILN_GENERIC_MIXED_TIER) && !defined(KILN_GENERIC_OPT_OVERRIDE)\n#if defined(__clang__)\n__attribute__((optnone))\n#elif defined(__GNUC__)\n__attribute__((optimize(\"O0\")))\n#endif\n#endif\n"
+            } else if proto.code.len() > 3000 {
                 "__attribute__((optnone)) "
             } else {
                 ""

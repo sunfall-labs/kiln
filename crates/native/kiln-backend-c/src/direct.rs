@@ -79,6 +79,10 @@ pub struct CallPlan {
     /// Emit only the generic body; native-dev uses this to keep the edit/run loop proportional
     /// to the program instead of multiplying it by speculative clones.
     pub generic_only: bool,
+    /// This boxed body is selected for the bounded mixed optimization tier used by large
+    /// generic-only release modules. The ABI and body are unchanged; only the compiler's
+    /// optimization level differs from the O0 generic functions beside it.
+    pub generic_function_optimized: bool,
     /// With `generic_only`: the unit still lowers its qualifying `parallelMap` sites (see
     /// [`DirectPlan::plan_parallel_sites`]); without it, a site says `dev-profile`.
     pub parallel_in_generic: bool,
@@ -174,6 +178,8 @@ impl DirectPlan {
             // specifically to keep emission proportional to their bytecode, so do not compute
             // speculative facts only to erase them below.
             let function_count = graphs.len();
+            let optimized_functions =
+                select_generic_optimization_functions(program, publishes_frame);
             let generic_verdicts = std::sync::Arc::new(vec![
                 Err(crate::parallel::Refusal::new(
                     if parallel_in_generic {
@@ -191,10 +197,11 @@ impl DirectPlan {
             let columns = std::sync::Arc::new(vec![0; function_count]);
             let available = std::sync::Arc::new(vec![true; function_count]);
             let publishes_frame = std::sync::Arc::new(publishes_frame.to_vec());
-            let plan = || CallPlan {
+            let plan = |generic_function_optimized: bool| CallPlan {
                 compact,
                 compile_regex,
                 generic_only: true,
+                generic_function_optimized,
                 parallel_in_generic,
                 speculate,
                 typed_returns: false_flags.clone(),
@@ -209,10 +216,12 @@ impl DirectPlan {
                 ..CallPlan::default()
             };
             let mut generic = Self {
-                functions: (0..function_count).map(|_| plan()).collect(),
+                functions: (0..function_count)
+                    .map(|index| plan(optimized_functions[index]))
+                    .collect(),
                 typed: vec![None; function_count],
                 parallel: vec![None; function_count],
-                entry: plan(),
+                entry: plan(false),
             };
             if parallel_in_generic {
                 generic.plan_parallel_sites(program, graphs, entry, &publishes_frame, speculate);
@@ -500,6 +509,7 @@ impl DirectPlan {
                 compact,
                 compile_regex,
                 generic_only,
+                generic_function_optimized: false,
                 parallel_in_generic,
                 speculate,
                 known: if generic_only {
@@ -1265,6 +1275,40 @@ impl DirectPlan {
     pub fn has_typed_entry(&self, index: u32) -> bool {
         self.typed.get(index as usize).is_some_and(Option::is_some)
     }
+}
+
+/// Select a bounded, deterministic subset of frame-free generic bodies to compile at O1 inside
+/// otherwise O0 large modules. This is only a compiler tier: every selected function retains its
+/// original boxed ABI and generic emitted body. Source order and explicit instruction/function
+/// caps make object growth predictable without a library-specific allowlist.
+pub(crate) fn select_generic_optimization_functions(
+    program: &Program,
+    publishes_frame: &[bool],
+) -> Vec<bool> {
+    const MAX_FUNCTIONS: usize = 64;
+    const MAX_FUNCTION_INSTRUCTIONS: usize = 320;
+    const MAX_TOTAL_INSTRUCTIONS: usize = 4096;
+
+    let mut selected = vec![false; program.functions.len()];
+    let mut count = 0usize;
+    let mut instructions = 0usize;
+    for (index, proto) in program.functions.iter().enumerate() {
+        let publishes = publishes_frame.get(index).copied().unwrap_or(true);
+        let size = proto.code.len();
+        if count >= MAX_FUNCTIONS || size == 0 || size > MAX_FUNCTION_INSTRUCTIONS {
+            continue;
+        }
+        if !direct_callable(proto, publishes) {
+            continue;
+        }
+        if instructions.saturating_add(size) > MAX_TOTAL_INSTRUCTIONS {
+            continue;
+        }
+        selected[index] = true;
+        count += 1;
+        instructions += size;
+    }
+    selected
 }
 
 struct Site {

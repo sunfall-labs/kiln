@@ -842,13 +842,32 @@ fn configure_release_prelude_compile(options: &mut CompileOptions) {
         .extend(["-fno-vectorize".into(), "-fno-slp-vectorize".into()]);
 }
 
-fn configure_release_module_compile(options: &mut CompileOptions, generic_only: bool) {
+fn configure_release_module_compile(
+    options: &mut CompileOptions,
+    generic_only: bool,
+    generic_mixed_optimization: bool,
+) {
     if generic_only {
         // Generic bodies are deliberately used for the largest modules, where optimizing them
         // makes small real-world bundles materially slower despite reducing object size. Keep
         // this path at O0 by default, or respect KILN_GENERIC_OPT (e.g. 1, 2, 3, z).
-        let opt = std::env::var("KILN_GENERIC_OPT").unwrap_or_else(|_| "0".into());
+        let explicit_opt = std::env::var("KILN_GENERIC_OPT").ok();
+        let opt = explicit_opt
+            .clone()
+            .unwrap_or_else(|| if generic_mixed_optimization { "1" } else { "0" }.into());
         options.extra_args.push(format!("-O{opt}").into());
+        if generic_mixed_optimization && explicit_opt.is_none() {
+            options
+                .extra_args
+                .push("-DKILN_GENERIC_MIXED_TIER=1".into());
+        }
+        if explicit_opt.is_some() {
+            // The explicit global override preserves KILN_GENERIC_OPT's historical meaning:
+            // optimize every generic function at the requested level.
+            options
+                .extra_args
+                .push("-DKILN_GENERIC_OPT_OVERRIDE=1".into());
+        }
         // Clang treats an explicit O0 as its Debug configuration and otherwise injects UBSan
         // calls that the release link intentionally does not carry.
         options.extra_args.push("-fno-sanitize=undefined".into());
@@ -862,6 +881,10 @@ fn configure_release_module_compile(options: &mut CompileOptions, generic_only: 
     }
 }
 
+fn supports_function_optimization_attributes(kind: CompilerKind) -> bool {
+    matches!(kind, CompilerKind::Clang | CompilerKind::Gcc)
+}
+
 fn configure_release_size_module_compile(options: &mut CompileOptions) {
     options.extra_args.push("-fno-sanitize=undefined".into());
     options.extra_args.push("-fno-function-sections".into());
@@ -869,10 +892,12 @@ fn configure_release_size_module_compile(options: &mut CompileOptions) {
     options.extra_args.push("-fvisibility=hidden".into());
 }
 
-fn release_module_compile_identity(generic_only: bool) -> String {
+fn release_module_compile_identity(generic_only: bool, generic_mixed_optimization: bool) -> String {
     if generic_only {
         if let Ok(opt) = std::env::var("KILN_GENERIC_OPT") {
-            format!("generic-o{opt}-nosan-nosections")
+            format!("generic-override-o{opt}-nosan-nosections")
+        } else if generic_mixed_optimization {
+            "generic-mixed-o1-nosan-nosections".to_owned()
         } else {
             "generic-o0-nosan-nosections".into()
         }
@@ -1422,7 +1447,11 @@ impl NativeBuilder {
         let march_opt = object_flag_identity(options);
         let pgo_opt = pgo_options_fingerprint(options);
         let module_opt = if profile == NativeProfile::Release {
-            release_module_compile_identity(emission.generic_only)
+            release_module_compile_identity(
+                module.generic_only,
+                module.generic_mixed_optimization
+                    && supports_function_optimization_attributes(identity.kind),
+            )
         } else if profile == NativeProfile::ReleaseSize {
             release_size_module_compile_identity().to_string()
         } else {
@@ -1539,7 +1568,12 @@ impl NativeBuilder {
         };
         let mut app_compile_options = compile_options.clone();
         if profile == NativeProfile::Release {
-            configure_release_module_compile(&mut app_compile_options, emission.generic_only);
+            configure_release_module_compile(
+                &mut app_compile_options,
+                module.generic_only,
+                module.generic_mixed_optimization
+                    && supports_function_optimization_attributes(identity.kind),
+            );
         } else if profile == NativeProfile::ReleaseSize {
             configure_release_size_module_compile(&mut app_compile_options);
         }
@@ -2199,6 +2233,7 @@ impl NativeBuilder {
         let mut symbol_list = Vec::new();
         let mut module_sources = Vec::new();
         let mut module_generic_only = Vec::new();
+        let mut module_generic_mixed = Vec::new();
         for ((_, module), &hit) in modules.iter().zip(&generated_c_hits) {
             if module.chunks.is_empty() {
                 symbol_list.push(module.symbol.clone());
@@ -2208,6 +2243,7 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(module.generic_only);
+                module_generic_mixed.push(module.generic_mixed_optimization);
             } else {
                 for (chunk_idx, chunk_source) in module.chunks.iter().enumerate() {
                     symbol_list.push(format!("{}_chunk_{chunk_idx}", module.symbol));
@@ -2217,6 +2253,7 @@ impl NativeBuilder {
                         hit,
                     ));
                     module_generic_only.push(module.generic_only);
+                    module_generic_mixed.push(module.chunk_generic_mixed_optimization[chunk_idx]);
                 }
             }
             if let Some(workers) = &module.parallel_workers {
@@ -2230,6 +2267,7 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(false);
+                module_generic_mixed.push(false);
             }
             if let Some(instantiation) = &module.instantiation {
                 symbol_list.push(instantiation.symbol.clone());
@@ -2239,6 +2277,7 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(module.generic_only);
+                module_generic_mixed.push(false);
             }
         }
         let paths = SharedGraphLibraryPaths::new(workspace.path(), &symbol_list);
@@ -2258,14 +2297,19 @@ impl NativeBuilder {
         let march_opt = object_flag_identity(options);
         let module_object_options = module_generic_only
             .iter()
-            .map(|&generic_only| {
+            .zip(&module_generic_mixed)
+            .map(|(&generic_only, &generic_mixed)| {
                 Digest::hash(
                     format!(
                         "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}{march_opt}\0module-opt={}",
                         identity.kind,
                         profile.as_str(),
                         if profile == NativeProfile::Release {
-                            release_module_compile_identity(generic_only)
+                            release_module_compile_identity(
+                                generic_only,
+                                generic_mixed
+                                    && supports_function_optimization_attributes(identity.kind),
+                            )
                         } else if profile == NativeProfile::ReleaseSize {
                             release_size_module_compile_identity().to_string()
                         } else {
@@ -2290,7 +2334,8 @@ impl NativeBuilder {
         // the six-argument entries externally linkable inside this DSO but hidden outside it.
         let module_compile_options = module_generic_only
             .iter()
-            .map(|&generic_only| {
+            .zip(&module_generic_mixed)
+            .map(|(&generic_only, &generic_mixed)| {
                 let mut compile = CompileOptions {
                     profile: profile.toolchain(),
                     position_independent: true,
@@ -2299,7 +2344,11 @@ impl NativeBuilder {
                 };
                 compile.extra_args.push("-fvisibility=hidden".into());
                 if profile == NativeProfile::Release {
-                    configure_release_module_compile(&mut compile, generic_only);
+                    configure_release_module_compile(
+                        &mut compile,
+                        generic_only,
+                        generic_mixed && supports_function_optimization_attributes(identity.kind),
+                    );
                 } else if profile == NativeProfile::ReleaseSize {
                     configure_release_size_module_compile(&mut compile);
                 }
@@ -2902,6 +2951,7 @@ impl NativeBuilder {
         let mut symbol_list = Vec::new();
         let mut module_sources = Vec::new();
         let mut module_generic_only = Vec::new();
+        let mut module_generic_mixed = Vec::new();
         let mut module_chunk_ranges = Vec::with_capacity(modules.len());
         for ((_, module), &hit) in modules.iter().zip(&generated_c_hits) {
             let start = symbol_list.len();
@@ -2913,6 +2963,7 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(module.generic_only);
+                module_generic_mixed.push(module.generic_mixed_optimization);
             } else {
                 for (chunk_idx, chunk_source) in module.chunks.iter().enumerate() {
                     symbol_list.push(format!("{}_chunk_{chunk_idx}", module.symbol));
@@ -2922,6 +2973,7 @@ impl NativeBuilder {
                         hit,
                     ));
                     module_generic_only.push(module.generic_only);
+                    module_generic_mixed.push(module.chunk_generic_mixed_optimization[chunk_idx]);
                 }
             }
             if let Some(workers) = &module.parallel_workers {
@@ -2935,6 +2987,7 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(false);
+                module_generic_mixed.push(false);
             }
             if let Some(instantiation) = &module.instantiation {
                 symbol_list.push(instantiation.symbol.clone());
@@ -2944,6 +2997,7 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(module.generic_only);
+                module_generic_mixed.push(false);
             }
             module_chunk_ranges.push(start..symbol_list.len());
         }
@@ -2989,6 +3043,7 @@ impl NativeBuilder {
                 self.cached_payload(&bootstrap_source_key, unit.as_bytes())?;
             module_sources.push((bootstrap_bytes, bootstrap_digest, bootstrap_generated_c_hit));
             module_generic_only.push(bootstrap.generic_only);
+            module_generic_mixed.push(bootstrap.generic_mixed_optimization);
         }
         let runtime_source_key = NativeArtifactFamily::RuntimeSource.source_key(
             &target,
@@ -3062,10 +3117,15 @@ impl NativeBuilder {
             .extend(prelude_group_defines(group_mask));
         let module_compile_options = module_generic_only
             .iter()
-            .map(|&generic_only| {
+            .zip(&module_generic_mixed)
+            .map(|(&generic_only, &generic_mixed)| {
                 let mut compile = compile_options.clone();
                 if profile == NativeProfile::Release {
-                    configure_release_module_compile(&mut compile, generic_only);
+                    configure_release_module_compile(
+                        &mut compile,
+                        generic_only,
+                        generic_mixed && supports_function_optimization_attributes(identity.kind),
+                    );
                 } else if profile == NativeProfile::ReleaseSize {
                     configure_release_size_module_compile(&mut compile);
                 }
@@ -3074,14 +3134,19 @@ impl NativeBuilder {
             .collect::<Vec<_>>();
         let module_object_options = module_generic_only
             .iter()
-            .map(|&generic_only| {
+            .zip(&module_generic_mixed)
+            .map(|(&generic_only, &generic_mixed)| {
                 Digest::hash(
                     format!(
                         "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}\0module-opt={}",
                         identity.kind,
                         profile.as_str(),
                         if profile == NativeProfile::Release {
-                            release_module_compile_identity(generic_only)
+                            release_module_compile_identity(
+                                generic_only,
+                                generic_mixed
+                                    && supports_function_optimization_attributes(identity.kind),
+                            )
                         } else if profile == NativeProfile::ReleaseSize {
                             release_size_module_compile_identity().to_string()
                         } else {

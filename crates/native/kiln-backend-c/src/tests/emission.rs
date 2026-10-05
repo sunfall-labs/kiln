@@ -1039,6 +1039,104 @@ fn compact_mode_deduplicates_function_names_across_functions() {
 }
 
 #[test]
+fn generic_mixed_tier_keeps_unsupported_bodies_at_o0_and_boxed() {
+    let selected = function(vec![Instruction::Return]);
+    let mut unsupported = function(vec![Instruction::Return]);
+    unsupported.generator = true;
+    let mut prog = program(
+        Vec::new(),
+        vec![
+            Instruction::MakeFunction(0),
+            Instruction::MakeFunction(1),
+            Instruction::Return,
+        ],
+        0,
+    );
+    prog.functions = vec![selected, unsupported];
+
+    let emitted = emit_with_policy(
+        &prog,
+        EmissionPolicy {
+            generic_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("generic module emits");
+    assert!(emitted.generic_only);
+    assert!(emitted.generic_mixed_optimization);
+    assert_eq!(emitted.chunk_generic_mixed_optimization, Vec::<bool>::new());
+    assert_eq!(
+        emitted
+            .source
+            .matches("defined(KILN_GENERIC_MIXED_TIER)")
+            .count(),
+        1,
+        "only the unselected generic body receives an O0 attribute"
+    );
+    assert!(emitted.source.contains("_fn_0("));
+    assert!(emitted.source.contains("_fn_1("));
+    assert!(
+        !emitted.source.contains("_fn_0_t("),
+        "the optimized generic tier retains the boxed ABI instead of a typed clone"
+    );
+
+    let mut compiled = emitted.clone();
+    compiled.source = format!("#define KILN_GENERIC_MIXED_TIER 1\n{}", compiled.source);
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; return {0}(NULL, &result) == KILN_C99_OK ? 0 : 1; }}\n",
+        compiled.symbol
+    );
+    let run = run_with_main(&compiled, &wrapper, "generic-mixed-tier-attributes");
+    assert!(
+        run.status.success(),
+        "mixed-tier C compiles and runs: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn generic_mixed_tier_metadata_tracks_each_emitted_chunk() {
+    let selected = function(vec![Instruction::Return]);
+    let mut unsupported = function(vec![Instruction::Return]);
+    unsupported.generator = true;
+    let mut prog = program(
+        Vec::new(),
+        vec![
+            Instruction::MakeFunction(0),
+            Instruction::MakeFunction(1),
+            Instruction::Return,
+        ],
+        0,
+    );
+    prog.functions = vec![selected, unsupported];
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module(prog, Vec::new(), Vec::new()),
+        "tier-test.js",
+        EmissionPolicy {
+            compact: true,
+            generic_only: true,
+            unit_chunk_bytes: Some(1),
+            ..Default::default()
+        },
+    )
+    .expect("chunked generic module emits");
+
+    assert!(emitted.generic_mixed_optimization);
+    assert!(emitted.chunks.len() >= 2);
+    assert_eq!(
+        emitted.chunk_generic_mixed_optimization.len(),
+        emitted.chunks.len()
+    );
+    assert!(emitted.chunk_generic_mixed_optimization[0]);
+    assert!(
+        emitted
+            .chunk_generic_mixed_optimization
+            .iter()
+            .any(|mixed| !mixed)
+    );
+}
+
+#[test]
 fn compact_mode_emits_closure_metadata_table_and_compact_call_sites() {
     let mut f0 = function(vec![Instruction::Return]);
     f0.name = Some("target".into());

@@ -488,8 +488,14 @@ pub struct CModule {
     /// Whether this unit intentionally contains only generic bodies and should favor the
     /// cheapest downstream compilation tier.
     pub generic_only: bool,
+    /// Whether this generated unit contains selected generic boxed bodies which are compiled at
+    /// O1 while their neighboring generic bodies remain O0.
+    pub generic_mixed_optimization: bool,
     /// If non-empty, contains multi-chunk C99 sources for parallel compilation.
     pub chunks: Vec<String>,
+    /// Per-chunk value aligned with [`Self::chunks`], identifying chunks with selected generic
+    /// bodies. Empty when [`Self::chunks`] is empty.
+    pub chunk_generic_mixed_optimization: Vec<bool>,
     /// With [`EmissionPolicy::parallel_workers_unit`], and only when the module has a
     /// qualifying `parallelMap` site: one more translation unit holding the sites' parallel
     /// clones and chunk workers, which [`Self::source`] (or a chunk) declares and calls. It is
@@ -507,6 +513,13 @@ pub struct CModuleUnit {
     /// Helper that allocates and publishes this module's export cells before instantiation.
     pub prepare_symbol: String,
     pub source: String,
+}
+
+fn generic_mixed_for_program(program: &Program, policy: &EmissionPolicy) -> bool {
+    policy.generic_only
+        && direct::select_generic_optimization_functions(program, &compute_publishes_frame(program))
+            .into_iter()
+            .any(|selected| selected)
 }
 
 /// Backwards-compatible descriptive alias for callers that call an emitted unit a module.
@@ -557,7 +570,9 @@ pub fn emit_with_policy(program: &Program, policy: EmissionPolicy) -> Result<CMo
         source,
         program_hash,
         generic_only: policy.generic_only,
+        generic_mixed_optimization: generic_mixed_for_program(program, &policy),
         chunks: Vec::new(),
+        chunk_generic_mixed_optimization: Vec::new(),
         parallel_workers: None,
         instantiation: None,
     })
@@ -599,7 +614,9 @@ pub fn emit_module_with_policy(
         source: rendered.source,
         program_hash,
         generic_only: policy.generic_only,
+        generic_mixed_optimization: rendered.generic_mixed_optimization,
         chunks: rendered.chunks,
+        chunk_generic_mixed_optimization: rendered.chunk_generic_mixed_optimization,
         parallel_workers: rendered.parallel_workers,
         instantiation: None,
     })
@@ -904,7 +921,9 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
         source: rendered.source,
         program_hash,
         generic_only: policy.generic_only,
+        generic_mixed_optimization: rendered.generic_mixed_optimization,
         chunks: rendered.chunks,
+        chunk_generic_mixed_optimization: rendered.chunk_generic_mixed_optimization,
         parallel_workers: rendered.parallel_workers,
         instantiation,
     })
@@ -1021,7 +1040,9 @@ pub fn emit_commonjs_module_with_logical_path_and_policy(
         source: rendered.source,
         program_hash,
         generic_only: policy.generic_only,
+        generic_mixed_optimization: rendered.generic_mixed_optimization,
         chunks: rendered.chunks,
+        chunk_generic_mixed_optimization: rendered.chunk_generic_mixed_optimization,
         parallel_workers: rendered.parallel_workers,
         instantiation: None,
     })
@@ -1069,7 +1090,9 @@ pub fn emit_runtime_module_with_logical_path_and_policy(
         source,
         program_hash,
         generic_only: policy.generic_only,
+        generic_mixed_optimization: false,
         chunks: Vec::new(),
+        chunk_generic_mixed_optimization: Vec::new(),
         parallel_workers: None,
         instantiation: None,
     })
@@ -1802,6 +1825,8 @@ struct RenderedFunctions {
 struct RenderedModule {
     source: String,
     chunks: Vec<String>,
+    generic_mixed_optimization: bool,
+    chunk_generic_mixed_optimization: Vec<bool>,
     parallel_workers: Option<String>,
 }
 
@@ -5506,6 +5531,15 @@ fn render_module_positioned(
         chunked_bodies.as_mut(),
         split_workers.then_some((symbol, &mut workers_unit)),
     );
+    let generic_optimized_functions = direct
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(index, plan)| {
+            plan.generic_function_optimized && reachable.is_none_or(|set| set.contains(&index))
+        })
+        .collect::<Vec<_>>();
+    let generic_mixed_optimization = generic_optimized_functions.iter().any(|&selected| selected);
     let parallel_workers = (!workers_unit.is_empty()).then(|| {
         let mut unit = String::with_capacity(workers_unit.len() + 256);
         render_emission_policy(&mut unit, policy);
@@ -5696,8 +5730,14 @@ fn render_module_positioned(
         }
 
         let mut chunks = Vec::new();
+        let mut chunk_generic_mixed_optimization = Vec::new();
         if chunk_ends.len() > 1 {
             chunks.push(chunk_0);
+            chunk_generic_mixed_optimization.push(
+                generic_optimized_functions[..chunk_0_funcs]
+                    .iter()
+                    .any(|&selected| selected),
+            );
             let mut start = chunk_0_funcs;
             for &end in &chunk_ends[1..] {
                 let referenced = scan_referenced_functions(
@@ -5721,12 +5761,19 @@ fn render_module_positioned(
                     chunk_k.push_str(f);
                 }
                 chunks.push(chunk_k);
+                chunk_generic_mixed_optimization.push(
+                    generic_optimized_functions[start..end]
+                        .iter()
+                        .any(|&selected| selected),
+                );
                 start = end;
             }
         }
         Ok(RenderedModule {
             source,
             chunks,
+            generic_mixed_optimization,
+            chunk_generic_mixed_optimization,
             parallel_workers,
         })
     } else {
@@ -5742,6 +5789,8 @@ fn render_module_positioned(
         Ok(RenderedModule {
             source: output,
             chunks: Vec::new(),
+            generic_mixed_optimization,
+            chunk_generic_mixed_optimization: Vec::new(),
             parallel_workers,
         })
     }

@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn generic_optimization_selection_is_bounded_ordered_and_frame_conservative() {
+    let first = function(vec![Instruction::Return]);
+    let mut generator = function(vec![Instruction::Return]);
+    generator.generator = true;
+    let third = function(vec![Instruction::Return; 321]);
+    let fourth = function(vec![Instruction::Return]);
+    let mut prog = program(Vec::new(), vec![Instruction::Return], 0);
+    prog.functions = vec![first, generator, third, fourth];
+
+    let selected =
+        crate::direct::select_generic_optimization_functions(&prog, &[false, false, false, false]);
+    assert_eq!(selected, [true, false, false, true]);
+    assert_eq!(
+        selected,
+        crate::direct::select_generic_optimization_functions(&prog, &[false, false, false, false],),
+        "selection is deterministic"
+    );
+    assert_eq!(
+        crate::direct::select_generic_optimization_functions(&prog, &[false]),
+        [true, false, false, false],
+        "missing publication facts conservatively exclude later functions"
+    );
+}
+
+#[test]
 fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
     // function (n) { let sum = 0; let i = 0; while (i < n) { sum += i; i++; } return sum; }
     //

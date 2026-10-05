@@ -262,7 +262,7 @@ fn failed_native_object_compile_releases_its_bucket_for_retry() {
 #[test]
 fn release_large_modules_preserve_throughput_policy() {
     let mut options = CompileOptions::default();
-    configure_release_module_compile(&mut options, true);
+    configure_release_module_compile(&mut options, true, false);
     let arguments = options
         .extra_args
         .iter()
@@ -278,8 +278,33 @@ fn release_large_modules_preserve_throughput_policy() {
         ]
     );
     assert_eq!(
-        release_module_compile_identity(true),
+        release_module_compile_identity(true, false),
         "generic-o0-nosan-nosections"
+    );
+}
+
+#[test]
+fn release_generic_mixed_tier_uses_a_distinct_optimization_identity() {
+    let mut options = CompileOptions::default();
+    configure_release_module_compile(&mut options, true, true);
+    let arguments = options
+        .extra_args
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        arguments,
+        [
+            "-O1",
+            "-DKILN_GENERIC_MIXED_TIER=1",
+            "-fno-sanitize=undefined",
+            "-fno-function-sections",
+            "-fno-data-sections"
+        ]
+    );
+    assert_eq!(
+        release_module_compile_identity(true, true),
+        "generic-mixed-o1-nosan-nosections"
     );
 }
 
