@@ -1330,10 +1330,12 @@ impl DirectPlan {
     }
 }
 
-/// Select a bounded, deterministic subset of frame-free generic bodies to compile at O1 inside
-/// otherwise O0 large modules. This is only a compiler tier: every selected function retains its
-/// original boxed ABI and generic emitted body. Source order and explicit instruction/function
-/// caps make object growth predictable without a library-specific allowlist.
+/// Select bounded, deterministic generic bodies to compile at O1 inside otherwise O0 large
+/// modules. This is only a compiler tier: every selected function retains its original boxed ABI
+/// and generic emitted body. The original frame-free bucket remains source ordered; a separate,
+/// smaller bucket admits frame-publishing bodies only when their bytecode contains a loop
+/// backedge. Static loop work ranks those candidates, and explicit instruction/function caps
+/// make object growth predictable without a library-specific allowlist.
 pub(crate) fn select_generic_optimization_functions(
     program: &Program,
     publishes_frame: &[bool],
@@ -1342,6 +1344,9 @@ pub(crate) fn select_generic_optimization_functions(
     const MAX_FUNCTIONS: usize = 64;
     const MAX_FUNCTION_INSTRUCTIONS: usize = 320;
     const MAX_TOTAL_INSTRUCTIONS: usize = 4096;
+    const MAX_LOOP_FUNCTIONS: usize = 2;
+    const MAX_LOOP_FUNCTION_INSTRUCTIONS: usize = 1024;
+    const MAX_LOOP_TOTAL_INSTRUCTIONS: usize = 2048;
 
     let mut selected = vec![false; program.functions.len()];
     let mut count = 0usize;
@@ -1365,7 +1370,77 @@ pub(crate) fn select_generic_optimization_functions(
         count += 1;
         instructions += size;
     }
+
+    // Generator and frame-publishing bodies carry the VM frame across calls/suspensions, so
+    // they are deliberately absent from `direct_callable` and the legacy bucket above. O1 only
+    // changes the host compiler's treatment of the existing boxed body; it does not introduce a
+    // direct or typed entry. Admit a tiny, separately-budgeted set of such bodies when their
+    // bytecode has statically identifiable loop work. Rank by summed backedge span, then number
+    // of backedges, then original proto index so selection is stable and favors loop-heavy code.
+    let mut loop_candidates = Vec::new();
+    for (index, proto) in program.functions.iter().enumerate() {
+        if selected[index]
+            || available.is_some_and(|available| !available.get(index).copied().unwrap_or(false))
+        {
+            continue;
+        }
+        let publishes = publishes_frame.get(index).copied();
+        let retains_frame = publishes == Some(true)
+            || proto.generator
+            || proto.asynchronous
+            || proto.async_generator;
+        if !retains_frame
+            || proto.code.is_empty()
+            || proto.code.len() > MAX_LOOP_FUNCTION_INSTRUCTIONS
+        {
+            continue;
+        }
+        let Some((loop_span, backedges)) = loop_work(proto) else {
+            continue;
+        };
+        loop_candidates.push((index, proto.code.len(), loop_span, backedges));
+    }
+    loop_candidates.sort_by(|left, right| {
+        right
+            .2
+            .cmp(&left.2)
+            .then_with(|| right.3.cmp(&left.3))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let mut loop_count = 0usize;
+    let mut loop_instructions = 0usize;
+    for (index, size, _, _) in loop_candidates {
+        if loop_count == MAX_LOOP_FUNCTIONS
+            || loop_instructions.saturating_add(size) > MAX_LOOP_TOTAL_INSTRUCTIONS
+        {
+            continue;
+        }
+        selected[index] = true;
+        loop_count += 1;
+        loop_instructions += size;
+    }
     selected
+}
+
+/// Return the total static span of backward control-flow edges and their count, if any.
+fn loop_work(proto: &FunctionProto) -> Option<(usize, usize)> {
+    let mut span = 0usize;
+    let mut count = 0usize;
+    for (pc, instruction) in proto.code.iter().enumerate() {
+        let target = match instruction {
+            Instruction::Jump(target)
+            | Instruction::JumpIfFalse(target)
+            | Instruction::JumpIfTruthy(target)
+            | Instruction::JumpIfNotNullish(target)
+            | Instruction::JumpIfReturnSignal(target) => *target as usize,
+            _ => continue,
+        };
+        if target <= pc {
+            span = span.saturating_add(pc.saturating_sub(target).saturating_add(1));
+            count = count.saturating_add(1);
+        }
+    }
+    (count > 0).then_some((span, count))
 }
 
 struct Site {

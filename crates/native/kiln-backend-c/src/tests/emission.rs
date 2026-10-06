@@ -1095,6 +1095,91 @@ fn generic_mixed_tier_keeps_unsupported_bodies_at_o0_and_boxed() {
 }
 
 #[test]
+fn generic_mixed_tier_keeps_looping_generator_boxed_while_selecting_its_body() {
+    let mut generator = function(vec![
+        Instruction::NewObject { count: 0 },
+        Instruction::Yield,
+        Instruction::Pop,
+        Instruction::Jump(0),
+    ]);
+    generator.generator = true;
+    let mut prog = program(
+        Vec::new(),
+        vec![Instruction::MakeFunction(0), Instruction::Return],
+        0,
+    );
+    prog.functions.push(generator);
+
+    let emitted = emit_with_policy(
+        &prog,
+        EmissionPolicy {
+            generic_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("generic generator module emits");
+    assert!(emitted.generic_mixed_optimization);
+    assert!(
+        !emitted.source.contains("_fn_0_t("),
+        "the O1 tier keeps the existing boxed generator entry and ABI"
+    );
+    assert_eq!(
+        emitted
+            .source
+            .matches("defined(KILN_GENERIC_MIXED_TIER)")
+            .count(),
+        0,
+        "the selected generator body is emitted without the O0 optnone attribute"
+    );
+
+    let mut compiled = emitted.clone();
+    compiled.source = format!("#define KILN_GENERIC_MIXED_TIER 1\n{}", compiled.source);
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    uint64_t realm;
+    kiln_value function, generator, result, value, done;
+    kiln_value thrown = kiln_c99_undefined();
+    if (setenv("KILN_GC_STRESS", "1", 1) != 0) return 1;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 2;
+    kiln_test_realm_active = 1;
+    if (kiln_c99_make_closure(&function, {symbol}_fn_0, NULL, NULL, 0, "<tier-test>", 0, 0,
+                              1, 0, 0, 0, 0, 1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
+                              0, 4, 0, 0, NULL, 0) != KILN_C99_OK) return 3;
+    {{ int status = kiln_c99_call(NULL, &generator, function, kiln_c99_undefined(), NULL, 0, 0,
+                                  &thrown);
+       if (status != KILN_C99_OK) {{
+           size_t len = 0; const char *message = kiln_c99_string_ascii_bytes(thrown, &len);
+           fprintf(stderr, "generator call status=%d thrown-tag=%d %.*s\\n", status,
+                   thrown.tag, (int)len, message ? message : "");
+           return 40 + status;
+       }} }}
+    if (generator.tag != KILN_VALUE_GENERATOR) return 30 + generator.tag;
+    for (int i = 0; i < 5; ++i) {{
+        if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_GENERATOR_NEXT, generator,
+                                   NULL, 0, 0, &thrown) != KILN_C99_OK) return 5;
+    }}
+    if (result.tag != KILN_VALUE_OBJECT) return 20 + result.tag;
+    if (kiln_c99_get(NULL, result, "value", 5, &value, 0, &thrown) != KILN_C99_OK ||
+        value.tag != KILN_VALUE_OBJECT) return 3;
+    if (kiln_c99_get(NULL, result, "done", 4, &done, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_truthy(done)) return 4;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 5;
+}}
+"#,
+        symbol = compiled.symbol
+    );
+    let run = run_with_main(&compiled, &wrapper, "generic-looping-generator-tier");
+    assert!(
+        run.status.success(),
+        "boxed generator C compiles and runs (status {:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn generic_mixed_tier_budget_is_spent_after_module_liveness() {
     let mut prog = program(
         (0..65)

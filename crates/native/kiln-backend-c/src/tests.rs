@@ -1439,6 +1439,7 @@ int main(void) {{
 // `conformance/native/url-surface.mjs` and `app-http-client-url.mjs` hold both engines to node.
 
 mod analysis;
+mod direct_optimization;
 mod emission;
 mod intrinsics;
 mod objects;
