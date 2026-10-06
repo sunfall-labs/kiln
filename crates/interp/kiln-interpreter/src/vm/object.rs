@@ -2880,14 +2880,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
-        let key = Value::String(key.owned());
+        let key = if key.is_symbol() {
+            self.symbol_of_key(&key.owned().to_lossy_string())
+                .map(Value::Symbol)
+                .unwrap_or_else(|| Value::String(key.owned()))
+        } else {
+            Value::String(key.owned())
+        };
         let Some(trap) = self.proxy_trap(&proxy, "defineProperty", instruction)? else {
             // No trap: the definition forwards to the target as the record it is. Round-tripping
             // it through a descriptor object here is what used to complete it.
             let key_units = key.property_key_units_checked()?;
             return self.define_own_operation_key(
                 &inner,
-                PropertyKeyRef::Units(&key_units),
+                PropertyKeyRef::from_value(&key, &key_units),
                 descriptor,
                 instruction,
             );

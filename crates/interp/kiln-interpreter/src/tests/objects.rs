@@ -1080,6 +1080,65 @@ fn inferred_closure_name_property_preserves_utf16_units() {
 }
 
 #[test]
+fn proxy_definitions_preserve_symbol_keys_with_and_without_traps() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let symbol = vm.new_symbol(Some("field".into()));
+    let units = symbol.property_key_units_checked().unwrap();
+    let spelling = Value::String(units.clone());
+    for trapped in [false, true] {
+        let target = ordinary_object(Vec::<(String, Value)>::new());
+        let handler = if trapped {
+            ordinary_object([(
+                "defineProperty".to_owned(),
+                Value::Native(Native::ObjectDefineProperty, RealmId::PRIMARY),
+            )])
+        } else {
+            ordinary_object(Vec::<(String, Value)>::new())
+        };
+        let proxy = Value::Proxy(Rc::new(ProxyData {
+            target: target.clone(),
+            handler,
+            private_elements: RefCell::new(ObjectData::default()),
+            revoked: std::cell::Cell::new(false),
+        }));
+        for (key, value) in [(&symbol, 17.0), (&spelling, 29.0)] {
+            let descriptor = Descriptor {
+                value: Some(Value::Number(value)),
+                writable: Some(true),
+                enumerable: Some(true),
+                configurable: Some(true),
+                ..Descriptor::default()
+            };
+            assert!(
+                vm.define_own_operation_key(
+                    &proxy,
+                    PropertyKeyRef::from_value(key, &units),
+                    &descriptor,
+                    0,
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(
+            vm.read_computed(&target, &symbol, 0),
+            Ok(Value::Number(17.0))
+        );
+        assert_eq!(
+            vm.read_computed(&target, &spelling, 0),
+            Ok(Value::Number(29.0))
+        );
+    }
+}
+
+#[test]
 fn array_species_definition_observes_a_proxy_define_property_trap() {
     let program = Program {
         source: "".into(),
