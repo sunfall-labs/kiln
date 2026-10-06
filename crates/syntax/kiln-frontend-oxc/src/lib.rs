@@ -7413,7 +7413,9 @@ export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
         let transform = Transformer::new(
             &allocator,
             path,
-            &resolve_transform_options(Some("fixture.tsx")),
+            // This code-generation fixture has no project config. Resolve the default JSX
+            // runtime independently of tsconfig files in this checkout or its parents.
+            &resolve_transform_options(None),
         )
         .build_with_scoping(semantic.into_scoping(), &mut parsed.program);
         assert!(
