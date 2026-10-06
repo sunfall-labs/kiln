@@ -1217,7 +1217,13 @@ fn runtime_prelude_size() {
     // descriptor parser is shared by ordinary definitions, defineProperties staging, and
     // proxy traps; prepared descriptor values are rooted across allocations. No new public
     // C builtin or repeated runtime section was added.
-    const CEILING_LINES: usize = 85_500;
+    // Reviewed 2026-10-06: private-brand membership and proxy-owned brand storage,
+    // superclass receiver adoption, and custom array prototype dispatch extend existing
+    // kernels. The minimal unit is 85,707 lines; runtime sections still appear once and
+    // the additional ABI entries are private operations, not public C builtins.
+    // String-wrapper own-slot construction and direct-call attribution bring the final
+    // measured unit to 85,732 lines, still with no duplicated section or new public C builtin.
+    const CEILING_LINES: usize = 86_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

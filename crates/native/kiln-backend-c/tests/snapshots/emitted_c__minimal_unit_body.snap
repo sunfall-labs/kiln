@@ -1,13 +1,12 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 1231
 expression: body(&unit)
 ---
-/* Program hash: 20355359641d7438; bytecode version: 16. */
-static void kiln_module_20355359641d74384a0d3355c80814e7_gc_roots(void *heap, void *context, int phase) {
+/* Program hash: 804c91211be00ee7; bytecode version: 17. */
+static void kiln_module_804c91211be00ee7e9f5f58e10457a38_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
-static int kiln_module_20355359641d74384a0d3355c80814e7_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
+static int kiln_module_804c91211be00ee7e9f5f58e10457a38_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
     const kiln_value *roots[] = { &kiln_c99_new_target, &kiln_c99_adopted_this, &kiln_c99_captured_arguments, &kiln_c99_frame_arguments_object, &kiln_c99_frame_callee };
     size_t index;
     (void)context;
@@ -15,8 +14,8 @@ static int kiln_module_20355359641d74384a0d3355c80814e7_gc_visit_roots(void *con
         if (visit(visit_context, roots[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;
     return KILN_C99_OK;
 }
-int kiln_module_20355359641d74384a0d3355c80814e7(kiln_host *host, kiln_value *result) {
-    if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_20355359641d74384a0d3355c80814e7_gc_roots, kiln_module_20355359641d74384a0d3355c80814e7_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
+int kiln_module_804c91211be00ee7e9f5f58e10457a38(kiln_host *host, kiln_value *result) {
+    if (kiln_realm_is_active()) { int roots_status = kiln_realm_gc_register_roots_with_visitor(kiln_module_804c91211be00ee7e9f5f58e10457a38_gc_roots, kiln_module_804c91211be00ee7e9f5f58e10457a38_gc_visit_roots, NULL, 0); if (roots_status != KILN_C99_OK) return roots_status; }
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_reset_diagnostics();
 kiln_block_0:;

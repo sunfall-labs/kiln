@@ -1,6 +1,5 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 823
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1932,6 +1931,7 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_string *key);
+static int kiln_c99_proxy_private_store(kiln_value proxy, int create, kiln_value *out);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
 static int kiln_c99_private_error_key(kiln_value *thrown, const kiln_string *key, int mode);
 static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
@@ -2126,6 +2126,7 @@ static int kiln_c99_heritage_constructs(kiln_value value);
 static int kiln_c99_intrinsic_has_instance(kiln_value callable);
 static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown);
 static int kiln_c99_instance_of(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown);
+static void kiln_c99_collection_compact_weak(kiln_collection *collection);
 #define KILN_GC_PHASE_MARK 0
 #define KILN_GC_PHASE_TEARDOWN 1
 #define KILN_GC_PHASE_RESET 2
@@ -2989,6 +2990,9 @@ static int kiln_c99_function_prototype_writable(const kiln_closure *closure) {
 static void kiln_c99_gc_trace_object_properties(kiln_gc_heap *heap,
 static int kiln_c99_property_key_snapshot(kiln_object *object, kiln_value *out) {
 static size_t kiln_c99_own_index(const kiln_object *object, const kiln_string *ikey,
+static int kiln_c99_property_store_at_prototype(kiln_value current, kiln_value *store) {
+static int kiln_c99_property_storage_commit(kiln_value target, const kiln_string *key,
+static int kiln_c99_date_set_with_prototype(kiln_host *host, kiln_value target,
 static int kiln_c99_has_inherited_setter_or_readonly(kiln_value proto) {
 #define KILN_C99_LEVEL_NONE 0
 #define KILN_C99_LEVEL_DATA 1
@@ -3365,6 +3369,7 @@ static int kiln_c99_tail_apply(kiln_host *host, kiln_val *stack, size_t *sp, int
 static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
 static void kiln_c99_attribute_body_refusal(const kiln_closure *closure, int depth) {
 static void kiln_c99_attribute_body_function(const kiln_closure *closure) {
+void kiln_c99_attribute_direct_body_result(const kiln_closure *closure, int depth, int status) {
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((always_inline))
 #endif
@@ -3520,7 +3525,9 @@ static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
 static int kiln_c99_function_species(kiln_host *host, kiln_value target,
 static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
 static int kiln_c99_prototype_store_read_with_receiver(
+static int kiln_c99_builtin_custom_prototype_read_with_receiver(
 static int kiln_c99_builtin_custom_prototype_read(
+static int kiln_c99_array_custom_parent_read(
 static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
 #define KILN_C99_WRITTEN_MEMBER_FIRST(prototype)                                                   \
 static int kiln_c99_primitive_object_prototype_read(kiln_host *host, const kiln_string *key,
@@ -3533,6 +3540,7 @@ static int kiln_c99_shared_arena_find(const kiln_shared_facade *facade,
 static int kiln_c99_shared_arena_value(kiln_shared_facade *facade, uint64_t index,
 static int kiln_c99_shared_own_read(kiln_value target, const kiln_string *key,
 done:
+static int kiln_c99_namespace_cell_read(kiln_value value, kiln_value *out,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
 #if KILN_RETAIN_GROUP_TEMPORAL
 #endif
@@ -3849,6 +3857,9 @@ static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value it
 static int kiln_c99_temporal_answer(int32_t answered, void *handle, double number,
 static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_t code,
+static int kiln_c99_array_own_enumerable(const kiln_array *array,
+static uint64_t kiln_c99_value_hash(kiln_value value);
+static void kiln_c99_collection_compact_weak(kiln_collection *collection) {
 static int kiln_c99_needs_number_conversion(kiln_value value) {
 static int kiln_c99_needs_text_conversion(kiln_value value) {
 static int kiln_c99_to_number_argument(kiln_host *host, kiln_value value, kiln_value *out,
@@ -4075,6 +4086,7 @@ static void kiln_c99_collection_register_weak(kiln_collection *collection) {
 static kiln_proxy *kiln_c99_proxy_of(kiln_value value) {
 static kiln_value kiln_c99_proxy_inner(kiln_value value) {
 static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value handler) {
+static int kiln_c99_proxy_private_store(kiln_value proxy_value, int create,
 static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
 static int kiln_c99_can_be_held_weakly(kiln_value value) {
 static uint64_t kiln_c99_collection_string_hash(const kiln_string *string) {
@@ -4118,6 +4130,7 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons) {
 static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len) {
 static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_string *key) {
+int kiln_c99_private_has(kiln_value target, kiln_value brand,
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
 static int kiln_c99_private_error_key(kiln_value *thrown, const kiln_string *key, int mode) {
 static const char *kiln_c99_kind_name(kiln_value value) {
@@ -4197,6 +4210,7 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
 static double kiln_c99_parse_date(kiln_value source) {
 static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, size_t argc,
 static uint8_t kiln_c99_primitive_wrapper_kind(kiln_value primitive) {
+static int kiln_c99_primitive_wrapper_define_data(kiln_value target, const char *key,
 static int kiln_c99_unwrap_primitive_wrapper(kiln_value receiver, uint8_t kind,
 static int kiln_c99_new_primitive_wrapper(kiln_value *out, kiln_value primitive) {
 static int kiln_c99_object_constructor(kiln_value *out, const kiln_value *args, size_t argc) {
@@ -4405,12 +4419,12 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
 #if KILN_RETAIN_GROUP_NODE_STREAM
 #endif
 static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value parent,
-static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
+static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced, int preserve_prototype) {
 int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure) {
 static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
 static int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val callee,
 static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent,
-static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced) {
+static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced, kiln_val parent) {
 static int kiln_c99_can_be_prototype(kiln_value value) {
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
 static int kiln_c99_heritage_constructs(kiln_value value) {
