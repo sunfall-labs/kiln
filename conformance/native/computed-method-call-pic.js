@@ -63,6 +63,22 @@ const proxied = new Proxy(receiver, {
 });
 console.log(proxied[left](), proxied[verifyReceiver](), proxyReads);
 
+// The value-call helper must keep the generic fallback for callable proxies, bound functions,
+// and generators; only ordinary closures use its direct native invocation path.
+const proxyCallableReceiver = {};
+const proxyCallable = new Proxy(function (value) { return [this, value]; }, {
+  apply(_target, thisValue, args) { return thisValue === proxyCallableReceiver && args[0] === 7; },
+});
+proxyCallableReceiver.invoke = proxyCallable;
+console.log("proxy callable", proxyCallableReceiver["invoke"](7));
+function boundTarget() { return this.label; }
+const boundReceiver = { invoke: boundTarget.bind({ label: "bound receiver" }) };
+console.log("bound computed", boundReceiver["invoke"]());
+const generatorReceiver = {
+  *iterate() { yield this === generatorReceiver; },
+};
+console.log("generator computed", generatorReceiver["iterate"]().next().value);
+
 // Non-primitive keys still run ToPropertyKey exactly once before the call.
 let conversions = 0;
 const keyObject = {
