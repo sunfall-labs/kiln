@@ -183,11 +183,14 @@
   // The interpreter also creates SuppressedErrors internally while unwinding disposal. Its
   // realm error constructor and prototype are engine-owned, so the public facade must keep that
   // prototype identity; otherwise internal throws look like a different constructor despite
-  // having the same name. Reuse the captured intrinsic prototype when available.
+  // having the same name. Reuse a distinct intrinsic prototype when available.
+  // A host that aliases this unfinished intrinsic to Error.prototype needs the facade
+  // prototype instead; installing SuppressedError must never rename Error.prototype.
   const nativePrototype =
     typeof NativeSuppressedError === "function" ? NativeSuppressedError.prototype : undefined;
   const publicPrototype =
     nativePrototype !== null &&
+    nativePrototype !== ErrorCtor.prototype &&
     (typeof nativePrototype === "object" || typeof nativePrototype === "function")
       ? nativePrototype
       : Object.create(ErrorCtor.prototype);

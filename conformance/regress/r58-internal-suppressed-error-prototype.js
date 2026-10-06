@@ -1,3 +1,10 @@
+if (Error.prototype.constructor !== Error ||
+    new Error("plain").constructor !== Error ||
+    Error.prototype.name !== "Error" ||
+    SuppressedError.prototype === Error.prototype) {
+  throw new Error("SuppressedError installation changed Error prototype identity");
+}
+
 function checkSuppressed(error, first, second, where) {
   if (!(error instanceof SuppressedError) ||
       Object.getPrototypeOf(error) !== SuppressedError.prototype ||
