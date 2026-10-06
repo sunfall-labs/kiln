@@ -1,0 +1,15 @@
+# HashMap hash-law progress diagnostic (2026-10-06)
+
+This private-copy diagnostic checks whether the native HashMap hash-law timeout reflects unfinished or divergent work. It does not change the pinned test assertion or its 5,000 ms per-case deadline.
+
+The only source edit binds values already produced by the test (`Array.from(map)`, `Hash.hash(map)`, and `Hash.hash(rebuilt)`) and prints one scalar record at the end of each existing 40-step run. The 100 runs, RNG calls and seed/order, map mutations, comparisons, and hash assertions remain in place. The original source SHA256 is `9fbc376ce19f8de3190eb9de5e8fa5b8bd2698cf16d3617178bf401eb5f3ea0c`; the diagnostic copy is `9e829105e741dcb5dce91ee0770b45f951f2e2979e2f70d0f02ea577c621da2e`. The patch itself is archived beside this note.
+
+Node ran the preceding RNG-seeding test and target test in source order: 2 passed under the unchanged timeout. The native runner ran the complete Hash file: 25 discovered and recorded, 24 passed, 1 failed, 0 skipped. The sole failure remained `Hash > hash law > hashes a HashMap like a fresh build after persistent and in-place edits`, with `TEST_TIMEOUT: 5000ms`. The native build took 606.162 seconds; execution took 9.132 seconds. The diagnostic produced all 100 progress rows. The parsed Node and native rows are identical, including map size and both hash values at every checkpoint. The final checkpoint is run 100, 40 steps, size 53, both hashes `1045523140`.
+
+This demonstrates that the instrumented native test completed the same 4,000 loop iterations and observable hash checks as Node. It does not establish an uninstrumented performance ratio: the diagnostic adds logging, and the whole-file native runtime exceeded the original 5-second budget. The native report cannot claim official Node/Vitest per-case oracle matching for this edited source copy because its pinned source digest differs; its 25-case inventory and local outcomes are retained for traceability.
+
+The accepted native command used frozen release CLI SHA256 `5648787dead49c15a9a34839159fb683f566d41c867542e025c6bc17ec6a8269` (source commit `80f09d88`, tree `48a6d446`), provider manifest SHA256 `4b68a2200f148e19ff7fcd146cacd5c8ffb546692d67e52478fb3b266c19621b`, provider archive SHA256 `61c1ef04…5c2f6d`, one build/runtime worker, and a 4,096 MiB cap. `KILN_GENERIC_OPT` was unset. The native binary SHA256 is `a45e6db44c45da8ce17e071ac8f90e89191a0fa9d73151504084851c923f71e3`.
+
+A separate initial attempt accidentally set `KILN_GENERIC_OPT=0`. It is preserved as `excluded-invalid-*`, explicitly excluded from the accepted result and all comparisons. The corrected default-selector run completed after that child terminated; the two attempts used distinct supervisor/status records.
+
+`receipt.json` records hashes, counts, process IDs, timings, and interpretation. Compressed raw logs and reports are included. The 116 MB result binary and 302 MB CLI are not copied into this documentation directory; their SHA256 values and live scratch paths are recorded in the receipt and job log.
