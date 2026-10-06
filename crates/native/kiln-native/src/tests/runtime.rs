@@ -2070,6 +2070,33 @@ setTimeout(() => console.log(events.join("|")), 0);
 }
 
 #[test]
+fn native_direct_typed_call_keeps_its_result_live_after_return() {
+    let Some(output) = run_native_release_fixture(
+        "native-direct-typed-call-result-live",
+        "function increment(value) { return value + 1; }\nfunction read() { const result = increment(41); return result + 1; }\nconsole.log(read());\n",
+    ) else {
+        return;
+    };
+    assert_eq!(output, "43\n");
+}
+
+#[test]
+fn native_direct_typed_call_failure_keeps_callee_attribution() {
+    let Some(stderr) = run_native_failure_fixture(
+        "native-direct-typed-call-failure-attribution",
+        "function inner(value) { if (value < 0) { const bad = {}; bad(); } return value + 1; }\nfunction outer() { return inner(-1); }\nouter();\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("detail=non-callable callee kind"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("function=inner"), "{stderr}");
+    assert!(!stderr.contains("function=outer"), "{stderr}");
+}
+
+#[test]
 fn native_await_promise_resolve_emits_guard_for_microtasks_shape() {
     use kiln_module_resolver::NodeRuntimeResolver;
 

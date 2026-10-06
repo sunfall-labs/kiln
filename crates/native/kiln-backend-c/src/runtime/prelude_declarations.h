@@ -260,6 +260,7 @@ extern int kiln_c99_val_new_array_literal(kiln_val *out, const kiln_val *element
 extern int kiln_c99_val_new_object_literal(kiln_val *out, const kiln_val *pairs, size_t count);
 extern int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result, kiln_closure *closure, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame, int inherit_new_target);
 extern int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result, kiln_closure *closure, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame, int inherit_new_target);
+extern void kiln_c99_attribute_direct_body_result(const kiln_closure *closure, int depth, int status);
 extern int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure);
 extern int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_number(double value);

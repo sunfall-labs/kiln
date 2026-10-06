@@ -739,6 +739,15 @@ static void kiln_c99_attribute_body_function(const kiln_closure *closure) {
     }
 }
 
+void kiln_c99_attribute_direct_body_result(const kiln_closure *closure, int depth, int status) {
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_site == NULL) kiln_c99_attribute_body_refusal(closure, depth);
+        else kiln_c99_attribute_body_function(closure);
+    } else if (status == KILN_C99_THROWN) {
+        kiln_c99_attribute_body_function(closure);
+    }
+}
+
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((always_inline))
 #endif

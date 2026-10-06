@@ -930,6 +930,28 @@ pub(super) fn emit_graph_op(
             let target = plan.known[callee];
             let target_proto = &program.functions[target as usize];
             let argc = args.len();
+            // A statically-known call may bypass `kiln_c99_val_call`, but it is still a
+            // JavaScript activation. Publish it while executing the direct body so native
+            // Error stack capture observes the same caller chain as the generic call path.
+            let call_frame = format!("call_frame_{}", vid.0);
+            let saved_diagnostic_depth = format!("call_saved_diagnostic_depth_{}", vid.0);
+            let js_frame = format!(
+                "int {saved_diagnostic_depth} = kiln_c99_diagnostic_active_depth; kiln_c99_diagnostic_active_depth = depth + 1; kiln_js_frame {call_frame}; kiln_c99_js_frame_enter(&{call_frame}, (const kiln_closure *)KILN_VAL_PTR(v{}));",
+                callee.0
+            );
+            let js_frame_leave = format!("kiln_c99_js_frame_leave(&{call_frame});");
+            let js_depth_restore =
+                format!("kiln_c99_diagnostic_active_depth = {saved_diagnostic_depth};");
+            let js_frame_failure = format!(
+                "kiln_c99_attribute_direct_body_result((const kiln_closure *)KILN_VAL_PTR(v{}), depth, status);",
+                callee.0
+            );
+            let typed_frame_failure = |failed: &str| {
+                format!(
+                    "if (KILN_UNLIKELY({failed})) kiln_c99_attribute_direct_body_result((const kiln_closure *)KILN_VAL_PTR(v{}), depth, kiln_c99_typed_status);",
+                    callee.0
+                )
+            };
             let init = if args.is_empty() {
                 "KILN_VAL_UNDEFINED".to_owned()
             } else {
@@ -1094,7 +1116,7 @@ pub(super) fn emit_graph_op(
                             String::new()
                         };
                         format!(
-                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, NULL, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {boxed_upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {boxed_check}{proof} }}",
+                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} {js_frame} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, NULL, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {boxed_upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {js_frame_leave} {js_frame_failure} {js_depth_restore} {boxed_check}{proof} }}",
                             n = argc.max(1),
                             boxed_upvalues = boxed_upvalues,
                             fast = if plan.fast.get(target as usize).copied().unwrap_or(false) {
@@ -1120,6 +1142,7 @@ pub(super) fn emit_graph_op(
                 };
                 if plan.typed_returns[target as usize] {
                     if live_typed {
+                        let typed_frame_failure_code = typed_frame_failure(&format!("d{v}"));
                         let int_twin = if live_typed_int {
                             format!(" i{v} = (int64_t)d{v};")
                         } else {
@@ -1127,10 +1150,11 @@ pub(super) fn emit_graph_op(
                         };
                         writeln!(
                             output,
-                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} d{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d{v}))) {failed} v{v} = kiln_c99_val_from_double(d{v});{int_twin} }}"
+                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} {js_frame} d{v} = {symbol}_fn_{target}_t({call_args}); {js_frame_leave} {typed_frame_failure_code} {js_depth_restore} if (KILN_UNLIKELY(kiln_c99_typed_failed(d{v}))) {failed} v{v} = kiln_c99_val_from_double(d{v});{int_twin} }}"
                         )
                         .unwrap();
                     } else {
+                        let typed_frame_failure_code = typed_frame_failure(&format!("d_ret_{v}"));
                         let int_twin = if live_typed_int {
                             format!(" i{v} = (int64_t)d_ret_{v};")
                         } else {
@@ -1138,11 +1162,13 @@ pub(super) fn emit_graph_op(
                         };
                         writeln!(
                             output,
-                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} double d_ret_{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d_ret_{v}))) {failed} v{v} = kiln_c99_val_from_double(d_ret_{v});{int_twin} }}"
+                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} {js_frame} double d_ret_{v} = {symbol}_fn_{target}_t({call_args}); {js_frame_leave} {typed_frame_failure_code} {js_depth_restore} if (KILN_UNLIKELY(kiln_c99_typed_failed(d_ret_{v}))) {failed} v{v} = kiln_c99_val_from_double(d_ret_{v});{int_twin} }}"
                         )
                         .unwrap();
                     }
                 } else {
+                    let typed_frame_failure_code =
+                        typed_frame_failure(&format!("v{v} == KILN_VAL_TYPED_FAIL"));
                     let twin = if live_typed {
                         format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));")
                     } else {
@@ -1161,7 +1187,7 @@ pub(super) fn emit_graph_op(
                     };
                     writeln!(
                         output,
-                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(v{v} == KILN_VAL_TYPED_FAIL)) {failed}{twin}{int_twin} }}"
+                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} {js_frame} v{v} = {symbol}_fn_{target}_t({call_args}); {js_frame_leave} {typed_frame_failure_code} {js_depth_restore} if (KILN_UNLIKELY(v{v} == KILN_VAL_TYPED_FAIL)) {failed}{twin}{int_twin} }}"
                     )
                     .unwrap();
                 }
@@ -1185,7 +1211,7 @@ pub(super) fn emit_graph_op(
                 let check = call_status_check(diagnostic_site, pc, label, unwind);
                 writeln!(
                     output,
-                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, NULL, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {check}{twin}{int_twin} }}",
+                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} {js_frame} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, NULL, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {js_frame_leave} {js_frame_failure} {js_depth_restore} {check}{twin}{int_twin} }}",
                     fast = if plan.fast.get(target as usize).copied().unwrap_or(false) { "_f" } else { "" },
                     n = argc.max(1)
                 )
