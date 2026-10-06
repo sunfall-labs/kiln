@@ -3048,37 +3048,47 @@ int main(void) {
 }
 
 #[test]
-fn executable_zero_argument_string_construction_uses_a_valid_header() {
+fn string_wrapper_definition_shadows_inherited_readonly_length() {
     let generated =
         emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty wrapper fixture emits");
-    let wrapper = format!(
-        r#"
-int main(void) {{
-    uint64_t realm = 0;
-    if (kiln_realm_create(&realm) != KILN_C99_OK) return 99;
-    kiln_test_realm_active = 1;
-    kiln_value dummy, empty, wrapped, length, thrown = kiln_c99_undefined();
-    if ({}(NULL, &dummy) != KILN_C99_OK) return 1;
-    kiln_value constructor = kiln_c99_builtin(KILN_C99_BUILTIN_STRING);
-    if (kiln_c99_call(NULL, &empty, constructor, kiln_c99_undefined(), NULL, 0, 0, &thrown) != KILN_C99_OK) return 2;
-    if (empty.tag != KILN_VALUE_STRING || empty.ptr == NULL ||
-        ((const kiln_string *)empty.ptr)->unit_len != 0) return 3;
-    if (kiln_c99_construct(NULL, &wrapped, constructor, NULL, 0, 0, &thrown) != KILN_C99_OK) return 4;
-    if (kiln_c99_get(NULL, wrapped, "length", 6, &length, 0, &thrown) != KILN_C99_OK ||
-        length.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(length) != 0) return 5;
-    kiln_value primitive;
-    if (!kiln_c99_unwrap_primitive_wrapper(wrapped, KILN_C99_WRAPPER_STRING, &primitive) ||
-        !kiln_c99_same_value_zero(empty, primitive)) return 6;
-    kiln_test_realm_active = 0;
-    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 7;
-}}
-"#,
-        generated.symbol
-    );
-    let run = run_with_main(&generated, &wrapper, "zero-argument-string-wrapper");
+    let wrapper = r#"
+int main(void) {
+    kiln_value prototype = kiln_c99_undefined();
+    kiln_value receiver = kiln_c99_undefined();
+    kiln_value got = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_property *inherited;
+    kiln_property *own;
+    kiln_object *object;
+    if (kiln_c99_new_object(&prototype) != KILN_C99_OK ||
+        kiln_c99_new_object(&receiver) != KILN_C99_OK) return 1;
+    if (kiln_c99_own_slot(prototype, "length", 6, &inherited) != KILN_C99_OK) return 2;
+    object = kiln_c99_object_of(prototype);
+    kiln_c99_heap_store_value(object, &inherited->value, kiln_c99_number(0.0));
+    inherited->enumerable = 0;
+    inherited->writable = 0;
+    inherited->configurable = 0;
+    object = kiln_c99_object_of(receiver);
+    kiln_c99_heap_store_value(object, &object->prototype, prototype);
+
+    if (kiln_c99_primitive_wrapper_define_data(receiver, "length", 6,
+                                               kiln_c99_number(3.0), 0, 0, 0) !=
+        KILN_C99_OK) return 3;
+    if (kiln_c99_get(NULL, receiver, "length", 6, &got, 0, &thrown) != KILN_C99_OK ||
+        got.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(got) != 3.0) return 4;
+    object = kiln_c99_object_of(receiver);
+    if (object->count != 1 || object->properties == NULL) return 5;
+    own = &object->properties[0];
+    if (own->enumerable || own->writable || own->configurable || own->accessor ||
+        own->value.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(own->value) != 3.0)
+        return 6;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "string-wrapper-own-descriptor");
     assert!(
         run.status.success(),
-        "empty String wrapper failed ({:?}): {}",
+        "String wrapper definition must shadow inherited readonly length ({:?}): {}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );

@@ -66,6 +66,28 @@ static uint8_t kiln_c99_primitive_wrapper_kind(kiln_value primitive) {
     }
 }
 
+/* String wrapper indices and `length` are own data properties, not assignments. In particular,
+ * String.prototype already has a non-writable `length`; routing the constructor through [[Set]]
+ * silently declines to create the wrapper's own property. */
+static int kiln_c99_primitive_wrapper_define_data(kiln_value target, const char *key,
+                                                   size_t key_len, kiln_value value,
+                                                   int enumerable, int writable,
+                                                   int configurable) {
+    kiln_property *property;
+    kiln_object *object;
+    int status = kiln_c99_own_slot(target, key, key_len, &property);
+    if (status != KILN_C99_OK) return status;
+    object = kiln_c99_object_of(target);
+    kiln_c99_heap_store_value(object, &property->value, value);
+    property->enumerable = enumerable != 0;
+    property->writable = writable != 0;
+    property->configurable = configurable != 0;
+    property->symbol_hidden = 0;
+    property->accessor = 0;
+    property->refused = 0;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_unwrap_primitive_wrapper(kiln_value receiver, uint8_t kind,
                                              kiln_value *primitive) {
     if (receiver.tag != KILN_VALUE_OBJECT) return 0;
@@ -111,19 +133,13 @@ static int kiln_c99_new_primitive_wrapper(kiln_value *out, kiln_value primitive)
             kiln_value character = kiln_val_to_boundary(
                 kiln_c99_val_from_unit(kiln_string_unit_at(text, index)));
             if (length < 0 || (size_t)length >= sizeof key) return KILN_C99_INVALID_ARGUMENT;
-            status = kiln_c99_put(NULL, built, key, (size_t)length, character, 0, NULL);
+            status = kiln_c99_primitive_wrapper_define_data(
+                built, key, (size_t)length, character, 1, 0, 0);
             if (status != KILN_C99_OK) return status;
-            object = kiln_c99_object_of(built);
-            object->properties[object->count - 1].writable = 0;
-            object->properties[object->count - 1].configurable = 0;
         }
-        status = kiln_c99_put(NULL, built, "length", 6,
-                              kiln_c99_number((double)text->unit_len), 0, NULL);
+        status = kiln_c99_primitive_wrapper_define_data(
+            built, "length", 6, kiln_c99_number((double)text->unit_len), 0, 0, 0);
         if (status != KILN_C99_OK) return status;
-        object = kiln_c99_object_of(built);
-        object->properties[object->count - 1].enumerable = 0;
-        object->properties[object->count - 1].writable = 0;
-        object->properties[object->count - 1].configurable = 0;
     }
     *out = built;
     return KILN_C99_OK;
