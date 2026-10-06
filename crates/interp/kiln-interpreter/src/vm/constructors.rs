@@ -212,6 +212,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.stack.push(Value::Proxy(Rc::new(ProxyData {
                     target,
                     handler,
+                    private_elements: RefCell::new(ObjectData::default()),
                     revoked: std::cell::Cell::new(false),
                 })));
             }

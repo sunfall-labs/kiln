@@ -211,10 +211,16 @@ impl super::Compiler {
         // made a fresh function per instance, so `a.#m === b.#m` was false and a brand check
         // written as an identity comparison failed. It also closed over the constructor's
         // locals rather than the class, which is not the environment the specification gives it.
-        // The brand: one fresh object per *evaluation* of this class. An empty array is the
-        // cheapest thing with an identity, and nothing ever looks inside it -- only whether an
-        // instance's brand is this one.
-        if let Some(brand) = self.private_brands.last().cloned() {
+        // The brand is one fresh object per evaluation when this class actually declares
+        // private elements. Public-only classes have no brand observers; installing a synthetic
+        // property on every instance is observable when `this` is a Proxy returned by `super()`.
+        // An empty array is the cheapest identity, and nothing looks inside it.
+        if self
+            .private_declarations
+            .last()
+            .is_some_and(|declarations| !declarations.is_empty())
+            && let Some(brand) = self.private_brands.last().cloned()
+        {
             self.code.push(Instruction::NewArray { count: 0 });
             self.store_home_binding(&brand);
         }
@@ -273,7 +279,12 @@ impl super::Compiler {
 
         // The constructor carries the brand too: a static private member lives on it, and the
         // check that reads one has to tell this evaluation's constructor from another's.
-        if let Some(brand) = self.private_brands.last().cloned() {
+        if self
+            .private_declarations
+            .last()
+            .is_some_and(|declarations| !declarations.is_empty())
+            && let Some(brand) = self.private_brands.last().cloned()
+        {
             let key = self.constant_index(Constant::String(self.own_private_brand_key().into()));
             self.load_local_or_cell(local);
             self.load_captured_binding(&brand);
@@ -860,9 +871,14 @@ impl super::Compiler {
         fields: &[(&ClassField, Option<String>)],
         _span: Span,
     ) -> Option<()> {
-        // Every instance carries the brand of the evaluation that made it, stored beside its
-        // private members and read by each access to tell one evaluation from another.
-        if let Some(brand) = self.private_brands.last().cloned() {
+        // Only instances with private elements need the evaluation brand. Keeping this write off
+        // public-only instances is observable for a Proxy receiver, where ordinary properties
+        // must be defined through `[[DefineOwnProperty]]` without an extra synthetic key.
+        let has_private_instance_elements = !private_elements.is_empty()
+            || fields
+                .iter()
+                .any(|(field, _)| matches!(field.key, ObjectKey::Private(_)));
+        if has_private_instance_elements && let Some(brand) = self.private_brands.last().cloned() {
             let key = self.constant_index(Constant::String(self.own_private_brand_key().into()));
             self.code.push(Instruction::LoadThis);
             self.load_captured_binding(&brand);

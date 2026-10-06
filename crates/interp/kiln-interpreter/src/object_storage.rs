@@ -793,6 +793,16 @@ pub(super) fn prototype_slot(target: &Value) -> Option<&RefCell<ObjectData>> {
     }
 }
 
+/// Storage for compiler-owned private elements. Unlike ordinary properties, these internal
+/// slots are installed on the identity passed to the class constructor and never forward through
+/// a Proxy to its target or invoke its traps.
+pub(super) fn private_slot(target: &Value) -> Option<&RefCell<ObjectData>> {
+    match target {
+        Value::Proxy(proxy) => Some(&proxy.private_elements),
+        other => prototype_slot(other),
+    }
+}
+
 /// Record `prototype` as the value's own chain, reporting whether it had anywhere to keep one.
 ///
 /// The refusal is the answer `Reflect.setPrototypeOf` gives, and the reason `super()` leaves an

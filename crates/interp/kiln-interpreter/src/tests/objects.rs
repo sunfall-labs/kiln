@@ -48,6 +48,118 @@ fn strict_symbol_writes_check_the_symbol_descriptor() {
 }
 
 #[test]
+fn proxy_private_elements_are_own_internal_slots() {
+    let target = Value::Object(tracked_object(ObjectData::default()));
+    let proxy = Value::Proxy(Rc::new(ProxyData {
+        target: target.clone(),
+        handler: Value::Object(tracked_object(ObjectData::default())),
+        private_elements: RefCell::new(ObjectData::default()),
+        revoked: std::cell::Cell::new(false),
+    }));
+    let key = "@@private:proxy-test:%brand";
+    let brand = Value::Array(ArrayData::new(Vec::new()));
+
+    private_slot(&proxy)
+        .expect("a proxy has private internal storage")
+        .borrow_mut()
+        .set(key, brand.clone());
+
+    assert_eq!(
+        own_private_element(&proxy, key),
+        Some((Property::Value(brand), Attributes::DEFAULT)),
+        "private lookup sees slots on the proxy identity"
+    );
+    assert_eq!(
+        own_private_element(&target, key),
+        None,
+        "private slots do not forward to the proxy target"
+    );
+    assert_eq!(
+        prototype_slot(&target)
+            .unwrap()
+            .borrow()
+            .get_own_property(key),
+        None,
+        "private slots are not installed as properties on the target"
+    );
+}
+
+#[test]
+fn private_setproperty_on_proxy_writes_its_internal_slot() {
+    let key = "@@private:vm-test:%brand";
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
+        constants: vec![
+            Constant::Number(73.0_f64.to_bits()),
+            Constant::String(key.to_owned().into()),
+        ],
+        code: vec![Instruction::MakeFunction(0), Instruction::Return],
+        local_count: 0,
+        functions: vec![kiln_ir::FunctionProto {
+            inferred_name: None,
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: Some("installBrand".to_owned()),
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            parameter_count: 0,
+            declared_length: 0,
+            mapped_arguments: false,
+            local_count: 0,
+            code: vec![
+                Instruction::LoadThis,
+                Instruction::Const(0),
+                Instruction::SetProperty(1),
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        }],
+    };
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let installer = vm.run().expect("module makes installer").value;
+    let target = Value::Object(tracked_object(ObjectData::default()));
+    let proxy = Value::Proxy(Rc::new(ProxyData {
+        target: target.clone(),
+        handler: Value::Object(tracked_object(ObjectData::default())),
+        private_elements: RefCell::new(ObjectData::default()),
+        revoked: std::cell::Cell::new(false),
+    }));
+
+    vm.call_value(&installer, proxy.clone(), Vec::new(), 0)
+        .expect("private brand write accepts a Proxy receiver");
+
+    assert_eq!(
+        own_private_element(&proxy, key),
+        Some((Property::Value(Value::Number(73.0)), Attributes::DEFAULT))
+    );
+    assert_eq!(
+        prototype_slot(&target)
+            .unwrap()
+            .borrow()
+            .get_own_property(key),
+        None
+    );
+}
+
+#[test]
 fn temporal_now_namespace_member_has_the_replaceable_builtin_descriptor() {
     let program = no_program();
     let mut host = TestHost {
@@ -412,6 +524,7 @@ fn computed_lone_surrogate_reads_share_ordinary_and_proxy_paths() {
     let proxy = Value::Proxy(Rc::new(ProxyData {
         target,
         handler,
+        private_elements: RefCell::new(ObjectData::default()),
         revoked: std::cell::Cell::new(false),
     }));
     assert_eq!(
@@ -515,6 +628,7 @@ fn property_key_units_cover_mutation_descriptors_inherited_accessors_and_proxy_i
     let proxy = Value::Proxy(Rc::new(ProxyData {
         target: locked_target,
         handler,
+        private_elements: RefCell::new(ObjectData::default()),
         revoked: std::cell::Cell::new(false),
     }));
     assert_eq!(
@@ -996,6 +1110,7 @@ fn array_species_definition_observes_a_proxy_define_property_trap() {
     let proxy = Value::Proxy(Rc::new(ProxyData {
         target: target.clone(),
         handler,
+        private_elements: RefCell::new(ObjectData::default()),
         revoked: std::cell::Cell::new(false),
     }));
 

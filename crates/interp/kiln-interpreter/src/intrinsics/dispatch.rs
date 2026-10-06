@@ -359,6 +359,7 @@ pub(crate) fn call_native(
             let proxy = Value::Proxy(Rc::new(ProxyData {
                 target,
                 handler,
+                private_elements: RefCell::new(ObjectData::default()),
                 revoked: std::cell::Cell::new(false),
             }));
             let mut pair = ObjectData::default();

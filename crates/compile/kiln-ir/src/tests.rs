@@ -1370,6 +1370,44 @@ fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
 }
 
 #[test]
+fn only_classes_with_private_elements_emit_private_brands() {
+    let class = |name: &str, initialisers: Vec<ClassInitialiser>| kiln_hir::Class {
+        inferred_name: None,
+        name: Some(name.to_owned()),
+        superclass: None,
+        constructor: None,
+        methods: Vec::new(),
+        initialisers,
+        span: Span::default(),
+    };
+    let public = compile(&module(vec![statement(StatementKind::Class(Box::new(
+        class("PublicOnly", Vec::new()),
+    )))]))
+    .expect("public-only class compiles");
+    let brand = Constant::String("@@private:0:%brand".to_owned().into());
+    assert!(
+        !public.constants.contains(&brand),
+        "a public-only class has no private brand to install on its instance"
+    );
+
+    let private = compile(&module(vec![statement(StatementKind::Class(Box::new(
+        class(
+            "PrivateMember",
+            vec![ClassInitialiser::Field(ClassField {
+                key: ObjectKey::Private("value".to_owned()),
+                value: Some(number(1.0)),
+                is_static: false,
+            })],
+        ),
+    )))]))
+    .expect("private-field class compiles");
+    assert!(
+        private.constants.contains(&brand),
+        "a private-field class still emits the brand its private access checks require"
+    );
+}
+
+#[test]
 fn a_class_constructor_inside_a_wrapper_captures_the_wrapper_binding() {
     let constructor = kiln_hir::Function {
         inferred_name: None,

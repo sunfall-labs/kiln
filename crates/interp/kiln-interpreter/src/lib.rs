@@ -623,6 +623,9 @@ impl AtomicsOp {
 pub struct ProxyData {
     target: Value,
     handler: Value,
+    /// Private elements belong to the proxy object itself. They are internal slots, so class
+    /// initialization and `#name` access bypass the public proxy traps and never touch `target`.
+    private_elements: RefCell<ObjectData>,
     /// `Proxy.revocable`'s second half was called.
     ///
     /// A revoked proxy is not an empty one: every operation on it is a TypeError, which is the

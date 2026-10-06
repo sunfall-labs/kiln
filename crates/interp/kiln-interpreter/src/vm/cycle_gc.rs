@@ -233,6 +233,9 @@ impl Owner {
             Self::DataView(value) => {
                 value.properties.replace(ObjectData::default());
             }
+            Self::Proxy(value) => {
+                value.private_elements.replace(ObjectData::default());
+            }
             Self::Bound(value) => {
                 value.properties.replace(ObjectData::default());
             }
@@ -246,7 +249,6 @@ impl Owner {
             | Self::Shared(_)
             | Self::Intl(_)
             | Self::ModuleExports(_)
-            | Self::Proxy(_)
             | Self::CommonJs(_)
             | Self::HttpIncoming(_)
             | Self::Zlib(_) => {}
@@ -946,6 +948,7 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
         Owner::Proxy(value) => {
             values.push(value.target.clone());
             values.push(value.handler.clone());
+            values.extend(object_children(&value.private_elements.borrow()));
         }
         Owner::Bound(value) => {
             values.push(value.target.clone());
@@ -1754,6 +1757,88 @@ mod tests {
         vm.collect_closure_cycles();
         assert!(weak_target.upgrade().is_none());
         assert_eq!(vm.weak_ref_deref(&weak_ref, 0), Ok(Value::Undefined));
+    }
+
+    #[test]
+    fn proxy_private_slot_self_cycle_is_traced_and_reclaimed() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let proxy_data = Rc::new(ProxyData {
+            target: Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            handler: Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            private_elements: RefCell::new(ObjectData::default()),
+            revoked: std::cell::Cell::new(false),
+        });
+        let proxy = Value::Proxy(Rc::clone(&proxy_data));
+        let weak_target = Rc::downgrade(&proxy_data);
+        // Seed the weak-only census through an ordinary object. Proxy allocations do not
+        // currently have an independent weak census, so this holder makes the self-cycle
+        // discoverable without retaining it.
+        let mut holder = ObjectData::default();
+        holder.set("proxy", proxy.clone());
+        let holder = tracked_object(holder);
+        holder
+            .borrow_mut()
+            .set("self", Value::Object(Rc::clone(&holder)));
+        proxy_data
+            .private_elements
+            .borrow_mut()
+            .set("@@private:cycle:%brand", proxy.clone());
+
+        drop(holder);
+        drop(proxy);
+        drop(proxy_data);
+        vm.collect_closure_cycles();
+
+        assert!(
+            weak_target.upgrade().is_none(),
+            "private-slot edges are accounted for and broken on unreachable Proxy cycles"
+        );
+    }
+
+    #[test]
+    fn proxy_private_slot_cycle_survives_external_owner() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let proxy_data = Rc::new(ProxyData {
+            target: Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            handler: Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            private_elements: RefCell::new(ObjectData::default()),
+            revoked: std::cell::Cell::new(false),
+        });
+        let proxy = Value::Proxy(Rc::clone(&proxy_data));
+        let weak_target = Rc::downgrade(&proxy_data);
+        let mut holder = ObjectData::default();
+        holder.set("proxy", proxy.clone());
+        let holder = tracked_object(holder);
+        holder
+            .borrow_mut()
+            .set("self", Value::Object(Rc::clone(&holder)));
+        proxy_data
+            .private_elements
+            .borrow_mut()
+            .set("@@private:cycle:%brand", proxy.clone());
+        let external_owner = proxy.clone();
+
+        drop(holder);
+        drop(proxy);
+        drop(proxy_data);
+        vm.collect_closure_cycles();
+
+        let Value::Proxy(proxy_data) = &external_owner else {
+            unreachable!();
+        };
+        assert!(
+            matches!(
+                proxy_data
+                    .private_elements
+                    .borrow()
+                    .get_own_property("@@private:cycle:%brand"),
+                Some(Property::Value(value)) if value == &external_owner
+            ),
+            "an external Proxy owner retains the private-slot cycle"
+        );
+        assert!(weak_target.upgrade().is_some());
     }
 
     #[test]

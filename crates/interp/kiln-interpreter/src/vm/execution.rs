@@ -1581,7 +1581,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             continue;
                         }
                         Property::Value(_) => {
-                            let Some(store) = prototype_slot(&target) else {
+                            let Some(store) = private_slot(&target) else {
                                 return Err(ExecutionError::NotAnObject {
                                     instruction: current,
                                     value: target.type_name(),
@@ -1632,7 +1632,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             data.define_accessor(&name, None, Some(function.clone()), attributes);
                         }
                     };
-                    let Some(store) = prototype_slot(&target) else {
+                    let Some(store) = private_slot(&target) else {
                         return Err(ExecutionError::NotAnObject {
                             instruction: current,
                             value: target.type_name(),
@@ -1977,7 +1977,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .ok()
                         .filter(|key| key.starts_with(PRIVATE_KEY_PREFIX))
                     {
-                        let Some(store) = prototype_slot(&target) else {
+                        let Some(store) = private_slot(&target) else {
                             return Err(ExecutionError::NotAnObject {
                                 instruction: current,
                                 value: target.type_name(),
@@ -2003,7 +2003,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .ok()
                         .filter(|key| key.starts_with(PRIVATE_KEY_PREFIX))
                     {
-                        let Some(store) = prototype_slot(&target) else {
+                        let Some(store) = private_slot(&target) else {
                             return Err(ExecutionError::NotAnObject {
                                 instruction: current,
                                 value: target.type_name(),

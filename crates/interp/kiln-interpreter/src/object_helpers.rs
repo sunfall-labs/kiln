@@ -525,6 +525,7 @@ mod function_realm_tests {
         let live_proxy = Value::Proxy(Rc::new(ProxyData {
             target: foreign_array.clone(),
             handler: Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            private_elements: RefCell::new(ObjectData::default()),
             revoked: std::cell::Cell::new(false),
         }));
         assert!(
@@ -535,6 +536,7 @@ mod function_realm_tests {
         let revoked_proxy = Value::Proxy(Rc::new(ProxyData {
             target: foreign_array,
             handler: Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            private_elements: RefCell::new(ObjectData::default()),
             revoked: std::cell::Cell::new(true),
         }));
         assert!(matches!(
