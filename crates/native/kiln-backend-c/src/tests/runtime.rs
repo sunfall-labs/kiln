@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn array_index_range_is_shared_by_string_and_numeric_keys() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value array, read, thrown = kiln_c99_undefined();
+    kiln_value key = kiln_c99_static_text("4294967295", 10);
+    if (kiln_c99_array_index(key) != -1.0 ||
+        kiln_c99_array_index(kiln_c99_number(4294967295.0)) != -1.0 ||
+        kiln_c99_array_index(kiln_c99_static_text("4294967294", 10)) != 4294967294.0 ||
+        kiln_c99_array_index(kiln_c99_static_text("01", 2)) != -1.0) return 1;
+    if (kiln_c99_new_array(&array) != KILN_C99_OK) return 2;
+    if (kiln_c99_set_computed(NULL, array, key, kiln_c99_number(17), 0, &thrown) !=
+        KILN_C99_OK) return 3;
+    if (kiln_c99_array_of(array)->count != 0 ||
+        kiln_c99_get_computed(NULL, array, key, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(read) != 17) return 4;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "array-index-range");
+    assert!(
+        run.status.success(),
+        "array index range diverged ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn array_create_data_property_keeps_default_indices_dense_under_gc_stress() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

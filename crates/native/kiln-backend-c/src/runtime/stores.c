@@ -23,7 +23,8 @@ static double kiln_c99_array_index(kiln_value key) {
         if ((size_t)length != key_len || memcmp(buffer, bytes, key_len) != 0) {
             return -1.0;
         }
-        return number;
+        /* Both string and numeric keys share the array-index range. The canonical spelling
+         * alone is insufficient: 2^32-1 names an ordinary property and must not grow storage. */
     } else {
         return -1.0;
     }

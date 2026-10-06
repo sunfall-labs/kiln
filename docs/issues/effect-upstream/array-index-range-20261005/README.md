@@ -1,0 +1,7 @@
+# Native array index string range
+
+The ordinary parity probe `array-index-enumeration.js` exposed an existing boundary bug: the string branch of `kiln_c99_array_index` returned a canonical decimal value before the shared upper-bound guard. Numeric 4294967295 was rejected, but the string key with the same spelling reached the dense growth path. This is an ordinary named property in JavaScript. The executable printed its first probe line, then tried to allocate billions of slots. The retained systemd journal confirms that oomd killed the probe service (10.7 GiB resident peak, 20.3 GiB swap peak); this was not an execution-session reset. Earlier two probe attempts also ended without a verdict and are not acceptance evidence.
+
+Both branches now pass through the same upper-bound check. The focused emitted-C test passed (one selected test, zero failures, 1.52 seconds execution), covering numeric/string rejection at 2^32-1, acceptance of the largest canonical index without allocating it, noncanonical `01`, and setting/getting the out-of-range spelling as a named property without changing length. Full build/test output and explicit terminal service status are retained.
+
+The JavaScript probe also exposed a separate interpreter enumerable-key mismatch, being repaired in parallel. Native ordinary/stress parity, the original Effect replays and the final gate remain outstanding. No upstream assertions or deadlines changed.
