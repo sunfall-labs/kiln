@@ -429,6 +429,11 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 6);
                 word(&mut hash, u64::from(binary_code(*value)));
             }
+            Instruction::HasPrivate { name, brand_key } => {
+                byte(&mut hash, 80);
+                word(&mut hash, u64::from(*name));
+                word(&mut hash, u64::from(*brand_key));
+            }
             Instruction::Jump(value) => {
                 byte(&mut hash, 7);
                 word(&mut hash, u64::from(*value));

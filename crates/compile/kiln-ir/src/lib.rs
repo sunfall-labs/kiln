@@ -11,7 +11,7 @@ pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 16;
+pub const BYTECODE_VERSION: u16 = 17;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -455,6 +455,12 @@ pub enum Instruction {
     /// Own-only, and a miss is a TypeError rather than `undefined` -- which is the brand check:
     /// an object of another class simply does not carry the name.
     GetPrivate(u32),
+    /// Test `#name in object` without invoking public Proxy traps. The stack holds the receiver
+    /// and the expected class-evaluation brand: `[object, brand] -> [boolean]`.
+    HasPrivate {
+        name: u32,
+        brand_key: u32,
+    },
     /// Write `object.#name = value`. Stack: `[object, value] -> [value]`.
     SetPrivate(u32),
     /// Install a private method or accessor half. Stack: `[target, function] -> [target]`.

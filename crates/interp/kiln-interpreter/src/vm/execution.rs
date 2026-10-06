@@ -1451,6 +1451,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     }
                 }
+                Instruction::HasPrivate { name, .. } => {
+                    let name = self.string_constant_scalar(*name, current)?;
+                    let brand = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    if !is_reflect_target(&target) {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            "right-hand side of private `in` must be an object".to_owned(),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let answer = private_brand_matches(&target, &name, &brand)
+                        && own_private_element(&target, &name).is_some();
+                    self.stack.push(Value::Boolean(answer));
+                }
                 Instruction::GetPrivate(name) => {
                     let name = self.string_constant_scalar(*name, current)?;
                     let brand = self.pop(current)?;

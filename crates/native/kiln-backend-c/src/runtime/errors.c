@@ -341,6 +341,36 @@ static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_str
     return index == object->count ? NULL : &object->properties[index];
 }
 
+/* `#name in target` is an own private-element query, never a public property operation. In
+ * particular, a Proxy's private elements live in its sidecar and neither `has` nor revocation is
+ * consulted. The member key proves initialization has happened; the brand value distinguishes
+ * separate evaluations of the declaring class. */
+int kiln_c99_private_has(kiln_value target, kiln_value brand,
+                         const kiln_string *member_key,
+                         const kiln_string *brand_key, int *out,
+                         kiln_value *thrown) {
+    kiln_property *member;
+    kiln_property *held_brand;
+    if (member_key == NULL || brand_key == NULL || out == NULL || thrown == NULL)
+        return KILN_C99_INVALID_ARGUMENT;
+    if (!kiln_c99_is_reference(target) && target.tag != KILN_VALUE_DATE)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "right-hand side of private in must be an object");
+    member = kiln_c99_own_private_key(target, member_key);
+    if (member == NULL) {
+        *out = 0;
+        return KILN_C99_OK;
+    }
+    if (brand.tag == KILN_VALUE_UNDEFINED) {
+        *out = 1;
+        return KILN_C99_OK;
+    }
+    held_brand = kiln_c99_own_private_key(target, brand_key);
+    *out = held_brand != NULL && !held_brand->accessor &&
+           kiln_c99_strict_equal(held_brand->value, brand);
+    return KILN_C99_OK;
+}
+
 /* A private element refusing what was asked of it: a TypeError naming the member.
  *
  * The stored key is `@@private:<module-scope>:<name>` -- reserved so nothing that enumerates own string

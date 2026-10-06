@@ -94,6 +94,18 @@ pub(crate) fn emit_tail_instruction(
             )
             .unwrap();
         }
+        Instruction::HasPrivate { name, brand_key } => {
+            let (Constant::String(_), Constant::String(_)) =
+                (&constants[*name as usize], &constants[*brand_key as usize])
+            else {
+                unreachable!("verification rejects a non-string private name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value receiver = kiln_val_to_boundary(stack[sp - 2]); kiln_value brand = kiln_val_to_boundary(stack[sp - 1]); kiln_string member_key = *{symbol}_constant_{name}; kiln_string brand_key = *{symbol}_constant_{brand_key}; int answer = 0; int status; member_key.flags |= KILN_STRING_PRIVATE_KEY; brand_key.flags |= KILN_STRING_PRIVATE_KEY; status = kiln_c99_private_has(receiver, brand, &member_key, &brand_key, &answer, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= 2; stack[sp++] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}"
+            )
+            .unwrap();
+        }
         Instruction::ConstructSpread => {
             // `new f(...args)` is the same construction the fixed-arity `New` performs, so it
             // goes through the same path rather than repeating the allocate-run-override

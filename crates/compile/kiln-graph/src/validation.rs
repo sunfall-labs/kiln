@@ -402,6 +402,13 @@ pub fn stack_effect(
                 Ok((height - 1, false))
             }
         }
+        Instruction::HasPrivate { .. } => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
         // ...and the value replaces both, exactly as `SetProperty` does: an assignment is an
         // expression and its value is what was assigned.
         Instruction::SetPrivate(_) => {

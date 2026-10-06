@@ -489,6 +489,7 @@ impl GraphOp {
                 Instruction::LoadPrototype => Effects::READS_HEAP | Effects::MAY_THROW,
                 Instruction::SetPrototype => Effects::WRITES_HEAP | Effects::MAY_THROW,
                 Instruction::GetPrivate(_) => Effects::READS_HEAP | Effects::MAY_THROW,
+                Instruction::HasPrivate { .. } => Effects::READS_HEAP | Effects::MAY_THROW,
                 Instruction::SetPrivate(_) => Effects::WRITES_HEAP | Effects::MAY_THROW,
                 Instruction::NewRegExp { .. } => Effects::ALLOCATES,
                 Instruction::DeleteProperty(_)

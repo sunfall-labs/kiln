@@ -107,6 +107,25 @@ pub(crate) fn validate_code(
                     format!("template site {site} is out of bounds"),
                 ));
             }
+            Instruction::HasPrivate { name, brand_key } => {
+                for constant in [name, brand_key] {
+                    match program.constants.get(*constant as usize) {
+                        Some(Constant::String(_)) => {}
+                        Some(_) => {
+                            return Err(invalid(
+                                index,
+                                format!("private-in name constant {constant} is not a string"),
+                            ));
+                        }
+                        None => {
+                            return Err(invalid(
+                                index,
+                                format!("private-in name constant {constant} is out of bounds"),
+                            ));
+                        }
+                    }
+                }
+            }
             // The interpreter can make a second realm; this backend cannot. Its global object is
             // built once in C, in one copy, so a compiled program that reached the hook would get
             // a plausible-looking realm whose intrinsics were secretly this one's -- and every
@@ -458,6 +477,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::DeleteGlobalBinding(_)
         | Instruction::DeclareGlobalBinding { .. }
         | Instruction::GetPrivate(_)
+        | Instruction::HasPrivate { .. }
         | Instruction::SetPrivate(_)
         | Instruction::Dup2
         | Instruction::CallComputed { .. }

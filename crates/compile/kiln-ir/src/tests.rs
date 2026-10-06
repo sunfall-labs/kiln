@@ -1408,6 +1408,36 @@ fn only_classes_with_private_elements_emit_private_brands() {
 }
 
 #[test]
+fn private_in_lowers_to_its_own_brand_aware_instruction() {
+    let program = compile(&module(vec![statement(StatementKind::Expression(
+        Expression {
+            kind: ExpressionKind::PrivateIn {
+                name: "value".to_owned(),
+                object: Box::new(identifier("receiver")),
+            },
+            span: Span::default(),
+        },
+    ))]))
+    .expect("private-in expression compiles");
+
+    assert!(program.code.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::HasPrivate { name, brand_key }
+            if matches!(program.constants.get(*name as usize), Some(Constant::String(key))
+                if key.to_scalar_string().ok().as_deref() == Some("@@private:0:value"))
+                && matches!(program.constants.get(*brand_key as usize), Some(Constant::String(key))
+                    if key.to_scalar_string().ok().as_deref() == Some("@@private:0:%brand"))
+    )), "private-in retains both private-key identities in the dedicated instruction: {:?}", program.code);
+    assert!(
+        !program
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Binary(BinaryOp::In))),
+        "private-in must never lower through public Proxy has semantics"
+    );
+}
+
+#[test]
 fn a_class_constructor_inside_a_wrapper_captures_the_wrapper_binding() {
     let constructor = kiln_hir::Function {
         inferred_name: None,

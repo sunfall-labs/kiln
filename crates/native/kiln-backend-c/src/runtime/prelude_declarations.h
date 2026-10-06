@@ -351,6 +351,10 @@ extern int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int p
 extern int kiln_c99_iterator_method(kiln_host *host, kiln_value *result, uint64_t code, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
 extern kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 extern kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_string *key);
+extern int kiln_c99_private_has(kiln_value target, kiln_value brand,
+                                const kiln_string *member_key,
+                                const kiln_string *brand_key, int *out,
+                                kiln_value *thrown);
 extern int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len, int mode);
 extern int kiln_c99_private_error_key(kiln_value *thrown, const kiln_string *key, int mode);
 extern int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);

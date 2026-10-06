@@ -11,3 +11,5 @@ The provider manifest SHA-256 is `4b68a2200f148e19ff7fcd146cacd5c8ffb546692d67e5
 Direct Node/native stdout comparisons passed in ordinary and `KILN_NATIVE_GC_STRESS=1` modes for both fixtures. `scripts/native.sh conformance/native/proxy-private-class-elements.js` reported 1 matched, 0 refused, 0 diverged. The successful raw logs and stdout files are archived beside this note in `logs/`: `native-cli-build-final.log`, `proxy-private-ordinary-final3.log`, `class-field-ordinary-final.log`, `node-native-gc-stress-final.log`, `native-runner-proxy-ordinary-final.log`, plus exact Node/native stdout for ordinary and GC-stress runs. `cargo fmt --all -- --check` and `git diff --check` passed.
 
 The IR currently lowers private `#x in object` to ordinary `BinaryOp::In` plus a brand comparison. That operation still follows Proxy `has`/revocation behavior; this change does not claim to fix private-in semantics on Proxies.
+
+**Follow-up:** the earlier limitation sentence above is superseded by [`proxy-private-in-20261005`](../proxy-private-in-20261005/README.md), which adds dedicated `HasPrivate` lowering and ordinary/stress Proxy membership validation.

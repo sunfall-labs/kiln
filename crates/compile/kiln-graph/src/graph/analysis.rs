@@ -959,6 +959,7 @@ pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
         | Instruction::SetPrototype
         | Instruction::DefinePrivate { .. }
         | Instruction::GetPrivate(_)
+        | Instruction::HasPrivate { .. }
         | Instruction::LoadSuperElement
         | Instruction::SetSuperPropertyStrict { .. }
         | Instruction::DeleteComputed
