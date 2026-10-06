@@ -688,7 +688,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .program
                     .upgrade()
                     .filter(|cached| Rc::ptr_eq(cached, &program))
-                    .map(|_| entry.by_yield_pc.clone())
+                    .map(|_| Rc::clone(&entry.by_yield_pc))
             })
         };
         let by_yield_pc = if let Some(cached) = cached {
@@ -709,6 +709,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if live_by_pc.is_empty() {
                 return;
             }
+            let live_by_pc = Rc::new(live_by_pc);
             let mut map = module_map.borrow_mut();
             if map.gc_suspended_locals.len() >= map.gc_suspended_locals_prune_at.max(64) {
                 map.gc_suspended_locals
@@ -722,7 +723,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 key,
                 crate::module_map::SuspendedLocalCache {
                     program: Rc::downgrade(&program),
-                    by_yield_pc: live_by_pc.clone(),
+                    by_yield_pc: Rc::clone(&live_by_pc),
                 },
             );
             live_by_pc
