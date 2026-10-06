@@ -31,3 +31,7 @@ mise exec -- mbx test --jobs=1 -p kiln-backend-c --lib -- --test-threads=1
 Result: **334 passed, 0 failed, 2 ignored**, in 305.55 seconds. The new executable emission fixture constructs and resumes a selected generic looping generator with `KILN_GC_STRESS=1`; it checks the yielded object and that the generator remains suspended. The fixture also asserts the selected body remains boxed and has no typed clone.
 
 Formatting and whitespace validation passed with `cargo fmt --all -- --check` and `git diff --check`. Toolchain: Rust 1.97.1. This run is correctness evidence only; no generated CLI or runtime performance comparison was made.
+
+## Combined selector + known-call compiler suite
+
+After cherry-picking known-call change `6d5fe097` onto the selector candidate and moving its ignored diagnostic helper body into a `#[cfg(test)]` file, the full backend library suite passed again: **339 passed, 0 failed, 3 ignored**, in 112.65 seconds. The complete log is `backend-lib-combined-known-calls.log` (SHA-256 `490d4318554da95040cedda9ebe5533ae6214dbe30b3c4d8d3dffc90dd3fe21f`). This confirms the combined Rust/backend changes; it does not replace the pending combined CLI build and native Sharding replay.
