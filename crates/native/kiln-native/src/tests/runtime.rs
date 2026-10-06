@@ -2081,6 +2081,17 @@ fn native_direct_typed_call_keeps_its_result_live_after_return() {
 }
 
 #[test]
+fn native_direct_typed_self_call_retains_the_closure_for_its_frame() {
+    let Some(output) = run_native_release_fixture(
+        "native-direct-typed-self-call-frame",
+        "function sum(value) { if (value <= 0) return 0; return value + sum(value - 1); }\nconsole.log(sum(5));\n",
+    ) else {
+        return;
+    };
+    assert_eq!(output, "15\n");
+}
+
+#[test]
 fn native_direct_typed_call_failure_keeps_callee_attribution() {
     let Some(stderr) = run_native_failure_fixture(
         "native-direct-typed-call-failure-attribution",
@@ -2094,6 +2105,22 @@ fn native_direct_typed_call_failure_keeps_callee_attribution() {
     );
     assert!(stderr.contains("function=inner"), "{stderr}");
     assert!(!stderr.contains("function=outer"), "{stderr}");
+}
+
+#[test]
+fn native_direct_typed_successful_call_does_not_reuse_stale_failure_status() {
+    let Some(stderr) = run_native_failure_fixture(
+        "native-successful-typed-call-stale-status",
+        "function maybe(value) { if (value < 0) throw new Error('first failure'); return value + 1; }\nfunction increment(value) { return value + 1; }\nfunction outer() { try { maybe(-1); } catch (_) {} increment(4); const bad = {}; bad(); }\nouter();\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("detail=non-callable callee kind"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("function=outer"), "{stderr}");
+    assert!(!stderr.contains("function=increment"), "{stderr}");
 }
 
 #[test]

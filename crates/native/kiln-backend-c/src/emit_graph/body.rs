@@ -1365,17 +1365,17 @@ fn emit_block_sequence(
         Site::Entry { .. } | Site::AsyncEntry => None,
     };
     // A pure read nothing consumes is not emitted: it would only name something -- an upvalue
-    // table, a slot -- that the body then appears to need. The callee read a direct self-call
-    // has replaced is the common case.
+    // table or a slot -- that the body then appears to need. Direct-call callee reads are the
+    // exception because the statically proven closure is needed to publish the call frame.
     let mut used: HashSet<ValueId> = HashSet::new();
     for block in &graph.blocks {
         if !block.is_reachable_from_entry(graph.entry_block) {
             continue;
         }
-        for (vid, op) in &block.operations {
-            // A direct call reads its callee value only for the upvalue table it carries: not
-            // on a self-call, which has its own, and not into a typed entry that takes none.
-            // A boxed body's direct call keeps it for the generic path past the depth limit.
+        for (_vid, op) in &block.operations {
+            // Direct call sites need the statically proven closure value for the published
+            // JavaScript frame, including self-calls and typed entries with no upvalue inputs.
+            // The generic fallback past the depth limit uses it as well.
             if let GraphOp::Call { callee, args, .. } = op
                 && let Some(&target) = plan.known.get(callee)
                 && direct_callable(
@@ -1385,21 +1385,7 @@ fn emit_block_sequence(
                 && matches!(kind, EntryKind::Typed { .. })
             {
                 used.extend(args.iter().copied());
-                let self_call = self_index == Some(target);
-                let typed_site = plan.typed_sites.contains(vid);
-                // An arrow's typed entry, when it needs a receiver, reads it out of the
-                // callee's own `captured_this` (see the `Call` arm of `emit_graph_op`), so the
-                // callee value must stay alive for that too -- not only for its upvalue table.
-                // A self-call needs neither: the receiver a self-referencing arrow would read
-                // this way is this frame's own, already in scope as `receiver`.
-                let reads_callee = !self_call
-                    && (!typed_site
-                        || plan.typed_needs[target as usize].upvalues
-                        || (program.functions[target as usize].arrow
-                            && plan.typed_needs[target as usize].receiver));
-                if reads_callee {
-                    used.insert(*callee);
-                }
+                used.insert(*callee);
                 continue;
             }
             used.extend(op.operands());

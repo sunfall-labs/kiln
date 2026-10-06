@@ -1142,7 +1142,8 @@ pub(super) fn emit_graph_op(
                 };
                 if plan.typed_returns[target as usize] {
                     if live_typed {
-                        let typed_frame_failure_code = typed_frame_failure(&format!("d{v}"));
+                        let typed_frame_failure_code =
+                            typed_frame_failure(&format!("kiln_c99_typed_failed(d{v})"));
                         let int_twin = if live_typed_int {
                             format!(" i{v} = (int64_t)d{v};")
                         } else {
@@ -1154,7 +1155,8 @@ pub(super) fn emit_graph_op(
                         )
                         .unwrap();
                     } else {
-                        let typed_frame_failure_code = typed_frame_failure(&format!("d_ret_{v}"));
+                        let typed_frame_failure_code =
+                            typed_frame_failure(&format!("kiln_c99_typed_failed(d_ret_{v})"));
                         let int_twin = if live_typed_int {
                             format!(" i{v} = (int64_t)d_ret_{v};")
                         } else {
