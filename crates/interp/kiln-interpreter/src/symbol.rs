@@ -151,10 +151,17 @@ pub(crate) fn is_reserved(key: &str) -> bool {
     if !key.starts_with(RESERVED_KEY_PREFIX) {
         return false;
     }
-    WellKnown::from_property_key(key).is_some()
-        || INTERNAL_PREFIXES
-            .iter()
-            .any(|prefix| key.starts_with(prefix))
+    WellKnown::from_property_key(key).is_some() || is_internal_key(key)
+}
+
+/// Whether this is a VM-owned reserved spelling rather than a well-known symbol key.
+///
+/// Kept separate from `is_reserved` so a property lookup that has already classified whether
+/// the key is a symbol does not scan `WellKnown::ALL` a second time.
+pub(crate) fn is_internal_key(key: &str) -> bool {
+    INTERNAL_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
         || INTERNAL_SLOTS.contains(&key)
 }
 

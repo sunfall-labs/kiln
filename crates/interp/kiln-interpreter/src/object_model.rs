@@ -151,13 +151,40 @@ impl<'a> PropertyKeyRef<'a> {
         }
     }
 
-    pub(super) fn is_internal(self) -> bool {
-        matches!(self, Self::Utf8(key) if symbol::is_reserved(key) && !is_symbol_key(key))
+    /// Classification used by a slot walk. Keep the relatively expensive symbol/reserved-name
+    /// checks outside the per-slot predicate: UTF-8 names otherwise re-scan the well-known
+    /// symbol and internal-slot tables for every property in the object and every prototype.
+    pub(super) fn classification(self) -> PropertyKeyClassification {
+        match self {
+            Self::Utf8(key) => {
+                let symbol = is_symbol_key(key);
+                PropertyKeyClassification {
+                    symbol,
+                    internal: !symbol && symbol::is_internal_key(key),
+                }
+            }
+            Self::Units(_) => PropertyKeyClassification {
+                symbol: false,
+                internal: false,
+            },
+            Self::SymbolUnits(_) => PropertyKeyClassification {
+                symbol: true,
+                internal: false,
+            },
+        }
     }
 
     pub(super) fn matches_slot(self, slot: &Slot) -> bool {
-        self.is_symbol() == slot.symbol
-            && self.is_internal() == slot.internal
+        self.matches_classified_slot(slot, self.classification())
+    }
+
+    pub(super) fn matches_classified_slot(
+        self,
+        slot: &Slot,
+        classification: PropertyKeyClassification,
+    ) -> bool {
+        classification.symbol == slot.symbol
+            && classification.internal == slot.internal
             && self.matches(&slot.key)
     }
 
@@ -168,6 +195,12 @@ impl<'a> PropertyKeyRef<'a> {
             Self::Units(units)
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PropertyKeyClassification {
+    pub(super) symbol: bool,
+    pub(super) internal: bool,
 }
 
 #[derive(Clone, Debug)]

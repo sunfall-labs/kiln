@@ -28,9 +28,10 @@ impl ObjectData {
     }
 
     pub(super) fn get_own_property_key(&self, key: PropertyKeyRef<'_>) -> Option<&Property> {
+        let classification = key.classification();
         self.properties
             .iter()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
             .map(|slot| &slot.property)
     }
 
@@ -44,9 +45,10 @@ impl ObjectData {
     }
 
     pub(super) fn get_own_attributes_key(&self, key: PropertyKeyRef<'_>) -> Option<Attributes> {
+        let classification = key.classification();
         self.properties
             .iter()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
             .map(|slot| slot.attributes)
     }
 
@@ -75,10 +77,11 @@ impl ObjectData {
     }
 
     fn get_own_value_key(&self, key: PropertyKeyRef<'_>) -> Option<Value> {
+        let classification = key.classification();
         self.properties
             .iter()
             .enumerate()
-            .find(|(_, slot)| key.matches_slot(slot))
+            .find(|(_, slot)| key.matches_classified_slot(slot, classification))
             .and_then(|(index, slot)| match self.property_at_slot(index, slot) {
                 Property::Value(value) => Some(value),
                 Property::Accessor { .. } => None,
@@ -138,11 +141,13 @@ impl ObjectData {
     }
 
     pub(super) fn lookup_key(&self, key: PropertyKeyRef<'_>) -> Option<Property> {
+        // Reuse one classification across every slot and prototype in this lookup.
+        let classification = key.classification();
         if let Some((index, own)) = self
             .properties
             .iter()
             .enumerate()
-            .find(|(_, slot)| key.matches_slot(slot))
+            .find(|(_, slot)| key.matches_classified_slot(slot, classification))
         {
             return Some(self.property_at_slot(index, own));
         }
@@ -159,7 +164,7 @@ impl ObjectData {
                     store
                         .properties
                         .iter()
-                        .find(|slot| key.matches_slot(slot))
+                        .find(|slot| key.matches_classified_slot(slot, classification))
                         .map(|slot| slot.property.clone())
                         .ok_or_else(|| store.prototype.clone())
                 }
@@ -169,7 +174,7 @@ impl ObjectData {
                         .properties
                         .iter()
                         .enumerate()
-                        .find(|(_, slot)| key.matches_slot(slot))
+                        .find(|(_, slot)| key.matches_classified_slot(slot, classification))
                         .map(|(index, slot)| parent.property_at_slot(index, slot))
                         .ok_or_else(|| parent.prototype.clone())
                 }
@@ -178,7 +183,7 @@ impl ObjectData {
                     parent
                         .properties
                         .iter()
-                        .find(|slot| key.matches_slot(slot))
+                        .find(|slot| key.matches_classified_slot(slot, classification))
                         .map(|slot| slot.property.clone())
                         .ok_or_else(|| parent.prototype.clone())
                 }
@@ -212,10 +217,11 @@ impl ObjectData {
         value: Value,
         attributes: Attributes,
     ) {
+        let classification = key.classification();
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
         {
             if !redefinable(slot, attributes, true) {
                 return;
@@ -276,6 +282,7 @@ impl ObjectData {
         setter: Option<Value>,
         attributes: Attributes,
     ) {
+        let classification = key.classification();
         let existing = match self.get_own_property_key(key) {
             Some(Property::Accessor { get, set }) => (get.clone(), set.clone()),
             _ => (None, None),
@@ -287,7 +294,7 @@ impl ObjectData {
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
         {
             if !redefinable(slot, attributes, false) {
                 return;
@@ -298,8 +305,8 @@ impl ObjectData {
         }
         self.properties.push(Slot {
             key: key.owned(),
-            symbol: key.is_symbol(),
-            internal: key.is_internal(),
+            symbol: classification.symbol,
+            internal: classification.internal,
             property,
             attributes,
         });
@@ -311,10 +318,11 @@ impl ObjectData {
         property: Property,
         attributes: Attributes,
     ) {
+        let classification = key.classification();
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
         {
             slot.property = property;
             slot.attributes = attributes;
@@ -388,10 +396,11 @@ impl ObjectData {
             return;
         }
 
+        let classification = key.classification();
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
         {
             // Only a data property can refuse a write. An accessor's setter has already had its
             // chance -- `inherited_setter_key` runs ahead of every store -- so a store that reaches
@@ -414,10 +423,11 @@ impl ObjectData {
         property: Property,
         attributes: Attributes,
     ) {
+        let classification = key.classification();
         let slot = Slot {
             key: key.owned(),
-            symbol: key.is_symbol(),
-            internal: key.is_internal(),
+            symbol: classification.symbol,
+            internal: classification.internal,
             property,
             attributes,
         };
@@ -591,16 +601,18 @@ impl ObjectData {
     }
 
     pub(super) fn remove_key(&mut self, key: PropertyKeyRef<'_>) -> bool {
+        let classification = key.classification();
         if self
             .properties
             .iter()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
             .is_some_and(|slot| !slot.attributes.configurable)
         {
             return false;
         }
-        self.properties
-            .retain(|slot| !key.matches_slot(slot) || !slot.attributes.configurable);
+        self.properties.retain(|slot| {
+            !key.matches_classified_slot(slot, classification) || !slot.attributes.configurable
+        });
 
         true
     }
@@ -872,6 +884,7 @@ pub(super) fn own_property_state_key(
     target: &Value,
     key: PropertyKeyRef<'_>,
 ) -> Option<(Property, Attributes)> {
+    let classification = key.classification();
     // A namespace export's slot carries the ordinary property shape, while its value lives in
     // the exporting module's cell. Resolve just this slot here so [[GetOwnProperty]], proxy
     // invariants, descriptors and the ordinary Get walk all observe the same current binding.
@@ -881,7 +894,7 @@ pub(super) fn own_property_state_key(
             .properties
             .iter()
             .enumerate()
-            .find(|(_, slot)| key.matches_slot(slot))
+            .find(|(_, slot)| key.matches_classified_slot(slot, classification))
         {
             return Some((data.property_at_slot(index, slot), slot.attributes));
         }

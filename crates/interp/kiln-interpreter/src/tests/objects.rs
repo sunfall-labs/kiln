@@ -281,6 +281,79 @@ fn object_data_property_keys_preserve_lone_surrogates() {
 }
 
 #[test]
+fn property_key_classification_preserves_key_kind_through_slot_and_prototype_walks() {
+    let well_known = Symbol::WellKnown(WellKnown::Iterator);
+    let symbol_units = StringUnits::from(well_known.property_key());
+    let ordinary_units = StringUnits::from(well_known.property_key());
+    let surrogate = StringUnits::from_units(&[0xd800]);
+
+    let ordinary = PropertyKeyRef::Utf8("@@ordinary-key").classification();
+    assert_eq!((ordinary.symbol, ordinary.internal), (false, false));
+    let internal = PropertyKeyRef::Utf8("@@private:cache").classification();
+    assert_eq!((internal.symbol, internal.internal), (false, true));
+    let text_symbol_spelling = PropertyKeyRef::Units(&ordinary_units).classification();
+    assert_eq!(
+        (text_symbol_spelling.symbol, text_symbol_spelling.internal),
+        (false, false)
+    );
+    let actual_symbol = PropertyKeyRef::SymbolUnits(&symbol_units).classification();
+    assert_eq!(
+        (actual_symbol.symbol, actual_symbol.internal),
+        (true, false)
+    );
+    let surrogate_key = PropertyKeyRef::Units(&surrogate).classification();
+    assert_eq!(
+        (surrogate_key.symbol, surrogate_key.internal),
+        (false, false)
+    );
+
+    let mut prototype = ObjectData::default();
+    prototype.set("@@ordinary-key", Value::Number(1.0));
+    prototype.set("@@private:cache", Value::Number(2.0));
+    prototype.set_units(&ordinary_units, Value::Number(3.0));
+    prototype.set_key(
+        PropertyKeyRef::SymbolUnits(&symbol_units),
+        Value::Number(4.0),
+    );
+    prototype.set_units(&surrogate, Value::Number(5.0));
+
+    let mut child = ObjectData::default();
+    child.set_prototype(Value::Object(tracked_object(prototype)));
+    assert_eq!(
+        child.lookup("@@ordinary-key"),
+        Some(Property::Value(Value::Number(1.0)))
+    );
+    assert_eq!(
+        child.lookup("@@private:cache"),
+        Some(Property::Value(Value::Number(2.0)))
+    );
+    assert_eq!(
+        child.lookup_units(&ordinary_units),
+        Some(Property::Value(Value::Number(3.0)))
+    );
+    assert_eq!(
+        child.lookup_key(PropertyKeyRef::SymbolUnits(&symbol_units)),
+        Some(Property::Value(Value::Number(4.0)))
+    );
+    assert_eq!(
+        child.lookup_units(&surrogate),
+        Some(Property::Value(Value::Number(5.0)))
+    );
+
+    child.set("@@ordinary-key", Value::Number(6.0));
+    child.remove("@@ordinary-key");
+    assert_eq!(
+        child.lookup("@@ordinary-key"),
+        Some(Property::Value(Value::Number(1.0)))
+    );
+    child.set("@@ordinary-key", Value::Number(7.0));
+    assert_eq!(
+        child.lookup("@@ordinary-key"),
+        Some(Property::Value(Value::Number(7.0)))
+    );
+}
+
+#[test]
 fn computed_lone_surrogate_reads_share_ordinary_and_proxy_paths() {
     let program = no_program();
     let mut host = TestHost {
