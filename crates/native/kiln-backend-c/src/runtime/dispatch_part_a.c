@@ -3,6 +3,25 @@
  * Dispatch reads groups and both coercion masks together so this hot path has one descriptor
  * lookup and unknown codes retain the all-zero refusal behavior. */
 
+/* Object.values/entries take a key snapshot, then recheck each property's current own
+ * enumerability before Get. Keep that check on the metadata path: constructing a descriptor
+ * object for every dense array element is both unnecessary and costly. Array element storage
+ * supplies the default enumerable data-property case; descriptor overlays and named properties
+ * live in the ordinary property store. */
+static int kiln_c99_array_own_enumerable(const kiln_array *array,
+                                        const kiln_string *key) {
+    kiln_property property;
+    double index;
+    if (array == NULL || key == NULL || kiln_c99_same_name_key(key, "length")) return 0;
+    if (array->properties.tag == KILN_VALUE_OBJECT &&
+        kiln_c99_property_read_own_value(array->properties, key, NULL, &property)) {
+        return kiln_c99_property_is_enumerable(&property);
+    }
+    index = kiln_c99_key_index_key(key);
+    return index >= 0.0 && index < (double)array->count &&
+           array->elements[(size_t)index] != KILN_VAL_HOLE;
+}
+
 /* Collections preserve insertion order because Map and Set expose iteration. Weak collections
  * are not iterable, so once enough dead slots accumulate they can be compacted without changing
  * an observable cursor. Keep the threshold proportional to live entries (with a floor) so the
@@ -4052,88 +4071,129 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             /* An array's own enumerable keys are its indices, as strings, and a hole is not one
              * of them -- which is the same walk `for...in` does, so it is the same code. */
             if (args[0].tag == KILN_VALUE_ARRAY) {
-                kiln_array *array = kiln_c99_array_of(args[0]);
-                status = kiln_c99_new_array(&built);
-                for (index = 0; index < array->count && status == KILN_C99_OK; ++index) {
-                    if (array->elements[index] == KILN_VAL_HOLE) {
-                        continue;
+                kiln_value subject = args[0];
+                kiln_value keys;
+                kiln_array *array = kiln_c99_array_of(subject);
+                kiln_array *listed;
+                kiln_c99_gc_keep_alive(&subject);
+                if (code == KILN_C99_METHOD_OBJECT_KEYS) {
+                    status = kiln_c99_own_keys(host, subject, &keys, depth, thrown);
+                    if (status == KILN_C99_OK) *result = keys;
+                    return status;
+                }
+                /* A plain array has no observable per-index metadata: each non-hole element is
+                 * an enumerable data property. Keep the old allocation-light walk for this
+                 * common case; descriptor/named-property arrays use the snapshot path below. */
+                if (!array->has_index_descriptors &&
+                    array->properties.tag != KILN_VALUE_OBJECT) {
+                    status = kiln_c99_new_array(&built);
+                    if (status != KILN_C99_OK) return status;
+                    for (index = 0; index < array->count && status == KILN_C99_OK; ++index) {
+                        kiln_value value;
+                        if (array->elements[index] == KILN_VAL_HOLE) continue;
+                        value = kiln_val_to_boundary(array->elements[index]);
+                        kiln_c99_gc_keep_alive(&subject);
+                        kiln_c99_gc_keep_alive(&built);
+                        kiln_c99_gc_keep_alive(&value);
+                        if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                            status = kiln_c99_array_push(built, value);
+                        } else {
+                            kiln_value key = kiln_c99_text(
+                                kiln_c99_number((double)index));
+                            kiln_value pair;
+                            kiln_c99_gc_keep_alive(&subject);
+                            kiln_c99_gc_keep_alive(&built);
+                            kiln_c99_gc_keep_alive(&value);
+                            kiln_c99_gc_keep_alive(&key);
+                            status = kiln_c99_new_array(&pair);
+                            if (status == KILN_C99_OK) {
+                                kiln_c99_gc_keep_alive(&subject);
+                                kiln_c99_gc_keep_alive(&built);
+                                kiln_c99_gc_keep_alive(&value);
+                                kiln_c99_gc_keep_alive(&key);
+                                kiln_c99_gc_keep_alive(&pair);
+                                status = kiln_c99_array_push(pair, key);
+                            }
+                            if (status == KILN_C99_OK) {
+                                kiln_c99_gc_keep_alive(&subject);
+                                kiln_c99_gc_keep_alive(&built);
+                                kiln_c99_gc_keep_alive(&value);
+                                kiln_c99_gc_keep_alive(&pair);
+                                status = kiln_c99_array_push(pair, value);
+                            }
+                            if (status == KILN_C99_OK) {
+                                kiln_c99_gc_keep_alive(&subject);
+                                kiln_c99_gc_keep_alive(&built);
+                                kiln_c99_gc_keep_alive(&pair);
+                                status = kiln_c99_array_push(built, pair);
+                            }
+                        }
                     }
-                    if (code == KILN_C99_METHOD_OBJECT_KEYS) {
-                        status = kiln_c99_array_push(
-                            built, kiln_c99_text(kiln_c99_number((double)index)));
-                    } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
-                        status = kiln_c99_array_push(built, kiln_val_to_boundary(array->elements[index]));
+                    if (status == KILN_C99_OK) *result = built;
+                    return status;
+                }
+                status = kiln_c99_all_own_keys(host, subject, &keys, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                kiln_c99_gc_keep_alive(&subject);
+                kiln_c99_gc_keep_alive(&keys);
+                status = kiln_c99_new_array(&built);
+                if (status != KILN_C99_OK) return status;
+                listed = kiln_c99_array_of(keys);
+                for (index = 0; index < listed->count && status == KILN_C99_OK; ++index) {
+                    kiln_value key = kiln_val_to_boundary(listed->elements[index]);
+                    kiln_value value;
+                    const kiln_string *name;
+                    if (key.tag != KILN_VALUE_STRING ||
+                        kiln_c99_key_is_reserved((const kiln_string *)key.ptr)) continue;
+                    name = (const kiln_string *)key.ptr;
+                    kiln_c99_gc_keep_alive(&subject);
+                    kiln_c99_gc_keep_alive(&keys);
+                    kiln_c99_gc_keep_alive(&built);
+                    kiln_c99_gc_keep_alive(&key);
+                    if (!kiln_c99_array_own_enumerable(kiln_c99_array_of(subject), name)) continue;
+                    kiln_c99_gc_keep_alive(&subject);
+                    kiln_c99_gc_keep_alive(&keys);
+                    kiln_c99_gc_keep_alive(&built);
+                    kiln_c99_gc_keep_alive(&key);
+                    status = kiln_c99_get_computed(host, subject, key, &value, depth, thrown);
+                    if (status != KILN_C99_OK) break;
+                    kiln_c99_gc_keep_alive(&subject);
+                    kiln_c99_gc_keep_alive(&keys);
+                    kiln_c99_gc_keep_alive(&built);
+                    kiln_c99_gc_keep_alive(&key);
+                    kiln_c99_gc_keep_alive(&value);
+                    if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                        status = kiln_c99_array_push(built, value);
                     } else {
                         kiln_value pair;
                         status = kiln_c99_new_array(&pair);
                         if (status == KILN_C99_OK) {
-                            status = kiln_c99_array_push(
-                                pair, kiln_c99_text(kiln_c99_number((double)index)));
+                            kiln_c99_gc_keep_alive(&subject);
+                            kiln_c99_gc_keep_alive(&keys);
+                            kiln_c99_gc_keep_alive(&built);
+                            kiln_c99_gc_keep_alive(&key);
+                            kiln_c99_gc_keep_alive(&value);
+                            kiln_c99_gc_keep_alive(&pair);
+                            status = kiln_c99_array_push(pair, key);
                         }
                         if (status == KILN_C99_OK) {
-                            status = kiln_c99_array_push(pair, kiln_val_to_boundary(array->elements[index]));
+                            kiln_c99_gc_keep_alive(&subject);
+                            kiln_c99_gc_keep_alive(&keys);
+                            kiln_c99_gc_keep_alive(&built);
+                            kiln_c99_gc_keep_alive(&value);
+                            kiln_c99_gc_keep_alive(&pair);
+                            status = kiln_c99_array_push(pair, value);
                         }
                         if (status == KILN_C99_OK) {
+                            kiln_c99_gc_keep_alive(&subject);
+                            kiln_c99_gc_keep_alive(&keys);
+                            kiln_c99_gc_keep_alive(&built);
+                            kiln_c99_gc_keep_alive(&pair);
                             status = kiln_c99_array_push(built, pair);
                         }
                     }
                 }
-                if (array->properties.tag == KILN_VALUE_OBJECT) {
-                    kiln_object *extra = kiln_c99_object_of(array->properties);
-                    if (extra->properties == NULL && extra->shape != NULL &&
-                        extra->shape->accessor_mask == 0) {
-                        for (index = 0; index < extra->shape->property_count && status == KILN_C99_OK; ++index) {
-                            const kiln_string *skey = extra->shape->keys[index];
-                            kiln_value key;
-                            kiln_value val;
-                            if (kiln_c99_key_is_reserved(skey) ||
-                                (extra->shape->attrs[index] & KILN_C99_ATTR_ENUM_FLIP) != 0) {
-                                continue;
-                            }
-                            key = kiln_c99_stable_key_value(skey);
-                            val = (extra->slots != NULL && index < extra->slot_capacity)
-                                      ? kiln_val_to_boundary(extra->slots[index])
-                                      : kiln_c99_undefined();
-                            if (code == KILN_C99_METHOD_OBJECT_KEYS) {
-                                status = kiln_c99_array_push(built, key);
-                            } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
-                                status = kiln_c99_array_push(built, val);
-                            } else {
-                                kiln_value pair;
-                                status = kiln_c99_new_array(&pair);
-                                if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, key);
-                                if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, val);
-                                if (status == KILN_C99_OK) status = kiln_c99_array_push(built, pair);
-                            }
-                        }
-                    } else {
-                        if (extra->shape != NULL) {
-                            kiln_c99_ensure_dictionary(extra);
-                        }
-                        for (index = 0; index < extra->count && status == KILN_C99_OK; ++index) {
-                            kiln_value key;
-                            if (!extra->properties[index].enumerable) {
-                                continue;
-                            }
-                            key = kiln_c99_stable_key_value(extra->properties[index].key);
-                            if (code == KILN_C99_METHOD_OBJECT_KEYS) {
-                                status = kiln_c99_array_push(built, key);
-                            } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
-                                status = kiln_c99_array_push(built, extra->properties[index].value);
-                            } else {
-                                kiln_value pair;
-                                status = kiln_c99_new_array(&pair);
-                                if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, key);
-                                if (status == KILN_C99_OK) {
-                                    status = kiln_c99_array_push(pair,
-                                                                 extra->properties[index].value);
-                                }
-                                if (status == KILN_C99_OK) status = kiln_c99_array_push(built, pair);
-                            }
-                        }
-                    }
-                }
-                *result = built;
+                if (status == KILN_C99_OK) *result = built;
                 return status;
             }
             if (args[0].tag == KILN_VALUE_TYPED_ARRAY) {
