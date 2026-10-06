@@ -74,6 +74,64 @@ const keyObject = {
 const coercible = { label: "coercible", call() { return this.label; } };
 console.log(coercible[keyObject](), conversions);
 
+// A computed call retains ToPropertyKey's result for both lookup and call-site metadata. The
+// conversion, accessor and arguments run in that order; the accessor's captured callee survives
+// mutations performed while evaluating the argument.
+const computedCallOrder = [];
+const computedAliasKey = {
+  [Symbol.toPrimitive](hint) {
+    computedCallOrder.push(`key:${hint}`);
+    return "resolvedAlias";
+  },
+};
+const computedAliasReceiver = {
+  get resolvedAlias() {
+    computedCallOrder.push("get");
+    return function () { return this === computedAliasReceiver; };
+  },
+};
+const computedAliasCallResult = computedAliasReceiver[computedAliasKey](
+  computedCallOrder.push("argument"),
+);
+console.log("computed call order", computedAliasCallResult, computedCallOrder.join(","));
+
+// Method metadata receives the canonical string produced by ToPropertyKey, even though the
+// original computed key was an object. Keep the function anonymous so the frame needs that alias.
+const computedAliasDataMethod = function () { throw new Error("computed alias"); };
+Object.defineProperty(computedAliasDataMethod, "name", { value: "", configurable: true });
+const computedAliasDataReceiver = { resolvedAlias: computedAliasDataMethod };
+const priorPrepareStackTrace = Error.prepareStackTrace;
+Error.prepareStackTrace = (_error, frames) =>
+  frames.map((frame) => frame.getMethodName() ?? "").join(",");
+try {
+  computedAliasDataReceiver[computedAliasKey]();
+} catch (error) {
+  console.log("computed method alias", String(error.stack).split(",").includes("resolvedAlias"));
+} finally {
+  Error.prepareStackTrace = priorPrepareStackTrace;
+}
+let nullReceiverKeyConversions = 0;
+try {
+  null[{ [Symbol.toPrimitive]() { nullReceiverKeyConversions += 1; return "x"; } }]();
+} catch (_error) {
+  console.log("null receiver key conversions", nullReceiverKeyConversions);
+}
+let computedGetterArgumentRan = false;
+try {
+  const throwingGetter = Object.defineProperty({}, "run", {
+    get() { throw new Error("getter before argument"); },
+  });
+  throwingGetter["run"]((computedGetterArgumentRan = true));
+} catch (_error) {
+  console.log("computed getter suppresses argument", computedGetterArgumentRan);
+}
+let computedNoncallableArgumentRan = false;
+try {
+  ({ run: 1 })["run"]((computedNoncallableArgumentRan = true));
+} catch (error) {
+  console.log("computed noncallable", error instanceof TypeError, computedNoncallableArgumentRan);
+}
+
 const capturedMethod = Symbol("capturedMethod");
 const capturesCallee = {
   [capturedMethod]() { return "original"; },

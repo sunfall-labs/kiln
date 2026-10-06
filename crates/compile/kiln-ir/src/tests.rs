@@ -2362,6 +2362,60 @@ fn a_named_method_call_resolves_its_callee_before_argument_evaluation() {
 }
 
 #[test]
+fn computed_method_calls_convert_once_and_resolve_before_arguments() {
+    let program = compile(&module(vec![statement(StatementKind::Expression(
+        Expression {
+            kind: ExpressionKind::Call {
+                callee: Box::new(Expression {
+                    kind: ExpressionKind::ComputedMember {
+                        object: Box::new(Expression {
+                            kind: ExpressionKind::Identifier("receiver".into()),
+                            span: Span::default(),
+                        }),
+                        property: Box::new(Expression {
+                            kind: ExpressionKind::Identifier("key".into()),
+                            span: Span::default(),
+                        }),
+                        optional: false,
+                    },
+                    span: Span::default(),
+                }),
+                arguments: vec![kiln_hir::ListElement::Item(Expression {
+                    kind: ExpressionKind::Identifier("argument".into()),
+                    span: Span::default(),
+                })],
+                optional: false,
+            },
+            span: Span::default(),
+        },
+    ))]))
+    .expect("compiles");
+
+    let conversion = program
+        .code
+        .iter()
+        .position(|instruction| matches!(instruction, Instruction::ToPropertyKey))
+        .expect("the original key is canonicalized for lookup and method metadata");
+    let duplicate_and_read = program
+        .code
+        .windows(2)
+        .position(|window| matches!(window, [Instruction::Dup2, Instruction::GetComputed]))
+        .expect("computed lookup reuses the canonical receiver/key pair");
+    let call = program
+        .code
+        .iter()
+        .position(|instruction| matches!(instruction, Instruction::CallComputed { argc: 1 }))
+        .expect("fixed-arity computed calls avoid an argument-array allocation");
+    assert!(conversion < duplicate_and_read && duplicate_and_read < call);
+    assert!(
+        !program
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Apply))
+    );
+}
+
+#[test]
 fn a_call_with_a_spread_builds_its_arguments_at_runtime() {
     // A spread's length is not known until it runs, so the arity leaves the bytecode and
     // becomes the length of an array the program computes.

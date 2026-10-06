@@ -2190,9 +2190,14 @@ impl super::Compiler {
                     self.code.push(Instruction::Apply);
                 } else {
                     self.expression(property);
-                    // Resolve the reference before evaluating arguments. A getter may replace
-                    // the method or an argument may mutate the property; JavaScript calls the
-                    // value obtained by Get before it evaluates the argument list.
+                    // Convert once and retain the canonical key with the receiver and saved
+                    // callee. ToPropertyKey leaves the key alone for a nullish receiver, so the
+                    // following GetComputed still throws before coercing the key in that case.
+                    // Resolve the reference before arguments: a getter may replace the method or
+                    // an argument may mutate the property, but the captured value is invoked.
+                    // Keeping the canonical key also supplies correct call-frame method metadata
+                    // without coercing the original key a second time.
+                    self.code.push(Instruction::ToPropertyKey);
                     self.code.push(Instruction::Dup2);
                     self.code.push(Instruction::GetComputed);
                     let argc = self.emit_arguments(arguments);

@@ -160,7 +160,8 @@ pub enum Instruction {
     /// Computed property References retain their raw property-name value: `GetComputed` and
     /// `SetComputed` each coerce it when performing GetValue and PutValue. This explicit
     /// conversion is for bytecode sites that must materialize a property key before the property
-    /// operation (for example, a computed property definition).
+    /// operation (for example, a computed property definition or a prepared method call that
+    /// retains the canonical key for call-frame metadata).
     ///
     /// It reads the object beneath the key without consuming it, because the order is fixed:
     /// a nullish object throws *before* the key converts, so `null[k] += 1` never runs `k`'s
@@ -187,8 +188,10 @@ pub enum Instruction {
         name: u32,
         argc: u16,
     },
-    /// Call a computed property whose receiver, original key and resolved method are already on
-    /// the stack, followed by its arguments. The compiler performs Get before evaluating args.
+    /// Call a computed property whose receiver, canonical key and resolved method are already on
+    /// the stack, followed by its arguments. The compiler performs ToPropertyKey and Get before
+    /// evaluating args, preserving the captured method and its call-frame name without repeating
+    /// a user-defined key conversion.
     CallComputed {
         argc: u16,
     },
