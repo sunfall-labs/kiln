@@ -2610,6 +2610,109 @@ fn an_index_key_enumerates_before_every_string_key() {
 }
 
 #[test]
+fn array_values_and_entries_read_getters_and_recheck_later_keys() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    for native in [Native::ObjectValues, Native::ObjectEntries] {
+        let array = ArrayData::new(vec![
+            Value::Number(1.0),
+            Value::Number(2.0),
+            Value::Number(3.0),
+        ]);
+        // Reading index 0 invokes pop on this array, removing the later own key 2.
+        array.elements.borrow_mut().push(ExoticElement {
+            index: 0,
+            property: Property::Accessor {
+                get: Some(Value::Native(Native::ArrayPop, RealmId::PRIMARY)),
+                set: None,
+            },
+            attributes: Attributes::DEFAULT,
+        });
+        let result = vm
+            .dispatch_native(native, &Value::Undefined, &[Value::Array(array)], 0)
+            .expect("enumeration invokes the getter");
+        let Value::Array(result) = result else {
+            panic!("enumeration returns an array")
+        };
+        assert_eq!(result.borrow().len(), 2);
+        for (index, expected) in [3.0, 2.0].into_iter().enumerate() {
+            let item = result.borrow()[index].clone();
+            if matches!(native, Native::ObjectValues) {
+                assert_eq!(item, Value::Number(expected));
+            } else {
+                assert_eq!(
+                    vm.read_property(&item, "0", 0),
+                    Ok(Value::String(index.to_string().into()))
+                );
+                assert_eq!(vm.read_property(&item, "1", 0), Ok(Value::Number(expected)));
+            }
+        }
+    }
+}
+
+#[test]
+fn proxy_values_and_entries_filter_current_descriptors_and_symbols() {
+    let program = no_program();
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: Default::default(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let mut data = ObjectData::default();
+    data.define_value(
+        "hidden",
+        Value::Number(41.0),
+        Attributes {
+            enumerable: false,
+            ..Attributes::DEFAULT
+        },
+    );
+    data.define_value("visible", Value::Number(7.0), Attributes::DEFAULT);
+    let symbol = Value::Symbol(Symbol::WellKnown(WellKnown::Iterator));
+    let symbol_units = symbol.property_key_units_checked().unwrap();
+    data.define_value_key(
+        PropertyKeyRef::SymbolUnits(&symbol_units),
+        Value::Number(9.0),
+        Attributes::DEFAULT,
+    );
+    let proxy = Value::Proxy(Rc::new(ProxyData {
+        target: Value::Object(tracked_object(data)),
+        handler: ordinary_object(Vec::<(String, Value)>::new()),
+        private_elements: RefCell::new(ObjectData::default()),
+        revoked: std::cell::Cell::new(false),
+    }));
+    for native in [Native::ObjectValues, Native::ObjectEntries] {
+        let result = vm
+            .dispatch_native(native, &Value::Undefined, std::slice::from_ref(&proxy), 0)
+            .unwrap();
+        let Value::Array(result) = result else {
+            panic!("enumeration returns an array")
+        };
+        assert_eq!(result.borrow().len(), 1);
+        let item = result.borrow()[0].clone();
+        if matches!(native, Native::ObjectValues) {
+            assert_eq!(item, Value::Number(7.0));
+        } else {
+            assert_eq!(
+                vm.read_property(&item, "0", 0),
+                Ok(Value::String("visible".into()))
+            );
+            assert_eq!(vm.read_property(&item, "1", 0), Ok(Value::Number(7.0)));
+        }
+    }
+}
+
+#[test]
 fn object_keys_uses_array_index_descriptors_and_keeps_4294967295_named() {
     let array = ArrayData::new(vec![
         Value::Number(10.0),

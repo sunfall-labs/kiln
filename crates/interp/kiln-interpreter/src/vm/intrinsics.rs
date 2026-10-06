@@ -2333,52 +2333,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // store, so the walk below has nothing to read.
                 if matches!(source, Value::Proxy(_)) {
                     let mut items = Vec::new();
-                    for key in self.own_keys(&source, instruction)? {
-                        if is_reserved_units(&key) {
+                    for key in self.own_keys_reflected(&source, instruction)? {
+                        if matches!(key, Value::Symbol(_)) {
+                            continue;
+                        }
+                        let Some(descriptor) =
+                            self.own_descriptor_value(&source, &key, instruction)?
+                        else {
+                            continue;
+                        };
+                        if !self
+                            .read_property(&descriptor, "enumerable", instruction)?
+                            .is_truthy()
+                        {
                             continue;
                         }
                         items.push(match native {
-                            Native::ObjectValues => self.read_property_key(
-                                &source,
-                                PropertyKeyRef::Units(&key),
-                                instruction,
-                            )?,
+                            Native::ObjectValues => {
+                                self.read_computed(&source, &key, instruction)?
+                            }
                             _ => Value::Array(ArrayData::new(vec![
-                                Value::String(key.clone()),
-                                self.read_property_key(
-                                    &source,
-                                    PropertyKeyRef::Units(&key),
-                                    instruction,
-                                )?,
+                                key.clone(),
+                                self.read_computed(&source, &key, instruction)?,
                             ])),
                         });
                     }
                     return Ok(Value::Array(ArrayData::new(items)));
                 }
                 let mut items = Vec::new();
-                let module_namespace = matches!(
-                    &source,
-                    Value::Object(object) if object.borrow().is_module_namespace()
-                );
-                for (key, property) in own_string_properties_units(&self.intrinsics, &source) {
-                    let value = if module_namespace {
-                        // This operation reads values, so use the namespace's ordinary [[Get]]
-                        // path and its current export cell rather than the stored slot shape.
-                        self.read_property_key(&source, PropertyKeyRef::Units(&key), instruction)?
-                    } else {
-                        match property {
-                            Property::Value(value) => value,
-                            Property::Accessor { get, .. } => match get {
-                                Some(getter) => self.call_value(
-                                    &getter,
-                                    source.clone(),
-                                    Vec::new(),
-                                    instruction,
-                                )?,
-                                None => Value::Undefined,
-                            },
-                        }
-                    };
+                // Snapshot every own string key before any getter runs, then ask about its
+                // current descriptor. Earlier getters may expose, hide or delete later keys.
+                for key in own_property_keys_units(&self.intrinsics, &source) {
+                    let property_key = PropertyKeyRef::Units(&key);
+                    if !own_attributes_key(&self.intrinsics, &source, property_key)
+                        .is_some_and(|attributes| attributes.enumerable)
+                    {
+                        continue;
+                    }
+                    let value = self.read_property_key(&source, property_key, instruction)?;
                     items.push(if matches!(native, Native::ObjectValues) {
                         value
                     } else {
