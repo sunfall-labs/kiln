@@ -2551,6 +2551,61 @@ fn an_index_key_enumerates_before_every_string_key() {
 }
 
 #[test]
+fn object_keys_uses_array_index_descriptors_and_keeps_4294967295_named() {
+    let array = ArrayData::new(vec![
+        Value::Number(10.0),
+        Value::Number(20.0),
+        Value::Native(Native::Hole, RealmId::PRIMARY),
+    ]);
+    array.elements.borrow_mut().extend([
+        ExoticElement {
+            index: 1,
+            property: Property::Value(Value::Number(20.0)),
+            attributes: Attributes {
+                enumerable: false,
+                ..Attributes::DEFAULT
+            },
+        },
+        ExoticElement {
+            index: 2,
+            property: Property::Accessor {
+                get: None,
+                set: None,
+            },
+            attributes: Attributes::DEFAULT,
+        },
+    ]);
+    {
+        let mut properties = array.properties.borrow_mut();
+        properties.define_value("named", Value::Boolean(true), Attributes::DEFAULT);
+        properties.define_value("4294967295", Value::Boolean(true), Attributes::DEFAULT);
+    }
+
+    let intrinsics = Intrinsics::default();
+    let result = call_native(
+        &intrinsics,
+        Native::ObjectKeys,
+        &Value::Undefined,
+        &[Value::Array(Rc::clone(&array))],
+    )
+    .expect("Object.keys succeeds on an ordinary array");
+    let Value::Array(keys) = result else {
+        panic!("Object.keys returns an array");
+    };
+    let actual = keys
+        .borrow()
+        .iter()
+        .map(|key| match key {
+            Value::String(key) => key.to_lossy_string(),
+            other => panic!("Object.keys returned {other:?}, expected strings"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, ["0", "2", "named", "4294967295"]);
+    assert_eq!(canonical_index("4294967294"), Some(4_294_967_294));
+    assert_eq!(canonical_index("4294967295"), None);
+}
+
+#[test]
 fn an_element_key_is_wider_than_an_index() {
     // What separates a typed array's element keys from its named ones. Every name that is
     // the canonical spelling of *some* number is an element key -- even one no view can

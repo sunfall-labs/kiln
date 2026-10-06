@@ -1013,7 +1013,7 @@ pub(super) fn array_index_key(key: PropertyKeyRef<'_>) -> Option<usize> {
 /// language uses to separate an element from a property that merely looks like one.
 pub(super) fn canonical_index(name: &str) -> Option<usize> {
     let index: usize = name.parse().ok()?;
-    (index.to_string() == name).then_some(index)
+    (index <= u32::MAX as usize - 1 && index.to_string() == name).then_some(index)
 }
 
 /// The same array-index test over the language's UTF-16 key units. This avoids constructing a

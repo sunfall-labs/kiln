@@ -667,19 +667,13 @@ pub(crate) fn call_native(
                 // `length` is not among them, because it is not enumerable. Stopping at the
                 // elements made `Object.keys` disagree with the `for-in` beside it about the
                 // same array.
-                Some(Value::Array(items)) => items
-                    .borrow()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
-                    .map(|(index, _)| Value::String(index.to_string().into()))
-                    .chain(
-                        items
-                            .properties
-                            .borrow()
-                            .string_entries()
-                            .map(|(key, _)| Value::String(key.clone())),
-                    )
+                Some(target @ Value::Array(_)) => own_property_keys_units(intrinsics, target)
+                    .into_iter()
+                    .filter(|key| {
+                        own_attributes_key(intrinsics, target, PropertyKeyRef::Units(key))
+                            .is_some_and(|attributes| attributes.enumerable)
+                    })
+                    .map(Value::String)
                     .collect(),
                 Some(target @ Value::Shared(_)) => own_properties_units(intrinsics, target)
                     .into_iter()
