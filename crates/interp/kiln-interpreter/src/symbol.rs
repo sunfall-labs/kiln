@@ -159,10 +159,51 @@ pub(crate) fn is_reserved(key: &str) -> bool {
 /// Kept separate from `is_reserved` so a property lookup that has already classified whether
 /// the key is a symbol does not scan `WellKnown::ALL` a second time.
 pub(crate) fn is_internal_key(key: &str) -> bool {
+    // Every exact slot and generated internal family is under `@@`. Most property names have no
+    // reserved prefix, so skip both tables instead of comparing an ordinary key against all 40
+    // exact slots on every property lookup.
+    if !key.starts_with(RESERVED_KEY_PREFIX) {
+        return false;
+    }
     INTERNAL_PREFIXES
         .iter()
         .any(|prefix| key.starts_with(prefix))
         || INTERNAL_SLOTS.contains(&key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{INTERNAL_SLOTS, is_internal_key};
+
+    #[test]
+    fn internal_key_classification_skips_ordinary_names_without_widening_reserved_keys() {
+        for key in [
+            "map",
+            "length",
+            "value",
+            "@@observable",
+            "@@symbol-observable",
+        ] {
+            assert!(!is_internal_key(key), "{key} is a program-visible key");
+        }
+
+        for key in INTERNAL_SLOTS {
+            assert!(is_internal_key(key), "{key} is an internal slot");
+        }
+
+        for key in [
+            "@@symbol:1",
+            "@@private:scope:1",
+            "@@kiln:host-slot",
+            "@@node:timer-handle",
+        ] {
+            assert!(is_internal_key(key), "{key} belongs to an internal family");
+        }
+
+        for key in ["@symbol:1", "@@symbol", "@@private", "@@kiln", "@@node"] {
+            assert!(!is_internal_key(key), "{key} is not a complete family key");
+        }
+    }
 }
 
 /// `WellKnown::ALL` holds every variant, once, in ordinal order -- checked while the compiler
