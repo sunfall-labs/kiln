@@ -1,6 +1,49 @@
 use super::*;
 
 #[test]
+fn array_index_enumeration_merges_descriptor_overlays_once() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value array, keys, names, descriptor, thrown = kiln_c99_undefined();
+    kiln_value read;
+    if (kiln_c99_new_array(&array) != KILN_C99_OK) return 1;
+    for (int i = 0; i < 3; ++i)
+        if (kiln_c99_array_push(array, kiln_c99_number(i + 10)) != KILN_C99_OK) return 2;
+    if (kiln_c99_create_data_property(NULL, array, kiln_c99_static_text("0", 1),
+                                      kiln_c99_number(11), 0, &thrown) != KILN_C99_OK) return 3;
+    if (kiln_c99_new_object(&descriptor) != KILN_C99_OK ||
+        kiln_c99_put(NULL, descriptor, "enumerable", 10, kiln_c99_boolean(0), 0,
+                       &thrown) != KILN_C99_OK) return 4;
+    if (kiln_c99_define_property(NULL, array, "1", 1, descriptor, 0, &thrown) !=
+        KILN_C99_OK) return 5;
+    if (kiln_c99_put(NULL, array, "named", 5, kiln_c99_number(20), 0, &thrown) !=
+        KILN_C99_OK) return 6;
+    if (kiln_c99_own_keys(NULL, array, &keys, 0, &thrown) != KILN_C99_OK) return 7;
+    if (kiln_c99_array_of(keys)->count != 3) return 8;
+    const char *expected[] = {"0", "2", "named"};
+    for (int i = 0; i < 3; ++i) {
+        read = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[i]);
+        if (read.tag != KILN_VALUE_STRING ||
+            !kiln_c99_same_name_key((const kiln_string *)read.ptr, expected[i]))
+            return 9;
+    }
+    if (kiln_c99_all_own_keys(NULL, array, &names, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_array_of(names)->count != 5) return 10;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "array-index-enumeration");
+    assert!(
+        run.status.success(),
+        "array indexed keys diverged ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn class_field_data_descriptor_uses_canonical_definition_rules() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

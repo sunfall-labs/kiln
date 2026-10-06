@@ -963,7 +963,7 @@ static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target,
  * indices precede named shape keys; a mixed shape/list store keeps the dictionary conversion
  * until its integer-key merge has a read-only cursor. */
 static int kiln_c99_append_enumerable_object_keys(kiln_object *object, kiln_value built,
-                                                   int include_dense) {
+                                                   int include_dense, int skip_indices) {
     size_t index;
     size_t count;
     int status;
@@ -987,6 +987,9 @@ static int kiln_c99_append_enumerable_object_keys(kiln_object *object, kiln_valu
         kiln_property projected;
         const kiln_property *property = kiln_c99_property_view(object, index, &projected);
         if (!property->enumerable) continue;
+        /* Array indexed descriptors describe the same keys as its element walk, not extra
+         * named properties. The array walk also owns their enumerability and ordering. */
+        if (skip_indices && kiln_c99_key_index_key(property->key) >= 0.0) continue;
         status = kiln_c99_array_push(built, kiln_c99_stable_key_value(property->key));
         if (status != KILN_C99_OK) return status;
     }
@@ -1026,7 +1029,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
     }
     if (target.tag == KILN_VALUE_OBJECT) {
         kiln_object *object = kiln_c99_object_of(target);
-        status = kiln_c99_append_enumerable_object_keys(object, built, 1);
+        status = kiln_c99_append_enumerable_object_keys(object, built, 1, 0);
         if (status != KILN_C99_OK) return status;
     } else if (target.tag == KILN_VALUE_BUILTIN) {
         /* A built-in constructor can have enumerable own statics even though its callable
@@ -1066,7 +1069,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
     } else if (target.tag == KILN_VALUE_REGEXP) {
         kiln_value store = kiln_c99_regexp_of(target)->properties;
         if (store.tag == KILN_VALUE_OBJECT) {
-            status = kiln_c99_append_enumerable_object_keys(kiln_c99_object_of(store), built, 1);
+            status = kiln_c99_append_enumerable_object_keys(kiln_c99_object_of(store), built, 1, 0);
             if (status != KILN_C99_OK) return status;
         }
     } else if (target.tag == KILN_VALUE_ARRAY) {
@@ -1074,17 +1077,28 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
          * gives "0" and "1", not 0 and 1. */
         kiln_array *array = kiln_c99_array_of(target);
         for (index = 0; index < array->count; ++index) {
-            if (array->elements[index] == KILN_VAL_HOLE) {
-                continue;
+            kiln_value key = kiln_c99_undefined();
+            int present = array->elements[index] != KILN_VAL_HOLE;
+            if (array->has_index_descriptors && array->properties.tag == KILN_VALUE_OBJECT) {
+                kiln_property descriptor;
+                key = kiln_c99_text(kiln_c99_number((double)index));
+                if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+                if (kiln_c99_property_read_own(kiln_c99_object_of(array->properties),
+                                               (const kiln_string *)key.ptr, NULL, &descriptor)) {
+                    if (!descriptor.enumerable) continue;
+                    present = 1;
+                }
             }
-            status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
+            if (!present) continue;
+            if (key.tag != KILN_VALUE_STRING) key = kiln_c99_text(kiln_c99_number((double)index));
+            status = kiln_c99_array_push(built, key);
             if (status != KILN_C99_OK) {
                 return status;
             }
         }
         if (array->properties.tag == KILN_VALUE_OBJECT) {
             kiln_object *extra = kiln_c99_object_of(array->properties);
-            status = kiln_c99_append_enumerable_object_keys(extra, built, 0);
+            status = kiln_c99_append_enumerable_object_keys(extra, built, 0, 1);
             if (status != KILN_C99_OK) return status;
         }
     } else if (target.tag == KILN_VALUE_TYPED_ARRAY) {
@@ -1097,7 +1111,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
         }
         if (view->properties.tag == KILN_VALUE_OBJECT) {
             status = kiln_c99_append_enumerable_object_keys(
-                kiln_c99_object_of(view->properties), built, 0);
+                kiln_c99_object_of(view->properties), built, 0, 0);
             if (status != KILN_C99_OK) return status;
         }
     } else if (target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
@@ -1105,7 +1119,7 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
         status = kiln_c99_callable_store(target, &store, 0);
         if (status != KILN_C99_OK) return status;
         if (store.tag == KILN_VALUE_OBJECT) {
-            status = kiln_c99_append_enumerable_object_keys(kiln_c99_object_of(store), built, 0);
+            status = kiln_c99_append_enumerable_object_keys(kiln_c99_object_of(store), built, 0, 0);
             if (status != KILN_C99_OK) return status;
         }
     }
