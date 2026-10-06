@@ -501,3 +501,31 @@ fn attributes_are_never_reported_for_an_absent_member() {
         }
     }
 }
+
+#[test]
+fn internal_key_classification_skips_ordinary_names_without_widening_reserved_keys() {
+    use crate::symbol::is_internal_key;
+
+    for key in [
+        "map",
+        "length",
+        "value",
+        "@@observable",
+        "@@symbol-observable",
+    ] {
+        assert!(!is_internal_key(key), "{key} is a program-visible key");
+    }
+
+    for key in [
+        "@@symbol:1",
+        "@@private:scope:1",
+        "@@kiln:host-slot",
+        "@@node:timer-handle",
+    ] {
+        assert!(is_internal_key(key), "{key} belongs to an internal family");
+    }
+
+    for key in ["@symbol:1", "@@symbol", "@@private", "@@kiln", "@@node"] {
+        assert!(!is_internal_key(key), "{key} is not a complete family key");
+    }
+}

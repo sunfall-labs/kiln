@@ -171,41 +171,6 @@ pub(crate) fn is_internal_key(key: &str) -> bool {
         || INTERNAL_SLOTS.contains(&key)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{INTERNAL_SLOTS, is_internal_key};
-
-    #[test]
-    fn internal_key_classification_skips_ordinary_names_without_widening_reserved_keys() {
-        for key in [
-            "map",
-            "length",
-            "value",
-            "@@observable",
-            "@@symbol-observable",
-        ] {
-            assert!(!is_internal_key(key), "{key} is a program-visible key");
-        }
-
-        for key in INTERNAL_SLOTS {
-            assert!(is_internal_key(key), "{key} is an internal slot");
-        }
-
-        for key in [
-            "@@symbol:1",
-            "@@private:scope:1",
-            "@@kiln:host-slot",
-            "@@node:timer-handle",
-        ] {
-            assert!(is_internal_key(key), "{key} belongs to an internal family");
-        }
-
-        for key in ["@symbol:1", "@@symbol", "@@private", "@@kiln", "@@node"] {
-            assert!(!is_internal_key(key), "{key} is not a complete family key");
-        }
-    }
-}
-
 /// `WellKnown::ALL` holds every variant, once, in ordinal order -- checked while the compiler
 /// builds it, because a list that is merely believed to be complete is not one.
 const _: () = {
@@ -218,3 +183,13 @@ const _: () = {
         index += 1;
     }
 };
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn all_internal_slots_satisfy_the_reserved_prefix_guard() {
+        for key in super::INTERNAL_SLOTS {
+            assert!(super::is_internal_key(key), "{key} is an internal slot");
+        }
+    }
+}
