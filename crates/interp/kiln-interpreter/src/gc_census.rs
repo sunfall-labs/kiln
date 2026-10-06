@@ -12,10 +12,6 @@ use std::rc::{Rc, Weak};
 
 struct WeakCensus<T> {
     entries: Vec<Weak<T>>,
-    /// Counts only the weak references owned by `entries`, indexed by stable allocation
-    /// identity. These are excluded from actor move-eligibility checks; user WeakRefs remain
-    /// observable and still prevent moving a graph.
-    internal_weak_counts: HashMap<usize, usize>,
     prune_at: usize,
 }
 
@@ -23,7 +19,6 @@ impl<T> Default for WeakCensus<T> {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
-            internal_weak_counts: HashMap::new(),
             prune_at: 0,
         }
     }
@@ -35,28 +30,10 @@ impl<T> WeakCensus<T> {
             self.prune();
         }
         self.entries.push(Rc::downgrade(value));
-        *self
-            .internal_weak_counts
-            .entry(Rc::as_ptr(value) as usize)
-            .or_default() += 1;
     }
 
     fn prune(&mut self) {
-        let entries = &mut self.entries;
-        let counts = &mut self.internal_weak_counts;
-        entries.retain(|entry| {
-            if entry.strong_count() > 0 {
-                return true;
-            }
-            let identity = entry.as_ptr() as usize;
-            if let Some(count) = counts.get_mut(&identity) {
-                *count -= 1;
-                if *count == 0 {
-                    counts.remove(&identity);
-                }
-            }
-            false
-        });
+        self.entries.retain(|entry| entry.strong_count() > 0);
         self.prune_at = self
             .entries
             .len()
@@ -67,8 +44,16 @@ impl<T> WeakCensus<T> {
         self.entries.clone()
     }
 
+    /// Count only the weak handles physically owned by this census. Actor transfer calls this
+    /// infrequently; deriving the snapshot here avoids a HashMap lookup/update for every object
+    /// registration. `as_ptr` is non-owning, and iterating under the caller's census borrow makes
+    /// this a consistent snapshot without upgrading or cloning any weak handle.
     fn internal_weak_counts(&self) -> HashMap<usize, usize> {
-        self.internal_weak_counts.clone()
+        let mut counts = HashMap::new();
+        for entry in &self.entries {
+            *counts.entry(entry.as_ptr() as usize).or_default() += 1;
+        }
+        counts
     }
 }
 
@@ -162,11 +147,11 @@ mod tests {
         drop(live);
         census.prune();
         assert!(census.entries.is_empty());
-        assert_eq!(census.internal_weak_counts.len(), 0);
+        assert!(census.internal_weak_counts().is_empty());
     }
 
     #[test]
-    fn pruning_removes_all_duplicate_weak_edges_for_an_expired_identity() {
+    fn derived_counts_preserve_duplicate_weak_edges_through_pruning() {
         let mut census = WeakCensus::<usize>::default();
         let repeated = Rc::new(7);
         let identity = Rc::as_ptr(&repeated) as usize;
@@ -179,7 +164,7 @@ mod tests {
         assert_eq!(Rc::strong_count(&repeated), 1);
         census.prune();
         assert_eq!(
-            census.internal_weak_counts.get(&identity),
+            census.internal_weak_counts().get(&identity),
             Some(&2),
             "pruning must preserve duplicate entries while their Rc allocation is alive"
         );
@@ -188,7 +173,7 @@ mod tests {
         drop(repeated);
         census.prune();
         assert!(census.entries.is_empty());
-        assert!(!census.internal_weak_counts.contains_key(&identity));
+        assert!(!census.internal_weak_counts().contains_key(&identity));
         // Numeric count snapshots own neither Weak nor Rc references and remain stable when the
         // census removes expired registration entries.
         assert_eq!(snapshot.get(&identity), Some(&2));
