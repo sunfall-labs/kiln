@@ -501,6 +501,45 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
     has_writable = parsed.has_writable;
     has_enumerable = parsed.has_enumerable;
     has_configurable = parsed.has_configurable;
+
+    /* CreateDataProperty on an ordinary array index has the same result as writing the dense
+     * element directly when the complete descriptor is the default writable/enumerable/
+     * configurable data shape. Avoid creating an array property-store overlay: that flag sends
+     * every later element read, write and iterator through descriptor lookup. Keep partial or
+     * unusual descriptors on the ValidateAndApply path below, where attributes, accessors,
+     * extensibility and existing overlays are authoritative. Proxies were returned through
+     * their trap path above. */
+    if (target.tag == KILN_VALUE_ARRAY && has_value && has_writable && has_enumerable &&
+        has_configurable && !has_getter && !has_setter &&
+        kiln_c99_truthy(writable) && kiln_c99_truthy(enumerable) &&
+        kiln_c99_truthy(configurable)) {
+        kiln_array *array = kiln_c99_array_of(target);
+        double index = kiln_c99_key_index_key(view);
+        if (index >= 0.0 && !array->frozen && !array->not_extensible &&
+            !array->has_index_descriptors) {
+            /* Canonical array indices are at most 2^32-2. Check the host size conversion and
+             * increment explicitly before asking the allocator for the required element run. */
+            if (index > (double)(SIZE_MAX - 1)) return KILN_C99_OUT_OF_MEMORY;
+            size_t slot = (size_t)index;
+            if (slot == SIZE_MAX) return KILN_C99_OUT_OF_MEMORY;
+            size_t needed = slot + 1;
+            kiln_c99_gc_keep_alive(&target);
+            kiln_c99_gc_keep_alive(&value);
+            status = kiln_c99_array_reserve(array, needed);
+            if (status != KILN_C99_OK) return status;
+            if (slot > array->count) array->is_numeric = 0;
+            for (size_t fill = array->count; fill < slot; ++fill)
+                kiln_c99_heap_store_val(array, &array->elements[fill], KILN_VAL_HOLE);
+            kiln_val stored = kiln_val_from_boundary(value);
+            kiln_c99_heap_store_val(array, &array->elements[slot], stored);
+            if (array->is_numeric && !KILN_VAL_IS_NUMBER(stored)) array->is_numeric = 0;
+            if (needed > array->count) array->count = needed;
+            kiln_c99_gc_keep_alive(&target);
+            kiln_c99_gc_keep_alive(&value);
+            return KILN_C99_OK;
+        }
+    }
+
     if (target.tag == KILN_VALUE_FUNCTION && kiln_c99_same_name_key(view, "prototype") &&
         kiln_c99_function_owns_prototype(kiln_c99_closure_of(target))) {
         kiln_closure *closure = kiln_c99_closure_of(target);

@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn array_create_data_property_keeps_default_indices_dense_under_gc_stress() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    kiln_value array = kiln_c99_undefined();
+    kiln_value object = kiln_c99_undefined();
+    kiln_value first_text = kiln_c99_undefined();
+    kiln_value tail_text = kiln_c99_undefined();
+    kiln_value keys = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value read = kiln_c99_undefined();
+    kiln_array *elements;
+    if (heap == NULL) return 1;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 1;
+    heap->stress = 1;
+    heap->stress_every = 1;
+    heap->stress_countdown = 1;
+    kiln_c99_gc_heap_register(heap);
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+
+    if (kiln_c99_new_array(&array) != KILN_C99_OK ||
+        kiln_c99_new_object(&object) != KILN_C99_OK) return 2;
+    kiln_c99_gc_keep_alive(&array);
+    kiln_c99_gc_keep_alive(&object);
+    first_text = kiln_c99_copy_text("first", 5);
+    kiln_c99_gc_keep_alive(&first_text);
+    if (kiln_c99_array_push(array, object) != KILN_C99_OK ||
+        kiln_c99_array_push(array, first_text) != KILN_C99_OK) return 3;
+    tail_text = kiln_c99_copy_text("tail", 4);
+    kiln_c99_gc_keep_alive(&array);
+    kiln_c99_gc_keep_alive(&object);
+    kiln_c99_gc_keep_alive(&first_text);
+    kiln_c99_gc_keep_alive(&tail_text);
+    if (kiln_c99_create_data_property(NULL, array, kiln_c99_number(9), tail_text, 0,
+                                      &thrown) != KILN_C99_OK) return 4;
+
+    elements = kiln_c99_array_of(array);
+    if (elements->count != 10 || elements->capacity < 10 || elements->has_index_descriptors ||
+        elements->properties.tag != KILN_VALUE_UNDEFINED || elements->is_numeric) return 5;
+    if (kiln_val_to_boundary(elements->elements[0]).ptr != object.ptr ||
+        kiln_val_to_boundary(elements->elements[1]).ptr != first_text.ptr ||
+        kiln_val_to_boundary(elements->elements[9]).ptr != tail_text.ptr) return 6;
+    for (size_t index = 2; index < 9; ++index)
+        if (elements->elements[index] != KILN_VAL_HOLE) return 7;
+    if (kiln_c99_get(NULL, array, "9", 1, &read, 0, &thrown) != KILN_C99_OK ||
+        read.ptr != tail_text.ptr) return 8;
+    if (kiln_c99_own_keys(NULL, array, &keys, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_array_of(keys)->count != 3) return 9;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "array-create-data-property-dense");
+    assert!(
+        run.status.success(),
+        "array CreateDataProperty did not retain dense storage under GC stress ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn array_index_enumeration_merges_descriptor_overlays_once() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
