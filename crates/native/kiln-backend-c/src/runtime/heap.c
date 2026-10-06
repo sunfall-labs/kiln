@@ -5655,7 +5655,8 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
         const kiln_proxy *proxy = (const kiln_proxy *)(block + 1);
         if (block->size < sizeof *proxy) return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
         return kiln_c99_graph_value_in_batch(heap, chunks, count, &proxy->target) ||
-               kiln_c99_graph_value_in_batch(heap, chunks, count, &proxy->handler)
+               kiln_c99_graph_value_in_batch(heap, chunks, count, &proxy->handler) ||
+               kiln_c99_graph_value_in_batch(heap, chunks, count, &proxy->private_elements)
                    ? KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS : KILN_C99_GRAPH_ROOTS_UNENUMERATED;
     }
     case KILN_GC_PROMISE: {
@@ -8370,6 +8371,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_PROXY:
         kiln_c99_gc_mark_value(heap, &((kiln_proxy *)payload)->target);
         kiln_c99_gc_mark_value(heap, &((kiln_proxy *)payload)->handler);
+        kiln_c99_gc_mark_value(heap, &((kiln_proxy *)payload)->private_elements);
         break;
     case KILN_GC_TYPED_ARRAY:
         kiln_c99_gc_mark_block(heap, ((kiln_typed_array *)payload)->buffer);

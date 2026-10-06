@@ -2440,6 +2440,11 @@ pub struct AbsentAnswer {
 /// checks the half a `const` cannot -- that the sites are in the functions claimed here.
 pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     AbsentAnswer {
+        function: "kiln_c99_proxy_private_store",
+        sites: 1,
+        proved_by: "the Proxy has no lazily allocated private-elements store, so it owns no private slot",
+    },
+    AbsentAnswer {
         function: "kiln_c99_array_custom_parent_read",
         sites: 1,
         proved_by: "Array.prototype has an explicit null parent, so no inherited property exists",

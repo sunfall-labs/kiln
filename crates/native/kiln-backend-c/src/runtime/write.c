@@ -322,6 +322,13 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
             return reduced;
         }
     }
+    if (target.tag == KILN_VALUE_PROXY && key.tag == KILN_VALUE_STRING &&
+        (((const kiln_string *)(uintptr_t)key.bits)->flags & KILN_STRING_PRIVATE_KEY)) {
+        kiln_value private_store;
+        int status = kiln_c99_proxy_private_store(target, 1, &private_store);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_set_computed_mode(host, private_store, key, value, strict, depth, thrown);
+    }
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_set(host, target, key, value, strict, depth, thrown);
     }

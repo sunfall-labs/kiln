@@ -2291,6 +2291,8 @@ static inline uint32_t kiln_c99_site_decode_dictionary_index(uint32_t encoded) {
 typedef struct kiln_proxy {
     kiln_value target;
     kiln_value handler;
+    /* Class private elements belong to the Proxy identity and bypass its public traps. */
+    kiln_value private_elements;
     /* `Proxy.revocable`'s second half was called. A revoked proxy is not an empty one: every
      * operation on it is a TypeError, which is the entire point -- the capability it stood for
      * has been withdrawn, and a program holding a stale reference has to find out rather than

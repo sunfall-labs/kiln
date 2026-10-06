@@ -35,14 +35,41 @@ static kiln_value kiln_c99_proxy_inner(kiln_value value) {
 }
 
 static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value handler) {
-    kiln_proxy *proxy = (kiln_proxy *)kiln_c99_gc_alloc(KILN_GC_PROXY, sizeof *proxy);
+    kiln_proxy *proxy;
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&handler);
+    proxy = (kiln_proxy *)kiln_c99_gc_alloc(KILN_GC_PROXY, sizeof *proxy);
     if (proxy == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
+    proxy->private_elements = kiln_c99_undefined();
     kiln_c99_heap_store_value(proxy, &proxy->target, target);
     kiln_c99_heap_store_value(proxy, &proxy->handler, handler);
     proxy->revoked = 0;
     *out = kiln_c99_value(KILN_VALUE_PROXY, (uint64_t)(uintptr_t)proxy, NULL, 0);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_proxy_private_store(kiln_value proxy_value, int create,
+                                         kiln_value *out) {
+    kiln_proxy *proxy;
+    int status;
+    if (proxy_value.tag != KILN_VALUE_PROXY || out == NULL)
+        return KILN_C99_INVALID_ARGUMENT;
+    proxy = kiln_c99_proxy_of(proxy_value);
+    if (proxy->private_elements.tag == KILN_VALUE_OBJECT) {
+        *out = proxy->private_elements;
+        return KILN_C99_OK;
+    }
+    if (!create) {
+        KILN_C99_ABSENT("a Proxy with no private elements, which carries no own private slot", out);
+    }
+    kiln_c99_gc_keep_alive(&proxy_value);
+    status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&proxy_value);
+    kiln_c99_gc_keep_alive(out);
+    kiln_c99_heap_store_value(proxy, &proxy->private_elements, *out);
     return KILN_C99_OK;
 }
 

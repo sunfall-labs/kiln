@@ -847,6 +847,13 @@ static int kiln_c99_put_mode_key(kiln_host *host, kiln_value target, const kiln_
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_PROXY) {
+        if ((key->flags & KILN_STRING_PRIVATE_KEY) != 0) {
+            kiln_value private_store;
+            status = kiln_c99_proxy_private_store(target, 1, &private_store);
+            if (status != KILN_C99_OK) return status;
+            return kiln_c99_put_mode_key(host, private_store, key, ikey, value, strict, depth,
+                                         thrown);
+        }
         /* Writing to a proxy is a call, exactly as reading one is. */
         if (stable_key == NULL) stable_key = kiln_c99_intern_key(key);
         if (stable_key == NULL) return KILN_C99_OUT_OF_MEMORY;

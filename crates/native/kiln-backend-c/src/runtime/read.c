@@ -2631,6 +2631,16 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
                             kiln_value *thrown) {
     int status;
     if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (target.tag == KILN_VALUE_PROXY && (key->flags & KILN_STRING_PRIVATE_KEY)) {
+        kiln_value private_store;
+        status = kiln_c99_proxy_private_store(target, 0, &private_store);
+        if (status != KILN_C99_OK) return status;
+        if (private_store.tag != KILN_VALUE_OBJECT) {
+            *out = private_store;
+            return KILN_C99_OK;
+        }
+        return kiln_c99_get_key(host, private_store, key, ikey, out, depth, thrown);
+    }
     if (kiln_c99_private_hook_read(target, key, out)) return KILN_C99_OK;
     if (kiln_c99_is_node_hidden_key_key(key)) {
         KILN_C99_ABSENT("a hidden runtime slot, which no program names", out);

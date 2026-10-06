@@ -277,6 +277,12 @@ static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len) {
     kiln_object *object;
     size_t index;
+    if (target.tag == KILN_VALUE_PROXY) {
+        kiln_value store;
+        if (kiln_c99_proxy_private_store(target, 0, &store) != KILN_C99_OK ||
+            store.tag != KILN_VALUE_OBJECT) return NULL;
+        target = store;
+    }
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_value store = kiln_c99_closure_store(kiln_c99_closure_of(target));
         if (store.tag != KILN_VALUE_OBJECT) {
@@ -306,6 +312,12 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
 static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_string *key) {
     kiln_object *object;
     size_t index;
+    if (target.tag == KILN_VALUE_PROXY) {
+        kiln_value store;
+        if (kiln_c99_proxy_private_store(target, 0, &store) != KILN_C99_OK ||
+            store.tag != KILN_VALUE_OBJECT) return NULL;
+        target = store;
+    }
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_value store = kiln_c99_closure_store(kiln_c99_closure_of(target));
         if (store.tag != KILN_VALUE_OBJECT) {

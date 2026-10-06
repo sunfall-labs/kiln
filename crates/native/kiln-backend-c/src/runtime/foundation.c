@@ -631,6 +631,7 @@ static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
                                                kiln_value *thrown);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_string *key);
+static int kiln_c99_proxy_private_store(kiln_value proxy, int create, kiln_value *out);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
                                   int mode);
 static int kiln_c99_private_error_key(kiln_value *thrown, const kiln_string *key, int mode);

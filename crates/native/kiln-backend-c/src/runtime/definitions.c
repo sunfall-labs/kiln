@@ -2059,6 +2059,12 @@ static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const
  * the `set #x` written beside it -- two definitions describing one element. */
 static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
                                    kiln_value function, int kind) {
+    if (target.tag == KILN_VALUE_PROXY) {
+        kiln_value store;
+        int status = kiln_c99_proxy_private_store(target, 1, &store);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_define_private(store, key, key_len, function, kind);
+    }
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_property *slot;
     int status;
@@ -2104,6 +2110,12 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
  * reaches for. */
 static int kiln_c99_define_private_key(kiln_value target, const kiln_string *key,
                                        kiln_value function, int kind) {
+    if (target.tag == KILN_VALUE_PROXY) {
+        kiln_value store;
+        int status = kiln_c99_proxy_private_store(target, 1, &store);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_define_private_key(store, key, function, kind);
+    }
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_property *slot;
     int status;
