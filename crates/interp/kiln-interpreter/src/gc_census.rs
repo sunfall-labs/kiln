@@ -5,7 +5,7 @@
 //! this interpreter thread without making the objects live. `Rc` values are not `Send`, which
 //! keeps each registry confined to the thread that owns its realms.
 
-use super::{ArrayData, ObjectData};
+use super::{ArrayData, ObjectData, ProxyData};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -76,6 +76,7 @@ impl<T> WeakCensus<T> {
 struct ThreadCensus {
     objects: WeakCensus<RefCell<ObjectData>>,
     arrays: WeakCensus<ArrayData>,
+    proxies: WeakCensus<ProxyData>,
 }
 
 thread_local! {
@@ -96,12 +97,20 @@ pub(crate) fn register_array(value: &Rc<ArrayData>) {
     CENSUS.with(|census| census.borrow_mut().arrays.register(value));
 }
 
+pub(crate) fn register_proxy(value: &Rc<ProxyData>) {
+    CENSUS.with(|census| census.borrow_mut().proxies.register(value));
+}
+
 pub(crate) fn object_candidates() -> Vec<Weak<RefCell<ObjectData>>> {
     CENSUS.with(|census| census.borrow().objects.snapshot())
 }
 
 pub(crate) fn array_candidates() -> Vec<Weak<ArrayData>> {
     CENSUS.with(|census| census.borrow().arrays.snapshot())
+}
+
+pub(crate) fn proxy_candidates() -> Vec<Weak<ProxyData>> {
+    CENSUS.with(|census| census.borrow().proxies.snapshot())
 }
 
 pub(crate) fn internal_object_weak_counts() -> HashMap<usize, usize> {
@@ -117,6 +126,7 @@ pub(crate) fn prune_dead_candidates() {
         let mut census = census.borrow_mut();
         census.objects.prune();
         census.arrays.prune();
+        census.proxies.prune();
     });
 }
 

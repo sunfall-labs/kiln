@@ -356,12 +356,14 @@ pub(crate) fn call_native(
                         .to_owned(),
                 });
             }
-            let proxy = Value::Proxy(Rc::new(ProxyData {
+            let proxy_data = Rc::new(ProxyData {
                 target,
                 handler,
                 private_elements: RefCell::new(ObjectData::default()),
                 revoked: std::cell::Cell::new(false),
-            }));
+            });
+            crate::gc_census::register_proxy(&proxy_data);
+            let proxy = Value::Proxy(proxy_data);
             let mut pair = ObjectData::default();
             // The revoke function carries the proxy as its receiver, which is what a bound
             // native is for: there is no other way to give a built-in a captured value.

@@ -209,12 +209,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .to_owned(),
                     });
                 }
-                self.stack.push(Value::Proxy(Rc::new(ProxyData {
+                let proxy = Rc::new(ProxyData {
                     target,
                     handler,
                     private_elements: RefCell::new(ObjectData::default()),
                     revoked: std::cell::Cell::new(false),
-                })));
+                });
+                crate::gc_census::register_proxy(&proxy);
+                self.stack.push(Value::Proxy(proxy));
             }
             Value::Proxy(proxy) => {
                 let inner = proxy.target.clone();

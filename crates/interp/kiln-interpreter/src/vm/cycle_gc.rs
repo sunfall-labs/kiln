@@ -313,6 +313,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // this thread; another live realm's references remain external owners and stay live.
         let allocated_objects = crate::gc_census::object_candidates();
         let allocated_arrays = crate::gc_census::array_candidates();
+        let allocated_proxies = crate::gc_census::proxy_candidates();
         let (
             shared_closures,
             shared_generators,
@@ -389,6 +390,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         for weak in &allocated_arrays {
             if let Some(array) = weak.upgrade() {
                 let owner = Owner::Array(array);
+                let key = owner.key();
+                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
+                    entry.insert(Node {
+                        owner: Some(owner),
+                        edges: Vec::new(),
+                    });
+                    work.push(key);
+                }
+            }
+        }
+        for weak in &allocated_proxies {
+            if let Some(proxy) = weak.upgrade() {
+                let owner = Owner::Proxy(proxy);
                 let key = owner.key();
                 if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
                     entry.insert(Node {
@@ -1769,23 +1783,14 @@ mod tests {
             private_elements: RefCell::new(ObjectData::default()),
             revoked: std::cell::Cell::new(false),
         });
+        crate::gc_census::register_proxy(&proxy_data);
         let proxy = Value::Proxy(Rc::clone(&proxy_data));
         let weak_target = Rc::downgrade(&proxy_data);
-        // Seed the weak-only census through an ordinary object. Proxy allocations do not
-        // currently have an independent weak census, so this holder makes the self-cycle
-        // discoverable without retaining it.
-        let mut holder = ObjectData::default();
-        holder.set("proxy", proxy.clone());
-        let holder = tracked_object(holder);
-        holder
-            .borrow_mut()
-            .set("self", Value::Object(Rc::clone(&holder)));
         proxy_data
             .private_elements
             .borrow_mut()
             .set("@@private:cycle:%brand", proxy.clone());
 
-        drop(holder);
         drop(proxy);
         drop(proxy_data);
         vm.collect_closure_cycles();
@@ -1806,21 +1811,15 @@ mod tests {
             private_elements: RefCell::new(ObjectData::default()),
             revoked: std::cell::Cell::new(false),
         });
+        crate::gc_census::register_proxy(&proxy_data);
         let proxy = Value::Proxy(Rc::clone(&proxy_data));
         let weak_target = Rc::downgrade(&proxy_data);
-        let mut holder = ObjectData::default();
-        holder.set("proxy", proxy.clone());
-        let holder = tracked_object(holder);
-        holder
-            .borrow_mut()
-            .set("self", Value::Object(Rc::clone(&holder)));
         proxy_data
             .private_elements
             .borrow_mut()
             .set("@@private:cycle:%brand", proxy.clone());
         let external_owner = proxy.clone();
 
-        drop(holder);
         drop(proxy);
         drop(proxy_data);
         vm.collect_closure_cycles();
