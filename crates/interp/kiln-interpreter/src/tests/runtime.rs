@@ -391,6 +391,171 @@ fn missing_arguments_are_undefined_and_extra_ones_are_discarded() {
     assert_eq!(run(&long), Ok(Value::Number(2.0)), "third argument dropped");
 }
 
+/// The frame keeps every supplied actual for `arguments`, even though local slots bind only
+/// the formal prefix. This guards the move-based call entry against truncating the owned vector.
+#[test]
+fn a_call_keeps_surplus_actuals_in_its_arguments_object() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
+        constants: vec![number(7.0), number(8.0), number(9.0)],
+        code: vec![
+            Instruction::MakeFunction(0),
+            Instruction::Const(0),
+            Instruction::Const(1),
+            Instruction::Const(2),
+            Instruction::Call { argc: 3 },
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: vec![kiln_ir::FunctionProto {
+            inferred_name: None,
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: Some("arguments".to_owned()),
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            parameter_count: 1,
+            declared_length: 1,
+            mapped_arguments: false,
+            local_count: 1,
+            code: vec![Instruction::LoadArguments, Instruction::Return],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        }],
+    };
+
+    let Value::Object(arguments) = run(&program).expect("call returns its arguments object") else {
+        panic!("LoadArguments produces an object");
+    };
+    let arguments = arguments.borrow();
+    assert_eq!(arguments.get_own("length"), Some(&Value::Number(3.0)));
+    assert_eq!(arguments.get_own("0"), Some(&Value::Number(7.0)));
+    assert_eq!(arguments.get_own("1"), Some(&Value::Number(8.0)));
+    assert_eq!(arguments.get_own("2"), Some(&Value::Number(9.0)));
+}
+
+/// A rest parameter reads the full actual list, not the formal prefix stored in local slots.
+#[test]
+fn a_call_keeps_surplus_actuals_for_rest_arguments() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
+        constants: vec![number(7.0), number(8.0), number(9.0)],
+        code: vec![
+            Instruction::MakeFunction(0),
+            Instruction::Const(0),
+            Instruction::Const(1),
+            Instruction::Const(2),
+            Instruction::Call { argc: 3 },
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: vec![kiln_ir::FunctionProto {
+            inferred_name: None,
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: Some("rest".to_owned()),
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            parameter_count: 1,
+            declared_length: 1,
+            mapped_arguments: false,
+            local_count: 1,
+            code: vec![Instruction::RestArguments(1), Instruction::Return],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        }],
+    };
+
+    let Value::Array(rest) = run(&program).expect("call returns its rest array") else {
+        panic!("RestArguments produces an array");
+    };
+    assert_eq!(&*rest.borrow(), &[Value::Number(8.0), Value::Number(9.0)]);
+}
+
+/// Generator parameter instantiation uses the whole call argument list before suspension, while
+/// its ordinary parameter slots still receive only the formal prefix.
+#[test]
+fn a_generator_prologue_keeps_surplus_actuals_and_rest_values() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
+        constants: vec![number(7.0), number(8.0), number(9.0)],
+        code: vec![
+            Instruction::MakeFunction(0),
+            Instruction::Const(0),
+            Instruction::Const(1),
+            Instruction::Const(2),
+            Instruction::Call { argc: 3 },
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: vec![kiln_ir::FunctionProto {
+            inferred_name: None,
+            span: kiln_ir::Span::default(),
+            prologue_end: 2,
+            asynchronous: false,
+            name: Some("generator".to_owned()),
+            arrow: false,
+            generator: true,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            parameter_count: 1,
+            declared_length: 1,
+            mapped_arguments: false,
+            local_count: 2,
+            code: vec![
+                Instruction::RestArguments(1),
+                Instruction::StoreLocal(1),
+                Instruction::LoadLocal(0),
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        }],
+    };
+
+    let Value::Generator(generator) = run(&program).expect("generator call returns an iterator")
+    else {
+        panic!("generator calls produce a generator");
+    };
+    let generator = generator.borrow();
+    assert_eq!(
+        generator.arguments,
+        vec![Value::Number(7.0), Value::Number(8.0), Value::Number(9.0)]
+    );
+    assert_eq!(generator.locals[0], Value::Number(7.0));
+    let Value::Array(rest) = &generator.locals[1] else {
+        panic!("the generator prologue stores its rest parameter");
+    };
+    assert_eq!(&*rest.borrow(), &[Value::Number(8.0), Value::Number(9.0)]);
+}
+
 /// The caller's operand stack must survive the call untouched.
 #[test]
 fn a_call_leaves_only_its_result_on_the_caller_stack() {

@@ -2503,14 +2503,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if self.stack.len() < argc + 1 {
             return Err(ExecutionError::StackUnderflow { instruction });
         }
-        let mut arguments = self.stack.split_off(self.stack.len() - argc);
+        let received = self.stack.split_off(self.stack.len() - argc);
         self.stack.pop();
 
         let mut locals = vec![Value::Undefined; proto.local_count as usize];
-        let received = arguments.clone();
-        arguments.truncate(proto.parameter_count as usize);
-        for (slot, argument) in arguments.into_iter().enumerate() {
-            locals[slot] = argument;
+        // The generator retains every actual for `arguments`, rest parameters and resumptions.
+        // Locals need only a separate copy of the formal prefix; cloning the whole argument
+        // vector here duplicated surplus actuals and allocated a second vector per generator.
+        for (slot, argument) in received
+            .iter()
+            .take(proto.parameter_count as usize)
+            .enumerate()
+        {
+            locals[slot] = argument.clone();
         }
 
         // Binding the parameters is part of the *call*, not of the first resumption: the

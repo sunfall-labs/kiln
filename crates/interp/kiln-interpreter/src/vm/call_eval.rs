@@ -137,16 +137,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if self.stack.len() < argc + 1 {
             return Err(ExecutionError::StackUnderflow { instruction });
         }
-        let mut arguments = self.stack.split_off(self.stack.len() - argc);
+        let received = self.stack.split_off(self.stack.len() - argc);
         // The callee sits directly below its arguments; removing it here is what makes the
         // stack look, to the caller, as though the call left only its result.
         self.stack.pop();
-        let received = arguments.clone();
 
         let mut locals = vec![Value::Undefined; proto.local_count as usize];
-        arguments.truncate(proto.parameter_count as usize);
-        for (slot, argument) in arguments.into_iter().enumerate() {
-            locals[slot] = argument;
+        // Keep the full incoming vector as this frame's `arguments`. Only the formal prefix is
+        // also needed in local slots. Cloning the whole vector first duplicated every surplus
+        // actual (and allocated another Vec) on every ordinary call.
+        for (slot, argument) in received
+            .iter()
+            .take(proto.parameter_count as usize)
+            .enumerate()
+        {
+            locals[slot] = argument.clone();
         }
 
         // `new.target` is the constructor this call named, which is this closure when the call
