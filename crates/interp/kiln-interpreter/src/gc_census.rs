@@ -68,7 +68,9 @@ struct ThreadCensus {
 
 thread_local! {
     static CENSUS: RefCell<ThreadCensus> = RefCell::new(ThreadCensus::default());
-    static ACTIVE_VM_RUNS: Cell<usize> = const { Cell::new(0) };
+    // Only the outermost invocation owns this bit. Nested VMs need to see that a run is active,
+    // but do not need their own count or a matching TLS write on return.
+    static VM_RUN_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) struct VmRunGuard {
@@ -83,15 +85,22 @@ impl VmRunGuard {
 
 impl Drop for VmRunGuard {
     fn drop(&mut self) {
-        ACTIVE_VM_RUNS.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        if self.outermost {
+            // Production guards are lexical locals in `run_bounded`; any nested VM drive
+            // returns (and drops its non-outer guard) before this outer guard can drop.
+            VM_RUN_ACTIVE.with(|active| active.set(false));
+        }
     }
 }
 
 pub(crate) fn enter_vm_run() -> VmRunGuard {
-    let outermost = ACTIVE_VM_RUNS.with(|depth| {
-        let previous = depth.get();
-        depth.set(previous.saturating_add(1));
-        previous == 0
+    let outermost = VM_RUN_ACTIVE.with(|active| {
+        if active.get() {
+            false
+        } else {
+            active.set(true);
+            true
+        }
     });
     VmRunGuard { outermost }
 }
@@ -261,7 +270,16 @@ mod tests {
         // execution must leave collection pressure pending for the next outer opcode boundary.
         let nested = enter_vm_run();
         assert!(!nested.outermost());
+        let deeper_nested = enter_vm_run();
+        assert!(!deeper_nested.outermost());
+        let cross_vm = enter_vm_run();
+        assert!(!cross_vm.outermost());
+        drop(cross_vm);
+        drop(deeper_nested);
         drop(nested);
+        let later_nested = enter_vm_run();
+        assert!(!later_nested.outermost());
+        drop(later_nested);
         drop(outer);
 
         assert!(enter_vm_run().outermost());
