@@ -30,10 +30,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let constructor = Value::Native(Native::Error(ErrorKind::Error), self.current_realm);
         let identity = intrinsic_key(&constructor)?;
         let entries = self.intrinsics.entries.borrow();
-        let value = entries
-            .iter()
-            .find(|(key, _)| *key == identity)
-            .and_then(|(_, data)| data.get_own("stackTraceLimit"))?;
+        let index = self.intrinsics.entry_position(&entries, identity)?;
+        let value = entries.get(index)?.1.get_own("stackTraceLimit")?;
         let Value::Number(limit) = value else {
             return None;
         };

@@ -227,7 +227,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         // The built-in store is a realm root too, and one that can hold anything: a program
         // that writes a closure onto `Array.prototype` puts a whole object graph in here.
         // Dropped rather than emptied slot by slot, because nothing points *into* it.
-        self.intrinsics.entries.borrow_mut().clear();
+        self.intrinsics.clear_entries();
         // The realm's own roots. `globalThis.globalThis` is the global object itself, so the
         // realm is a cycle on its own and survives the machine that built it -- taking with it
         // everything the program hung off the global object.

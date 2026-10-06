@@ -1,4 +1,5 @@
 use super::*;
+use std::hash::{Hash, Hasher};
 
 /// `Reflect.get` does not box primitive targets. Every other public `Value` variant represents an
 /// object or callable object; `Cell` is internal and must never escape as a target.
@@ -1336,6 +1337,94 @@ pub(super) enum IntrinsicKey {
     Callback(CallbackMethod, RealmId),
 }
 
+impl Hash for IntrinsicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Native(native, realm) => {
+                0u8.hash(state);
+                std::mem::discriminant(native).hash(state);
+                hash_native_payload(*native, state);
+                realm.hash(state);
+            }
+            Self::Callback(method, realm) => {
+                1u8.hash(state);
+                std::mem::discriminant(method).hash(state);
+                realm.hash(state);
+            }
+        }
+    }
+}
+
+fn hash_native_payload<H: Hasher>(native: Native, state: &mut H) {
+    fn tag<T>(value: &T, state: &mut impl Hasher) {
+        std::mem::discriminant(value).hash(state);
+    }
+
+    match native {
+        Native::Temporal(op) => match op {
+            temporal::Op::Namespace | temporal::Op::Now | temporal::Op::NowTimeZoneId => {}
+            temporal::Op::NowRead(kind)
+            | temporal::Op::Constructor(kind)
+            | temporal::Op::Prototype(kind)
+            | temporal::Op::From(kind)
+            | temporal::Op::Compare(kind) => tag(&kind, state),
+            temporal::Op::FromEpoch(precision) => tag(&precision, state),
+            temporal::Op::Accessor(kind, field) => {
+                tag(&kind, state);
+                field.hash(state);
+            }
+            temporal::Op::Method(kind, method) => {
+                tag(&kind, state);
+                tag(&method, state);
+            }
+        },
+        Native::Intl(op) => match op {
+            intl::Op::Namespace | intl::Op::GetCanonicalLocales | intl::Op::SupportedValuesOf => {}
+            intl::Op::Constructor(service)
+            | intl::Op::Prototype(service)
+            | intl::Op::SupportedLocalesOf(service) => tag(&service, state),
+            intl::Op::Method(service, method) => {
+                tag(&service, state);
+                tag(&method, state);
+            }
+            intl::Op::Adapter(adapter) => tag(&adapter, state),
+        },
+        Native::HostAgent(op) => tag(&op, state),
+        Native::CollectionGetOrInsert { weak, computed } => {
+            weak.hash(state);
+            computed.hash(state);
+        }
+        Native::AtomicsOp(op) => tag(&op, state),
+        Native::AbortSignalListen { remove } => remove.hash(state),
+        Native::NodeOsFact(op) => tag(&op, state),
+        Native::NodePathPart(op) => tag(&op, state),
+        Native::Error(kind) => tag(&kind, state),
+        Native::Uint8Text(op) => tag(&op, state),
+        Native::Date(op) => tag(&op, state),
+        Native::RegExpAccessor(op) => tag(&op, state),
+        Native::SetOperation(op) => tag(&op, state),
+        Native::ArrayCopy(op) => tag(&op, state),
+        Native::BuiltinAccessor(op) => tag(&op, state),
+        Native::RegExpSymbol(op) => tag(&op, state),
+        Native::PrototypeOf(table) => tag(&table, state),
+        Native::CollectionKeys(value)
+        | Native::CollectionForEach(value)
+        | Native::CollectionEntries(value)
+        | Native::CollectionClear(value)
+        | Native::CollectionValues(value) => value.hash(state),
+        Native::TypedArrayConstructor(kind)
+        | Native::TypedArrayOf(kind)
+        | Native::TypedArrayFrom(kind)
+        | Native::DataViewGet(kind)
+        | Native::DataViewSet(kind) => tag(&kind, state),
+        Native::DataViewGetBig { signed } | Native::DataViewSetBig { signed } => signed.hash(state),
+        Native::IteratorLazy(kind) | Native::IteratorHelperNext(kind) => tag(&kind, state),
+        Native::IteratorTerminal(kind) => tag(&kind, state),
+        Native::WebStub(kind) => tag(&kind, state),
+        _ => {}
+    }
+}
+
 /// The key a built-in is stored under, or `None` for a value that is not one.
 ///
 /// `Bound` and `Settler` are deliberately absent. Each is an allocation with identity of its
@@ -1376,10 +1465,13 @@ pub(super) fn retag_intrinsic_property(property: Property, realm: RealmId) -> Pr
 }
 
 pub(super) struct Intrinsics {
-    /// A linear scan rather than a map: this is empty for a program that leaves the built-ins
-    /// alone and holds a handful of entries for one that does not, which is well below the size
-    /// where hashing every lookup pays for itself.
+    /// Stable storage order for materialized built-ins. Reflection walks this vector to retain
+    /// ordinary insertion order within each object's own store.
     pub(super) entries: RefCell<Vec<(IntrinsicKey, ObjectData)>>,
+    /// Lookup index allocated only after enough intrinsics have been materialized to make a
+    /// linear scan expensive. The vector remains authoritative for order; indices stay stable
+    /// because records are appended or replaced in place and are cleared as a whole at teardown.
+    entry_indices: RefCell<Option<Box<std::collections::HashMap<IntrinsicKey, usize>>>>,
     /// Whether any program has defined an *accessor* on any built-in.
     ///
     /// A guard for [`inherited_intrinsic_accessor_key`], which is asked on every read that misses a
@@ -1427,6 +1519,7 @@ impl Default for Intrinsics {
     fn default() -> Self {
         Self {
             entries: RefCell::default(),
+            entry_indices: RefCell::new(None),
             accessors: std::cell::Cell::new(false),
             indexed_array_prototype: std::cell::Cell::new(
                 kiln_builtin_surface::PROTOTYPE_SURFACE
@@ -1449,13 +1542,74 @@ impl Default for Intrinsics {
 }
 
 impl Intrinsics {
+    const INDEXED_ENTRY_THRESHOLD: usize = 8;
+
+    /// Find one materialized intrinsic by its realm-scoped identity. Common small executions
+    /// keep the existing compact-vector scan; once the vector grows, all reads and writes share
+    /// this stable-index map. `IntrinsicKey` hashes its enum discriminant and realm; payload
+    /// variants may collide, which ordinary equality resolves without changing identity.
+    pub(super) fn entry_position(
+        &self,
+        entries: &[(IntrinsicKey, ObjectData)],
+        identity: IntrinsicKey,
+    ) -> Option<usize> {
+        if entries.len() >= Self::INDEXED_ENTRY_THRESHOLD {
+            let indices = self.entry_indices.borrow();
+            if let Some(indices) = indices.as_ref() {
+                return indices.get(&identity).copied();
+            }
+        }
+        entries.iter().position(|(key, _)| *key == identity)
+    }
+
+    fn record_entry(&self, entries: &mut Vec<(IntrinsicKey, ObjectData)>, identity: IntrinsicKey) {
+        let index = entries.len();
+        entries.push((identity, ObjectData::default()));
+        self.index_appended_entry(entries, identity, index);
+    }
+
+    fn record_materialized_entry(
+        &self,
+        entries: &mut Vec<(IntrinsicKey, ObjectData)>,
+        identity: IntrinsicKey,
+        data: ObjectData,
+    ) {
+        let index = entries.len();
+        entries.push((identity, data));
+        self.index_appended_entry(entries, identity, index);
+    }
+
+    fn index_appended_entry(
+        &self,
+        entries: &[(IntrinsicKey, ObjectData)],
+        identity: IntrinsicKey,
+        index: usize,
+    ) {
+        let mut entry_indices = self.entry_indices.borrow_mut();
+        if let Some(indices) = entry_indices.as_mut() {
+            indices.insert(identity, index);
+        } else if entries.len() >= Self::INDEXED_ENTRY_THRESHOLD {
+            *entry_indices = Some(Box::new(
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (key, _))| (*key, index))
+                    .collect(),
+            ));
+        }
+    }
+
+    pub(super) fn clear_entries(&self) {
+        self.entries.borrow_mut().clear();
+        self.entry_indices.borrow_mut().take();
+    }
+
     /// A materialized intrinsic may have an ordinary mutable [[Prototype]] link of its own.
     pub(super) fn prototype_override(&self, target: &Value) -> Option<Value> {
         let identity = intrinsic_key(target)?;
-        self.entries
-            .borrow()
-            .iter()
-            .find(|(held, _)| *held == identity)
+        let entries = self.entries.borrow();
+        self.entry_position(&entries, identity)
+            .and_then(|index| entries.get(index))
             .and_then(|(_, data)| data.prototype().cloned())
     }
 
@@ -1470,7 +1624,7 @@ impl Intrinsics {
         };
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();
-        Self::data(&mut entries, identity).set_prototype(prototype);
+        self.data(&mut entries, identity).set_prototype(prototype);
         let mut array_parent = None;
         let mut object_parent = None;
         for (key, data) in entries.iter() {
@@ -1679,10 +1833,10 @@ impl Intrinsics {
             self.materialize(target);
         }
         let entries = self.entries.borrow();
-        let Some((_, slots)) = entries.iter().find(|(held, _)| *held == identity) else {
+        let Some(index) = self.entry_position(&entries, identity) else {
             return Overridden::Untouched;
         };
-        let data = slots;
+        let data = &entries[index].1;
         if let Some(property) = data.get_own_property_key(key) {
             return Overridden::Held(
                 property.clone(),
@@ -1736,10 +1890,9 @@ impl Intrinsics {
         let Some(identity) = intrinsic_key(target) else {
             return true;
         };
-        self.entries
-            .borrow()
-            .iter()
-            .find(|(held, _)| *held == identity)
+        let entries = self.entries.borrow();
+        self.entry_position(&entries, identity)
+            .and_then(|index| entries.get(index))
             .is_none_or(|(_, data)| data.is_extensible())
     }
 
@@ -1753,7 +1906,7 @@ impl Intrinsics {
         };
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();
-        let data = Self::data(&mut entries, identity);
+        let data = self.data(&mut entries, identity);
         if sealing {
             data.seal();
         } else {
@@ -1792,7 +1945,7 @@ impl Intrinsics {
         }
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();
-        let data = Self::data(&mut entries, identity);
+        let data = self.data(&mut entries, identity);
         data.install_key(key, property, attributes);
     }
 
@@ -1802,24 +1955,23 @@ impl Intrinsics {
         };
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();
-        let data = Self::data(&mut entries, identity);
+        let data = self.data(&mut entries, identity);
         data.remove_key(key);
     }
 
     /// Complete materialized own keys in ordinary ObjectData insertion order.
     pub(super) fn is_materialized(&self, target: &Value) -> bool {
-        intrinsic_key(target).is_some_and(|identity| {
-            self.entries
-                .borrow()
-                .iter()
-                .any(|(key, _)| *key == identity)
-        })
+        let Some(identity) = intrinsic_key(target) else {
+            return false;
+        };
+        let entries = self.entries.borrow();
+        self.entry_position(&entries, identity).is_some()
     }
 
     pub(super) fn own_keys_units(&self, target: &Value) -> Option<Vec<StringUnits>> {
         let identity = intrinsic_key(target)?;
         let entries = self.entries.borrow();
-        let data = &entries.iter().find(|(key, _)| *key == identity)?.1;
+        let data = &entries.get(self.entry_position(&entries, identity)?)?.1;
         Some(data.keys().cloned().collect())
     }
 
@@ -1829,21 +1981,22 @@ impl Intrinsics {
         };
         self.materialize(target);
         let entries = self.entries.borrow();
-        let Some((_, data)) = entries.iter().find(|(held, _)| *held == identity) else {
+        let Some(index) = self.entry_position(&entries, identity) else {
             return Vec::new();
         };
+        let data = &entries[index].1;
         data.string_entries()
             .map(|(key, property)| (key.clone(), property.clone()))
             .collect()
     }
 
-    pub(super) fn data(
-        entries: &mut Vec<(IntrinsicKey, ObjectData)>,
+    pub(super) fn data<'a>(
+        &self,
+        entries: &'a mut Vec<(IntrinsicKey, ObjectData)>,
         identity: IntrinsicKey,
-    ) -> &mut ObjectData {
-        let position = entries.iter().position(|(key, _)| *key == identity);
-        let position = position.unwrap_or_else(|| {
-            entries.push((identity, ObjectData::default()));
+    ) -> &'a mut ObjectData {
+        let position = self.entry_position(entries, identity).unwrap_or_else(|| {
+            self.record_entry(entries, identity);
             entries.len() - 1
         });
         &mut entries[position].1
@@ -1853,12 +2006,7 @@ impl Intrinsics {
         let Some(identity) = intrinsic_key(target) else {
             return;
         };
-        if self
-            .entries
-            .borrow()
-            .iter()
-            .any(|(key, _)| *key == identity)
-        {
+        if self.is_materialized(target) {
             return;
         }
         let realm = value_realm(target);
@@ -2042,10 +2190,10 @@ impl Intrinsics {
             }
             data.set_prototype(prototype_of(target));
             let mut entries = self.entries.borrow_mut();
-            if let Some((_, slot)) = entries.iter_mut().find(|(key, _)| *key == identity) {
-                *slot = data;
+            if let Some(index) = self.entry_position(&entries, identity) {
+                entries[index].1 = data;
             } else {
-                entries.push((identity, data));
+                self.record_materialized_entry(&mut entries, identity, data);
             }
             return;
         }
@@ -2107,10 +2255,10 @@ impl Intrinsics {
         }
         data.set_prototype(prototype_of(target));
         let mut entries = self.entries.borrow_mut();
-        if let Some((_, slot)) = entries.iter_mut().find(|(key, _)| *key == identity) {
-            *slot = data;
+        if let Some(index) = self.entry_position(&entries, identity) {
+            entries[index].1 = data;
         } else {
-            entries.push((identity, data));
+            self.record_materialized_entry(&mut entries, identity, data);
         }
     }
 }
@@ -3269,15 +3417,16 @@ pub(super) fn own_symbol_keys_units(intrinsics: &Intrinsics, target: &Value) -> 
         | Value::Capability(..)
         | Value::Element(_) => intrinsic_key(target)
             .and_then(|identity| {
-                intrinsics.entries.borrow().iter().find_map(|(held, data)| {
-                    (*held == identity).then(|| {
-                        data.properties
-                            .iter()
-                            .filter(|slot| slot.symbol)
-                            .map(|slot| slot.key.clone())
-                            .collect()
-                    })
-                })
+                let entries = intrinsics.entries.borrow();
+                let index = intrinsics.entry_position(&entries, identity)?;
+                let data = &entries.get(index)?.1;
+                Some(
+                    data.properties
+                        .iter()
+                        .filter(|slot| slot.symbol)
+                        .map(|slot| slot.key.clone())
+                        .collect(),
+                )
             })
             .unwrap_or_default(),
         _ => Vec::new(),
@@ -3748,4 +3897,55 @@ pub(super) fn own_descriptor_key(
     data.set("enumerable", Value::Boolean(attributes.enumerable));
     data.set("configurable", Value::Boolean(attributes.configurable));
     Some(Value::Object(tracked_object(data)))
+}
+
+#[cfg(test)]
+mod intrinsic_index_tests {
+    use super::*;
+
+    #[test]
+    fn materialized_intrinsic_index_handles_payload_collisions_realms_and_reset() {
+        let intrinsics = Intrinsics::default();
+        let primary = RealmId::PRIMARY;
+        let identities = [
+            IntrinsicKey::Native(Native::MathAbs, primary),
+            IntrinsicKey::Native(Native::MathMax, primary),
+            IntrinsicKey::Native(Native::Temporal(temporal::Op::Namespace), primary),
+            IntrinsicKey::Native(Native::Temporal(temporal::Op::Now), primary),
+            IntrinsicKey::Native(
+                Native::Intl(intl::Op::Constructor(intl::Service::Collator)),
+                primary,
+            ),
+            IntrinsicKey::Native(
+                Native::Intl(intl::Op::Constructor(intl::Service::NumberFormat)),
+                primary,
+            ),
+            IntrinsicKey::Callback(CallbackMethod::Map, primary),
+            IntrinsicKey::Callback(CallbackMethod::ForEach, primary),
+            IntrinsicKey::Native(Native::MathAbs, RealmId(1)),
+        ];
+
+        let mut entries = intrinsics.entries.borrow_mut();
+        for identity in identities {
+            intrinsics.record_entry(&mut entries, identity);
+        }
+        for (expected, identity) in identities.into_iter().enumerate() {
+            assert_eq!(
+                intrinsics.entry_position(&entries, identity),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            intrinsics.entry_indices.borrow().as_ref().unwrap().len(),
+            identities.len()
+        );
+        drop(entries);
+
+        intrinsics.clear_entries();
+        let mut entries = intrinsics.entries.borrow_mut();
+        intrinsics.record_entry(&mut entries, identities[8]);
+        assert_eq!(intrinsics.entry_position(&entries, identities[8]), Some(0));
+        assert_eq!(intrinsics.entry_position(&entries, identities[0]), None);
+        assert!(intrinsics.entry_indices.borrow().is_none());
+    }
 }
