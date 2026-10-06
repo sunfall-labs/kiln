@@ -9186,6 +9186,7 @@ static void kiln_c99_gc_weak_ephemerons_prune(kiln_gc_heap *heap) {
             entry->value = kiln_c99_undefined();
             collection->live -= 1;
         }
+        kiln_c99_collection_compact_weak(collection);
     }
 }
 

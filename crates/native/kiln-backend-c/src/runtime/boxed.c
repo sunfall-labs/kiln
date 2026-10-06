@@ -573,6 +573,7 @@ static kiln_val kiln_c99_collection_delete_val_fast(kiln_collection *collection,
     kiln_c99_collection_hash_remove(collection, (size_t)at, kiln_val_to_boundary(key));
     kiln_c99_heap_store_value(collection, &collection->entries[(size_t)at].key, kiln_c99_undefined());
     kiln_c99_heap_store_value(collection, &collection->entries[(size_t)at].value, kiln_c99_undefined());
+    kiln_c99_collection_compact_weak(collection);
     return KILN_VAL_TRUE;
 }
 

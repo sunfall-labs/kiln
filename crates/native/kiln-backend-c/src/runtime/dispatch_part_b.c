@@ -73,6 +73,7 @@
                 kiln_c99_collection_hash_remove(collection, (size_t)at, first);
                 kiln_c99_heap_store_value(collection, &collection->entries[(size_t)at].key, kiln_c99_undefined());
                 kiln_c99_heap_store_value(collection, &collection->entries[(size_t)at].value, kiln_c99_undefined());
+                kiln_c99_collection_compact_weak(collection);
                 *result = kiln_c99_boolean(1);
                 return KILN_C99_OK;
             case KILN_C99_METHOD_COLLECTION_CLEAR:

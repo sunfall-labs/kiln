@@ -309,6 +309,106 @@ int main(void) {
     );
 }
 
+#[test]
+fn weak_collection_churn_compacts_history_and_preserves_ephemerons() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("unit emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_value fast_set_value, dispatch_set_value, key, keeper, map_value, live_key, live_value;
+    kiln_collection *fast_set;
+    kiln_collection *dispatch_set;
+    kiln_collection *map;
+    kiln_value delete_args[1];
+    kiln_value result = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_gc_block *value_block;
+    kiln_c99_gc_heap_init(&heap);
+    kiln_test_heap = &heap;
+    kiln_test_generation += 1;
+    heap.enabled = 0;
+    if (kiln_c99_new_collection(&fast_set_value, 0, 1) != KILN_C99_OK ||
+        kiln_c99_new_collection(&dispatch_set_value, 0, 1) != KILN_C99_OK ||
+        kiln_c99_new_array(&key) != KILN_C99_OK ||
+        kiln_c99_new_array(&keeper) != KILN_C99_OK) return 1;
+    fast_set = kiln_c99_collection_of(fast_set_value);
+    dispatch_set = kiln_c99_collection_of(dispatch_set_value);
+    if (kiln_c99_collection_put_unleased(fast_set_value, keeper, keeper) != KILN_C99_OK ||
+        kiln_c99_collection_put_unleased(dispatch_set_value, keeper, keeper) != KILN_C99_OK)
+        return 2;
+    delete_args[0] = key;
+    for (size_t index = 0; index < 10000; ++index) {
+        if (kiln_c99_collection_put_unleased(fast_set_value, key, key) != KILN_C99_OK ||
+            kiln_c99_collection_put_unleased(dispatch_set_value, key, key) != KILN_C99_OK)
+            return 2;
+        if (kiln_c99_collection_delete_val_fast(fast_set, kiln_val_from_boundary(key)) !=
+            KILN_VAL_TRUE) return 3;
+        if (kiln_c99_call(NULL, &result,
+                kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE), dispatch_set_value,
+                delete_args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 4;
+    }
+    if (fast_set->live != 1 || dispatch_set->live != 1 ||
+        fast_set->count >= 34 || dispatch_set->count >= 34 ||
+        fast_set->capacity > 128 || dispatch_set->capacity > 128) return 5;
+    if (kiln_c99_collection_has_val_fast(fast_set, kiln_val_from_boundary(keeper)) !=
+            KILN_VAL_TRUE ||
+        kiln_c99_call(NULL, &result, kiln_c99_method(KILN_C99_METHOD_COLLECTION_HAS),
+            dispatch_set_value, &keeper, 1, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result)) return 10;
+
+    if (kiln_c99_new_collection(&map_value, 1, 1) != KILN_C99_OK) return 6;
+    map = kiln_c99_collection_of(map_value);
+    for (size_t index = 0; index < 40; ++index) {
+        if (kiln_c99_new_array(&live_key) != KILN_C99_OK ||
+            kiln_c99_new_array(&live_value) != KILN_C99_OK ||
+            kiln_c99_collection_put_unleased(map_value, live_key, live_value) != KILN_C99_OK)
+            return 6;
+    }
+    kiln_c99_nursery_turn_chunk(&heap);
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_value(&heap, &map_value);
+    kiln_c99_gc_drain(&heap);
+    kiln_c99_gc_weak_ephemerons(&heap);
+    kiln_c99_gc_weak_ephemerons_prune(&heap);
+    if (map->live != 0 || map->count != 0 || map->capacity > 64 ||
+        map->hash_capacity > 16) return 7;
+
+    if (kiln_c99_new_array(&live_key) != KILN_C99_OK ||
+        kiln_c99_new_array(&live_value) != KILN_C99_OK ||
+        kiln_c99_collection_put_unleased(map_value, live_key, live_value) != KILN_C99_OK)
+        return 6;
+    value_block = kiln_c99_gc_lookup(&heap, (void *)(uintptr_t)live_value.bits);
+    if (value_block == NULL) return 8;
+    kiln_c99_nursery_turn_chunk(&heap);
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_value(&heap, &map_value);
+    kiln_c99_gc_mark_value(&heap, &live_key);
+    kiln_c99_gc_drain(&heap);
+    kiln_c99_gc_weak_ephemerons(&heap);
+    kiln_c99_gc_weak_ephemerons_prune(&heap);
+    if (value_block->mark != heap.epoch || map->live != 1 || map->count != 1 ||
+        map->entries[0].dead) return 9;
+
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_value(&heap, &map_value);
+    kiln_c99_gc_drain(&heap);
+    kiln_c99_gc_weak_ephemerons(&heap);
+    kiln_c99_gc_weak_ephemerons_prune(&heap);
+    if (map->live != 0 || value_block->mark == heap.epoch || !map->entries[0].dead ||
+        map->entries[0].key.tag != KILN_VALUE_UNDEFINED ||
+        map->entries[0].value.tag != KILN_VALUE_UNDEFINED) return 10;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "weak-collection-churn-compaction");
+    assert!(
+        run.status.success(),
+        "weak collection churn fixture failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 /// ADR 0071, realms issue 04 step 3: a process-wide site keeps what every realm can read and
 /// forgets, when a realm is torn down, everything that realm is about to free -- its realm-local
 /// shapes, and a realm-local key a list-mode holder was checked by. Which built-ins are modified

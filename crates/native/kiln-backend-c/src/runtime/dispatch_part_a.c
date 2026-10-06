@@ -3,6 +3,97 @@
  * Dispatch reads groups and both coercion masks together so this hot path has one descriptor
  * lookup and unknown codes retain the all-zero refusal behavior. */
 
+/* Collections preserve insertion order because Map and Set expose iteration. Weak collections
+ * are not iterable, so once enough dead slots accumulate they can be compacted without changing
+ * an observable cursor. Keep the threshold proportional to live entries (with a floor) so the
+ * dead prefix remains bounded while small, frequently reused WeakSets avoid allocator churn. */
+static uint64_t kiln_c99_value_hash(kiln_value value);
+
+static void kiln_c99_collection_compact_weak(kiln_collection *collection) {
+    size_t old_count;
+    size_t dead_count;
+    size_t write = 0;
+    size_t index;
+    size_t entry_target;
+    size_t hash_target = 16;
+
+    if (collection == NULL || !collection->is_weak) return;
+    old_count = collection->count;
+    dead_count = old_count - collection->live;
+    if (dead_count < 32 || dead_count < collection->live) return;
+
+    /* Validate shrink/rebuild sizes before changing entry positions, so an impractically large
+     * collection keeps its existing hash indices intact if a size calculation would overflow. */
+    entry_target = collection->live > 32
+        ? (collection->live <= SIZE_MAX / 2 ? collection->live * 2 : collection->live)
+        : 64;
+    if (entry_target > SIZE_MAX / sizeof *collection->entries) return;
+    if (collection->hash_table != NULL && collection->hash_capacity != 0) {
+        if (collection->live > SIZE_MAX / 2) return;
+        while (hash_target < collection->live * 2) {
+            if (hash_target > SIZE_MAX / 2) return;
+            hash_target *= 2;
+        }
+        if (hash_target > SIZE_MAX / sizeof *collection->hash_table) return;
+    }
+
+    for (index = 0; index < old_count; ++index) {
+        kiln_entry *entry = &collection->entries[index];
+        if (entry->dead) continue;
+        if (write != index) {
+            kiln_value key = entry->key;
+            kiln_value value = entry->value;
+            kiln_c99_heap_store_value(collection, &collection->entries[write].key, key);
+            kiln_c99_heap_store_value(collection, &collection->entries[write].value, value);
+            collection->entries[write].dead = 0;
+        }
+        ++write;
+    }
+    for (index = write; index < old_count; ++index) {
+        kiln_c99_heap_store_value(collection, &collection->entries[index].key,
+                                  kiln_c99_undefined());
+        kiln_c99_heap_store_value(collection, &collection->entries[index].value,
+                                  kiln_c99_undefined());
+        collection->entries[index].dead = 1;
+    }
+    collection->count = write;
+    collection->live = write;
+
+    /* Keep a modest reusable buffer for the common empty WeakSet churn case, but shed
+     * disproportionately large historical allocations when the live set has shrunk. */
+    if (collection->capacity > entry_target &&
+        collection->capacity - entry_target > entry_target) {
+        kiln_entry *moved = (kiln_entry *)realloc(collection->entries,
+                                                   entry_target * sizeof *moved);
+        if (moved != NULL) {
+            collection->entries = moved;
+            collection->capacity = entry_target;
+        }
+    }
+
+    if (collection->hash_table == NULL || collection->hash_capacity == 0) return;
+    if (collection->hash_capacity > hash_target &&
+        collection->hash_capacity - hash_target > hash_target) {
+        uint32_t *moved = (uint32_t *)realloc(collection->hash_table,
+                                              hash_target * sizeof *moved);
+        if (moved != NULL) {
+            collection->hash_table = moved;
+            collection->hash_capacity = hash_target;
+        }
+    }
+    memset(collection->hash_table, 0,
+           collection->hash_capacity * sizeof *collection->hash_table);
+    if (collection->hash_capacity == 0) return;
+    {
+        size_t mask = collection->hash_capacity - 1;
+        for (index = 0; index < write; ++index) {
+            size_t slot = (size_t)kiln_c99_value_hash(collection->entries[index].key) & mask;
+            while (collection->hash_table[slot] != 0) slot = (slot + 1) & mask;
+            collection->hash_table[slot] = (uint32_t)(index + 1);
+        }
+    }
+}
+
 /* Whether a numeric argument still has to go through `ToNumber` to become one.
  *
  * `undefined` is left alone: it is not a missing number but a *meaningful* one, and each built-in
