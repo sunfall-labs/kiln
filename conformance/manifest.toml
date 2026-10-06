@@ -2377,3 +2377,14 @@ catches = "Function constructor bodies inherit strictness from their own directi
 expected_stdout = """
 2 2 4
 """
+
+[[test]]
+id = "regress/r58-internal-suppressed-error-prototype"
+group = "regress"
+source = "regress/r58-internal-suppressed-error-prototype.js"
+status = "runnable"
+features = ["explicit-resource-management", "errors", "parity"]
+catches = "Errors produced internally while unwinding sync or async disposal use the public realm SuppressedError prototype and preserve the displaced errors."
+expected_stdout = """
+sync and async SuppressedError prototypes passed
+"""

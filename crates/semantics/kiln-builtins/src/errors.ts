@@ -164,6 +164,7 @@
   // current native SuppressedError intrinsic uses Error's first-argument message convention,
   // whereas SuppressedError's first two arguments are payloads. This facade applies the public
   // payload and newTarget semantics in both engines.
+  const NativeSuppressedError = G.SuppressedError;
   function allocateBrandedError(): any {
     return Reflect.construct(ErrorCtor, [], ErrorCtor);
   }
@@ -179,7 +180,17 @@
     else result.__proto__ = prototype;
   }
   function SuppressedErrorTarget(error: any, suppressed: any, message?: any): any {}
-  const publicPrototype = Object.create(ErrorCtor.prototype);
+  // The interpreter also creates SuppressedErrors internally while unwinding disposal. Its
+  // realm error constructor and prototype are engine-owned, so the public facade must keep that
+  // prototype identity; otherwise internal throws look like a different constructor despite
+  // having the same name. Reuse the captured intrinsic prototype when available.
+  const nativePrototype =
+    typeof NativeSuppressedError === "function" ? NativeSuppressedError.prototype : undefined;
+  const publicPrototype =
+    nativePrototype !== null &&
+    (typeof nativePrototype === "object" || typeof nativePrototype === "function")
+      ? nativePrototype
+      : Object.create(ErrorCtor.prototype);
   SuppressedErrorTarget.prototype = publicPrototype;
   Object.defineProperty(SuppressedErrorTarget, "prototype", { writable: false });
   Object.defineProperty(SuppressedErrorTarget, "name", { value: "SuppressedError" });
