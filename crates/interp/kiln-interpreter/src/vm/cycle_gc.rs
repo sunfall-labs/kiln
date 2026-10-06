@@ -582,6 +582,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 break;
             }
         }
+        let live_candidate_count = live.len();
 
         // Break only proven-unreachable nodes. WeakRef target upgrades happen after this method
         // returns, so a reclaimed target is absent on the same explicit collection request.
@@ -642,6 +643,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .len()
             .saturating_add(map.gc_weak_ref_objects.len().max(1024));
         map.prune_dead_generations();
+        map.gc_cycle_candidate_allocations = 0;
+        map.gc_cycle_candidate_threshold = live_candidate_count.max(4096);
+        drop(map);
+        drop(module_map);
+        crate::gc_census::collection_completed(live_candidate_count);
     }
 
     /// Drop only physical locals proven dead at this suspended resume point. Captured cells
@@ -1230,6 +1236,108 @@ mod tests {
         )
         .expect("test realm initializes");
         (vm, program)
+    }
+
+    fn add_allocation_pressure(vm: &Vm<'_, TestHost>) {
+        loop {
+            let module_map = vm.gc_module_map();
+            let module_map = module_map.borrow();
+            if crate::gc_census::automatic_collection_due(
+                module_map.gc_cycle_candidate_allocations,
+                module_map.gc_cycle_candidate_threshold,
+            ) {
+                return;
+            }
+            drop(module_map);
+            drop(tracked_object(ObjectData::default()));
+        }
+    }
+
+    fn run_empty_boundary(vm: &mut Vm<'_, TestHost>, program: &Rc<Program>) {
+        vm.program = Rc::clone(program);
+        vm.instruction = 0;
+        vm.run_frames(0).expect("boundary program returns");
+    }
+
+    #[test]
+    fn automatic_cycle_collection_respects_vm_roots_and_job_keepalive() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        vm.locals.push(Value::Undefined);
+        let other_module_map = SharedModuleMap::default();
+        other_module_map.borrow_mut().gc_cycle_candidate_allocations = 4100;
+
+        let mut program = Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
+            constants: Vec::new(),
+            code: vec![Instruction::Nop; 2048],
+            local_count: 1,
+            functions: Vec::new(),
+        };
+        program.code.push(Instruction::Return);
+        let program = Rc::new(program);
+
+        let rooted_target = tracked_object(ObjectData::default());
+        rooted_target
+            .borrow_mut()
+            .set("self", Value::Object(Rc::clone(&rooted_target)));
+        let rooted_weak = Rc::downgrade(&rooted_target);
+        let rooted_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&rooted_target))], 0)
+            .expect("WeakRef construction succeeds");
+        vm.locals[0] = Value::Object(Rc::clone(&rooted_target));
+
+        let job_target = tracked_object(ObjectData::default());
+        let job_weak = Rc::downgrade(&job_target);
+        let job_ref = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&job_target))], 0)
+            .expect("WeakRef construction succeeds");
+        drop(rooted_target);
+        drop(job_target);
+
+        // Candidate allocations make the next outermost opcode boundary collect. The current
+        // job's WeakRef keepalive and a value in the active VM frame both remain external roots.
+        add_allocation_pressure(&vm);
+        run_empty_boundary(&mut vm, &program);
+        assert_eq!(
+            other_module_map.borrow().gc_cycle_candidate_allocations,
+            4100,
+            "a pass in one module map must not erase another map's pressure"
+        );
+        assert!(rooted_weak.upgrade().is_some(), "active VM local is a root");
+        assert!(
+            job_weak.upgrade().is_some(),
+            "same-job WeakRef keepalive is a root"
+        );
+
+        // Clearing the job keepalive does not affect the active local. The next pressure pass
+        // may reclaim the unrelated acyclic target while preserving the VM-rooted cycle.
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        add_allocation_pressure(&vm);
+        run_empty_boundary(&mut vm, &program);
+        assert!(
+            rooted_weak.upgrade().is_some(),
+            "active VM local remains rooted"
+        );
+        assert!(
+            job_weak.upgrade().is_none(),
+            "target dies after the job keepalive is released"
+        );
+
+        vm.locals[0] = Value::Undefined;
+        add_allocation_pressure(&vm);
+        run_empty_boundary(&mut vm, &program);
+        assert!(
+            rooted_weak.upgrade().is_none(),
+            "cycle dies once its VM root is released"
+        );
+        let _ = (rooted_ref, job_ref);
     }
 
     fn generator_program() -> Rc<Program> {

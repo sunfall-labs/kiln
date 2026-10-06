@@ -117,6 +117,10 @@ pub struct ModuleMap {
     /// those references are accounted for without making abandoned generators roots.
     pub(super) gc_generators: Vec<Weak<GeneratorData>>,
     pub(super) gc_generators_prune_at: usize,
+    /// Closure/generator pressure is local to this census: collecting another independent
+    /// ModuleMap on the same thread must not erase its allocation trigger.
+    pub(super) gc_cycle_candidate_allocations: usize,
+    pub(super) gc_cycle_candidate_threshold: usize,
     pub(super) gc_weak_ref_objects: Vec<Weak<RefCell<ObjectData>>>,
     pub(super) gc_weak_ref_objects_prune_at: usize,
     /// Weak collections are census seeds so their conditional values can be traced even when a

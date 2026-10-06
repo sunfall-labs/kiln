@@ -115,6 +115,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         stop_before: usize,
         stop_depth: usize,
     ) -> Result<ExecutionResult, ExecutionError> {
+        let run_guard = crate::gc_census::enter_vm_run();
+        self.run_bounded_inner(stop_at, stop_before, stop_depth, run_guard.outermost())
+    }
+
+    fn run_bounded_inner(
+        &mut self,
+        stop_at: usize,
+        stop_before: usize,
+        stop_depth: usize,
+        outermost_run: bool,
+    ) -> Result<ExecutionResult, ExecutionError> {
         // Held across steps and refreshed only when the running frame's program actually
         // changes. The borrow has to come from a local rather than from `self`, which every
         // instruction below needs mutably -- but paying a refcount pair per *instruction* to
@@ -129,6 +140,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // comparison against a length -- next to the step-limit check below, nothing.
             if !self.self_bindings.is_empty() || !self.self_namespaces.is_empty() {
                 self.refresh_self_imports();
+            }
+            // Cycle collection is pressure-triggered and runs only between instructions, after
+            // self-import namespace snapshots catch up with their live cells. The outermost-run
+            // guard excludes nested interpreter entries whose Rust callers may retain RefCell
+            // borrows. The weak census preserves ordinary VM/Rust roots.
+            if outermost_run && self.steps & 0x3ff == 0 {
+                let module_map = self.gc_module_map();
+                let (module_allocations, module_threshold) = {
+                    let module_map = module_map.borrow();
+                    (
+                        module_map.gc_cycle_candidate_allocations,
+                        module_map.gc_cycle_candidate_threshold,
+                    )
+                };
+                if crate::gc_census::automatic_collection_due(module_allocations, module_threshold)
+                {
+                    self.collect_closure_cycles();
+                }
             }
             // One comparison, two boundaries. `checkpoint` is `max_steps` for every program that
             // has no second agent, so this is the step-limit check it always was; when a second
@@ -2544,6 +2573,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .saturating_add(module_map.gc_generators.len().max(1024));
         }
         module_map.gc_generators.push(Rc::downgrade(&generator));
+        module_map.gc_cycle_candidate_allocations =
+            module_map.gc_cycle_candidate_allocations.saturating_add(1);
         Ok(Value::Generator(generator))
     }
 

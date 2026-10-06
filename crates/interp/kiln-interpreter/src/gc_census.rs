@@ -6,7 +6,7 @@
 //! keeps each registry confined to the thread that owns its realms.
 
 use super::{ArrayData, ObjectData, ProxyData};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
@@ -62,14 +62,46 @@ struct ThreadCensus {
     objects: WeakCensus<RefCell<ObjectData>>,
     arrays: WeakCensus<ArrayData>,
     proxies: WeakCensus<ProxyData>,
+    allocations_since_collection: usize,
+    next_collection_at: usize,
 }
 
 thread_local! {
     static CENSUS: RefCell<ThreadCensus> = RefCell::new(ThreadCensus::default());
+    static ACTIVE_VM_RUNS: Cell<usize> = const { Cell::new(0) };
+}
+
+pub(crate) struct VmRunGuard {
+    outermost: bool,
+}
+
+impl VmRunGuard {
+    pub(crate) fn outermost(&self) -> bool {
+        self.outermost
+    }
+}
+
+impl Drop for VmRunGuard {
+    fn drop(&mut self) {
+        ACTIVE_VM_RUNS.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+pub(crate) fn enter_vm_run() -> VmRunGuard {
+    let outermost = ACTIVE_VM_RUNS.with(|depth| {
+        let previous = depth.get();
+        depth.set(previous.saturating_add(1));
+        previous == 0
+    });
+    VmRunGuard { outermost }
 }
 
 pub(crate) fn register_object(value: &Rc<RefCell<ObjectData>>) {
-    CENSUS.with(|census| census.borrow_mut().objects.register(value));
+    CENSUS.with(|census| {
+        let mut census = census.borrow_mut();
+        census.objects.register(value);
+        census.note_allocation();
+    });
 }
 
 pub(crate) fn tracked_object(data: ObjectData) -> Rc<RefCell<ObjectData>> {
@@ -79,11 +111,52 @@ pub(crate) fn tracked_object(data: ObjectData) -> Rc<RefCell<ObjectData>> {
 }
 
 pub(crate) fn register_array(value: &Rc<ArrayData>) {
-    CENSUS.with(|census| census.borrow_mut().arrays.register(value));
+    CENSUS.with(|census| {
+        let mut census = census.borrow_mut();
+        census.arrays.register(value);
+        census.note_allocation();
+    });
 }
 
 pub(crate) fn register_proxy(value: &Rc<ProxyData>) {
-    CENSUS.with(|census| census.borrow_mut().proxies.register(value));
+    CENSUS.with(|census| {
+        let mut census = census.borrow_mut();
+        census.proxies.register(value);
+        census.note_allocation();
+    });
+}
+
+impl ThreadCensus {
+    fn note_allocation(&mut self) {
+        self.allocations_since_collection = self.allocations_since_collection.saturating_add(1);
+    }
+}
+
+/// The VM checks this only at an opcode boundary and at a coarse instruction interval. It does
+/// not inspect or upgrade any candidate and therefore is safe while allocation constructors
+/// are otherwise active.
+pub(crate) fn automatic_collection_due(module_allocations: usize, module_threshold: usize) -> bool {
+    CENSUS.with(|census| {
+        let census = census.borrow();
+        let threshold = if census.next_collection_at == 0 {
+            4096
+        } else {
+            census.next_collection_at
+        };
+        census.allocations_since_collection >= threshold
+            || module_allocations >= module_threshold.max(4096)
+    })
+}
+
+/// Scale the next collection interval to the live graph. One graph-sized allocation interval
+/// between passes gives amortized linear work as a long-lived heap grows, while empty/churning
+/// heaps still get collected periodically.
+pub(crate) fn collection_completed(live_candidates: usize) {
+    CENSUS.with(|census| {
+        let mut census = census.borrow_mut();
+        census.allocations_since_collection = 0;
+        census.next_collection_at = live_candidates.max(4096);
+    });
 }
 
 pub(crate) fn object_candidates() -> Vec<Weak<RefCell<ObjectData>>> {
@@ -177,5 +250,20 @@ mod tests {
         // Numeric count snapshots own neither Weak nor Rc references and remain stable when the
         // census removes expired registration entries.
         assert_eq!(snapshot.get(&identity), Some(&2));
+    }
+
+    #[test]
+    fn automatic_collection_is_limited_to_the_outermost_vm_run() {
+        let outer = enter_vm_run();
+        assert!(outer.outermost());
+
+        // A callback can enter another VM while the caller retains Rust borrows. That nested
+        // execution must leave collection pressure pending for the next outer opcode boundary.
+        let nested = enter_vm_run();
+        assert!(!nested.outermost());
+        drop(nested);
+        drop(outer);
+
+        assert!(enter_vm_run().outermost());
     }
 }

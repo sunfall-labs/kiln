@@ -171,6 +171,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .saturating_add(module_map.gc_closures.len().max(1024));
         }
         module_map.gc_closures.push(Rc::downgrade(&closure));
+        module_map.gc_cycle_candidate_allocations =
+            module_map.gc_cycle_candidate_allocations.saturating_add(1);
         Ok(closure)
     }
 }
