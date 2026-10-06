@@ -38,6 +38,13 @@ use crate::graph::{
     BlockId, FunctionGraph, GraphOp, Proven, Terminator, ValueId, proven_types_with_bounds,
 };
 
+/// Generic-only release modules skip whole-program specialization to bound analysis and code
+/// size. Preserve a small direct-call island for modules whose entire graph is still cheap to
+/// inspect: it emits no extra body, and the existing `direct_callable` check retains the boxed
+/// runtime fallback for anything that publishes a frame or can suspend.
+const MAX_GENERIC_DIRECT_ANALYSIS_FUNCTIONS: usize = 128;
+const MAX_GENERIC_DIRECT_ANALYSIS_INSTRUCTIONS: usize = 8_192;
+
 /// Which body a graph belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Owner {
@@ -173,11 +180,19 @@ impl DirectPlan {
         speculate: Option<bool>,
     ) -> Self {
         if generic_only {
-            // None of the known-callee, numeric fixpoint, typed-entry, callback, or receiver
-            // analyses can affect a generic body. Large dependency modules choose this path
-            // specifically to keep emission proportional to their bytecode, so do not compute
-            // speculative facts only to erase them below.
             let function_count = graphs.len();
+            let total_instructions = program
+                .functions
+                .iter()
+                .map(|proto| proto.code.len())
+                .chain(std::iter::once(program.code.len()))
+                .fold(0usize, usize::saturating_add);
+            // Known-callee facts only replace a dynamic call with a call by C function name;
+            // they add no clone and no type assumption. Keep this analysis bounded across the
+            // full module so very large dependencies still take the cheap all-generic path.
+            let known = (function_count <= MAX_GENERIC_DIRECT_ANALYSIS_FUNCTIONS
+                && total_instructions <= MAX_GENERIC_DIRECT_ANALYSIS_INSTRUCTIONS)
+                .then(|| known_callees(program, graphs, entry));
             let optimized_functions =
                 select_generic_optimization_functions(program, publishes_frame, None);
             let generic_verdicts = std::sync::Arc::new(vec![
@@ -197,13 +212,14 @@ impl DirectPlan {
             let columns = std::sync::Arc::new(vec![0; function_count]);
             let available = std::sync::Arc::new(vec![true; function_count]);
             let publishes_frame = std::sync::Arc::new(publishes_frame.to_vec());
-            let plan = |generic_function_optimized: bool| CallPlan {
+            let plan = |generic_function_optimized: bool, known: HashMap<ValueId, u32>| CallPlan {
                 compact,
                 compile_regex,
                 generic_only: true,
                 generic_function_optimized,
                 parallel_in_generic,
                 speculate,
+                known,
                 typed_returns: false_flags.clone(),
                 typed_needs: typed_needs.clone(),
                 typed_entries: false_flags.clone(),
@@ -217,11 +233,25 @@ impl DirectPlan {
             };
             let mut generic = Self {
                 functions: (0..function_count)
-                    .map(|index| plan(optimized_functions[index]))
+                    .map(|index| {
+                        plan(
+                            optimized_functions[index],
+                            known
+                                .as_ref()
+                                .map(|known| known.functions[index].known.clone())
+                                .unwrap_or_default(),
+                        )
+                    })
                     .collect(),
                 typed: vec![None; function_count],
                 parallel: vec![None; function_count],
-                entry: plan(false),
+                entry: plan(
+                    false,
+                    known
+                        .as_ref()
+                        .map(|known| known.entry.known.clone())
+                        .unwrap_or_default(),
+                ),
             };
             if parallel_in_generic {
                 generic.plan_parallel_sites(program, graphs, entry, &publishes_frame, speculate);
@@ -1171,6 +1201,16 @@ impl DirectPlan {
             );
             for (plan, selected) in self.functions.iter_mut().zip(selected) {
                 plan.generic_function_optimized = selected;
+            }
+            for plan in self
+                .functions
+                .iter_mut()
+                .chain(self.typed.iter_mut().flatten())
+                .chain(self.parallel.iter_mut().flatten())
+                .chain(std::iter::once(&mut self.entry))
+            {
+                plan.known
+                    .retain(|_, target| available.get(*target as usize).copied().unwrap_or(false));
             }
         }
         let typed_entries = std::sync::Arc::new(
@@ -2159,4 +2199,211 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
         }
     }
     known
+}
+
+#[cfg(test)]
+mod effect_proto_diagnostic {
+    use super::*;
+    use crate::graph::build_function_graph;
+    use serde_json::json;
+
+    fn generic_plan(source: &str) -> (Program, DirectPlan) {
+        let hir = kiln_frontend_oxc::parse("direct-plan-test.ts", source);
+        let program = kiln_ir::compile_module(&hir)
+            .expect("compile test module")
+            .program;
+        let graphs = program
+            .functions
+            .iter()
+            .map(|proto| build_function_graph(proto, &program).expect("build function graph"))
+            .collect::<Vec<_>>();
+        let entry_proto = crate::entry_proto(&program);
+        let entry_graph = build_function_graph(&entry_proto, &program).expect("build entry graph");
+        let publishes = crate::compute_publishes_frame(&program);
+        let plan = DirectPlan::plan(
+            &program,
+            &graphs,
+            &entry_graph,
+            &publishes,
+            true,
+            false,
+            true,
+            true,
+            None,
+        );
+        (program, plan)
+    }
+
+    #[test]
+    fn bounded_generic_plan_keeps_safe_known_callees_without_typed_entries() {
+        let (program, mut plan) = generic_plan(
+            "function add(a, b) { return a + b; }\n\
+             function invoke(callback) { return callback(1, 2); }\n\
+             function run() { return add(1, 2); }\n\
+             run();",
+        );
+        let add = program
+            .functions
+            .iter()
+            .position(|proto| {
+                proto
+                    .effective_name_units()
+                    .is_some_and(|name| name.to_lossy_string() == "add")
+            })
+            .expect("add proto") as u32;
+        let run = program
+            .functions
+            .iter()
+            .position(|proto| {
+                proto
+                    .effective_name_units()
+                    .is_some_and(|name| name.to_lossy_string() == "run")
+            })
+            .expect("run proto");
+        let invoke = program
+            .functions
+            .iter()
+            .position(|proto| {
+                proto
+                    .effective_name_units()
+                    .is_some_and(|name| name.to_lossy_string() == "invoke")
+            })
+            .expect("invoke proto");
+        assert!(
+            plan.functions[run]
+                .known
+                .values()
+                .any(|&target| target == add as u32)
+        );
+        assert!(plan.functions.iter().all(|body| body.generic_only));
+        assert!(plan.typed.iter().all(Option::is_none));
+        assert!(
+            plan.functions[invoke].known.is_empty(),
+            "the indirect callback parameter must remain a generic call"
+        );
+        let mut unavailable = vec![true; program.functions.len()];
+        unavailable[add as usize] = false;
+        plan.set_available(&program, &unavailable);
+        assert!(
+            plan.functions[run]
+                .known
+                .values()
+                .all(|&target| target != add as u32),
+            "a target omitted from the emitted unit must use runtime fallback"
+        );
+    }
+
+    #[test]
+    fn generic_plan_skips_known_callee_analysis_above_module_budget() {
+        let mut source = String::new();
+        for index in 0..MAX_GENERIC_DIRECT_ANALYSIS_FUNCTIONS + 1 {
+            source.push_str(&format!("function f{index}() {{ return {index}; }}\n"));
+        }
+        source.push_str("f0();\n");
+        let (_, plan) = generic_plan(&source);
+        assert!(plan.functions.iter().all(|body| body.known.is_empty()));
+        assert!(plan.entry.known.is_empty());
+    }
+
+    /// Read-only diagnostic for a pinned Effect source checkout. Run with
+    /// `KILN_EFFECT_SOURCE_ROOT=/path/to/source mbx test -p kiln-backend-c --lib
+    /// diagnose_effect_hash_direct_eligibility -- --ignored --nocapture --test-threads=1`.
+    /// This lowers and analyzes the two source modules, but does not emit or compile C.
+    #[test]
+    #[ignore = "one-off native Hash direct-call eligibility diagnostic"]
+    fn diagnose_effect_hash_direct_eligibility() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("KILN_EFFECT_SOURCE_ROOT")
+                .expect("set KILN_EFFECT_SOURCE_ROOT to the pinned Effect source root"),
+        );
+
+        for relative in [
+            "packages/effect/src/Equal.ts",
+            "packages/effect/src/internal/hashMap.ts",
+        ] {
+            let path = root.join(relative);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            let hir = kiln_frontend_oxc::parse(&path.to_string_lossy(), &source);
+            let program = kiln_ir::compile_module(&hir)
+                .unwrap_or_else(|error| panic!("compile {}: {error:?}", path.display()))
+                .program;
+            let graphs = program
+                .functions
+                .iter()
+                .map(|proto| {
+                    build_function_graph(proto, &program)
+                        .unwrap_or_else(|error| panic!("graph {}: {error}", path.display()))
+                })
+                .collect::<Vec<_>>();
+            let entry_proto = crate::entry_proto(&program);
+            let entry_graph = build_function_graph(&entry_proto, &program)
+                .unwrap_or_else(|error| panic!("entry graph {}: {error}", path.display()));
+            let publishes = crate::compute_publishes_frame(&program);
+            let generic = DirectPlan::plan(
+                &program,
+                &graphs,
+                &entry_graph,
+                &publishes,
+                true,
+                false,
+                true,
+                true,
+                None,
+            );
+            let analyzed = DirectPlan::plan(
+                &program,
+                &graphs,
+                &entry_graph,
+                &publishes,
+                true,
+                false,
+                false,
+                true,
+                None,
+            );
+            let functions = program
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(index, proto)| {
+                    let known = analyzed.functions[index]
+                        .known
+                        .iter()
+                        .map(|(site, target)| {
+                            json!({ "site_value": site.0, "target_proto": target })
+                        })
+                        .collect::<Vec<_>>();
+                    let publishes_frame = publishes.get(index).copied().unwrap_or(true);
+                    json!({
+                        "proto": index,
+                        "name": proto.effective_name_units().map(|units| units.to_lossy_string()),
+                        "instructions": proto.code.len(),
+                        "arity": proto.parameter_count,
+                        "method": proto.is_method,
+                        "generator": proto.generator,
+                        "async": proto.asynchronous,
+                        "publishes_frame": publishes_frame,
+                        "direct_callable": direct_callable(proto, publishes_frame),
+                        "generic_known_callees": generic.functions[index].known.len(),
+                        "counterfactual_known_callees": known,
+                        "typed_entry": analyzed.typed.get(index).is_some_and(Option::is_some),
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!(
+                "{}",
+                json!({
+                    "source": relative,
+                    "function_count": program.functions.len(),
+                    "function_instructions": program.functions.iter().map(|p| p.code.len()).sum::<usize>(),
+                    "entry_instructions": program.code.len(),
+                    "total_instructions": program.functions.iter().map(|p| p.code.len()).chain(std::iter::once(program.code.len())).sum::<usize>(),
+                    "generic_plan_direct_sites": generic.functions.iter().map(|p| p.known.len()).sum::<usize>(),
+                    "non_generic_plan_direct_sites": analyzed.functions.iter().map(|p| p.known.len()).sum::<usize>(),
+                    "functions": functions,
+                })
+            );
+        }
+    }
 }

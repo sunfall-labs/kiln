@@ -1,6 +1,225 @@
 use super::*;
 
 #[test]
+fn generic_only_direct_call_keeps_boxed_dynamic_fallback() {
+    let mut add = function(vec![
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(kiln_ir::BinaryOp::Add),
+        Instruction::Return,
+    ]);
+    add.local_count = 2;
+    add.parameter_count = 2;
+
+    let mut invoke = function(vec![
+        Instruction::LoadLocal(0),
+        Instruction::Const(0),
+        Instruction::Const(1),
+        Instruction::Call { argc: 2 },
+        Instruction::Return,
+    ]);
+    invoke.local_count = 1;
+    invoke.parameter_count = 1;
+
+    let mut program = program(
+        vec![
+            Constant::Number(1.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+        ],
+        vec![
+            Instruction::MakeFunction(1),
+            Instruction::MakeFunction(0),
+            Instruction::Call { argc: 1 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    program.functions = vec![add, invoke];
+    let generated = emit_with_policy(
+        &program,
+        EmissionPolicy {
+            generic_only: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("generic-only module emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    kiln_value result = kiln_c99_undefined();
+    if ({}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_NUMBER && kiln_c99_as_number(result) == 3.0 ? 0 : 3;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "generic-only-direct-call");
+    assert!(
+        run.status.success(),
+        "generic-only direct/dynamic call result diverged ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn generic_only_direct_call_preserves_captured_cells_under_gc_stress() {
+    let mut add = FunctionProto {
+        upvalues: vec![kiln_ir::Upvalue::ParentLocal(0)],
+        ..function(vec![
+            Instruction::LoadUpvalue(0),
+            Instruction::LoadLocal(0),
+            Instruction::Binary(kiln_ir::BinaryOp::Add),
+            Instruction::Return,
+        ])
+    };
+    add.parameter_count = 1;
+    add.local_count = 1;
+
+    let mut run = function(vec![
+        Instruction::NewCell(0),
+        Instruction::MakeFunction(0),
+        Instruction::StoreLocal(1),
+        Instruction::LoadLocal(1),
+        Instruction::Const(1),
+        Instruction::Call { argc: 1 },
+        Instruction::Return,
+    ]);
+    run.parameter_count = 1;
+    run.local_count = 2;
+
+    let mut mutated_program = program(
+        vec![
+            Constant::Number(40.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+        ],
+        vec![
+            Instruction::MakeFunction(1),
+            Instruction::Const(0),
+            Instruction::Call { argc: 1 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    mutated_program.functions = vec![add, run];
+    let generated = emit_with_policy(
+        &mutated_program,
+        EmissionPolicy {
+            generic_only: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("generic-only captured module emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    kiln_value result = kiln_c99_undefined();
+    if (heap == NULL) return 1;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 1;
+    heap->stress = 1;
+    heap->stress_every = 1;
+    heap->stress_countdown = 1;
+    kiln_c99_gc_heap_register(heap);
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+    if ({}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_NUMBER && kiln_c99_as_number(result) == 42.0 ? 0 : 3;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "generic-only-captured-direct-call-gc");
+    assert!(
+        run.status.success(),
+        "generic-only captured call failed under collection stress ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn generic_only_direct_call_observes_mutated_binding_and_propagates_throw() {
+    let one = function(vec![Instruction::Const(0), Instruction::Return]);
+    let two = function(vec![Instruction::Const(1), Instruction::Return]);
+    let mut mutated_program = program(
+        vec![
+            Constant::Number(1.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+        ],
+        vec![
+            Instruction::NewCell(0),
+            Instruction::MakeFunction(0),
+            Instruction::StoreCell(0),
+            Instruction::MakeFunction(1),
+            Instruction::StoreCell(0),
+            Instruction::LoadCell(0),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        1,
+    );
+    mutated_program.functions = vec![one, two];
+    let generated = emit_with_policy(
+        &mutated_program,
+        EmissionPolicy {
+            generic_only: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("mutated generic-only module emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    kiln_value result = kiln_c99_undefined();
+    if ({}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_NUMBER && kiln_c99_as_number(result) == 2.0 ? 0 : 3;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "generic-only-mutated-binding");
+    assert!(
+        run.status.success(),
+        "a reassigned callable did not use the current binding ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let throwing = function(vec![Instruction::Const(0), Instruction::Throw]);
+    let mut throwing_program = program(
+        vec![Constant::Number(9.0f64.to_bits())],
+        vec![
+            Instruction::MakeFunction(0),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    throwing_program.functions = vec![throwing];
+    let generated = emit_with_policy(
+        &throwing_program,
+        EmissionPolicy {
+            generic_only: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("throwing generic-only module emits");
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result = kiln_c99_undefined(); return {}(NULL, &result) == KILN_C99_THROWN ? 0 : 1; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "generic-only-direct-call-throw");
+    assert!(
+        run.status.success(),
+        "direct-call throw status diverged ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn array_index_range_is_shared_by_string_and_numeric_keys() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
