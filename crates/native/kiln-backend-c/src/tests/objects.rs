@@ -323,6 +323,9 @@ int main(void) {
     kiln_value result = kiln_c99_undefined();
     kiln_value thrown = kiln_c99_undefined();
     kiln_gc_block *value_block;
+    const char *stress_setting = getenv("KILN_GC_STRESS");
+    int stress_mode = stress_setting != NULL && stress_setting[0] != '\0' &&
+                      stress_setting[0] != '0';
     kiln_c99_gc_heap_init(&heap);
     kiln_test_heap = &heap;
     kiln_test_generation += 1;
@@ -336,6 +339,19 @@ int main(void) {
     if (kiln_c99_collection_put_unleased(fast_set_value, keeper, keeper) != KILN_C99_OK ||
         kiln_c99_collection_put_unleased(dispatch_set_value, keeper, keeper) != KILN_C99_OK)
         return 2;
+    /* This fixture normally disables automatic collection so it can inspect dead entries
+     * directly. Under the stress runner, keep these four live values explicit and collect
+     * periodically while exercising deletion/compaction. */
+    if (stress_mode) {
+        heap.enabled = 1;
+        heap.stress = 1;
+        heap.stress_every = 1;
+        heap.stress_countdown = 1;
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)fast_set_value.bits);
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)dispatch_set_value.bits);
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)key.bits);
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)keeper.bits);
+    }
     delete_args[0] = key;
     for (size_t index = 0; index < 10000; ++index) {
         if (kiln_c99_collection_put_unleased(fast_set_value, key, key) != KILN_C99_OK ||
@@ -346,6 +362,13 @@ int main(void) {
         if (kiln_c99_call(NULL, &result,
                 kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE), dispatch_set_value,
                 delete_args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 4;
+        if (stress_mode && index % 31 == 0) {
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)fast_set_value.bits);
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)dispatch_set_value.bits);
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)key.bits);
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)keeper.bits);
+            kiln_c99_gc_collect_mid_turn(&heap);
+        }
     }
     if (fast_set->live != 1 || dispatch_set->live != 1 ||
         fast_set->count >= 34 || dispatch_set->count >= 34 ||
@@ -356,6 +379,11 @@ int main(void) {
             dispatch_set_value, &keeper, 1, 0, &thrown) != KILN_C99_OK ||
         !kiln_c99_truthy(result)) return 10;
 
+    /* Keep the later dead-key/ephemeron assertions deterministic; their explicit collection
+     * below is the collection under test, while the churn loop above carries stress coverage. */
+    heap.enabled = 0;
+    heap.stress = 0;
+    heap.stress_every = 0;
     if (kiln_c99_new_collection(&map_value, 1, 1) != KILN_C99_OK) return 6;
     map = kiln_c99_collection_of(map_value);
     for (size_t index = 0; index < 40; ++index) {
