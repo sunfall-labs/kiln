@@ -4,7 +4,47 @@ Goal: execute every pinned Effect test directly in kiln, prioritizing native, wi
 bundling sources. Bun supplies the direct-TypeScript performance comparison; the official
 Node/Vitest inventory and per-case outcomes establish correctness and runner fidelity.
 
-## Current checkpoint, 2026-10-05
+## Current checkpoint, 2026-10-06
+
+Public main includes the bounded generic known-call analysis at `6d5fe097` and
+materialized-intrinsic lookup index at `d87b1e38`. Both were normally pushed and
+remote main was verified. The earlier network/publication restrictions below are
+historical and no longer apply.
+
+The [complete frozen interpreter survey](interpreter-survey-20261006/) selected
+all 322 files and registered all 11,019 official cases. It recorded 10,941 passes,
+27 original-deadline timeouts and 45 upstream skips; an allocation abort left six
+Arbitrary cases unrecorded. This is a diagnostic baseline, not full acceptance.
+The [automatic collector acceptance](automatic-cycle-gc/evidence/arbitrary-20261006/)
+subsequently completed all 178 Arbitrary cases without the allocator abort, but
+still recorded eight timeouts. Automatic collection also introduced additional
+ClusterWorkflowEngine and Sharding deadline failures in the
+[unchanged failed-subset replay](automatic-cycle-gc/evidence/late-subsets-20261006/).
+
+Sharing immutable suspended-local liveness tables passed all 285 interpreter
+crate tests (one ignored), but the
+[original ClusterWorkflowEngine replay and profile](automatic-cycle-gc/evidence/dc62-workflow-profile-20261006/)
+still recorded 37/47 passes. The profile shows collection contributes about 9.5%
+of recorded sampled-thread CPU; it does not establish collection as the main
+cause. The newer intrinsic index passed 286 interpreter crate tests (one ignored);
+its upstream performance replay is pending.
+
+The [native Sharding CPU/profile evidence](sharding-native-profile-current-20261006/)
+records 61/66 cases passing with the same five original-deadline timeouts.
+Independent OS thread ticks establish that those windows consume approximately
+one full CPU. The bounded known-call compiler change passed
+[337 backend tests](native-generic-direct-calls-20261006/) (two ignored), but its
+unchanged native Hash replay still records 24/25 passes and the same HashMap law
+timeout. This change has not cleared that failure.
+
+A separate frozen native survey remains active with all 322 files selected,
+unchanged case budgets, official-oracle mapping checks and no deferred files.
+Its partial counts are discovery evidence, not an acceptance score. Final-source
+complete native and interpreter runs, remaining deadline fixes, the repository
+gate and quiet direct-TypeScript Bun benchmark comparisons remain required.
+The last passing gate below predates these changes.
+
+## Historical checkpoint, 2026-10-05
 
 The last verified public main commit is `bc82ca8f`. Its compiler milestone has a
 [passing ten-step routine gate](evidence/spread-child-gate-20261005/), with 2,670
