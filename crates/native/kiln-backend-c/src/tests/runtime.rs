@@ -1,6 +1,49 @@
 use super::*;
 
 #[test]
+fn class_field_data_descriptor_uses_canonical_definition_rules() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value target = kiln_c99_undefined();
+    kiln_value descriptor = kiln_c99_undefined();
+    kiln_value object_value = kiln_c99_undefined();
+    kiln_value value = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    int found = 0;
+    if (kiln_c99_new_object(&target) != KILN_C99_OK ||
+        kiln_c99_new_object(&object_value) != KILN_C99_OK) return 1;
+    if (kiln_c99_create_data_property(NULL, target, kiln_c99_number(17.0),
+                                      object_value, 0, &thrown) != KILN_C99_OK) return 2;
+    if (kiln_c99_describe_property(NULL, target, "17", 2, &descriptor, &found, 0,
+                                   &thrown) != KILN_C99_OK || !found) return 3;
+    if (kiln_c99_get(NULL, descriptor, "value", 5, &value, 0, &thrown) != KILN_C99_OK ||
+        value.tag != KILN_VALUE_OBJECT || value.ptr != object_value.ptr) return 4;
+    if (kiln_c99_get(NULL, descriptor, "writable", 8, &value, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(value)) return 5;
+    if (kiln_c99_get(NULL, descriptor, "enumerable", 10, &value, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(value)) return 6;
+    if (kiln_c99_get(NULL, descriptor, "configurable", 12, &value, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(value)) return 7;
+
+    kiln_c99_object_of(target)->not_extensible = 1;
+    thrown = kiln_c99_undefined();
+    if (kiln_c99_create_data_property(NULL, target, kiln_c99_number(18.0),
+                                      kiln_c99_number(43.0), 0, &thrown) != KILN_C99_THROWN) return 8;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "class-field-prepared-descriptor");
+    assert!(
+        run.status.success(),
+        "class field prepared descriptor changed own attributes/refusal ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn collection_for_each_validates_callback_before_empty_history_fast_return() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

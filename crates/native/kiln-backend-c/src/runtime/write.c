@@ -630,7 +630,7 @@ static int kiln_c99_reflect_define_property(kiln_host *host, kiln_value target,
     int refused = 0;
     int status = kiln_c99_define_property_key_answer(host, target, name_key,
                                                      kiln_c99_property_ikey(key), descriptor,
-                                                     depth, thrown, &refused);
+                                                     depth, thrown, &refused, NULL);
     if (status == KILN_C99_OK) {
         *accepted = !refused;
         return KILN_C99_OK;

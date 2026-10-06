@@ -419,7 +419,8 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
                                                const kiln_string *view,
                                                const kiln_string *canonical,
                                                kiln_value descriptor, int depth,
-                                               kiln_value *thrown, int *refusal) {
+                                               kiln_value *thrown, int *refusal,
+                                               const kiln_c99_property_descriptor *prepared) {
     const kiln_string *stable = canonical;
     if (target.tag == KILN_VALUE_OBJECT) kiln_c99_prototype_touched(kiln_c99_object_of(target));
     kiln_value store;
@@ -446,11 +447,13 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
     if (kiln_c99_is_node_hidden_key_key(view)) {
         return KILN_C99_OK;
     }
-    if (descriptor.tag != KILN_VALUE_OBJECT) {
+    if (prepared == NULL && descriptor.tag != KILN_VALUE_OBJECT) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                     "Property description must be an object");
     }
     if (target.tag == KILN_VALUE_PROXY) {
+        /* Prepared records are only passed by CreateDataProperty for known ordinary receivers;
+         * a Proxy always follows the original materialized-descriptor route. */
         /* The trap names its key as the language does: a reserved spelling that
          * resolves becomes the symbol, so a symbol descriptor arrives as the
          * symbol rather than `"@@symbol:N"`. Anything else keeps the string. */
@@ -459,8 +462,7 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
         if (stable_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
         if (!kiln_c99_symbol_of_key_view(view, &key_value))
             key_value = stable_value;
-        return kiln_c99_proxy_define(host, target, key_value, descriptor, depth, thrown,
-                                    refusal);
+        return kiln_c99_proxy_define(host, target, key_value, descriptor, depth, thrown, refusal);
     }
     if (target.tag != KILN_VALUE_SHARED && target.tag != KILN_VALUE_OBJECT &&
         target.tag != KILN_VALUE_FUNCTION && target.tag != KILN_VALUE_BUILTIN &&
@@ -472,11 +474,21 @@ static int kiln_c99_define_property_key_answer(kiln_host *host, kiln_value targe
          * hook on a constructor with `Object.defineProperty`. */
         KILN_C99_REFUSE("a property definition on a value with no property store");
     }
-    /* Parse once through the same authority used by Proxy trap snapshots. */
-    status = kiln_c99_to_property_descriptor(host, descriptor, &parsed, depth, thrown);
-    if (status != KILN_C99_OK) {
-        return status;
+    if (prepared != NULL) {
+        parsed = *prepared;
+    } else {
+        /* Parse once through the same authority used by Proxy trap snapshots. */
+        status = kiln_c99_to_property_descriptor(host, descriptor, &parsed, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
     }
+    kiln_c99_gc_keep_alive(&parsed.value);
+    kiln_c99_gc_keep_alive(&parsed.writable);
+    kiln_c99_gc_keep_alive(&parsed.getter);
+    kiln_c99_gc_keep_alive(&parsed.setter);
+    kiln_c99_gc_keep_alive(&parsed.enumerable);
+    kiln_c99_gc_keep_alive(&parsed.configurable);
     getter = parsed.getter;
     setter = parsed.setter;
     value = parsed.value;
@@ -818,7 +830,7 @@ static int kiln_c99_define_property_key(kiln_host *host, kiln_value target,
                                         const kiln_string *canonical, kiln_value descriptor,
                                         int depth, kiln_value *thrown) {
     return kiln_c99_define_property_key_answer(host, target, view, canonical, descriptor, depth,
-                                               thrown, NULL);
+                                               thrown, NULL, NULL);
 }
 
 /* Fixed C names use a borrowed Latin-1 view; the headed implementation above owns all
@@ -843,12 +855,53 @@ int kiln_c99_create_data_property(kiln_host *host, kiln_value target, kiln_value
     kiln_value descriptor;
     kiln_value name;
     const kiln_string *view;
+    kiln_c99_property_descriptor prepared;
+    int status;
     /* The allocator may collect inside this helper. Keep every incoming language value
      * discoverable in this C frame until the definition has published its edge. */
     kiln_c99_gc_keep_alive(&target);
     kiln_c99_gc_keep_alive(&key);
     kiln_c99_gc_keep_alive(&value);
-    int status = kiln_c99_new_object(&descriptor);
+    /* An ordinary receiver never exposes the temporary descriptor object. Feed its known
+     * complete data descriptor directly into the shared ValidateAndApply path. Proxy receivers
+     * keep the materialized object below because defineProperty traps observe that object. */
+    if (target.tag != KILN_VALUE_PROXY) {
+        name = kiln_c99_property_key(key);
+        kiln_c99_gc_keep_alive(&target);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&value);
+        kiln_c99_gc_keep_alive(&name);
+        if (name.tag != KILN_VALUE_STRING) {
+            KILN_C99_REFUSE("a class field key that is neither a string nor a named symbol slot");
+        }
+        view = (const kiln_string *)name.ptr;
+        memset(&prepared, 0, sizeof prepared);
+        prepared.value = value;
+        prepared.writable = kiln_c99_boolean(1);
+        prepared.enumerable = kiln_c99_boolean(1);
+        prepared.configurable = kiln_c99_boolean(1);
+        prepared.getter = kiln_c99_undefined();
+        prepared.setter = kiln_c99_undefined();
+        prepared.has_value = 1;
+        prepared.has_writable = 1;
+        prepared.has_enumerable = 1;
+        prepared.has_configurable = 1;
+        kiln_c99_gc_keep_alive(&prepared.value);
+        kiln_c99_gc_keep_alive(&prepared.writable);
+        kiln_c99_gc_keep_alive(&prepared.enumerable);
+        kiln_c99_gc_keep_alive(&prepared.configurable);
+        status = kiln_c99_define_property_key_answer(
+            host, target, view, kiln_c99_property_ikey(key), kiln_c99_undefined(), depth,
+            thrown, NULL, &prepared);
+        kiln_c99_gc_keep_alive(&prepared.value);
+        kiln_c99_gc_keep_alive(&target);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&value);
+        kiln_c99_gc_keep_alive(&name);
+        return status;
+    }
+
+    status = kiln_c99_new_object(&descriptor);
     kiln_c99_gc_keep_alive(&target);
     kiln_c99_gc_keep_alive(&key);
     kiln_c99_gc_keep_alive(&value);

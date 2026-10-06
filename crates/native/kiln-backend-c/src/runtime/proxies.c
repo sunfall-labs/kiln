@@ -642,7 +642,7 @@ static int kiln_c99_proxy_define(kiln_host *host, kiln_value proxy, kiln_value k
         if (status != KILN_C99_OK) return status;
         return kiln_c99_define_property_key_answer(host, inner, (const kiln_string *)name.ptr,
                                                    (const kiln_string *)name.ptr, snapshot,
-                                                   depth, thrown, refusal);
+                                                   depth, thrown, refusal, NULL);
     }
     {
         kiln_value snapshot;
