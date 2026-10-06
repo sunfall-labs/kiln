@@ -20,3 +20,5 @@ env PATH=~/.local/share/mise/installs/rust/1.97.1:~/.local/share/mise/installs/m
 ```
 
 Result: 8 unit tests passed, 0 failed; doc tests 0 passed, 0 failed. The added test checks equality across Latin1 and UTF-16 representations, non-ASCII Latin1, equal lone-surrogate units, replacement-character distinction, and unequal length/content. `cargo fmt --all` and `git diff --check` also passed.
+
+A follow-up also adds a Latin1/ASCII fast path to `StringUnits == str`, which is the common property-key comparison route. Non-ASCII input and UTF-16-backed strings retain the exact UTF-16 iterator comparison. After this follow-up the same pinned command was rerun: 8 unit tests passed, 0 failed; doc tests 0/0. The final follow-up source digest is recorded in git at commit `e19cbd16` plus its immediate child.

@@ -278,7 +278,10 @@ impl PartialEq for StringUnits {
 impl Eq for StringUnits {}
 impl PartialEq<str> for StringUnits {
     fn eq(&self, other: &str) -> bool {
-        self.units().eq(other.encode_utf16())
+        match &self.0 {
+            Repr::Latin1(bytes) if other.is_ascii() => bytes.as_ref() == other.as_bytes(),
+            _ => self.units().eq(other.encode_utf16()),
+        }
     }
 }
 impl PartialEq<&str> for StringUnits {
@@ -380,6 +383,9 @@ mod tests {
         assert_ne!(lone_surrogate, StringUnits::from("\u{fffd}"));
         assert_ne!(StringView::Latin1(&[0xff]), StringView::Utf16(&[0x100]));
         assert_ne!(StringView::Utf16(&[0x61]), StringView::Utf16(&[0x61, 0]));
+        assert_eq!(StringUnits::from("property"), "property");
+        assert_eq!(StringUnits::from("caf\u{e9}"), "caf\u{e9}");
+        assert_ne!(lone_surrogate, "\u{fffd}");
     }
 
     #[test]
