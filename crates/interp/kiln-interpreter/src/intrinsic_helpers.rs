@@ -2141,10 +2141,14 @@ fn inspect_nested_at(value: &Value, depth: usize, seen: &mut Vec<usize>, column:
             }
         }
         Value::Symbol(symbol) => format!("Symbol({})", symbol.description()),
-        Value::Function(closure) => match &closure.name {
-            Some(name) => format!("[Function: {name}]"),
-            None => "[Function (anonymous)]".to_owned(),
-        },
+        Value::Function(closure) => {
+            let name = closure.display_name_units();
+            if name.is_empty() {
+                "[Function (anonymous)]".to_owned()
+            } else {
+                format!("[Function: {}]", name.to_lossy_string())
+            }
+        }
         Value::Native(native, _) => match namespace_name(native) {
             Some(name) => format!("Object [{name}] {{}}"),
             None => format!("[Function: {}]", native_js_name(native)),

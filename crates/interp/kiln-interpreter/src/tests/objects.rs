@@ -1074,6 +1074,10 @@ fn inferred_closure_name_property_preserves_utf16_units() {
     };
     assert_eq!(closure.display_name_units(), inferred);
     assert_eq!(
+        inspect(&Value::Function(Rc::clone(&closure))),
+        "[Function: \u{fffd}]"
+    );
+    assert_eq!(
         closure.properties.borrow().get_own("name"),
         Some(&Value::String(inferred))
     );
