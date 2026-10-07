@@ -6722,6 +6722,49 @@ int main(void) {
 }
 
 #[test]
+fn executable_gc_lookup_string_header_falls_back_at_region_start() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    char *base;
+    const char *edge;
+    char *located_base;
+    char *located_limit;
+    uint64_t *bitmap;
+    size_t words;
+    void *seed;
+    kiln_c99_gc_heap_init(&heap);
+    heap.enabled = 1;
+    seed = kiln_c99_gc_nursery_bump(&heap, KILN_GC_BYTES, 64);
+    if (seed == NULL || heap.nursery.base == NULL) return 1;
+
+    /* The first probe is inside this nursery region, while subtracting the string header
+     * crosses its payload boundary. Lookup must take the fallback membership path and reject
+     * this non-object address without reading a header outside the region. */
+    base = heap.nursery.base;
+    edge = base + sizeof(kiln_string) - 1;
+    if (!kiln_c99_nursery_locate(&heap, edge, &located_base, &located_limit, &bitmap, &words) ||
+        located_base != base || edge >= located_limit) return 2;
+    if (kiln_c99_gc_lookup_nursery(&heap, edge) != NULL) return 3;
+
+    kiln_c99_nursery_destroy(&heap.nursery);
+    free(heap.large_table.table);
+    free(heap.slab_table.table);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-string-header-region-start");
+    assert!(
+        run.status.success(),
+        "string-header region fallback failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_minor_gc_traces_young_values_published_by_tenured_cells() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
@@ -6745,7 +6788,8 @@ static int minor_gc_entry(void *context) {
     first = kiln_c99_copy_text("remembered-first", 16);
     dead = kiln_c99_copy_text("dead-young", 10);
     if (first.tag != KILN_VALUE_STRING || dead.tag != KILN_VALUE_STRING) return 3;
-    first_block = kiln_c99_gc_lookup_interior(heap, (uintptr_t)first.ptr);
+    first_block = kiln_c99_gc_lookup(heap, (void *)(uintptr_t)first.ptr);
+    if (first_block == NULL || (first_block->kind & KILN_GC_KIND_MASK) != KILN_GC_STRING) return 21;
     if (first_block == NULL || kiln_c99_gc_is_young(heap, first_block) == 0) return 4;
     kiln_c99_heap_store_val((const void *)owner, &owner->value, kiln_val_from_boundary(first));
     if (!kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 5;
@@ -6756,7 +6800,7 @@ static int minor_gc_entry(void *context) {
     kiln_c99_gc_collect(heap, 0);
     heap->minor_requested = 0;
     if (heap->minor_collection || heap->minor_audit_failed ||
-        kiln_c99_gc_lookup_interior(heap, (uintptr_t)first.ptr) == NULL)
+        kiln_c99_gc_lookup(heap, (void *)(uintptr_t)first.ptr) != first_block)
         return 6;
     if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)dead.ptr) != NULL) return 7;
     if (kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 18;
@@ -6767,7 +6811,7 @@ static int minor_gc_entry(void *context) {
     second = kiln_c99_copy_text("remembered-second", 17);
     dead_again = kiln_c99_copy_text("dead-again", 10);
     if (second.tag != KILN_VALUE_STRING || dead_again.tag != KILN_VALUE_STRING) return 8;
-    second_block = kiln_c99_gc_lookup_interior(heap, (uintptr_t)second.ptr);
+    second_block = kiln_c99_gc_lookup(heap, (void *)(uintptr_t)second.ptr);
     if (second_block == NULL || kiln_c99_gc_is_young(heap, second_block) == 0) return 9;
     kiln_c99_heap_store_val((const void *)owner, &owner->value, kiln_val_from_boundary(second));
     if (!kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 19;
@@ -6775,7 +6819,7 @@ static int minor_gc_entry(void *context) {
     kiln_c99_gc_collect(heap, 0);
     heap->minor_requested = 0;
     if (heap->minor_audit_failed ||
-        kiln_c99_gc_lookup_interior(heap, (uintptr_t)second.ptr) == NULL) return 10;
+        kiln_c99_gc_lookup(heap, (void *)(uintptr_t)second.ptr) != second_block) return 10;
     if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)dead_again.ptr) != NULL) return 11;
     if (kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 20;
 
