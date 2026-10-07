@@ -1,0 +1,19 @@
+# Combined-source dual provider package preparation
+
+This directory contains prepared job specs plus completed provider packaging, discovery, and narrow native parity evidence. It is not a full gate result.
+
+- Source root: `~/Work/kiln/.scratch/source-candidates/native-effect-runtime-combined`. The authoritative base is CEA commit `cea553930db41a16bc222c6bc1332e9f38a34f00` / tree `5d8d4257ea28b7a93c8e904064f2727a7a04137d`, followed by the three exact overlays recorded in `provenance.json`.
+- The source snapshot consumed by the frozen CLI build is `.scratch/source-proof/source-provenance-v1.json`, SHA-256 `60a800fb1de19296c9c35390138f52122e51c3e0afefdb0c80e644876631128d`. This matches the build receipt's `source_provenance_sha256` (`60a800fb…31128d`). The current `.source-provenance.json` SHA-256 is `db3315d2f7b2e45f66356edcc1a5b7685c3574e7c99b541cc1d38bab127bbabc`; it additionally records the post-build conformance fixture change, which did not alter compiler sources.
+- The local plain-copy Git HEAD `06cd985a675831623e8b7ab4e6add677e514eca0` is not the combined source identity. The prior prepared receipt incorrectly labeled it `candidate_head`; it is preserved as `provenance-v1-metadata-superseded.json` and corrected here.
+- Frozen CLI SHA-256: `338b0497578ce9a4a091efe4d1bc6d1cf53578a5d557e4a000fba07967852ba1`; `bin/kiln` is a hard link to the frozen `kiln-candidate`.
+- Provider source hashes are in `provenance.json`, including `provider/realm.rs` with the callable-store candidate. Package only from this combined checkout; do not reuse the DB/frontcache provider.
+
+Run `package-full.job.json` to terminal success before `package-full-gui.job.json`; they share one Cargo target directory and publish distinct filenames into the same `lib/kiln` directory. Both use offline locked Cargo, pinned Rust 1.97.1 through `mbx`, one job, and the shared MBX cache. The successful retry records are `logs/package-full-retry1.status.json` and `logs/package-full-gui.status.json`.
+
+Then run `validate-headless.job.json` and `validate-gui.job.json`. Their commands explicitly unset both provider manifest overrides. Because the frozen CLI resides in `bin/kiln`, installed-provider discovery searches `bin/../lib/kiln`: the headless regex probe should resolve `full`, while `gui-accessibility.ts` should resolve `full-gui`. Both completed with exit 0 and source pre/post integrity checks; their summaries show those exact provider variants. `native-parity.log` reports 2 matched (regexps and GUI accessibility), and `native-gui-remaining.log` reports 3 matched (GUI reactivity, reactivity-GC, and widgets), with overrides unset. Direct execution of the two retained binaries also matched the frozen CLI interpreter's exact output bytes and exit codes. The checksummed receipt is `final-validation-receipt.json`.
+
+The first Full package attempt is rejected: `realm.rs` changed during packaging. The failed attempt, mutated source, and restoration record are preserved under `source-integrity-incident/`; do not use its archive. The successful retry used the restored source hash from the review candidate and passed pre/post source identity checks.
+
+`FullGui` enables `realm,realm-http,regexp,bigint,temporal,json,intl,parallel,ffi,gui`; unlike `Full`, it uses `--no-default-features`, so HTTP is explicit. ABI is 82. The packager validates the variant export list and checks GUI link arguments by linking its probe.
+
+Package jobs were run sequentially with a 3600-second process-group timeout/TERM/KILL/reap supervisor in `bounded-package-job.py`. Native validation and parity commands were likewise bounded separately. All native probes above passed; the earlier staged Effect/Sharding replay is recorded separately at `../combined-release/sharding/stage-receipt.json` and had 62/66 pass under the original deadlines.
