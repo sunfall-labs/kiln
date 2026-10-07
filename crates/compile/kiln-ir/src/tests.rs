@@ -1400,6 +1400,7 @@ fn only_classes_with_private_elements_emit_private_brands() {
         class(
             "PrivateMember",
             vec![ClassInitialiser::Field(ClassField {
+                span: Span::default(),
                 key: ObjectKey::Private("value".to_owned()),
                 value: Some(number(1.0)),
                 is_static: false,
