@@ -1,6 +1,69 @@
 use super::*;
 
 #[test]
+fn argc_only_arguments_length_emits_without_publishing_an_arguments_frame() {
+    let hir = kiln_frontend_oxc::parse(
+        "fixture/arguments-length-emission.ts",
+        "function argcOnly() { return arguments.length; }\nargcOnly(1, 2, 3);",
+    );
+    let program = kiln_ir::compile_module(&hir)
+        .expect("arguments-length fixture compiles")
+        .program;
+    let emitted = emit_with_policy(
+        &program,
+        EmissionPolicy {
+            generic_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("arguments-length module emits");
+
+    assert!(
+        emitted.source.contains("(double)argc"),
+        "the proven length read comes from the actual call argc"
+    );
+    assert!(
+        !emitted.source.contains("kiln_c99_visible_arguments"),
+        "the eligible body does not materialize the visible arguments array"
+    );
+    assert!(
+        !emitted.source.contains("kiln_c99_frame_mapped_arguments ="),
+        "an argc-only body does not publish an observable arguments object"
+    );
+    let argc_only = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|name| name.to_lossy_string() == "argcOnly")
+        })
+        .expect("argcOnly proto");
+    let marker = format!("(kiln_body_fn){}_fn_{argc_only},", emitted.symbol);
+    let proto_metadata = emitted
+        .source
+        .lines()
+        .find(|line| line.contains(&marker))
+        .expect("emitted proto metadata for argcOnly");
+    let metadata_prefix = proto_metadata
+        .split(", {0}")
+        .next()
+        .expect("proto metadata has its trailing reserved field");
+    let flags = metadata_prefix
+        .rsplit(", ")
+        .next()
+        .expect("proto metadata contains flags")
+        .trim()
+        .parse::<u8>()
+        .expect("proto flags are a byte");
+    assert_eq!(
+        flags & (1 << 6),
+        0,
+        "the exact argcOnly proto metadata clears publishes_frame"
+    );
+}
+
+#[test]
 fn generated_closures_retain_their_host_context_without_rebinding_plain_closures() {
     let mut closure_program = program(
         Vec::new(),
