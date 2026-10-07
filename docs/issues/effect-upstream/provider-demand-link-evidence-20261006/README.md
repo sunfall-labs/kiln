@@ -57,13 +57,21 @@ Graphene, Gio, GObject, and GLib. Both print identical stdout.
 `raw/launch-samples.csv` is an initial warmup-and-alternating sample for a different pair:
 `full-provider.bin` and `gui-export-rooted.bin`. The latter used `--as-needed` and the extra
 `--undefined=kiln_gui_init` linker root. Keep it as a GUI retention control only; do not report it
-as the FullGui-versus-Full latency comparison. The quiet sample of the exact `ms-full-gui.bin` and
-`full-provider.bin` pair is pending.
+as the FullGui-versus-Full latency comparison.
+
+The exact-pair launch sample is `raw/exact-full-vs-fullgui-launch-samples.csv`. After the root's
+combined CLI build had terminated, I ran three alternating warmup pairs followed by nine
+alternating timed pairs using `launch_samples.py`, with both provider-manifest variables removed
+from the child environment. Every launch exited 0 with empty stderr and the same stdout SHA listed
+above. Full had 6.463 ms median startup (5.922–6.892 ms); FullGui had 50.096 ms median
+(48.206–50.454 ms), a 43.633 ms median difference. At the sample timestamp, no compiler/native
+build was in the process list (host load average was 1.34/1.68/2.42). This is a short causal
+startup diagnostic, not the gate's full bundle benchmark or final performance acceptance.
 
 ## Files and provenance
 
 `raw/` contains the build reports, provider manifests, output bytes, initial launch CSV, exact
-link commands, dynamic dependency listings, and SHA-256 inventory. Large executable and object
+link commands, dynamic dependency listings, exact-pair timing CSV, and SHA-256 inventory. Large executable and object
 files are intentionally not copied into this evidence commit; their hashes and source paths are
 recorded in `raw/sha256.txt`.
 
