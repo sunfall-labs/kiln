@@ -159,6 +159,69 @@ int main(void) {{
 }
 
 #[test]
+fn computed_builtin_read_sees_sealed_callable_store_before_method_table() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty module emits");
+    let wrapper = r#"
+static int sealed_date_store_entry(void *context) {
+    kiln_value store, parent, result, thrown = kiln_c99_undefined();
+    const kiln_string *key, *canonical;
+    int status;
+    (void)context;
+    status = kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_DATE_PROTOTYPE),
+                                     &store, 1);
+    if (status != KILN_C99_OK) return 10;
+    status = kiln_c99_new_object(&parent);
+    if (status != KILN_C99_OK) return 16;
+    status = kiln_c99_define_accessor(parent, "observed", 8,
+                                      kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF),
+                                      kiln_c99_undefined(), 0);
+    if (status != KILN_C99_OK) return 17;
+    status = kiln_c99_set_prototype(store, parent);
+    if (status != KILN_C99_OK) return 18;
+    key = kiln_c99_intern_static("setTime", 7);
+    canonical = key == NULL ? NULL : kiln_c99_intern_static_key(key);
+    if (canonical == NULL) return 9;
+    status = kiln_c99_put_mode_key(NULL, store, key, canonical, kiln_c99_number(42.0),
+                                   1, 0, NULL);
+    if (status != KILN_C99_OK) return 11;
+    if (kiln_c99_ensure_dictionary(kiln_c99_object_of(store)) != KILN_C99_OK) return 12;
+    kiln_c99_sealed_layout_publish(KILN_VALUE_BUILTIN, UINT64_C(1234567),
+                                   kiln_c99_object_of(store));
+    if (!kiln_c99_sealed_layout_attach(KILN_VALUE_BUILTIN, UINT64_C(1234567),
+                                       kiln_c99_object_of(store))) return 15;
+    status = kiln_c99_get_computed(NULL, kiln_c99_builtin(KILN_C99_BUILTIN_DATE_PROTOTYPE),
+                                   kiln_c99_copy_text("setTime", 7), &result, 0, &thrown);
+    if (status != KILN_C99_OK) return 13;
+    if (result.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(result) != 42.0) return 14;
+    status = kiln_c99_get_computed(NULL, kiln_c99_builtin(KILN_C99_BUILTIN_DATE_PROTOTYPE),
+                                   kiln_c99_copy_text("observed", 8), &result, 0, &thrown);
+    if (status != KILN_C99_OK) return 19;
+    return result.tag == KILN_VALUE_BUILTIN &&
+                   result.bits == KILN_C99_BUILTIN_DATE_PROTOTYPE
+               ? 0
+               : 20;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 20;
+    status = kiln_realm_enter(realm, sealed_date_store_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 21;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "computed-sealed-builtin-store");
+    assert!(
+        run.status.success(),
+        "computed lookup fell through a sealed Date.prototype store ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn generic_only_direct_call_preserves_captured_cells_under_gc_stress() {
     let mut add = FunctionProto {
         upvalues: vec![kiln_ir::Upvalue::ParentLocal(0)],

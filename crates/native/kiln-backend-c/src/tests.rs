@@ -562,15 +562,15 @@ int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
         ((candidate == NULL) != (drop_candidate == NULL))) {
         return KILN_C99_INVALID_ARGUMENT;
     }
-    if (candidate == NULL) {
-        *out_store = NULL;
-        return KILN_C99_OK;
-    }
     for (index = 0; index < kiln_test_callable_store_count; ++index) {
         if (kiln_test_callable_tags[index] == tag && kiln_test_callable_codes[index] == code) {
             *out_store = kiln_test_callable_stores[index];
             return KILN_C99_OK;
         }
+    }
+    if (candidate == NULL) {
+        *out_store = NULL;
+        return KILN_C99_OK;
     }
     if (kiln_test_callable_store_count == 256) return KILN_C99_OUT_OF_MEMORY;
     index = kiln_test_callable_store_count++;

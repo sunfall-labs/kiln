@@ -870,31 +870,32 @@ static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
     }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         kiln_object *object;
-        size_t index;
+        kiln_property property;
         if (current.tag == KILN_VALUE_FUNCTION) {
             current = kiln_c99_closure_store(kiln_c99_closure_of(current));
         }
         if (current.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
         object = kiln_c99_object_of(current);
-        if (object->shape != NULL) kiln_c99_ensure_dictionary(object);
-        index = kiln_c99_own_index_key(object, canonical, key);
-        if (index != object->count) {
+        /* Callable stores may use a sealed layout after bootstrap. Read through the shared
+         * own-property projection so shaped, dictionary, and sealed slots have one authority.
+         * Otherwise a missing sealed-store hit can fall through to a synthetic method-table
+         * answer and shadow an installed TypeScript facade. */
+        if (kiln_c99_property_read_own_value(current, key, canonical, &property)) {
             *found = 1;
-            if (object->properties[index].refused) {
+            if (property.refused) {
                 return kiln_c99_refuse_named_key(
                     "a member this backend declares and has not implemented", key);
             }
-            if (!object->properties[index].accessor) {
-                *out = object->properties[index].value;
+            if (!property.accessor) {
+                *out = property.value;
                 return KILN_C99_OK;
             }
-            if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+            if (property.getter.tag == KILN_VALUE_UNDEFINED) {
                 KILN_C99_ABSENT("an accessor with no getter, whose read is undefined by "
                                 "definition",
                                 out);
             }
-            return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
-                                 depth, thrown);
+            return kiln_c99_call(host, out, property.getter, target, NULL, 0, depth, thrown);
         }
         current = object->prototype;
     }
