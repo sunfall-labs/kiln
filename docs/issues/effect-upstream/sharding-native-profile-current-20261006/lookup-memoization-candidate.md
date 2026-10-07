@@ -36,7 +36,12 @@ Focused checks on the candidate source:
 
 The stress-only failure was `executable_candidate_ledger_observes_post_factory_cell_aliases_and_clears`
 at its existing `ROOTS_UNENUMERATED` assertion after clearing a late owner's value. It has not
-been reproduced against the unmodified baseline in this worktree, so this note does not classify
-it as pre-existing. The candidate's own fixture passes with stress enabled; ordinary candidate
-ledger and minor-GC suites pass. No native CLI rebuild, upstream replay, or performance timing was
-run, and this candidate is not an acceptance claim.
+been reproduced against the unmodified baseline as well: exact single-test runs at baseline
+`45ac689fd06b92475cc7d2530a83429dd7b362d3` and candidate
+`0859b29a8bf64c0a2a2d4d2cf9ff4195d3515c8f`, both with `KILN_GC_STRESS=1`, exit 101 with fixture
+status `Some(10)` at that assertion. This shows the candidate did not introduce the failure. The
+fixture observes a graph-audit classification; it does not demonstrate that a live program value
+was collected or corrupted. Whether this stress-only audit expectation merits a separate collector
+follow-up remains open. The candidate's own fixture passes with stress enabled; ordinary
+candidate-ledger and minor-GC suites pass. No native CLI rebuild, upstream replay, or performance
+timing was run, and this candidate is not an acceptance claim.
