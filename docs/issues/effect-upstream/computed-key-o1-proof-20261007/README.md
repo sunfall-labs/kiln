@@ -76,3 +76,17 @@ at 1,025. The focused suite passed 6/6; its complete log is
 [`cap1024-focused-tests.log`](cap1024-focused-tests.log). This does not yet prove that the actual
 Effect method is selected or that fn120's emitted attribute changes; the integrated AOT emission
 must verify that separately.
+
+After the cap change, the emitted-C integration target was rerun at source commit
+`948c52bb8bd03d83f1bdd3823fb8ef06294eac88` (the tree also contained docs-only commits). It passed
+37/37 tests, 0 failed/ignored, in 1.71 seconds; the target completed in 0.20 seconds. The tested
+`direct.rs` SHA256 was `fdcf9415c0e8bb8fadc389af63db097966f99e23c5bfef3b2bf25e26b8dda559`. The pinned
+Rust 1.97.1/mbx command was:
+
+```sh
+mbx test -p kiln-backend-c --offline --test emitted_c -- --test-threads=1
+```
+
+Its full output is retained in [`cap1024-emitted-c.log`](cap1024-emitted-c.log). This confirms the
+existing emission integration suite remains green; actual Effect fn120 selection is still a
+separate AOT check.
