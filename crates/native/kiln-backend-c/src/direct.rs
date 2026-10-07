@@ -244,15 +244,21 @@ impl DirectPlan {
                     None
                 }
             });
-            let loop_weights = generic_loop_calls
-                .as_ref()
-                .map(|profile| profile.weights(None));
-            let optimized_functions = select_generic_optimization_functions_with_weights(
-                program,
-                publishes_frame,
-                None,
-                loop_weights.as_deref(),
-            );
+            let optimized_functions = if let Some(profile) = generic_loop_calls.as_ref() {
+                select_generic_optimization_functions_with_profile(
+                    program,
+                    publishes_frame,
+                    None,
+                    profile,
+                )
+            } else {
+                select_generic_optimization_functions_with_weights(
+                    program,
+                    publishes_frame,
+                    None,
+                    None,
+                )
+            };
             let generic_verdicts = std::sync::Arc::new(vec![
                 Err(crate::parallel::Refusal::new(
                     if parallel_in_generic {
@@ -1423,12 +1429,47 @@ pub(crate) fn select_generic_optimization_functions_with_weights(
     available: Option<&[bool]>,
     loop_call_weights: Option<&[usize]>,
 ) -> Vec<bool> {
+    select_generic_optimization_functions_internal(
+        program,
+        publishes_frame,
+        available,
+        loop_call_weights,
+        None,
+    )
+}
+
+pub(crate) fn select_generic_optimization_functions_with_profile(
+    program: &Program,
+    publishes_frame: &[bool],
+    available: Option<&[bool]>,
+    profile: &LoopCallProfile,
+) -> Vec<bool> {
+    select_generic_optimization_functions_internal(
+        program,
+        publishes_frame,
+        available,
+        None,
+        Some(profile),
+    )
+}
+
+fn select_generic_optimization_functions_internal(
+    program: &Program,
+    publishes_frame: &[bool],
+    available: Option<&[bool]>,
+    loop_call_weights: Option<&[usize]>,
+    loop_profile: Option<&LoopCallProfile>,
+) -> Vec<bool> {
     const MAX_FUNCTIONS: usize = 64;
     const MAX_FUNCTION_INSTRUCTIONS: usize = 320;
     const MAX_TOTAL_INSTRUCTIONS: usize = 4096;
     const MAX_LOOP_FUNCTIONS: usize = 2;
+    const MAX_LOOP_GROUPS: usize = 8;
+    const MAX_LOOP_PROFILE_FUNCTIONS: usize = 8;
     const MAX_LOOP_FUNCTION_INSTRUCTIONS: usize = MAX_GENERIC_LOOP_PROFILE_CALLER_INSTRUCTIONS;
     const MAX_LOOP_TOTAL_INSTRUCTIONS: usize = 2048;
+    const MAX_LOOP_PROFILE_TOTAL_INSTRUCTIONS: usize = 4096;
+    const MAX_LOOP_GROUP_FUNCTIONS: usize = 4;
 
     let mut selected = vec![false; program.functions.len()];
     let mut count = 0usize;
@@ -1456,10 +1497,103 @@ pub(crate) fn select_generic_optimization_functions_with_weights(
     // Large bodies, generators and other frame-publishing bodies may dominate repeated work
     // while remaining outside the legacy bucket above. O1 only changes the host compiler's
     // treatment of the existing boxed body; it does not introduce a direct or typed entry. Admit
-    // a tiny, separately-budgeted set of such loop bodies and proven callees. With call evidence,
-    // rank by estimated repeated body instructions (context weight times body size), then weight
-    // and static loop work. Without known edges,
+    // a separately-budgeted set of such loop bodies and proven callees. With call evidence,
+    // rank bounded callee groups by repeated body work (context weight times body size), then
+    // weight and body size. Without known edges,
     // preserve the previous span/backedge ranking. Proto index is the final stable tie break.
+    if let Some(profile) = loop_profile {
+        let loop_weights = profile.weights(available);
+        if profile.seed_edges.is_empty() {
+            return select_generic_optimization_functions_internal(
+                program,
+                publishes_frame,
+                available,
+                Some(&loop_weights),
+                None,
+            );
+        }
+        let mut groups = Vec::new();
+        for &(_caller, target, weight) in &profile.seed_edges {
+            let target = target as usize;
+            if target >= program.functions.len()
+                || weight == 0
+                || available
+                    .is_some_and(|available| !available.get(target).copied().unwrap_or(false))
+            {
+                continue;
+            }
+            let group = profile.loop_group(
+                program,
+                target,
+                available,
+                &selected,
+                &loop_weights,
+                MAX_LOOP_GROUP_FUNCTIONS,
+                MAX_LOOP_FUNCTION_INSTRUCTIONS,
+                MAX_LOOP_PROFILE_TOTAL_INSTRUCTIONS,
+            );
+            if group.is_empty() {
+                continue;
+            }
+            let instructions = group
+                .iter()
+                .filter(|index| !selected[**index])
+                .map(|index| program.functions[*index].code.len())
+                .sum::<usize>();
+            let body_work = group
+                .iter()
+                .map(|index| program.functions[*index].code.len())
+                .sum::<usize>();
+            groups.push((target, group, instructions, body_work, weight));
+        }
+        groups.sort_by(|left, right| {
+            let left_work = (left.3 as u128) * (left.4 as u128);
+            let right_work = (right.3 as u128) * (right.4 as u128);
+            right_work
+                .cmp(&left_work)
+                .then_with(|| right.3.cmp(&left.3))
+                .then_with(|| right.4.cmp(&left.4))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let mut loop_count = 0usize;
+        let mut loop_instructions = 0usize;
+        let mut loop_functions = 0usize;
+        for (_, group, _, _, _) in groups {
+            let new_functions = group.iter().filter(|index| !selected[**index]).count();
+            let new_instructions = group
+                .iter()
+                .filter(|index| !selected[**index])
+                .map(|index| program.functions[*index].code.len())
+                .sum::<usize>();
+            if new_functions == 0
+                || loop_count == MAX_LOOP_GROUPS
+                || loop_functions.saturating_add(new_functions) > MAX_LOOP_PROFILE_FUNCTIONS
+                || loop_instructions.saturating_add(new_instructions)
+                    > MAX_LOOP_PROFILE_TOTAL_INSTRUCTIONS
+            {
+                continue;
+            }
+            for index in group {
+                if !selected[index] {
+                    selected[index] = true;
+                    loop_functions += 1;
+                }
+            }
+            loop_count += 1;
+            loop_instructions += new_instructions;
+        }
+        if loop_count == 0 {
+            return select_generic_optimization_functions_internal(
+                program,
+                publishes_frame,
+                available,
+                Some(&loop_weights),
+                None,
+            );
+        }
+        return selected;
+    }
+
     let mut loop_candidates = Vec::new();
     for (index, proto) in program.functions.iter().enumerate() {
         if selected[index]
@@ -1554,6 +1688,93 @@ pub(crate) fn generic_loop_profile_for_program(program: &Program) -> Option<Arc<
 }
 
 impl LoopCallProfile {
+    fn loop_group(
+        &self,
+        program: &Program,
+        root: usize,
+        available: Option<&[bool]>,
+        selected: &[bool],
+        loop_weights: &[usize],
+        max_functions: usize,
+        max_function_instructions: usize,
+        max_total_instructions: usize,
+    ) -> Vec<usize> {
+        let Some(root_proto) = program.functions.get(root) else {
+            return Vec::new();
+        };
+        let root_size = root_proto.code.len();
+        if root_size == 0
+            || root_size > max_function_instructions
+            || available.is_some_and(|available| !available.get(root).copied().unwrap_or(false))
+        {
+            return Vec::new();
+        }
+
+        // The seed is a known callee reached from a loop. Add its bounded known-callee closure,
+        // not the caller loop itself: compiling the hot callback path gives value even when the
+        // larger loop body cannot fit in the same instruction budget.
+        let mut members = if selected[root] {
+            Vec::new()
+        } else {
+            vec![root]
+        };
+        let mut visited = vec![false; program.functions.len()];
+        let mut frontier = vec![root];
+        let mut instructions = if selected[root] { 0 } else { root_size };
+        visited[root] = true;
+        for _ in 0..MAX_GENERIC_LOOP_CALL_DEPTH {
+            let mut next = Vec::new();
+            for caller in frontier {
+                let mut candidates = self.edges[caller]
+                    .iter()
+                    .map(|target| *target as usize)
+                    .filter(|target| {
+                        *target < program.functions.len()
+                            && !visited[*target]
+                            && !program.functions[*target].code.is_empty()
+                            && program.functions[*target].code.len() <= max_function_instructions
+                            && !available.is_some_and(|available| {
+                                !available.get(*target).copied().unwrap_or(false)
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                candidates.sort_unstable_by(|left, right| {
+                    let left_weight = loop_weights.get(*left).copied().unwrap_or(0);
+                    let right_weight = loop_weights.get(*right).copied().unwrap_or(0);
+                    let left_work = (left_weight as u128)
+                        .saturating_mul(program.functions[*left].code.len() as u128);
+                    let right_work = (right_weight as u128)
+                        .saturating_mul(program.functions[*right].code.len() as u128);
+                    right_work
+                        .cmp(&left_work)
+                        .then_with(|| right_weight.cmp(&left_weight))
+                        .then_with(|| left.cmp(right))
+                });
+                for target in candidates {
+                    visited[target] = true;
+                    if selected[target] {
+                        next.push(target);
+                        continue;
+                    }
+                    let size = program.functions[target].code.len();
+                    if members.len() >= max_functions
+                        || instructions.saturating_add(size) > max_total_instructions
+                    {
+                        continue;
+                    }
+                    members.push(target);
+                    instructions += size;
+                    next.push(target);
+                }
+            }
+            if next.is_empty() || members.len() >= max_functions {
+                break;
+            }
+            frontier = next;
+        }
+        members
+    }
+
     fn from_known(
         program: &Program,
         graphs: &[FunctionGraph],

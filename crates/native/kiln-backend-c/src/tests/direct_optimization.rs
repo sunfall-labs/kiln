@@ -187,6 +187,71 @@ fn generic_loop_callee_weight_ranks_bounded_repeated_work_deterministically() {
     );
 }
 
+#[test]
+fn generic_loop_callee_groups_keep_a_hot_call_chain_within_the_budget() {
+    let source = r#"
+function leaf(value: number): number { return value + 1; }
+function wrapper(value: number): number { return leaf(value); }
+function run(count: number): number {
+  let total = 0;
+  for (let index = 0; index < count; index++) total = wrapper(total);
+  return total;
+}
+export { run };
+"#;
+    let hir = kiln_frontend_oxc::parse("fixture/loop-callee-group.ts", source);
+    let program = kiln_ir::compile_module(&hir)
+        .expect("loop-callee fixture compiles")
+        .program;
+    let find = |name: &str| {
+        program
+            .functions
+            .iter()
+            .position(|proto| {
+                proto
+                    .effective_name_units()
+                    .is_some_and(|value| value.to_lossy_string() == name)
+            })
+            .unwrap_or_else(|| panic!("missing proto {name}"))
+    };
+    let leaf = find("leaf");
+    let wrapper = find("wrapper");
+    let run = find("run");
+    let profile = crate::direct::generic_loop_profile_for_program(&program)
+        .expect("small fixture fits profile bounds");
+    let selected = crate::direct::select_generic_optimization_functions_with_profile(
+        &program,
+        &vec![true; program.functions.len()],
+        None,
+        &profile,
+    );
+    assert!(selected[wrapper], "loop-reached wrapper is selected");
+    assert!(selected[leaf], "known leaf stays grouped with its wrapper");
+    assert!(
+        !selected[run],
+        "the loop caller does not consume the callee-group budget"
+    );
+
+    let unavailable_leaf = crate::direct::select_generic_optimization_functions_with_profile(
+        &program,
+        &vec![true; program.functions.len()],
+        Some(
+            &program
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(index, _)| index != leaf)
+                .collect::<Vec<_>>(),
+        ),
+        &profile,
+    );
+    assert!(!unavailable_leaf[leaf], "unavailable callees stay excluded");
+    assert!(
+        unavailable_leaf[wrapper],
+        "the available wrapper remains eligible"
+    );
+}
+
 fn diagnostic_loop_work(proto: &kiln_ir::FunctionProto) -> Option<(usize, usize)> {
     let mut span = 0usize;
     let mut count = 0usize;
@@ -515,7 +580,11 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
     );
     assert!(
         selected[165],
-        "fn165 enters the bounded tier from proven loop-call evidence"
+        "the encode callee remains selected under its loop weight"
+    );
+    assert!(
+        selected[199] && selected[200],
+        "the decode callee chain is selected as a group"
     );
     assert!(
         !instantiation_selected[165],
@@ -524,6 +593,14 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
     assert!(
         shared_profile_selected[165],
         "the full-module ranking profile restores the bounded decision without changing calls"
+    );
+    assert!(
+        shared_profile_selected[199],
+        "decodeValue is reached from decodeArray"
+    );
+    assert!(
+        shared_profile_selected[200],
+        "decodeValueUnchecked remains grouped with its hot wrapper"
     );
 
     // Exercise the same split-module emitter used by native cyclic-module AOT, not only the
@@ -559,6 +636,22 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
                 || !function_header.contains("KILN_GENERIC_MIXED_TIER")),
         "actual SchemaBinary instantiation emits encodeValue in the bounded O1 tier: {function_header}"
     );
+    for index in [199usize, 200] {
+        let marker = format!("/* frontend function {index}:");
+        let marker_at = instantiation
+            .source
+            .find(&marker)
+            .unwrap_or_else(|| panic!("instantiation retains hot decode proto {index}"));
+        let header_end = instantiation.source[marker_at..]
+            .find("static inline int")
+            .map(|offset| marker_at + offset)
+            .unwrap_or_else(|| panic!("decode proto {index} has an emitted C function"));
+        let function_header = &instantiation.source[marker_at..header_end];
+        assert!(
+            !function_header.contains("optnone") && !function_header.contains("optimize(\"O0\")"),
+            "actual SchemaBinary instantiation emits hot decode proto {index} in O1: {function_header}"
+        );
+    }
 }
 
 #[test]
