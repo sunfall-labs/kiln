@@ -156,6 +156,79 @@ fn source_check_uses_nearest_uploaded_config_and_isolates_external_ambient_types
     );
 }
 
+#[test]
+fn source_check_limits_ambient_roots_to_entry_package_but_resolves_imported_packages() {
+    use std::sync::Arc;
+
+    let entry = "/workspace/packages/app/src/main.ts";
+    let global = "/workspace/packages/app/types/global.d.ts";
+    let unrelated = "/workspace/packages/other/index.d.ts";
+    let imported = "/workspace/packages/app/node_modules/actual/index.d.ts";
+    let modules = vec![
+        (
+            entry.into(),
+            Arc::new(kiln_frontend_oxc::parse(
+                entry,
+                "import { importedValue } from 'actual'; const ambient: number = globalValue; const mismatch: number = importedValue;",
+            )),
+        ),
+        (
+            global.into(),
+            Arc::new(kiln_frontend_oxc::parse(
+                global,
+                "declare const globalValue: number;",
+            )),
+        ),
+        (
+            unrelated.into(),
+            Arc::new(kiln_frontend_oxc::parse(
+                unrelated,
+                "declare const leaked: MissingFromOtherPackage;",
+            )),
+        ),
+        (
+            imported.into(),
+            Arc::new(kiln_frontend_oxc::parse(
+                imported,
+                "export declare const importedValue: string;",
+            )),
+        ),
+    ];
+    let package = |path: &str, text: &[u8]| (path.into(), Arc::<[u8]>::from(text));
+    let auxiliary = vec![
+        package("/workspace/package.json", br#"{"name":"workspace"}"#),
+        package("/workspace/packages/app/package.json", br#"{"name":"app"}"#),
+        package(
+            "/workspace/packages/other/package.json",
+            br#"{"name":"other"}"#,
+        ),
+        package(
+            "/workspace/packages/app/node_modules/actual/package.json",
+            br#"{"name":"actual","types":"index.d.ts"}"#,
+        ),
+    ];
+
+    let result = crate::server::check_source_types(entry, &modules, &auxiliary);
+
+    assert!(result.complete, "checker result must be complete");
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == Some(2322)),
+        "the imported package declaration was not resolved: {:?}",
+        result.diagnostics
+    );
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == Some(2304)),
+        "the sibling package leaked into ambient roots: {:?}",
+        result.diagnostics
+    );
+}
+
 /// Test clients keep the current protocol source view automatically. This lets the older daemon
 /// tests focus on query behavior while still exercising the v16 CAS contract.
 struct Client {

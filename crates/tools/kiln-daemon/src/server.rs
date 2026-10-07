@@ -215,16 +215,38 @@ pub(crate) fn check_source_types(
         .modules
         .extend(modules.iter().map(|(p, m)| (p.clone(), Arc::clone(m))));
     snapshot.auxiliary_files.extend(auxiliary.iter().cloned());
-    // Ambient declarations belong to the explicit project snapshot even when
-    // no runtime import reaches them. Standard libraries remain option-driven.
+    // Ambient declarations belong to the entry package snapshot even when no runtime import
+    // reaches them. A workspace snapshot can contain sibling packages; their declarations are
+    // not ambient in this package and should enter only through normal module resolution.
     let mut roots = vec![entry.to_owned()];
+    let package_manifests = auxiliary
+        .iter()
+        .filter_map(|(path, _)| {
+            std::path::Path::new(path)
+                .file_name()
+                .is_some_and(|name| name == "package.json")
+                .then_some(path.as_str())
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let entry_package = uploaded_package_root(entry, &package_manifests);
     roots.extend(modules.iter().filter_map(|(path, _)| {
-        (path != entry
-            && !std::path::Path::new(path)
+        let file = std::path::Path::new(path);
+        let declaration =
+            path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts");
+        if path == entry
+            || !declaration
+            || file
                 .components()
                 .any(|part| part.as_os_str() == "node_modules")
-            && (path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")))
-        .then(|| path.clone())
+        {
+            return None;
+        }
+        let package = uploaded_package_root(path, &package_manifests);
+        match entry_package.as_deref() {
+            Some(entry_package) if package.as_deref() == Some(entry_package) => Some(path.clone()),
+            None if package.is_none() => Some(path.clone()),
+            _ => None,
+        }
     }));
     // The closest uploaded project configuration owns checker options. Reading only
     // the immutable input set keeps editor revisions and compiler facts coherent.
@@ -248,6 +270,27 @@ pub(crate) fn check_source_types(
         ..Default::default()
     };
     kiln_type_checker::check(&snapshot, &roots, &options)
+}
+
+fn uploaded_package_root(
+    source: &str,
+    manifests: &std::collections::HashSet<&str>,
+) -> Option<String> {
+    std::path::Path::new(source)
+        .parent()?
+        .ancestors()
+        .find_map(|directory| {
+            if directory
+                .components()
+                .any(|part| part.as_os_str() == "node_modules")
+            {
+                return None;
+            }
+            let manifest = directory.join("package.json");
+            manifests
+                .contains(manifest.to_str()?)
+                .then(|| directory.to_string_lossy().into_owned())
+        })
 }
 
 /// A private request channel to the same handler used by socket clients. A one-shot CLI owns
