@@ -11113,8 +11113,13 @@ export default interface Fallback { value: boolean }
             Some(&kiln_hir::Pattern::Identifier("rest".to_owned()))
         );
         let rest_span = signature.signature.parameters[1].pattern_span;
+        let authored = module
+            .type_syntax
+            .original_module
+            .as_deref()
+            .unwrap_or(&module);
         assert_eq!(
-            module
+            authored
                 .source
                 .get(rest_span.start as usize..rest_span.end as usize),
             Some("rest")
@@ -11165,6 +11170,11 @@ type Query = typeof Exported\u0042ase;"#,
             r#"type Direct = import("pkg", { with: { "resolution-mode": "require" } }).Entry;
 type Queried = typeof import("pkg", { with: { "resolution-mode": "require" } }).Entry;"#,
         );
+        let authored = module
+            .type_syntax
+            .original_module
+            .as_deref()
+            .unwrap_or(&module);
         let options_for = |name: &str| {
             let declaration = module
                 .type_syntax
@@ -11190,7 +11200,7 @@ type Queried = typeof import("pkg", { with: { "resolution-mode": "require" } }).
                 &options.kind,
                 kiln_hir::ExpressionKind::Object { .. }
             ));
-            let source = module
+            let source = authored
                 .source
                 .get(options.span.start as usize..options.span.end as usize)
                 .unwrap();
@@ -11207,6 +11217,11 @@ type Queried = typeof import("pkg", { with: { "resolution-mode": "require" } }).
 export { value } from "pkg" with { "resolution-mode": "invalid-mode" };
 export * from "legacy" assert { type: "json" };"#,
         );
+        let authored = module
+            .type_syntax
+            .original_module
+            .as_deref()
+            .unwrap_or(&module);
         assert_eq!(module.type_syntax.module_attributes.len(), 3);
         let with_import = &module.type_syntax.module_attributes[0];
         assert_eq!(
@@ -11221,14 +11236,14 @@ export * from "legacy" assert { type: "json" };"#,
             kiln_hir::TypeModuleAttributeKeyKind::StringLiteral
         );
         assert_eq!(
-            module.source.get(
+            authored.source.get(
                 with_import.keyword_span.start as usize..with_import.keyword_span.end as usize
             ),
             Some("with")
         );
         let attributes_span = with_import.attributes_span;
         assert_eq!(
-            module
+            authored
                 .source
                 .get(attributes_span.start as usize..attributes_span.end as usize),
             Some(r#"{ "resolution-mode": "require" }"#)
@@ -11244,7 +11259,7 @@ export * from "legacy" assert { type: "json" };"#,
         assert_eq!(assert_export.attributes[0].key, "type");
         assert_eq!(assert_export.attributes[0].value, "json");
         assert_eq!(
-            module.source.get(
+            authored.source.get(
                 assert_export.keyword_span.start as usize..assert_export.keyword_span.end as usize
             ),
             Some("assert")
