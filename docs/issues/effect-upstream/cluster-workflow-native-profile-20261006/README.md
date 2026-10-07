@@ -7,7 +7,7 @@ This receipt records a diagnostic profile of the original native ClusterWorkflow
 - Source commit: `f53e22c6d47ef0daad71fa915d4ec8c73d2d6bae` (from the original replay job receipt).
 - Frozen CLI SHA-256: `cdae5bcf3bd90f73412e0e0b3d35d0cefc8204fb388502476673d0e700ae6df2`.
 - Profiled native executable SHA-256: `3125bfcd12d2e58c4eef7e12fc4f733a0ed885b14594b83b64af648b4166466b`.
-- Native number-provider manifest: `provider-4b68a2200f148e19ff7fcd146cacd5c8ffb546692d67e52478fb3b266c19621b`; manifest SHA-256 is recorded in the run receipt source location. Provider archive SHA-256: `61c1ef04a85b93ec98e561e320d4c056f6c2a07e788a25f71f1273f4ef5c2f6d`.
+- Native number-provider manifest SHA-256: `4b68a2200f148e19ff7fcd146cacd5c8ffb546692d67e52478fb3b266c19621b`. Provider archive SHA-256: `61c1ef04a85b93ec98e561e320d4c056f6c2a07e788a25f71f1273f4ef5c2f6d`.
 - The profiler attached after the case `resumes a fresh entity from a legacy envelope with queued replay true` passed and detached as the parent-suspension timeout output arrived. The full raw run log is retained.
 - `samply` ran at 100 Hz for 7 seconds. The saved profile contains 878 samples over 8.70 seconds with 8,694,728 microseconds of `threadCPUDelta` weight. These are sampled CPU weights, not elapsed-time measurements.
 
