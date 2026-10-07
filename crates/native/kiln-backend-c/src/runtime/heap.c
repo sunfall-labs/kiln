@@ -7174,6 +7174,12 @@ static int kiln_c99_keys_checked(void) {
     return kiln_c99_keys_check_mode;
 }
 
+static inline uint64_t kiln_c99_key_hash_mix_word(uint64_t hash, uint64_t word,
+                                                   uint64_t mix) {
+    hash = (hash ^ word) * mix;
+    return hash ^ (hash >> 29);
+}
+
 static uint64_t kiln_c99_key_hash(const kiln_string *string) {
     /* Hash JavaScript UTF-16 code units rather than storage bytes. Latin1 and UTF-16 headers
      * with the same units therefore share one canonical key identity. Pack four units into an
@@ -7183,27 +7189,54 @@ static uint64_t kiln_c99_key_hash(const kiln_string *string) {
     uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) ^
                     (uint64_t)(string == NULL ? 0 : string->unit_len);
     size_t index;
+    size_t length;
+    int utf16;
     if (string == NULL) return hash ^ (hash >> 32);
     if (kiln_c99_key_is_symbol(string)) hash ^= UINT64_C(0x6a09e667f3bcc909);
     if (string->flags & KILN_STRING_PRIVATE_KEY) hash ^= UINT64_C(0xbb67ae8584caa73b);
+    length = string->unit_len;
+    utf16 = kiln_string_is_utf16(string);
     index = 0;
-    while (string->unit_len - index >= 4) {
-        uint64_t word = (uint64_t)kiln_string_unit_at(string, index) |
-                        ((uint64_t)kiln_string_unit_at(string, index + 1) << 16) |
-                        ((uint64_t)kiln_string_unit_at(string, index + 2) << 32) |
-                        ((uint64_t)kiln_string_unit_at(string, index + 3) << 48);
-        hash = (hash ^ word) * mix;
-        hash ^= hash >> 29;
-        index += 4;
-    }
-    if (index < string->unit_len) {
-        uint64_t tail = 0;
-        size_t lane = 0;
-        while (index < string->unit_len) {
-            tail |= (uint64_t)kiln_string_unit_at(string, index++) << (16 * lane++);
+    if (string->data == NULL) {
+        /* Preserve kiln_string_unit_at's zero result for a malformed/null-data view without
+         * carrying its bounds, null, and width checks through the ordinary hot loops. */
+        while (length - index >= 4) {
+            hash = kiln_c99_key_hash_mix_word(hash, 0, mix);
+            index += 4;
         }
-        hash = (hash ^ tail) * mix;
-        hash ^= hash >> 29;
+        if (index < length) hash = kiln_c99_key_hash_mix_word(hash, 0, mix);
+    } else if (utf16) {
+        const uint16_t *units = kiln_string_utf16(string);
+        while (length - index >= 4) {
+            uint64_t word = (uint64_t)units[index] |
+                            ((uint64_t)units[index + 1] << 16) |
+                            ((uint64_t)units[index + 2] << 32) |
+                            ((uint64_t)units[index + 3] << 48);
+            hash = kiln_c99_key_hash_mix_word(hash, word, mix);
+            index += 4;
+        }
+        if (index < length) {
+            uint64_t tail = 0;
+            size_t lane = 0;
+            while (index < length) tail |= (uint64_t)units[index++] << (16 * lane++);
+            hash = kiln_c99_key_hash_mix_word(hash, tail, mix);
+        }
+    } else {
+        const uint8_t *units = kiln_string_latin1(string);
+        while (length - index >= 4) {
+            uint64_t word = (uint64_t)units[index] |
+                            ((uint64_t)units[index + 1] << 16) |
+                            ((uint64_t)units[index + 2] << 32) |
+                            ((uint64_t)units[index + 3] << 48);
+            hash = kiln_c99_key_hash_mix_word(hash, word, mix);
+            index += 4;
+        }
+        if (index < length) {
+            uint64_t tail = 0;
+            size_t lane = 0;
+            while (index < length) tail |= (uint64_t)units[index++] << (16 * lane++);
+            hash = kiln_c99_key_hash_mix_word(hash, tail, mix);
+        }
     }
     return hash ^ (hash >> 32);
 }

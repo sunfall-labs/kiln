@@ -1,6 +1,102 @@
 use super::*;
 
 #[test]
+fn key_hash_width_specialization_matches_unit_at_reference() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits the shared runtime");
+    let wrapper = r#"
+static uint64_t reference_key_hash(const kiln_string *string) {
+    const uint64_t mix = UINT64_C(0xff51afd7ed558ccd);
+    uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) ^
+                    (uint64_t)(string == NULL ? 0 : string->unit_len);
+    size_t index;
+    if (string == NULL) return hash ^ (hash >> 32);
+    if (kiln_c99_key_is_symbol(string)) hash ^= UINT64_C(0x6a09e667f3bcc909);
+    if (string->flags & KILN_STRING_PRIVATE_KEY) hash ^= UINT64_C(0xbb67ae8584caa73b);
+    index = 0;
+    while (string->unit_len - index >= 4) {
+        uint64_t word = (uint64_t)kiln_string_unit_at(string, index) |
+                        ((uint64_t)kiln_string_unit_at(string, index + 1) << 16) |
+                        ((uint64_t)kiln_string_unit_at(string, index + 2) << 32) |
+                        ((uint64_t)kiln_string_unit_at(string, index + 3) << 48);
+        hash = (hash ^ word) * mix;
+        hash ^= hash >> 29;
+        index += 4;
+    }
+    if (index < string->unit_len) {
+        uint64_t tail = 0;
+        size_t lane = 0;
+        while (index < string->unit_len)
+            tail |= (uint64_t)kiln_string_unit_at(string, index++) << (16 * lane++);
+        hash = (hash ^ tail) * mix;
+        hash ^= hash >> 29;
+    }
+    return hash ^ (hash >> 32);
+}
+
+int main(void) {
+    uint8_t latin1[67];
+    uint16_t random_utf16[67];
+    uint16_t utf16[67];
+    uint32_t state = UINT32_C(0x91e10da5);
+    static const uint32_t domains[] = {
+        0, KILN_STRING_SYMBOL_KEY, KILN_STRING_PRIVATE_KEY,
+        KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY
+    };
+    for (size_t index = 0; index < 67; ++index) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        latin1[index] = (uint8_t)state;
+        random_utf16[index] = (uint16_t)(state >> 7);
+    }
+    /* Include lone high/low surrogates and their neighbors in the UTF-16 lane. */
+    random_utf16[0] = UINT16_C(0xd800);
+    random_utf16[1] = UINT16_C(0xdc00);
+    random_utf16[2] = UINT16_C(0xdfff);
+    random_utf16[3] = UINT16_C(0xffff);
+    for (size_t length = 0; length <= 67; ++length) {
+        memcpy(utf16, random_utf16, sizeof utf16);
+        for (size_t domain = 0; domain < sizeof domains / sizeof domains[0]; ++domain) {
+            kiln_string byte_string = {
+                (uint32_t)length, KILN_STRING_LATIN1 | domains[domain], latin1
+            };
+            kiln_string word_string = {
+                (uint32_t)length, KILN_STRING_UTF16 | domains[domain], utf16
+            };
+            if (kiln_c99_key_hash(&byte_string) != reference_key_hash(&byte_string) ||
+                kiln_c99_key_hash(&word_string) != reference_key_hash(&word_string)) return 1;
+        }
+        /* The same Latin1 code units hash identically after widening to UTF-16. */
+        for (size_t index = 0; index < length; ++index) utf16[index] = latin1[index];
+        for (size_t domain = 0; domain < sizeof domains / sizeof domains[0]; ++domain) {
+            kiln_string byte_string = {
+                (uint32_t)length, KILN_STRING_LATIN1 | domains[domain], latin1
+            };
+            kiln_string word_string = {
+                (uint32_t)length, KILN_STRING_UTF16 | domains[domain], utf16
+            };
+            if (kiln_c99_key_hash(&byte_string) != kiln_c99_key_hash(&word_string)) return 2;
+        }
+    }
+    for (uint32_t length = 1; length <= 9; ++length) {
+        kiln_string missing = { length, KILN_STRING_UTF16 | KILN_STRING_SYMBOL_KEY, NULL };
+        if (kiln_c99_key_hash(&missing) != reference_key_hash(&missing)) return 3;
+    }
+    if (kiln_c99_key_hash(NULL) != reference_key_hash(NULL)) return 4;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "key-hash-width-specialization");
+    assert!(
+        run.status.success(),
+        "key hash width specialization mismatch ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn generic_only_direct_call_keeps_boxed_dynamic_fallback() {
     let mut add = function(vec![
         Instruction::LoadLocal(0),
