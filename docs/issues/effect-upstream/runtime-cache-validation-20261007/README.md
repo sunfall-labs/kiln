@@ -21,8 +21,14 @@ Focused results on that source:
 - Affected GC-stress probes: 6 matched, 0 refused or diverged.
 - Concurrent-realm probes: 4 matched at 1, 2 and 16 realms, no skips/divergences.
 
+The fresh native ClusterWorkflowEngine replay completed all 47 exact cases:
+42 passed and 5 hit the unchanged 5-second timeout; none skipped. Every
+case/mode mapped to the official Node/Vitest inventory. This candidate still
+needs performance work; it is not a stable improvement claim over older runs.
+The stage and original-case replay receipts and raw log are included.
+
 These checks do not prove the whole Effect or native corpus. Fresh native
-ClusterWorkflowEngine (47 cases) and Sharding (66 cases), both complete 322-file
+Sharding (66 cases), both complete 322-file
 Effect suites (11,019 official cases), the routine gate, and Bun comparisons
 remain required. Original 5-second case and 10-second hook deadlines remain.
 The earlier landing gate failed with disk-full/linker errors, provider capability
