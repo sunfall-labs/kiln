@@ -158,6 +158,70 @@ int main(void) {
 }
 
 #[test]
+fn canonical_array_index_parser_matches_previous_round_trip_and_respects_domains() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits the shared runtime");
+    let wrapper = r#"
+static double previous_index_rule(const char *key, size_t key_len) {
+    char buffer[64];
+    double number;
+    int length;
+    if (key_len == 0 || key_len > 10 || (unsigned char)(key[0] - '0') > 9u) return -1.0;
+    number = kiln_string_to_number(key, key_len);
+    if (!(number >= 0.0) || floor(number) != number || number > 4294967294.0) return -1.0;
+    length = kiln_c99_double_to_js(number, buffer);
+    if (length != (int)key_len || memcmp(buffer, key, key_len) != 0) return -1.0;
+    return number;
+}
+
+int main(void) {
+    static const char *const spellings[] = {
+        "", "0", "00", "01", "9", "10", "2147483647", "4294967294",
+        "4294967295", "9999999999", "12x", "-1", " 1"
+    };
+    static const uint16_t utf16_index[] = {'1', '2', '3'};
+    static const uint16_t utf16_surrogate[] = {0xd800};
+    static const uint16_t utf16_non_ascii_digit[] = {0x0661};
+    static const unsigned char latin1_non_ascii[] = {0xe9};
+    size_t spelling;
+    kiln_string key = {0};
+    for (spelling = 0; spelling < sizeof spellings / sizeof spellings[0]; ++spelling) {
+        const char *text = spellings[spelling];
+        size_t length = strlen(text);
+        if (kiln_c99_key_index(text, length) != previous_index_rule(text, length)) return 1;
+    }
+    if (kiln_c99_key_index("1\0", 2) >= 0.0 ||
+        kiln_c99_key_index("4294967294", 10) != 4294967294.0 ||
+        kiln_c99_key_index("4294967295", 10) >= 0.0 ||
+        kiln_c99_key_index(NULL, 1) >= 0.0) return 2;
+    key.unit_len = 3; key.flags = KILN_STRING_UTF16; key.data = (const char *)utf16_index;
+    if (kiln_c99_key_index_key(&key) != 123.0) return 3;
+    key.unit_len = 1; key.data = (const char *)utf16_surrogate;
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 4;
+    key.data = (const char *)utf16_non_ascii_digit;
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 5;
+    key.flags = KILN_STRING_LATIN1; key.data = (const char *)latin1_non_ascii;
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 6;
+    key.flags = KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY; key.data = "1";
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 7;
+    key.flags = KILN_STRING_LATIN1 | KILN_STRING_PRIVATE_KEY;
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 8;
+    if (kiln_c99_key_index_key(NULL) >= 0.0) return 9;
+    key.flags = KILN_STRING_LATIN1; key.unit_len = 0; key.data = "";
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 10;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "canonical-array-index-parser");
+    assert!(
+        run.status.success(),
+        "canonical index classification disagreed with the previous rule or domains ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn generic_only_direct_call_keeps_boxed_dynamic_fallback() {
     let mut add = function(vec![
         Instruction::LoadLocal(0),
