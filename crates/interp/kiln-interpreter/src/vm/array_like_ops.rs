@@ -211,6 +211,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             && !items.properties.borrow().is_frozen()
             && items.properties.borrow().prototype().is_none()
             && !self.intrinsics.indexed_array_prototype.get()
+            && !self
+                .intrinsics
+                .indexed_prototype_chain_is_custom(RealmId::PRIMARY)
         {
             return self.set_array_index(target, items, *index as usize, value, instruction);
         }
@@ -252,7 +255,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         // Use the same descriptor authority for ordinary and intrinsic prototypes. The
         // latter may have materialized properties that replace (or add to) the static table.
-        let mut current = prototype_of(target);
+        let mut current = prototype_of_in(&self.intrinsics, target);
         while matches!(
             current,
             Value::Object(_)
@@ -270,7 +273,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some((Property::Accessor { set, .. }, _)) => return set.is_some(),
                 None => {}
             }
-            current = prototype_of(&current);
+            current = prototype_of_in(&self.intrinsics, &current);
         }
         if let Value::Array(items) = target
             && let Some(index) = array_index_key(key)

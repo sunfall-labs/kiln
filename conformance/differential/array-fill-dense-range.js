@@ -156,6 +156,60 @@ console.log(
   inheritedArrayReceiver[2]
 )
 
+const readonlyArrayParent = Object.create(null)
+const readonlyArrayReceiver = new Array(4)
+Object.defineProperty(readonlyArrayParent, "2", {
+  configurable: true,
+  value: 21,
+  writable: false
+})
+let readonlyArrayRefused = false
+try {
+  Object.setPrototypeOf(Array.prototype, readonlyArrayParent)
+  readonlyArrayReceiver.fill(15)
+} catch (error) {
+  readonlyArrayRefused = error instanceof TypeError
+} finally {
+  Object.setPrototypeOf(Array.prototype, originalArrayPrototypeParent)
+}
+console.log(
+  "inherited-readonly-array-index",
+  readonlyArrayRefused,
+  readonlyArrayReceiver[0],
+  readonlyArrayReceiver[1],
+  Object.prototype.hasOwnProperty.call(readonlyArrayReceiver, "2"),
+  Object.prototype.hasOwnProperty.call(readonlyArrayReceiver, "3")
+)
+
+const getterOnlyArrayParent = Object.create(null)
+const getterOnlyArrayReceiver = new Array(4)
+let getterOnlyCalls = 0
+Object.defineProperty(getterOnlyArrayParent, "2", {
+  configurable: true,
+  get() {
+    getterOnlyCalls++
+    return 22
+  }
+})
+let getterOnlyArrayRefused = false
+try {
+  Object.setPrototypeOf(Array.prototype, getterOnlyArrayParent)
+  getterOnlyArrayReceiver.fill(16)
+} catch (error) {
+  getterOnlyArrayRefused = error instanceof TypeError
+} finally {
+  Object.setPrototypeOf(Array.prototype, originalArrayPrototypeParent)
+}
+console.log(
+  "inherited-getter-only-array-index",
+  getterOnlyArrayRefused,
+  getterOnlyCalls,
+  getterOnlyArrayReceiver[0],
+  getterOnlyArrayReceiver[1],
+  Object.prototype.hasOwnProperty.call(getterOnlyArrayReceiver, "2"),
+  Object.prototype.hasOwnProperty.call(getterOnlyArrayReceiver, "3")
+)
+
 const nonExtensibleSetter = new Array(1)
 let nonExtensibleCalls = 0
 const setterPrototype = Object.create(Array.prototype)
