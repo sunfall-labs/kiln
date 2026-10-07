@@ -1,6 +1,93 @@
 use super::*;
 
 #[test]
+fn candidate_pointer_store_memoizes_membership_lookups_without_losing_edges() {
+    let mut generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    generated
+        .source
+        .insert_str(0, "#define KILN_C99_TEST_STORE_LOOKUP_COUNTS 1\n");
+    let wrapper = r#"
+static int store_lookup_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_val *old_owner, *interior_owner, *active_owner;
+    kiln_val *candidate;
+    kiln_c99_candidate_group *group;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    old_owner = (kiln_val *)kiln_c99_gc_alloc_tenured(KILN_GC_CELL, sizeof *old_owner);
+    if (old_owner == NULL) return 2;
+    *old_owner = KILN_VAL_UNDEFINED;
+    if (!kiln_c99_actor_candidate_begin(heap)) return 3;
+    candidate = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *candidate);
+    if (candidate == NULL) return 4;
+    *candidate = KILN_VAL_UNDEFINED;
+    group = heap->actor_candidate_group;
+
+    /* A tenured-to-young publication consults owner and target membership once each even
+     * though both the remembered set and active candidate ledger need the same provenance. */
+    kiln_c99_test_store_lookup_count = 0;
+    kiln_c99_test_store_interior_lookup_count = 0;
+    kiln_c99_candidate_record_pointer_store(heap, old_owner, candidate);
+    if (kiln_c99_test_store_lookup_count != 2 ||
+        kiln_c99_test_store_interior_lookup_count != 0 ||
+        !kiln_c99_gc_ptrset_contains(&heap->remembered_owners,
+                                     ((kiln_gc_block *)old_owner - 1) + 1) ||
+        group->incoming_owners.count != 1 ||
+        !kiln_c99_gc_ptrset_contains(&group->incoming_owners,
+                                     (kiln_gc_block *)old_owner - 1)) return 5;
+
+    /* Interior references take the same exact lookup once, then one interior lookup. The
+     * result feeds both ledgers; the candidate group still records the external owner. */
+    interior_owner = (kiln_val *)kiln_c99_gc_alloc_tenured(KILN_GC_CELL, sizeof *interior_owner);
+    if (interior_owner == NULL) return 6;
+    *interior_owner = KILN_VAL_UNDEFINED;
+    kiln_c99_test_store_lookup_count = 0;
+    kiln_c99_test_store_interior_lookup_count = 0;
+    kiln_c99_candidate_record_pointer_store(heap, interior_owner, (char *)candidate + 1);
+    if (kiln_c99_test_store_lookup_count != 2 ||
+        kiln_c99_test_store_interior_lookup_count != 1 ||
+        !kiln_c99_gc_ptrset_contains(&heap->remembered_owners,
+                                     ((kiln_gc_block *)interior_owner - 1) + 1) ||
+        group->incoming_owners.count != 2 ||
+        !kiln_c99_gc_ptrset_contains(&group->incoming_owners,
+                                     (kiln_gc_block *)interior_owner - 1)) return 7;
+
+    /* The ordinary active-nursery fast path remains lookup-free when no ledger is open. */
+    if (!kiln_c99_actor_candidate_end(heap, 0)) return 8;
+    active_owner = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *active_owner);
+    if (active_owner == NULL || heap->candidate_ledger_groups != 0 ||
+        !heap->nursery.active || (uintptr_t)active_owner < (uintptr_t)heap->nursery.base ||
+        (uintptr_t)active_owner >= (uintptr_t)heap->nursery.bump) return 9;
+    *active_owner = KILN_VAL_UNDEFINED;
+    kiln_c99_test_store_lookup_count = 0;
+    kiln_c99_test_store_interior_lookup_count = 0;
+    kiln_c99_candidate_record_pointer_store(heap, active_owner, old_owner);
+    if (kiln_c99_test_store_lookup_count != 0 ||
+        kiln_c99_test_store_interior_lookup_count != 0) return 10;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 10;
+    status = kiln_realm_enter(realm, store_lookup_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 11;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-store-lookup-memoization");
+    assert!(
+        run.status.success(),
+        "candidate pointer-store lookup memoization failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn final_builtin_layout_shares_descriptors_but_not_values_or_mutations() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");

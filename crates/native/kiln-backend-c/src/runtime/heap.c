@@ -3084,14 +3084,25 @@ static kiln_c99_candidate_group *kiln_c99_candidate_block_group(
 
 static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *, uintptr_t);
 
+#if defined(KILN_C99_TEST_STORE_LOOKUP_COUNTS)
+static size_t kiln_c99_test_store_lookup_count;
+static size_t kiln_c99_test_store_interior_lookup_count;
+#define KILN_C99_STORE_LOOKUP_COUNT() (++kiln_c99_test_store_lookup_count)
+#define KILN_C99_STORE_INTERIOR_LOOKUP_COUNT() (++kiln_c99_test_store_interior_lookup_count)
+#else
+#define KILN_C99_STORE_LOOKUP_COUNT() ((void)0)
+#define KILN_C99_STORE_INTERIOR_LOOKUP_COUNT() ((void)0)
+#endif
+
 /* Remember possible owners, not slot addresses: growth can replace side buffers, and clearing
  * an edge must permit retry. Metadata does not root either endpoint. The admission walker will
  * inspect the owner's current complete layout. Missing coverage still requires the full scan. */
 static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
                                                     const void *owner_payload,
                                                     const void *target_payload) {
-    kiln_gc_block *target, *owner;
+    kiln_gc_block *target = NULL, *owner;
     kiln_c99_candidate_group *group;
+    int target_resolved = 0;
     if (heap == NULL || target_payload == NULL || kiln_c99_no_write_depth != 0) return;
     /* The same central store seam feeds the GC remembered set. This work is limited to
      * old-to-young edges; normal stores to process constants and tenured values stop here. */
@@ -3102,22 +3113,35 @@ static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
         heap->nursery.bump != NULL && (uintptr_t)owner_payload >= (uintptr_t)heap->nursery.base &&
         (uintptr_t)owner_payload < (uintptr_t)heap->nursery.bump)
         return;
+    KILN_C99_STORE_LOOKUP_COUNT();
     owner = kiln_c99_gc_lookup(heap, owner_payload);
     if (owner != NULL && !kiln_c99_gc_is_young(heap, owner)) {
+        KILN_C99_STORE_LOOKUP_COUNT();
         target = kiln_c99_gc_lookup(heap, target_payload);
+        target_resolved = 1;
         if (target == NULL && (uintptr_t)target_payload >= heap->lo &&
-            (uintptr_t)target_payload < heap->hi)
+            (uintptr_t)target_payload < heap->hi) {
+            KILN_C99_STORE_INTERIOR_LOOKUP_COUNT();
             target = kiln_c99_gc_lookup_interior(heap, (uintptr_t)target_payload);
+        }
         if (target != NULL && kiln_c99_gc_is_young(heap, target) &&
             !kiln_c99_gc_ptrset_contains(&heap->remembered_owners, owner + 1) &&
             kiln_c99_gc_ptrset_insert(&heap->remembered_owners, owner + 1) != KILN_C99_OK)
             heap->remembered_failed = 1;
     }
     if (heap->candidate_ledger_groups == 0) return;
-    target = kiln_c99_gc_lookup(heap, target_payload);
+    if (!target_resolved) {
+        KILN_C99_STORE_LOOKUP_COUNT();
+        target = kiln_c99_gc_lookup(heap, target_payload);
+        target_resolved = 1;
+        if (target == NULL && (uintptr_t)target_payload >= heap->lo &&
+            (uintptr_t)target_payload < heap->hi) {
+            KILN_C99_STORE_INTERIOR_LOOKUP_COUNT();
+            target = kiln_c99_gc_lookup_interior(heap, (uintptr_t)target_payload);
+        }
+    }
     if (target == NULL && (uintptr_t)target_payload >= heap->lo &&
         (uintptr_t)target_payload < heap->hi) {
-        target = kiln_c99_gc_lookup_interior(heap, (uintptr_t)target_payload);
         /* Large-block interior addresses are absent from the collector's exact-payload
          * table. Only the cold candidate map can supply their live allocation authority. */
         if (target == NULL && heap->candidate_large != NULL) {
@@ -3137,7 +3161,9 @@ static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
     }
     group = kiln_c99_candidate_block_group(heap, target);
     if (group == NULL || group->ledger_heap != heap || group->incoming_failed) return;
-    owner = kiln_c99_gc_lookup(heap, owner_payload);
+    /* The owner, target and candidate indexes are stable across the remembered-set insertion
+     * above: it only changes ptrset metadata and cannot collect or run user code. Reuse the
+     * validated owner block rather than repeating the nursery/slab membership search. */
     /* Unit-block cells and native root slots have their own complete realm/provider audit. */
     if (owner == NULL || kiln_c99_candidate_block_group(heap, owner) == group ||
         kiln_c99_gc_ptrset_contains(&group->incoming_owners, owner)) return;
@@ -3146,6 +3172,9 @@ static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
         kiln_c99_gc_ptrset_insert(&group->incoming_owners, owner) != KILN_C99_OK)
         group->incoming_failed = 1;
 }
+
+#undef KILN_C99_STORE_LOOKUP_COUNT
+#undef KILN_C99_STORE_INTERIOR_LOOKUP_COUNT
 
 static KILN_ALWAYS_INLINE inline void kiln_c99_candidate_record_val_store(
     const void *owner_payload, kiln_val value) {
