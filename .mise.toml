@@ -1,8 +1,7 @@
 # Task definitions for this repository.
 #
-# The toolchain itself stays pinned in the global mise config (`rust` and `mbx`); this file adds
-# only tasks, so that the things worth running have names instead of living in each agent's scratch
-# directory. Run `mise tasks` to list them.
+# Rust is pinned below for the checker's allocator API; mbx comes from the global mise config.
+# Tasks name the repository checks. Run `mise tasks` to list them.
 #
 # Every task shells out to a script under `scripts/`, which is where this repository already keeps
 # its runnable work -- these are a front door, not a second implementation.
@@ -96,5 +95,5 @@ description = "npm package compatibility corpus vs porffor's dashboard methodolo
 run = "./scripts/npm-compat.sh"
 
 [tools]
-rust = "latest"
+rust = "nightly-2026-09-15"
 

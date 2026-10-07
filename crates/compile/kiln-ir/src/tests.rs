@@ -3,6 +3,7 @@ use kiln_hir::*;
 
 fn module(body: Vec<Statement>) -> Module {
     Module {
+        type_syntax: kiln_hir::TypeSyntax::default(),
         // These modules are built as HIR rather than parsed, so there is no text their spans
         // point into. A function compiled from one answers `toString` with the empty string,
         // which is what "no source" means here.
@@ -264,6 +265,7 @@ fn strictness_reaches_every_body_written_inside_a_strict_one() {
         superclass: None,
         constructor: None,
         methods: vec![kiln_hir::ClassMethod {
+            span: Span::default(),
             key: ObjectKey::Static("m".to_owned().into()),
             function: inner,
             is_static: false,
@@ -1170,6 +1172,7 @@ fn a_class_method_default_captures_its_module_binding() {
             superclass: None,
             constructor: None,
             methods: vec![kiln_hir::ClassMethod {
+                span: Span::default(),
                 key: kiln_hir::ObjectKey::Static("read".to_owned().into()),
                 function: method,
                 is_static: false,
@@ -1225,6 +1228,7 @@ fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
         superclass: None,
         constructor: None,
         methods: vec![kiln_hir::ClassMethod {
+            span: Span::default(),
             key: ObjectKey::Static("read".to_owned().into()),
             function: read,
             is_static: true,
@@ -1254,12 +1258,14 @@ fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
             superclass: None,
             constructor: None,
             methods: vec![kiln_hir::ClassMethod {
+                span: Span::default(),
                 key: ObjectKey::Static("make".to_owned().into()),
                 function: make,
                 is_static: true,
                 kind: kiln_hir::MethodKind::Normal,
             }],
             initialisers: vec![ClassInitialiser::Field(ClassField {
+                span: Span::default(),
                 key: ObjectKey::Private("x".to_owned()),
                 value: Some(number(1.0)),
                 is_static: true,

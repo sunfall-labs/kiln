@@ -185,6 +185,49 @@ impl Daemon<MemoEngine> {
 
 fn production_engine() -> MemoEngine {
     MemoEngine::with_summary_query(kiln_frontend_oxc::parse, kiln_backend_c::summarize_program)
+        .with_source_check_query(check_source_types)
+}
+
+/// The composition root supplies immutable parsed library inputs; neither database nor checker reads disk.
+pub(crate) fn check_source_types(
+    entry: &str,
+    modules: &[(String, kiln_hir::Module)],
+) -> kiln_hir::source_types::CheckResult {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, OnceLock};
+    static LIBRARIES: OnceLock<BTreeMap<String, Arc<kiln_hir::Module>>> = OnceLock::new();
+    let libraries = LIBRARIES.get_or_init(|| {
+        kiln_type_checker::STANDARD_LIBRARIES
+            .iter()
+            .map(|(name, source)| {
+                let path = format!("/__kiln_typescript_lib/{name}");
+                let module = kiln_frontend_oxc::parse(&path, source);
+                (path, Arc::new(module))
+            })
+            .collect()
+    });
+    let mut snapshot = kiln_type_checker::SourceSnapshot::default();
+    snapshot
+        .modules
+        .extend(libraries.iter().map(|(p, m)| (p.clone(), m.clone())));
+    snapshot.modules.extend(
+        modules
+            .iter()
+            .map(|(p, m)| (p.clone(), Arc::new(m.clone()))),
+    );
+    // Ambient declarations belong to the explicit project snapshot even when
+    // no runtime import reaches them. Standard libraries remain option-driven.
+    let mut roots = vec![entry.to_owned()];
+    roots.extend(modules.iter().filter_map(|(path, _)| {
+        (path != entry
+            && (path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")))
+        .then(|| path.clone())
+    }));
+    let options = kiln_type_checker::CheckOptions {
+        libraries: vec!["esnext".into()],
+        ..Default::default()
+    };
+    kiln_type_checker::check(&snapshot, &roots, &options)
 }
 
 /// A private request channel to the same handler used by socket clients. A one-shot CLI owns

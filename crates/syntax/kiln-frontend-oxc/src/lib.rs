@@ -20,6 +20,9 @@ use kiln_hir::{
     ModuleRequestKind, ModuleRequestOccurrence, NodeRuntimeRequest, Parameter as HirParameter,
     RequestedModule, SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
     StatementKind as HirStatementKind, StringUnits, TypeAnnotation as HirTypeAnnotation,
+    TypeAnnotationSite as HirTypeAnnotationSite, TypeDeclaration as HirTypeDeclaration,
+    TypeDeclarationKind as HirTypeDeclarationKind, TypeExpr as HirTypeExpr,
+    TypeExprKind as HirTypeExprKind, TypeSite as HirTypeSite, TypeSyntax as HirTypeSyntax,
     UnaryOperator as HirUnaryOperator, VariableDeclarator as HirVariableDeclarator,
     VariableKind as HirVariableKind,
 };
@@ -37,6 +40,7 @@ use oxc_ast::{
         VariableDeclarationKind,
     },
 };
+use oxc_ast_visit::{Visit, walk};
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_ecmascript::BoundNames;
 use oxc_minifier::{CompressOptions, Compressor};
@@ -942,6 +946,11 @@ fn parse_source_with_commonjs_requires(
             ..ParseOptions::default()
         })
         .parse();
+    let mut type_syntax = capture_type_syntax(path, source, &parsed.program, None);
+    if source_type.is_typescript() {
+        type_syntax.body = capture_original_body(path, source, &parsed, None);
+        retain_erased_declarations(&mut type_syntax);
+    }
 
     if source_type.is_jsx() && !parsed.panicked && parsed.diagnostics.is_empty() {
         let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
@@ -998,6 +1007,7 @@ fn parse_source_with_commonjs_requires(
     };
     let mut module = lower_parsed(path, &parsed, source, source_type);
     module.node_runtime_requests = node_runtime_requests;
+    module.type_syntax = type_syntax;
     (module, requires)
 }
 
@@ -1109,6 +1119,12 @@ fn parse_source_in_context(
             ..ParseOptions::default()
         })
         .parse();
+    // Type syntax must come from the original AST, before JSX lowering and DCE mutate it.
+    let mut type_syntax = capture_type_syntax(path, source, &parsed.program, native_import_meta);
+    if source_type.is_typescript() {
+        type_syntax.body = capture_original_body(path, source, &parsed, native_import_meta);
+        retain_erased_declarations(&mut type_syntax);
+    }
 
     if source_type.is_jsx() && !parsed.panicked && parsed.diagnostics.is_empty() {
         let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
@@ -1159,7 +1175,1912 @@ fn parse_source_in_context(
         native_import_meta,
     );
     module.node_runtime_requests = node_runtime_requests;
+    module.type_syntax = type_syntax;
     module
+}
+
+/// Copy source-level TS declarations and annotation expressions out of Oxc's arena before any
+/// transformer or minifier can erase them. Raw type text is retained even when this adapter has
+/// not yet gained a structured lowering for a particular Oxc type node.
+fn capture_type_syntax(
+    path: Option<&str>,
+    source: &str,
+    program: &oxc_ast::ast::Program<'_>,
+    native_import_meta: Option<bool>,
+) -> HirTypeSyntax {
+    if !program.source_type.is_typescript() {
+        return HirTypeSyntax::default();
+    }
+    struct Collector<'s> {
+        source: &'s str,
+        path: Option<String>,
+        native_import_meta: Option<bool>,
+        result: HirTypeSyntax,
+        classified: HashSet<(u32, u32)>,
+    }
+    impl Collector<'_> {
+        fn is_exported(&self, span: oxc_span::Span) -> bool {
+            self.result
+                .exported_declarations
+                .iter()
+                .any(|declaration| declaration.start == span.start && declaration.end == span.end)
+        }
+
+        fn is_default_exported(&self, span: oxc_span::Span) -> bool {
+            self.result
+                .default_exported_declarations
+                .iter()
+                .any(|declaration| declaration.start == span.start && declaration.end == span.end)
+        }
+
+        fn raw(&self, span: Span) -> String {
+            let start = (span.start as usize).min(self.source.len());
+            let end = (span.end as usize).min(self.source.len()).max(start);
+            self.source.get(start..end).unwrap_or("").to_owned()
+        }
+        fn owned_key(
+            &self,
+            key: &oxc_ast::ast::PropertyKey<'_>,
+            computed: bool,
+        ) -> Option<kiln_hir::ObjectKey> {
+            let mut lowerer = Lowerer {
+                text: self.source,
+                path: self.path.as_deref(),
+                native_import_meta: self.native_import_meta,
+            };
+            lowerer.member_key(key, computed)
+        }
+        fn operand_span(&self, expression: &oxc_ast::ast::Expression<'_>) -> HirSpan {
+            let mut expression = expression;
+            while let oxc_ast::ast::Expression::ParenthesizedExpression(parenthesized) = expression
+            {
+                expression = &parenthesized.expression;
+            }
+            HirSpan::new(expression.span().start, expression.span().end)
+        }
+        fn accessibility(
+            value: Option<oxc_ast::ast::TSAccessibility>,
+        ) -> Option<kiln_hir::TypeAccessibility> {
+            value.map(|value| match value {
+                oxc_ast::ast::TSAccessibility::Public => kiln_hir::TypeAccessibility::Public,
+                oxc_ast::ast::TSAccessibility::Protected => kiln_hir::TypeAccessibility::Protected,
+                oxc_ast::ast::TSAccessibility::Private => kiln_hir::TypeAccessibility::Private,
+            })
+        }
+        fn this_parameter(
+            &self,
+            this_parameter: Option<&oxc_ast::ast::TSThisParameter<'_>>,
+        ) -> Option<kiln_hir::TypeSignatureParameter> {
+            this_parameter.map(|parameter| kiln_hir::TypeSignatureParameter {
+                name: Some("this".to_owned()),
+                pattern: Some(Box::new(kiln_hir::Pattern::Identifier("this".to_owned()))),
+                pattern_span: HirSpan::new(parameter.this_span.start, parameter.this_span.end),
+                span: HirSpan::new(parameter.span.start, parameter.span.end),
+                ty: parameter
+                    .type_annotation
+                    .as_deref()
+                    .map(|annotation| self.convert(&annotation.type_annotation)),
+                optional: false,
+                rest: false,
+                has_default: false,
+            })
+        }
+        fn owned_pattern(
+            &self,
+            pattern: &oxc_ast::ast::BindingPattern<'_>,
+            span: Span,
+        ) -> kiln_hir::Pattern {
+            let mut lowerer = Lowerer {
+                text: self.source,
+                path: self.path.as_deref(),
+                native_import_meta: self.native_import_meta,
+            };
+            lowerer.pattern(pattern, HirSpan::new(span.start, span.end))
+        }
+        fn convert(&self, ty: &oxc_ast::ast::TSType<'_>) -> HirTypeExpr {
+            use oxc_ast::ast::TSType as T;
+            let span = ty.span();
+            let hir_span = HirSpan::new(span.start, span.end);
+            let kind = match ty {
+                T::TSAnyKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Any),
+                T::TSUnknownKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Unknown),
+                T::TSNeverKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Never),
+                T::TSVoidKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Void),
+                T::TSUndefinedKeyword(_) => {
+                    HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Undefined)
+                }
+                T::TSNullKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Null),
+                T::TSBooleanKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Boolean),
+                T::TSNumberKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Number),
+                T::TSBigIntKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::BigInt),
+                T::TSStringKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::String),
+                T::TSSymbolKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Symbol),
+                T::TSObjectKeyword(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Object),
+                T::TSThisType(_) => HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::This),
+                T::TSIntrinsicKeyword(_) => {
+                    HirTypeExprKind::Keyword(kiln_hir::TypeKeyword::Intrinsic)
+                }
+                T::TSUnionType(n) => {
+                    HirTypeExprKind::Union(n.types.iter().map(|t| self.convert(t)).collect())
+                }
+                T::TSIntersectionType(n) => {
+                    HirTypeExprKind::Intersection(n.types.iter().map(|t| self.convert(t)).collect())
+                }
+                T::TSArrayType(n) => {
+                    HirTypeExprKind::Array(Box::new(self.convert(&n.element_type)))
+                }
+                T::TSTypeLiteral(n) => HirTypeExprKind::Object(self.object_members(&n.members)),
+                T::TSMappedType(n) => {
+                    let key_span = n.key.span;
+                    let modifier =
+                        |value: Option<oxc_ast::ast::TSMappedTypeModifierOperator>| match value {
+                            None => kiln_hir::TypeModifier::None,
+                            Some(
+                                oxc_ast::ast::TSMappedTypeModifierOperator::True
+                                | oxc_ast::ast::TSMappedTypeModifierOperator::Plus,
+                            ) => kiln_hir::TypeModifier::Add,
+                            Some(oxc_ast::ast::TSMappedTypeModifierOperator::Minus) => {
+                                kiln_hir::TypeModifier::Remove
+                            }
+                        };
+                    HirTypeExprKind::Mapped {
+                        parameter: kiln_hir::TypeParameter {
+                            name: n.key.name.to_string(),
+                            span: HirSpan::new(key_span.start, key_span.end),
+                            constraint: None,
+                            default: None,
+                            const_: false,
+                            in_: false,
+                            out: false,
+                        },
+                        constraint: Box::new(self.convert(&n.constraint)),
+                        name_type: n.name_type.as_ref().map(|t| Box::new(self.convert(t))),
+                        value: Box::new(
+                            n.type_annotation
+                                .as_ref()
+                                .map(|t| self.convert(t))
+                                .unwrap_or_else(|| HirTypeExpr {
+                                    span: hir_span,
+                                    kind: HirTypeExprKind::Unsupported {
+                                        syntax: self.raw(span),
+                                    },
+                                }),
+                        ),
+                        readonly: modifier(n.readonly),
+                        optional: modifier(n.optional),
+                    }
+                }
+                T::TSIndexedAccessType(n) => HirTypeExprKind::IndexedAccess {
+                    object: Box::new(self.convert(&n.object_type)),
+                    index: Box::new(self.convert(&n.index_type)),
+                },
+                T::TSParenthesizedType(n) => {
+                    HirTypeExprKind::Parenthesized(Box::new(self.convert(&n.type_annotation)))
+                }
+                T::TSConditionalType(n) => HirTypeExprKind::Conditional {
+                    check: Box::new(self.convert(&n.check_type)),
+                    extends: Box::new(self.convert(&n.extends_type)),
+                    when_true: Box::new(self.convert(&n.true_type)),
+                    when_false: Box::new(self.convert(&n.false_type)),
+                },
+                T::TSFunctionType(n) => {
+                    let mut signature = self.signature(
+                        n.span,
+                        n.type_parameters.as_deref(),
+                        &n.params,
+                        &n.return_type,
+                    );
+                    signature.this_parameter =
+                        self.this_parameter(n.this_param.as_deref()).map(Box::new);
+                    HirTypeExprKind::Function(signature)
+                }
+                T::TSConstructorType(n) => HirTypeExprKind::Constructor(self.signature(
+                    n.span,
+                    n.type_parameters.as_deref(),
+                    &n.params,
+                    &n.return_type,
+                )),
+                T::TSTypeReference(n) => {
+                    let mut name = self
+                        .raw(n.type_name.span())
+                        .split('.')
+                        .map(str::trim)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>();
+                    name.retain(|part| !part.is_empty());
+                    HirTypeExprKind::Reference {
+                        name,
+                        arguments: n
+                            .type_arguments
+                            .as_ref()
+                            .map(|a| a.params.iter().map(|t| self.convert(t)).collect())
+                            .unwrap_or_default(),
+                    }
+                }
+                T::TSLiteralType(n) => {
+                    use oxc_ast::ast::TSLiteral;
+                    let literal = match &n.literal {
+                        TSLiteral::StringLiteral(v) => kiln_hir::TypeLiteral::String(
+                            oxc_string_units(v.value.as_str(), v.lone_surrogates),
+                        ),
+                        TSLiteral::NumericLiteral(v) => kiln_hir::TypeLiteral::Number(
+                            kiln_host_abi::number_to_js_string(v.value),
+                        ),
+                        TSLiteral::BigIntLiteral(v) => {
+                            kiln_hir::TypeLiteral::BigInt(v.value.to_string())
+                        }
+                        TSLiteral::BooleanLiteral(v) => kiln_hir::TypeLiteral::Boolean(v.value),
+                        TSLiteral::UnaryExpression(v)
+                            if matches!(
+                                v.operator,
+                                UnaryOperator::UnaryPlus | UnaryOperator::UnaryNegation
+                            ) =>
+                        {
+                            match &v.argument {
+                                oxc_ast::ast::Expression::NumericLiteral(n) => {
+                                    let value = if v.operator == UnaryOperator::UnaryNegation {
+                                        -n.value
+                                    } else {
+                                        n.value
+                                    };
+                                    kiln_hir::TypeLiteral::Number(
+                                        kiln_host_abi::number_to_js_string(value),
+                                    )
+                                }
+                                oxc_ast::ast::Expression::BigIntLiteral(n) => {
+                                    let mut value = n.value.to_string();
+                                    if v.operator == UnaryOperator::UnaryNegation {
+                                        value.insert(0, '-');
+                                    }
+                                    kiln_hir::TypeLiteral::BigInt(value)
+                                }
+                                _ => {
+                                    return HirTypeExpr {
+                                        span: HirSpan::new(n.span.start, n.span.end),
+                                        kind: HirTypeExprKind::Unsupported {
+                                            syntax: self.raw(n.span),
+                                        },
+                                    };
+                                }
+                            }
+                        }
+                        TSLiteral::UnaryExpression(_) => {
+                            return HirTypeExpr {
+                                span: HirSpan::new(n.span.start, n.span.end),
+                                kind: HirTypeExprKind::Unsupported {
+                                    syntax: self.raw(n.span),
+                                },
+                            };
+                        }
+                        TSLiteral::TemplateLiteral(v) => {
+                            kiln_hir::TypeLiteral::String(oxc_string_units(
+                                v.quasis
+                                    .first()
+                                    .map(|q| {
+                                        q.value
+                                            .cooked
+                                            .as_ref()
+                                            .map_or(q.value.raw.as_str(), |x| x.as_str())
+                                    })
+                                    .unwrap_or(""),
+                                v.quasis.first().is_some_and(|q| q.lone_surrogates),
+                            ))
+                        }
+                    };
+                    HirTypeExprKind::Literal(literal)
+                }
+                T::TSTupleType(n) => HirTypeExprKind::Tuple(
+                    n.element_types
+                        .iter()
+                        .map(|el| {
+                            use oxc_ast::ast::TSTupleElement as E;
+                            let (el, name, optional) = if let E::TSNamedTupleMember(x) = el {
+                                (&x.element_type, Some(x.label.name.to_string()), x.optional)
+                            } else {
+                                (el, None, false)
+                            };
+                            let (ty, optional, rest) = match el {
+                                E::TSOptionalType(x) => (&x.type_annotation, true, false),
+                                E::TSRestType(x) => (&x.type_annotation, optional, true),
+                                other => (
+                                    other.as_ts_type().expect("TSTupleElement type"),
+                                    optional,
+                                    false,
+                                ),
+                            };
+                            kiln_hir::TypeTupleElement {
+                                name,
+                                ty: self.convert(ty),
+                                optional,
+                                rest,
+                            }
+                        })
+                        .collect(),
+                ),
+                T::TSTemplateLiteralType(n) => HirTypeExprKind::Template {
+                    quasis: n
+                        .quasis
+                        .iter()
+                        .map(|q| {
+                            let cooked = q
+                                .value
+                                .cooked
+                                .as_ref()
+                                .map_or(q.value.raw.as_str(), |s| s.as_str());
+                            oxc_string_units(cooked, q.lone_surrogates)
+                        })
+                        .collect(),
+                    types: n.types.iter().map(|t| self.convert(t)).collect(),
+                },
+                T::TSTypeQuery(n) => {
+                    if let oxc_ast::ast::TSTypeQueryExprName::TSImportType(import) = &n.expr_name {
+                        HirTypeExprKind::Import {
+                            specifier: import.source.value.to_string(),
+                            qualifier: import
+                                .qualifier
+                                .as_ref()
+                                .map(|q| {
+                                    self.raw(q.span())
+                                        .split('.')
+                                        .map(str::trim)
+                                        .map(str::to_owned)
+                                        .filter(|s| !s.is_empty())
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            arguments: import
+                                .type_arguments
+                                .as_ref()
+                                .map(|a| a.params.iter().map(|t| self.convert(t)).collect())
+                                .unwrap_or_default(),
+                            is_typeof: true,
+                        }
+                    } else {
+                        HirTypeExprKind::Typeof {
+                            name: self
+                                .raw(n.expr_name.span())
+                                .split('.')
+                                .map(str::trim)
+                                .map(str::to_owned)
+                                .filter(|s| !s.is_empty())
+                                .collect(),
+                            arguments: n
+                                .type_arguments
+                                .as_ref()
+                                .map(|a| a.params.iter().map(|t| self.convert(t)).collect())
+                                .unwrap_or_default(),
+                        }
+                    }
+                }
+                T::TSImportType(n) => HirTypeExprKind::Import {
+                    specifier: n.source.value.to_string(),
+                    qualifier: n
+                        .qualifier
+                        .as_ref()
+                        .map(|q| {
+                            self.raw(q.span())
+                                .split('.')
+                                .map(str::trim)
+                                .map(str::to_owned)
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    arguments: n
+                        .type_arguments
+                        .as_ref()
+                        .map(|a| a.params.iter().map(|t| self.convert(t)).collect())
+                        .unwrap_or_default(),
+                    is_typeof: false,
+                },
+                T::TSInferType(n) => HirTypeExprKind::Infer(kiln_hir::TypeParameter {
+                    name: n.type_parameter.name.name.to_string(),
+                    span: HirSpan::new(n.type_parameter.span.start, n.type_parameter.span.end),
+                    constraint: n
+                        .type_parameter
+                        .constraint
+                        .as_ref()
+                        .map(|t| Box::new(self.convert(t))),
+                    default: n
+                        .type_parameter
+                        .default
+                        .as_ref()
+                        .map(|t| Box::new(self.convert(t))),
+                    const_: n.type_parameter.r#const,
+                    in_: n.type_parameter.r#in,
+                    out: n.type_parameter.out,
+                }),
+                T::TSTypePredicate(n) => HirTypeExprKind::Predicate {
+                    parameter: self.raw(n.parameter_name.span()).trim().to_owned(),
+                    asserts: n.asserts,
+                    ty: n
+                        .type_annotation
+                        .as_deref()
+                        .map(|a| Box::new(self.convert(&a.type_annotation))),
+                },
+                T::TSTypeOperatorType(n) => {
+                    let op = match n.operator {
+                        oxc_ast::ast::TSTypeOperatorOperator::Keyof => {
+                            kiln_hir::TypeOperator::Keyof
+                        }
+                        oxc_ast::ast::TSTypeOperatorOperator::Readonly => {
+                            kiln_hir::TypeOperator::Readonly
+                        }
+                        oxc_ast::ast::TSTypeOperatorOperator::Unique => {
+                            kiln_hir::TypeOperator::Unique
+                        }
+                    };
+                    if op == kiln_hir::TypeOperator::Keyof {
+                        HirTypeExprKind::Keyof(Box::new(self.convert(&n.type_annotation)))
+                    } else {
+                        HirTypeExprKind::Operator {
+                            operator: op,
+                            operand: Box::new(self.convert(&n.type_annotation)),
+                        }
+                    }
+                }
+                // Keep exact source for forms whose AST needs a dedicated lowering. Explicit
+                // unsupported nodes retain their spelling and span instead of pretending Any.
+                _ => HirTypeExprKind::Unsupported {
+                    syntax: self.raw(span),
+                },
+            };
+            HirTypeExpr {
+                span: hir_span,
+                kind,
+            }
+        }
+        fn parameters(
+            &self,
+            params: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
+        ) -> Vec<kiln_hir::TypeParameter> {
+            params
+                .map(|decl| {
+                    decl.params
+                        .iter()
+                        .map(|p| kiln_hir::TypeParameter {
+                            name: p.name.name.to_string(),
+                            span: HirSpan::new(p.span.start, p.span.end),
+                            constraint: p.constraint.as_ref().map(|t| Box::new(self.convert(t))),
+                            default: p.default.as_ref().map(|t| Box::new(self.convert(t))),
+                            const_: p.r#const,
+                            in_: p.r#in,
+                            out: p.out,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        fn signature(
+            &self,
+            span: Span,
+            type_parameters: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
+            params: &oxc_ast::ast::FormalParameters<'_>,
+            return_type: &oxc_ast::ast::TSTypeAnnotation<'_>,
+        ) -> kiln_hir::TypeSignature {
+            self.signature_with_return(
+                span,
+                type_parameters,
+                params,
+                Some(self.convert(&return_type.type_annotation)),
+            )
+        }
+        fn signature_with_return(
+            &self,
+            span: Span,
+            type_parameters: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
+            params: &oxc_ast::ast::FormalParameters<'_>,
+            return_type: Option<HirTypeExpr>,
+        ) -> kiln_hir::TypeSignature {
+            let mut signature_params = params
+                .items
+                .iter()
+                .map(|p| {
+                    let ty = p
+                        .type_annotation
+                        .as_deref()
+                        .map(|a| self.convert(&a.type_annotation));
+                    kiln_hir::TypeSignatureParameter {
+                        name: match &p.pattern {
+                            oxc_ast::ast::BindingPattern::BindingIdentifier(id) => {
+                                Some(id.name.to_string())
+                            }
+                            _ => None,
+                        },
+                        pattern: Some(Box::new(self.owned_pattern(&p.pattern, p.pattern.span()))),
+                        pattern_span: HirSpan::new(p.pattern.span().start, p.pattern.span().end),
+                        span: HirSpan::new(p.span.start, p.span.end),
+                        ty,
+                        optional: p.optional,
+                        rest: false,
+                        has_default: p.initializer.is_some(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            if let Some(rest) = params.rest.as_deref() {
+                let ty = rest
+                    .type_annotation
+                    .as_deref()
+                    .map(|a| self.convert(&a.type_annotation));
+                signature_params.push(kiln_hir::TypeSignatureParameter {
+                    name: match &rest.rest.argument {
+                        oxc_ast::ast::BindingPattern::BindingIdentifier(id) => {
+                            Some(id.name.to_string())
+                        }
+                        _ => None,
+                    },
+                    pattern: Some(Box::new(
+                        self.owned_pattern(&rest.rest.argument, rest.rest.argument.span()),
+                    )),
+                    pattern_span: HirSpan::new(
+                        rest.rest.argument.span().start,
+                        rest.rest.argument.span().end,
+                    ),
+                    span: HirSpan::new(rest.span.start, rest.span.end),
+                    ty,
+                    optional: false,
+                    rest: true,
+                    has_default: false,
+                });
+            }
+            kiln_hir::TypeSignature {
+                span: HirSpan::new(span.start, span.end),
+                type_parameters: self.parameters(type_parameters),
+                this_parameter: None,
+                parameters: signature_params,
+                rest: params.rest.is_some(),
+                return_type: return_type.map(Box::new),
+            }
+        }
+        fn object_members(
+            &self,
+            signatures: &[oxc_ast::ast::TSSignature<'_>],
+        ) -> Vec<kiln_hir::TypeMember> {
+            use oxc_ast::ast::TSSignature as S;
+            signatures
+                .iter()
+                .map(|sig| match sig {
+                    S::TSPropertySignature(p) => {
+                        let span = p.span;
+                        let name = p.key.static_name().map(|name| name.to_string());
+                        let ty = p
+                            .type_annotation
+                            .as_deref()
+                            .map(|a| self.convert(&a.type_annotation))
+                            .unwrap_or_else(|| HirTypeExpr {
+                                span: HirSpan::new(span.start, span.end),
+                                kind: HirTypeExprKind::Unsupported {
+                                    syntax: self.raw(span),
+                                },
+                            });
+                        kiln_hir::TypeMember {
+                            name,
+                            key: self.owned_key(&p.key, p.computed),
+                            span: HirSpan::new(span.start, span.end),
+                            optional: p.optional,
+                            readonly: p.readonly,
+                            this_parameter: None,
+                            kind: kiln_hir::TypeMemberKind::Property(ty),
+                        }
+                    }
+                    S::TSMethodSignature(m) => {
+                        let span = m.span;
+                        let name = m.key.static_name().map(|name| name.to_string());
+                        let return_type = m
+                            .return_type
+                            .as_deref()
+                            .map(|a| self.convert(&a.type_annotation));
+                        let mut signature = self.signature_with_return(
+                            span,
+                            m.type_parameters.as_deref(),
+                            &m.params,
+                            return_type.clone(),
+                        );
+                        signature.this_parameter =
+                            self.this_parameter(m.this_param.as_deref()).map(Box::new);
+                        let this_parameter = signature.this_parameter.clone();
+                        let kind = match m.kind {
+                            oxc_ast::ast::TSMethodSignatureKind::Method => {
+                                kiln_hir::TypeMemberKind::Method(signature)
+                            }
+                            oxc_ast::ast::TSMethodSignatureKind::Get => {
+                                kiln_hir::TypeMemberKind::Getter(return_type)
+                            }
+                            oxc_ast::ast::TSMethodSignatureKind::Set => {
+                                kiln_hir::TypeMemberKind::Setter(signature)
+                            }
+                        };
+                        kiln_hir::TypeMember {
+                            name,
+                            key: self.owned_key(&m.key, m.computed),
+                            span: HirSpan::new(span.start, span.end),
+                            optional: m.optional,
+                            readonly: false,
+                            this_parameter,
+                            kind,
+                        }
+                    }
+                    S::TSCallSignatureDeclaration(c) => {
+                        let span = c.span;
+                        let ret = c
+                            .return_type
+                            .as_deref()
+                            .map(|a| self.convert(&a.type_annotation));
+                        let mut signature = self.signature_with_return(
+                            span,
+                            c.type_parameters.as_deref(),
+                            &c.params,
+                            ret,
+                        );
+                        signature.this_parameter =
+                            self.this_parameter(c.this_param.as_deref()).map(Box::new);
+                        kiln_hir::TypeMember {
+                            name: None,
+                            key: None,
+                            span: HirSpan::new(span.start, span.end),
+                            optional: false,
+                            readonly: false,
+                            this_parameter: signature.this_parameter.clone(),
+                            kind: kiln_hir::TypeMemberKind::Call(signature),
+                        }
+                    }
+                    S::TSConstructSignatureDeclaration(c) => {
+                        let span = c.span;
+                        let ret = c
+                            .return_type
+                            .as_deref()
+                            .map(|a| self.convert(&a.type_annotation));
+                        let signature = self.signature_with_return(
+                            span,
+                            c.type_parameters.as_deref(),
+                            &c.params,
+                            ret,
+                        );
+                        kiln_hir::TypeMember {
+                            name: None,
+                            key: None,
+                            span: HirSpan::new(span.start, span.end),
+                            optional: false,
+                            readonly: false,
+                            this_parameter: None,
+                            kind: kiln_hir::TypeMemberKind::Construct(signature),
+                        }
+                    }
+                    S::TSIndexSignature(i) => {
+                        let span = i.span;
+                        kiln_hir::TypeMember {
+                            name: Some(i.parameter.name.as_str().to_string()),
+                            key: None,
+                            span: HirSpan::new(span.start, span.end),
+                            optional: false,
+                            readonly: i.readonly,
+                            this_parameter: None,
+                            kind: kiln_hir::TypeMemberKind::Index {
+                                parameter: i.parameter.name.as_str().to_string(),
+                                key_type: self
+                                    .convert(&i.parameter.type_annotation.type_annotation),
+                                value_type: self.convert(&i.type_annotation.type_annotation),
+                            },
+                        }
+                    }
+                })
+                .collect()
+        }
+    }
+    impl<'a> Visit<'a> for Collector<'_> {
+        fn visit_binding_identifier(&mut self, node: &oxc_ast::ast::BindingIdentifier<'a>) {
+            self.result
+                .binding_identifiers
+                .push(kiln_hir::BindingIdentifierSite {
+                    name: node.name.to_string(),
+                    span: HirSpan::new(node.span.start, node.span.end),
+                });
+            walk::walk_binding_identifier(self, node);
+        }
+        fn visit_class(&mut self, node: &oxc_ast::ast::Class<'a>) {
+            use oxc_ast::ast::{ClassElement, MethodDefinitionKind};
+            let type_ref =
+                |span: oxc_span::Span,
+                 args: Option<&oxc_ast::ast::TSTypeParameterInstantiation<'_>>| {
+                    HirTypeExpr {
+                        span: HirSpan::new(span.start, span.end),
+                        kind: HirTypeExprKind::Reference {
+                            name: self
+                                .raw(span)
+                                .split('.')
+                                .map(str::trim)
+                                .map(str::to_owned)
+                                .filter(|s| !s.is_empty())
+                                .collect(),
+                            arguments: args
+                                .map(|a| a.params.iter().map(|t| self.convert(t)).collect())
+                                .unwrap_or_default(),
+                        },
+                    }
+                };
+            let extends = node.heritage.as_ref().map(|heritage| {
+                type_ref(
+                    heritage.expression.span(),
+                    heritage.type_arguments.as_deref(),
+                )
+            });
+            let implements = node
+                .implements
+                .iter()
+                .map(|heritage| {
+                    type_ref(
+                        heritage.expression.span(),
+                        heritage.type_arguments.as_deref(),
+                    )
+                })
+                .collect();
+            let mut members: Vec<kiln_hir::TypeClassMemberSite> = node
+                .body
+                .body
+                .iter()
+                .map(|element| match element {
+                    ClassElement::PropertyDefinition(property) => kiln_hir::TypeClassMemberSite {
+                        span: HirSpan::new(property.span.start, property.span.end),
+                        name: property.key.static_name().map(|name| name.to_string()),
+                        key: self.owned_key(&property.key, property.computed),
+                        kind: kiln_hir::TypeClassMemberKind::Field,
+                        static_: property.r#static,
+                        optional: property.optional,
+                        readonly: property.readonly,
+                        abstract_: property.r#type
+                            == oxc_ast::ast::PropertyDefinitionType::TSAbstractPropertyDefinition,
+                        accessibility: Self::accessibility(property.accessibility),
+                        override_: property.r#override,
+                        key_type: None,
+                        value_type: None,
+                    },
+                    ClassElement::AccessorProperty(property) => kiln_hir::TypeClassMemberSite {
+                        span: HirSpan::new(property.span.start, property.span.end),
+                        name: property.key.static_name().map(|name| name.to_string()),
+                        key: self.owned_key(&property.key, property.computed),
+                        kind: kiln_hir::TypeClassMemberKind::Accessor,
+                        static_: property.r#static,
+                        optional: false,
+                        readonly: false,
+                        abstract_: false,
+                        accessibility: Self::accessibility(property.accessibility),
+                        override_: property.r#override,
+                        key_type: None,
+                        value_type: None,
+                    },
+                    ClassElement::MethodDefinition(method) => kiln_hir::TypeClassMemberSite {
+                        span: HirSpan::new(method.span.start, method.span.end),
+                        name: method.key.static_name().map(|name| name.to_string()),
+                        key: self.owned_key(&method.key, method.computed),
+                        kind: match method.kind {
+                            MethodDefinitionKind::Constructor => {
+                                kiln_hir::TypeClassMemberKind::Constructor
+                            }
+                            MethodDefinitionKind::Get => kiln_hir::TypeClassMemberKind::Getter,
+                            MethodDefinitionKind::Set => kiln_hir::TypeClassMemberKind::Setter,
+                            MethodDefinitionKind::Method => kiln_hir::TypeClassMemberKind::Method,
+                        },
+                        static_: method.r#static,
+                        optional: method.optional,
+                        readonly: false,
+                        abstract_: method.r#type
+                            == oxc_ast::ast::MethodDefinitionType::TSAbstractMethodDefinition,
+                        accessibility: Self::accessibility(method.accessibility),
+                        override_: method.r#override,
+                        key_type: None,
+                        value_type: None,
+                    },
+                    ClassElement::StaticBlock(block) => kiln_hir::TypeClassMemberSite {
+                        span: HirSpan::new(block.span.start, block.span.end),
+                        name: None,
+                        key: None,
+                        kind: kiln_hir::TypeClassMemberKind::StaticBlock,
+                        static_: true,
+                        optional: false,
+                        readonly: false,
+                        abstract_: false,
+                        accessibility: None,
+                        override_: false,
+                        key_type: None,
+                        value_type: None,
+                    },
+                    ClassElement::TSIndexSignature(index) => kiln_hir::TypeClassMemberSite {
+                        span: HirSpan::new(index.span.start, index.span.end),
+                        name: Some(index.parameter.name.as_str().to_string()),
+                        key: None,
+                        kind: kiln_hir::TypeClassMemberKind::Index,
+                        static_: index.r#static,
+                        optional: false,
+                        readonly: index.readonly,
+                        abstract_: false,
+                        accessibility: None,
+                        override_: false,
+                        key_type: Some(
+                            self.convert(&index.parameter.type_annotation.type_annotation),
+                        ),
+                        value_type: Some(self.convert(&index.type_annotation.type_annotation)),
+                    },
+                })
+                .collect();
+            for element in &node.body.body {
+                let ClassElement::MethodDefinition(method) = element else {
+                    continue;
+                };
+                if method.kind != MethodDefinitionKind::Constructor {
+                    continue;
+                }
+                for parameter in &method.value.params.items {
+                    if parameter.accessibility.is_none() && !parameter.readonly {
+                        continue;
+                    }
+                    members.push(kiln_hir::TypeClassMemberSite {
+                        span: HirSpan::new(parameter.span.start, parameter.span.end),
+                        name: match &parameter.pattern {
+                            oxc_ast::ast::BindingPattern::BindingIdentifier(id) => {
+                                Some(id.name.to_string())
+                            }
+                            _ => None,
+                        },
+                        key: match &parameter.pattern {
+                            oxc_ast::ast::BindingPattern::BindingIdentifier(id) => {
+                                Some(kiln_hir::ObjectKey::Static(id.name.to_string().into()))
+                            }
+                            _ => None,
+                        },
+                        kind: kiln_hir::TypeClassMemberKind::ParameterProperty,
+                        static_: false,
+                        optional: parameter.optional,
+                        readonly: parameter.readonly,
+                        abstract_: false,
+                        accessibility: Self::accessibility(parameter.accessibility),
+                        override_: parameter.r#override,
+                        key_type: None,
+                        value_type: None,
+                    });
+                }
+            }
+            self.result.classes.push(kiln_hir::TypeClassSite {
+                span: HirSpan::new(node.span.start, node.span.end),
+                name: node.id.as_ref().map(|id| id.name.to_string()),
+                name_pos: node.id.as_ref().map_or(node.span.start, |id| id.span.start),
+                exported: self.is_exported(node.span),
+                default_exported: self.is_default_exported(node.span),
+                type_parameters: self.parameters(node.type_parameters.as_deref()),
+                extends,
+                implements,
+                abstract_: node.r#abstract,
+                declared: node.declare,
+                members,
+            });
+            if node.declare {
+                let span = node.span;
+                self.result.declarations.push(HirTypeDeclaration {
+                    name: node.id.as_ref().map(|id| id.name.to_string()),
+                    span: HirSpan::new(span.start, span.end),
+                    kind: kiln_hir::TypeDeclarationKind::Class,
+                    type_parameters: Vec::new(),
+                    extends: Vec::new(),
+                    members: Vec::new(),
+                    source_text: self.raw(span),
+                    exported: self.is_exported(span),
+                    default_exported: self.is_default_exported(span),
+                    declared: true,
+                    const_: false,
+                    global: false,
+                    body: Vec::new(),
+                    enum_members: Vec::new(),
+                });
+            }
+            walk::walk_class(self, node);
+        }
+        fn visit_export_declaration(&mut self, node: &oxc_ast::ast::ExportDeclaration<'a>) {
+            let declaration_span = node.declaration.span();
+            self.result
+                .exported_declarations
+                .push(HirSpan::new(declaration_span.start, declaration_span.end));
+            walk::walk_export_declaration(self, node);
+        }
+        fn visit_export_default_declaration(
+            &mut self,
+            node: &oxc_ast::ast::ExportDefaultDeclaration<'a>,
+        ) {
+            let declaration_span = node.declaration.span();
+            self.result
+                .default_exported_declarations
+                .push(HirSpan::new(declaration_span.start, declaration_span.end));
+            walk::walk_export_default_declaration(self, node);
+        }
+        fn visit_variable_declaration(&mut self, node: &oxc_ast::ast::VariableDeclaration<'a>) {
+            if node.declare {
+                let span = node.span;
+                let mut lowerer = Lowerer {
+                    text: self.source,
+                    path: self.path.as_deref(),
+                    native_import_meta: self.native_import_meta,
+                };
+                self.result.declarations.push(HirTypeDeclaration {
+                    name: None,
+                    span: HirSpan::new(span.start, span.end),
+                    kind: kiln_hir::TypeDeclarationKind::Variable,
+                    type_parameters: Vec::new(),
+                    extends: Vec::new(),
+                    members: Vec::new(),
+                    source_text: self.raw(span),
+                    exported: self.is_exported(span),
+                    default_exported: self.is_default_exported(span),
+                    declared: true,
+                    const_: node.kind == oxc_ast::ast::VariableDeclarationKind::Const,
+                    global: false,
+                    enum_members: Vec::new(),
+                    body: vec![HirStatement {
+                        kind: lowerer.variable(node),
+                        span: HirSpan::new(span.start, span.end),
+                    }],
+                });
+            }
+            walk::walk_variable_declaration(self, node);
+        }
+        fn visit_ts_type_annotation(&mut self, node: &oxc_ast::ast::TSTypeAnnotation<'a>) {
+            let ty_span = node.type_annotation.span();
+            if !self.classified.contains(&(node.span.start, node.span.end)) {
+                self.result.annotations.push(HirTypeAnnotationSite {
+                    site: HirTypeSite::Other("annotation".into()),
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    span: HirSpan::new(ty_span.start, ty_span.end),
+                    operand_span: None,
+                    ty: self.convert(&node.type_annotation),
+                });
+            }
+            walk::walk_ts_type_annotation(self, node);
+        }
+        fn visit_formal_parameters(&mut self, node: &oxc_ast::ast::FormalParameters<'a>) {
+            for (index, parameter) in node.items.iter().enumerate() {
+                if let Some(annotation) = parameter.type_annotation.as_deref() {
+                    let ty_span = annotation.type_annotation.span();
+                    self.classified
+                        .insert((annotation.span.start, annotation.span.end));
+                    self.result.annotations.push(HirTypeAnnotationSite {
+                        site: HirTypeSite::Parameter {
+                            index: index as u32,
+                            name: match &parameter.pattern {
+                                oxc_ast::ast::BindingPattern::BindingIdentifier(id) => {
+                                    Some(id.name.to_string())
+                                }
+                                _ => None,
+                            },
+                        },
+                        owner_span: HirSpan::new(parameter.span.start, parameter.span.end),
+                        span: HirSpan::new(ty_span.start, ty_span.end),
+                        operand_span: None,
+                        ty: self.convert(&annotation.type_annotation),
+                    });
+                }
+            }
+            walk::walk_formal_parameters(self, node);
+        }
+        fn visit_ts_property_signature(&mut self, node: &oxc_ast::ast::TSPropertySignature<'a>) {
+            if let Some(annotation) = node.type_annotation.as_deref() {
+                let ty_span = annotation.type_annotation.span();
+                self.classified
+                    .insert((annotation.span.start, annotation.span.end));
+                self.result.annotations.push(HirTypeAnnotationSite {
+                    site: HirTypeSite::Property {
+                        name: node.key.static_name().map(|n| n.to_string()),
+                    },
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    span: HirSpan::new(ty_span.start, ty_span.end),
+                    operand_span: None,
+                    ty: self.convert(&annotation.type_annotation),
+                });
+            }
+            walk::walk_ts_property_signature(self, node);
+        }
+        fn visit_property_definition(&mut self, node: &oxc_ast::ast::PropertyDefinition<'a>) {
+            if let Some(annotation) = node.type_annotation.as_deref() {
+                let ty_span = annotation.type_annotation.span();
+                self.classified
+                    .insert((annotation.span.start, annotation.span.end));
+                self.result.annotations.push(HirTypeAnnotationSite {
+                    site: HirTypeSite::ClassField {
+                        name: node.key.static_name().map(|n| n.to_string()),
+                    },
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    span: HirSpan::new(ty_span.start, ty_span.end),
+                    operand_span: None,
+                    ty: self.convert(&annotation.type_annotation),
+                });
+            }
+            walk::walk_property_definition(self, node);
+        }
+        fn visit_accessor_property(&mut self, node: &oxc_ast::ast::AccessorProperty<'a>) {
+            if let Some(annotation) = node.type_annotation.as_deref() {
+                let ty_span = annotation.type_annotation.span();
+                self.classified
+                    .insert((annotation.span.start, annotation.span.end));
+                self.result.annotations.push(HirTypeAnnotationSite {
+                    site: HirTypeSite::ClassField {
+                        name: node.key.static_name().map(|name| name.to_string()),
+                    },
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    span: HirSpan::new(ty_span.start, ty_span.end),
+                    operand_span: None,
+                    ty: self.convert(&annotation.type_annotation),
+                });
+            }
+            walk::walk_accessor_property(self, node);
+        }
+        fn visit_function(
+            &mut self,
+            node: &oxc_ast::ast::Function<'a>,
+            flags: oxc_syntax::scope::ScopeFlags,
+        ) {
+            let signature_return = node
+                .return_type
+                .as_deref()
+                .map(|a| self.convert(&a.type_annotation));
+            let mut signature = self.signature_with_return(
+                node.span,
+                node.type_parameters.as_deref(),
+                &node.params,
+                signature_return,
+            );
+            signature.this_parameter = self
+                .this_parameter(node.this_param.as_deref())
+                .map(Box::new);
+            self.result
+                .signatures
+                .push(kiln_hir::FunctionSignatureSite {
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    signature,
+                    has_body: node.body.is_some(),
+                });
+            if node.body.is_none() {
+                let span = node.span;
+                self.result.declarations.push(HirTypeDeclaration {
+                    name: node.id.as_ref().map(|id| id.name.to_string()),
+                    span: HirSpan::new(span.start, span.end),
+                    kind: HirTypeDeclarationKind::Overload,
+                    type_parameters: self.parameters(node.type_parameters.as_deref()),
+                    extends: Vec::new(),
+                    members: Vec::new(),
+                    source_text: self.raw(span),
+                    exported: self.is_exported(span),
+                    default_exported: self.is_default_exported(span),
+                    declared: node.declare,
+                    const_: false,
+                    global: false,
+                    enum_members: Vec::new(),
+                    body: Vec::new(),
+                });
+            }
+            if let Some(annotation) = node.return_type.as_deref() {
+                let ty_span = annotation.type_annotation.span();
+                self.classified
+                    .insert((annotation.span.start, annotation.span.end));
+                self.result.annotations.push(HirTypeAnnotationSite {
+                    site: HirTypeSite::Return,
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    span: HirSpan::new(ty_span.start, ty_span.end),
+                    operand_span: None,
+                    ty: self.convert(&annotation.type_annotation),
+                });
+            }
+            walk::walk_function(self, node, flags);
+        }
+        fn visit_import_declaration(&mut self, node: &oxc_ast::ast::ImportDeclaration<'a>) {
+            if node.import_kind.is_type() || node.specifiers.as_ref().is_some_and(|specifiers| {
+                specifiers.iter().any(|specifier| matches!(specifier, oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(s) if s.import_kind.is_type()))
+            }) {
+                let span = node.span;
+                self.result.declarations.push(HirTypeDeclaration {
+                    name: None,
+                    span: HirSpan::new(span.start, span.end),
+                    kind: HirTypeDeclarationKind::Import,
+                    type_parameters: Vec::new(),
+                    extends: Vec::new(),
+                    members: Vec::new(),
+                    source_text: self.raw(span),
+                    exported: false, default_exported: false, declared: false,
+                    const_: false, global: false, body: Vec::new(),
+                    enum_members: Vec::new(),
+                });
+            }
+            walk::walk_import_declaration(self, node);
+        }
+        fn visit_ts_import_equals_declaration(
+            &mut self,
+            node: &oxc_ast::ast::TSImportEqualsDeclaration<'a>,
+        ) {
+            let reference = match &node.module_reference {
+                oxc_ast::ast::TSModuleReference::ExternalModuleReference(reference) => {
+                    kiln_hir::TypeImportEqualsReference::ExternalModule(
+                        reference.expression.value.to_string(),
+                    )
+                }
+                oxc_ast::ast::TSModuleReference::IdentifierReference(reference) => {
+                    kiln_hir::TypeImportEqualsReference::EntityName(vec![
+                        reference.name.to_string(),
+                    ])
+                }
+                oxc_ast::ast::TSModuleReference::QualifiedName(reference) => {
+                    kiln_hir::TypeImportEqualsReference::EntityName(
+                        self.raw(reference.span)
+                            .split('.')
+                            .map(str::trim)
+                            .map(str::to_owned)
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    )
+                }
+            };
+            self.result.import_equals.push(kiln_hir::TypeImportEquals {
+                name: node.id.name.to_string(),
+                span: HirSpan::new(node.span.start, node.span.end),
+                reference,
+                type_only: node.import_kind.is_type(),
+                exported: self.is_exported(node.span),
+                declared: self
+                    .source
+                    .get(node.span.start as usize..)
+                    .is_some_and(|s| s.trim_start().starts_with("declare ")),
+            });
+            walk::walk_ts_import_equals_declaration(self, node);
+        }
+        fn visit_arrow_function_expression(
+            &mut self,
+            node: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+        ) {
+            let signature_return = node
+                .return_type
+                .as_deref()
+                .map(|a| self.convert(&a.type_annotation));
+            self.result
+                .signatures
+                .push(kiln_hir::FunctionSignatureSite {
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    signature: self.signature_with_return(
+                        node.span,
+                        node.type_parameters.as_deref(),
+                        &node.params,
+                        signature_return,
+                    ),
+                    has_body: true,
+                });
+            if let Some(annotation) = node.return_type.as_deref() {
+                let ty_span = annotation.type_annotation.span();
+                self.classified
+                    .insert((annotation.span.start, annotation.span.end));
+                self.result.annotations.push(HirTypeAnnotationSite {
+                    site: HirTypeSite::Return,
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    span: HirSpan::new(ty_span.start, ty_span.end),
+                    operand_span: None,
+                    ty: self.convert(&annotation.type_annotation),
+                });
+            }
+            walk::walk_arrow_function_expression(self, node);
+        }
+        fn visit_call_expression(&mut self, node: &oxc_ast::ast::CallExpression<'a>) {
+            if let Some(arguments) = node.type_arguments.as_deref() {
+                self.result
+                    .instantiations
+                    .push(kiln_hir::TypeInstantiationSite {
+                        owner_span: HirSpan::new(node.span.start, node.span.end),
+                        operand_span: None,
+                        arguments: arguments.params.iter().map(|t| self.convert(t)).collect(),
+                        kind: kiln_hir::TypeInstantiationKind::Call,
+                    });
+            }
+            walk::walk_call_expression(self, node);
+        }
+        fn visit_new_expression(&mut self, node: &oxc_ast::ast::NewExpression<'a>) {
+            if let Some(arguments) = node.type_arguments.as_deref() {
+                self.result
+                    .instantiations
+                    .push(kiln_hir::TypeInstantiationSite {
+                        owner_span: HirSpan::new(node.span.start, node.span.end),
+                        operand_span: None,
+                        arguments: arguments.params.iter().map(|t| self.convert(t)).collect(),
+                        kind: kiln_hir::TypeInstantiationKind::Construct,
+                    });
+            }
+            walk::walk_new_expression(self, node);
+        }
+        fn visit_ts_instantiation_expression(
+            &mut self,
+            node: &oxc_ast::ast::TSInstantiationExpression<'a>,
+        ) {
+            self.result
+                .instantiations
+                .push(kiln_hir::TypeInstantiationSite {
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    operand_span: Some(self.operand_span(&node.expression)),
+                    arguments: node
+                        .type_arguments
+                        .params
+                        .iter()
+                        .map(|t| self.convert(t))
+                        .collect(),
+                    kind: kiln_hir::TypeInstantiationKind::Expression,
+                });
+            walk::walk_ts_instantiation_expression(self, node);
+        }
+        fn visit_variable_declarator(&mut self, node: &oxc_ast::ast::VariableDeclarator<'a>) {
+            if let Some(annotation) = node.type_annotation.as_deref() {
+                let ty_span = annotation.type_annotation.span();
+                self.classified
+                    .insert((annotation.span.start, annotation.span.end));
+                self.result.annotations.push(HirTypeAnnotationSite {
+                    site: HirTypeSite::Variable {
+                        name: match &node.id {
+                            oxc_ast::ast::BindingPattern::BindingIdentifier(id) => {
+                                Some(id.name.to_string())
+                            }
+                            _ => None,
+                        },
+                    },
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    span: HirSpan::new(ty_span.start, ty_span.end),
+                    operand_span: None,
+                    ty: self.convert(&annotation.type_annotation),
+                });
+            }
+            walk::walk_variable_declarator(self, node);
+        }
+        fn visit_ts_as_expression(&mut self, node: &oxc_ast::ast::TSAsExpression<'a>) {
+            if self.raw(node.type_annotation.span()).trim() == "const" {
+                self.result
+                    .expression_wrappers
+                    .push(kiln_hir::TypeExpressionWrapperSite {
+                        owner_span: HirSpan::new(node.span.start, node.span.end),
+                        operand_span: self.operand_span(&node.expression),
+                        kind: kiln_hir::TypeExpressionWrapperKind::AsConst,
+                    });
+                walk::walk_ts_as_expression(self, node);
+                return;
+            }
+            let span = node.type_annotation.span();
+            self.result.annotations.push(HirTypeAnnotationSite {
+                site: HirTypeSite::AsExpression,
+                owner_span: HirSpan::new(node.span.start, node.span.end),
+                span: HirSpan::new(span.start, span.end),
+                operand_span: Some(self.operand_span(&node.expression)),
+                ty: self.convert(&node.type_annotation),
+            });
+            walk::walk_ts_as_expression(self, node);
+        }
+        fn visit_ts_satisfies_expression(
+            &mut self,
+            node: &oxc_ast::ast::TSSatisfiesExpression<'a>,
+        ) {
+            let span = node.type_annotation.span();
+            self.result.annotations.push(HirTypeAnnotationSite {
+                site: HirTypeSite::SatisfiesExpression,
+                owner_span: HirSpan::new(node.span.start, node.span.end),
+                span: HirSpan::new(span.start, span.end),
+                operand_span: Some(self.operand_span(&node.expression)),
+                ty: self.convert(&node.type_annotation),
+            });
+            walk::walk_ts_satisfies_expression(self, node);
+        }
+        fn visit_ts_type_assertion(&mut self, node: &oxc_ast::ast::TSTypeAssertion<'a>) {
+            let span = node.type_annotation.span();
+            self.result.annotations.push(HirTypeAnnotationSite {
+                site: HirTypeSite::AsExpression,
+                owner_span: HirSpan::new(node.span.start, node.span.end),
+                span: HirSpan::new(span.start, span.end),
+                operand_span: Some(self.operand_span(&node.expression)),
+                ty: self.convert(&node.type_annotation),
+            });
+            walk::walk_ts_type_assertion(self, node);
+        }
+        fn visit_ts_non_null_expression(&mut self, node: &oxc_ast::ast::TSNonNullExpression<'a>) {
+            self.result
+                .expression_wrappers
+                .push(kiln_hir::TypeExpressionWrapperSite {
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    operand_span: self.operand_span(&node.expression),
+                    kind: kiln_hir::TypeExpressionWrapperKind::NonNull,
+                });
+            walk::walk_ts_non_null_expression(self, node);
+        }
+        fn visit_ts_type_alias_declaration(
+            &mut self,
+            node: &oxc_ast::ast::TSTypeAliasDeclaration<'a>,
+        ) {
+            let span = node.span;
+            let expr = self.convert(&node.type_annotation);
+            self.result.declarations.push(HirTypeDeclaration {
+                name: Some(node.id.name.to_string()),
+                span: HirSpan::new(span.start, span.end),
+                kind: HirTypeDeclarationKind::Alias(expr),
+                type_parameters: self.parameters(node.type_parameters.as_deref()),
+                extends: Vec::new(),
+                members: Vec::new(),
+                source_text: self.raw(span),
+                exported: self.is_exported(span),
+                default_exported: self.is_default_exported(span),
+                declared: node.declare,
+                const_: false,
+                global: false,
+                enum_members: Vec::new(),
+                body: Vec::new(),
+            });
+            walk::walk_ts_type_alias_declaration(self, node);
+        }
+        fn visit_ts_interface_declaration(
+            &mut self,
+            node: &oxc_ast::ast::TSInterfaceDeclaration<'a>,
+        ) {
+            let span = node.span;
+            self.result.declarations.push(HirTypeDeclaration {
+                name: Some(node.id.name.to_string()),
+                span: HirSpan::new(span.start, span.end),
+                kind: HirTypeDeclarationKind::Interface,
+                type_parameters: self.parameters(node.type_parameters.as_deref()),
+                extends: node
+                    .extends
+                    .iter()
+                    .map(|e| {
+                        let span = e.span;
+                        HirTypeExpr {
+                            span: HirSpan::new(span.start, span.end),
+                            kind: HirTypeExprKind::Reference {
+                                name: self
+                                    .raw(e.type_name.span())
+                                    .split('.')
+                                    .map(str::trim)
+                                    .map(str::to_owned)
+                                    .filter(|s| !s.is_empty())
+                                    .collect(),
+                                arguments: e
+                                    .type_arguments
+                                    .as_ref()
+                                    .map(|a| a.params.iter().map(|t| self.convert(t)).collect())
+                                    .unwrap_or_default(),
+                            },
+                        }
+                    })
+                    .collect(),
+                members: self.object_members(&node.body.body),
+                source_text: self.raw(span),
+                exported: self.is_exported(span),
+                default_exported: self.is_default_exported(span),
+                declared: node.declare,
+                const_: false,
+                global: false,
+                enum_members: Vec::new(),
+                body: Vec::new(),
+            });
+            walk::walk_ts_interface_declaration(self, node);
+        }
+        fn visit_ts_enum_declaration(&mut self, node: &oxc_ast::ast::TSEnumDeclaration<'a>) {
+            let span = node.span;
+            self.result.declarations.push(HirTypeDeclaration {
+                name: Some(node.id.name.to_string()),
+                span: HirSpan::new(span.start, span.end),
+                kind: HirTypeDeclarationKind::Enum,
+                type_parameters: Vec::new(),
+                extends: Vec::new(),
+                members: Vec::new(),
+                source_text: self.raw(span),
+                exported: self.is_exported(span),
+                default_exported: self.is_default_exported(span),
+                declared: node.declare,
+                const_: node.r#const,
+                global: false,
+                enum_members: node
+                    .body
+                    .members
+                    .iter()
+                    .map(|member| {
+                        let (name, name_kind) = match &member.id {
+                            oxc_ast::ast::TSEnumMemberName::Identifier(id) => (
+                                StringUnits::from(id.name.as_str()),
+                                kiln_hir::EnumMemberNameKind::Identifier,
+                            ),
+                            oxc_ast::ast::TSEnumMemberName::String(id) => (
+                                oxc_string_units(id.value.as_str(), id.lone_surrogates),
+                                kiln_hir::EnumMemberNameKind::StringLiteral,
+                            ),
+                            oxc_ast::ast::TSEnumMemberName::ComputedString(id) => (
+                                oxc_string_units(id.value.as_str(), id.lone_surrogates),
+                                kiln_hir::EnumMemberNameKind::ComputedString,
+                            ),
+                            oxc_ast::ast::TSEnumMemberName::ComputedTemplateString(id) => (
+                                id.quasis.first().map_or_else(StringUnits::default, |q| {
+                                    oxc_string_units(
+                                        q.value
+                                            .cooked
+                                            .as_ref()
+                                            .map_or(q.value.raw.as_str(), |s| s.as_str()),
+                                        q.lone_surrogates,
+                                    )
+                                }),
+                                kiln_hir::EnumMemberNameKind::ComputedString,
+                            ),
+                        };
+                        kiln_hir::EnumMember {
+                            name,
+                            name_kind,
+                            span: HirSpan::new(member.span.start, member.span.end),
+                            initializer: member.initializer.as_ref().map(|e| {
+                                let mut lowerer = Lowerer {
+                                    text: self.source,
+                                    path: self.path.as_deref(),
+                                    native_import_meta: self.native_import_meta,
+                                };
+                                lowerer.expression(e)
+                            }),
+                        }
+                    })
+                    .collect(),
+                body: Vec::new(),
+            });
+            walk::walk_ts_enum_declaration(self, node);
+        }
+        fn visit_ts_namespace_declaration(
+            &mut self,
+            node: &oxc_ast::ast::TSNamespaceDeclaration<'a>,
+        ) {
+            let span = node.span;
+            self.result.declarations.push(HirTypeDeclaration {
+                name: Some(node.id.name.to_string()),
+                span: HirSpan::new(span.start, span.end),
+                kind: HirTypeDeclarationKind::Namespace,
+                type_parameters: Vec::new(),
+                extends: Vec::new(),
+                members: Vec::new(),
+                source_text: self.raw(span),
+                exported: self.is_exported(span),
+                default_exported: self.is_default_exported(span),
+                declared: node.declare,
+                const_: false,
+                global: false,
+                enum_members: Vec::new(),
+                body: match &node.body {
+                    oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+                        let mut lowerer = Lowerer {
+                            text: self.source,
+                            path: self.path.as_deref(),
+                            native_import_meta: self.native_import_meta,
+                        };
+                        lowerer.statements(&block.body)
+                    }
+                    oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => {
+                        Vec::new()
+                    }
+                },
+            });
+            walk::walk_ts_namespace_declaration(self, node);
+        }
+        fn visit_ts_external_module_declaration(
+            &mut self,
+            node: &oxc_ast::ast::TSExternalModuleDeclaration<'a>,
+        ) {
+            let span = node.span;
+            let body = node
+                .body
+                .as_deref()
+                .map(|block| {
+                    let mut lowerer = Lowerer {
+                        text: self.source,
+                        path: self.path.as_deref(),
+                        native_import_meta: self.native_import_meta,
+                    };
+                    lowerer.statements(&block.body)
+                })
+                .unwrap_or_default();
+            self.result.declarations.push(HirTypeDeclaration {
+                name: Some(node.id.value.to_string()),
+                span: HirSpan::new(span.start, span.end),
+                kind: HirTypeDeclarationKind::Module,
+                type_parameters: Vec::new(),
+                extends: Vec::new(),
+                members: Vec::new(),
+                source_text: self.raw(span),
+                exported: self.is_exported(span),
+                default_exported: self.is_default_exported(span),
+                declared: node.declare,
+                const_: false,
+                global: false,
+                enum_members: Vec::new(),
+                body,
+            });
+            walk::walk_ts_external_module_declaration(self, node);
+        }
+        fn visit_ts_global_declaration(&mut self, node: &oxc_ast::ast::TSGlobalDeclaration<'a>) {
+            let span = node.span;
+            let mut lowerer = Lowerer {
+                text: self.source,
+                path: self.path.as_deref(),
+                native_import_meta: self.native_import_meta,
+            };
+            let body = lowerer.statements(&node.body.body);
+            self.result.declarations.push(HirTypeDeclaration {
+                name: None,
+                span: HirSpan::new(span.start, span.end),
+                kind: HirTypeDeclarationKind::Module,
+                type_parameters: Vec::new(),
+                extends: Vec::new(),
+                members: Vec::new(),
+                source_text: self.raw(span),
+                exported: self.is_exported(span),
+                default_exported: self.is_default_exported(span),
+                declared: node.declare,
+                const_: false,
+                global: true,
+                enum_members: Vec::new(),
+                body,
+            });
+            walk::walk_ts_global_declaration(self, node);
+        }
+    }
+    let mut collector = Collector {
+        source,
+        path: path.map(str::to_owned),
+        native_import_meta,
+        result: HirTypeSyntax::default(),
+        classified: HashSet::new(),
+    };
+    for comment in &program.comments {
+        if comment.kind != oxc_ast::ast::CommentKind::Line {
+            continue;
+        }
+        let raw = collector.raw(comment.span);
+        let Some(content) = raw.strip_prefix("///") else {
+            continue;
+        };
+        let content = content.trim();
+        if !content.starts_with("<reference") {
+            continue;
+        }
+        let mut attrs = HashMap::<&str, String>::new();
+        for token in content.split_whitespace().skip(1) {
+            let token = token.trim_end_matches(['/', '>']);
+            let Some((key, value)) = token.split_once('=') else {
+                continue;
+            };
+            attrs.insert(key, value.trim_matches(['"', '\'']).to_owned());
+        }
+        if attrs
+            .get("no-default-lib")
+            .is_some_and(|value| value == "true")
+        {
+            collector.result.no_default_lib = true;
+        }
+        for (key, kind) in [
+            ("path", kiln_hir::TypeReferenceKind::Path),
+            ("types", kiln_hir::TypeReferenceKind::Types),
+            ("lib", kiln_hir::TypeReferenceKind::Lib),
+        ] {
+            if let Some(value) = attrs.get(key) {
+                let resolution_mode = if kind == kiln_hir::TypeReferenceKind::Types {
+                    match attrs.get("resolution-mode").map(String::as_str) {
+                        Some("import") => Some(kiln_hir::TypeResolutionMode::Import),
+                        Some("require") => Some(kiln_hir::TypeResolutionMode::Require),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                collector
+                    .result
+                    .references
+                    .push(kiln_hir::TypeReferenceDirective {
+                        kind,
+                        value: value.clone(),
+                        position: comment.span.start,
+                        resolution_mode,
+                    });
+            }
+        }
+    }
+    collector.visit_program(program);
+    collector
+        .result
+        .annotations
+        .sort_by_key(|site| (site.span.start, site.span.end));
+    collector
+        .result
+        .binding_identifiers
+        .sort_by_key(|site| (site.span.start, site.span.end));
+    collector
+        .result
+        .exported_declarations
+        .sort_by_key(|span| (span.start, span.end));
+    collector
+        .result
+        .default_exported_declarations
+        .sort_by_key(|span| (span.start, span.end));
+    collector
+        .result
+        .declarations
+        .sort_by_key(|decl| (decl.span.start, decl.span.end));
+    collector
+        .result
+        .classes
+        .sort_by_key(|class| (class.span.start, class.span.end));
+    collector
+        .result
+        .instantiations
+        .sort_by_key(|site| (site.owner_span.start, site.owner_span.end));
+    collector
+        .result
+        .expression_wrappers
+        .sort_by_key(|site| (site.owner_span.start, site.owner_span.end));
+    collector.result
+}
+
+fn capture_original_body(
+    path: Option<&str>,
+    source: &str,
+    parsed: &oxc_parser::ParserReturn<'_>,
+    native_import_meta: Option<bool>,
+) -> Vec<HirStatement> {
+    let mut lowerer = Lowerer {
+        text: source,
+        path,
+        native_import_meta,
+    };
+    lowerer.statements(&parsed.program.body)
+}
+
+/// `Lowerer` intentionally drops erased TS declarations from the executable HIR. The checker
+/// still needs those declarations in their lexical statement list, so retain span-only markers in
+/// the owned source snapshot. The checker replaces each marker from `TypeSyntax.declarations`.
+fn retain_erased_declarations(syntax: &mut HirTypeSyntax) {
+    fn recurse_expression(expression: &mut HirExpression, declarations: &[HirTypeDeclaration]) {
+        use HirExpressionKind as E;
+        match &mut expression.kind {
+            E::Function(function) => retain_list(&mut function.body, declarations, function.span),
+            E::Unary { argument, .. }
+            | E::Await(argument)
+            | E::Chain {
+                expression: argument,
+            } => recurse_expression(argument, declarations),
+            E::Binary { left, right, .. } | E::Logical { left, right, .. } => {
+                recurse_expression(left, declarations);
+                recurse_expression(right, declarations);
+            }
+            E::Conditional {
+                test,
+                consequent,
+                alternate,
+            } => {
+                recurse_expression(test, declarations);
+                recurse_expression(consequent, declarations);
+                recurse_expression(alternate, declarations);
+            }
+            E::Call {
+                callee, arguments, ..
+            }
+            | E::New { callee, arguments } => {
+                recurse_expression(callee, declarations);
+                for argument in arguments {
+                    match argument {
+                        ListElement::Item(e) | ListElement::Spread(e) => {
+                            recurse_expression(e, declarations)
+                        }
+                        ListElement::Hole => {}
+                    }
+                }
+            }
+            E::Array { elements }
+            | E::SuperCall {
+                arguments: elements,
+            } => {
+                for element in elements {
+                    match element {
+                        ListElement::Item(e) | ListElement::Spread(e) => {
+                            recurse_expression(e, declarations)
+                        }
+                        ListElement::Hole => {}
+                    }
+                }
+            }
+            E::Sequence { operands } => {
+                for e in operands {
+                    recurse_expression(e, declarations);
+                }
+            }
+            E::Object { members } => {
+                for member in members {
+                    match member {
+                        kiln_hir::ObjectMember::Property(p) => {
+                            recurse_expression(&mut p.value, declarations)
+                        }
+                        kiln_hir::ObjectMember::Spread(e) => recurse_expression(e, declarations),
+                        kiln_hir::ObjectMember::Accessor { function, .. } => {
+                            retain_list(&mut function.body, declarations, function.span)
+                        }
+                    }
+                }
+            }
+            E::Template { expressions, .. } => {
+                for e in expressions {
+                    recurse_expression(e, declarations);
+                }
+            }
+            E::ImportCall { specifier, options } => {
+                recurse_expression(specifier, declarations);
+                if let Some(e) = options {
+                    recurse_expression(e, declarations);
+                }
+            }
+            E::Class(class) => {
+                if let Some(constructor) = &mut class.constructor {
+                    retain_list(&mut constructor.body, declarations, constructor.span);
+                }
+                for method in &mut class.methods {
+                    retain_list(
+                        &mut method.function.body,
+                        declarations,
+                        method.function.span,
+                    );
+                }
+                for initializer in &mut class.initialisers {
+                    if let kiln_hir::ClassInitialiser::StaticBlock(function) = initializer {
+                        retain_list(&mut function.body, declarations, function.span);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    fn recurse_statement(statement: &mut HirStatement, declarations: &[HirTypeDeclaration]) {
+        let statement_span = statement.span;
+        match &mut statement.kind {
+            HirStatementKind::Variable {
+                declarations: vars, ..
+            } => {
+                for var in vars {
+                    if let Some(initializer) = &mut var.initializer {
+                        recurse_expression(initializer, declarations);
+                    }
+                }
+            }
+            HirStatementKind::Expression(expression) => {
+                recurse_expression(expression, declarations)
+            }
+            HirStatementKind::Return(Some(expression)) | HirStatementKind::Throw(expression) => {
+                recurse_expression(expression, declarations)
+            }
+            HirStatementKind::Block(body) => retain_list(body, declarations, statement_span),
+            HirStatementKind::Function(function) => {
+                retain_list(&mut function.body, declarations, function.span);
+            }
+            HirStatementKind::Class(class) => {
+                if let Some(constructor) = &mut class.constructor {
+                    retain_list(&mut constructor.body, declarations, constructor.span);
+                }
+                for method in &mut class.methods {
+                    retain_list(
+                        &mut method.function.body,
+                        declarations,
+                        method.function.span,
+                    );
+                }
+                for initializer in &mut class.initialisers {
+                    match initializer {
+                        kiln_hir::ClassInitialiser::Field(field) => {
+                            if let Some(value) = &mut field.value {
+                                recurse_expression(value, declarations);
+                            }
+                        }
+                        kiln_hir::ClassInitialiser::StaticBlock(function) => {
+                            retain_list(&mut function.body, declarations, function.span);
+                        }
+                    }
+                }
+            }
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                recurse_statement(consequent, declarations);
+                if let Some(alternate) = alternate {
+                    recurse_statement(alternate, declarations);
+                }
+            }
+            HirStatementKind::While { body, .. }
+            | HirStatementKind::DoWhile { body, .. }
+            | HirStatementKind::With { body, .. }
+            | HirStatementKind::Labelled { body, .. }
+            | HirStatementKind::For { body, .. }
+            | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::ForOf { body, .. } => recurse_statement(body, declarations),
+            HirStatementKind::Switch { cases, .. } => {
+                for case in cases {
+                    retain_list(&mut case.body, declarations, statement_span);
+                }
+            }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                retain_list(block, declarations, statement_span);
+                if let Some(handler) = handler {
+                    retain_list(&mut handler.body, declarations, statement_span);
+                }
+                retain_list(finalizer, declarations, statement_span);
+            }
+            _ => {}
+        }
+    }
+    fn retain_list(
+        body: &mut Vec<HirStatement>,
+        declarations: &[HirTypeDeclaration],
+        scope: HirSpan,
+    ) {
+        for statement in body.iter_mut() {
+            recurse_statement(statement, declarations);
+        }
+        for declaration in declarations {
+            if matches!(declaration.kind, HirTypeDeclarationKind::Import) {
+                continue;
+            }
+            // The body of a namespace/module is scoped by its own declaration span; its own
+            // declaration must never be inserted back into that body.
+            if declaration.span == scope {
+                continue;
+            }
+            if declaration.span.start < scope.start || declaration.span.end > scope.end {
+                continue;
+            }
+            // A nested function/block/namespace owns declarations inside its span; recurse into
+            // that statement or namespace body instead of lifting the marker into this scope.
+            if body.iter().any(|statement| {
+                statement.span != declaration.span
+                    && statement.span.start <= declaration.span.start
+                    && statement.span.end >= declaration.span.end
+            }) {
+                continue;
+            }
+            if declarations.iter().any(|parent| {
+                parent.span != declaration.span
+                    && parent.span != scope
+                    && matches!(
+                        parent.kind,
+                        HirTypeDeclarationKind::Namespace | HirTypeDeclarationKind::Module
+                    )
+                    && parent.span.start >= scope.start
+                    && parent.span.end <= scope.end
+                    && parent.span.start <= declaration.span.start
+                    && parent.span.end >= declaration.span.end
+            }) {
+                continue;
+            }
+            if body
+                .iter()
+                .any(|statement| statement.span == declaration.span)
+            {
+                continue;
+            }
+            body.push(HirStatement {
+                kind: HirStatementKind::Unsupported {
+                    feature: "TypeScript declaration marker".into(),
+                },
+                span: declaration.span,
+            });
+        }
+        body.sort_by_key(|statement| (statement.span.start, statement.span.end));
+    }
+    // The root list is not a declaration body, even when its sole declaration spans the whole
+    // file. Use an unbounded owner span so a one-statement file is not mistaken for its own body.
+    let scope = HirSpan::new(0, u32::MAX);
+    let declarations = syntax.declarations.clone();
+    retain_list(&mut syntax.body, &declarations, scope);
+    for declaration in &mut syntax.declarations {
+        if matches!(
+            declaration.kind,
+            HirTypeDeclarationKind::Namespace | HirTypeDeclarationKind::Module
+        ) {
+            retain_list(&mut declaration.body, &declarations, declaration.span);
+        }
+    }
 }
 
 fn lower_parsed(
@@ -1439,6 +3360,7 @@ fn lower_parsed_in_context(
         imports,
         exports,
         diagnostics,
+        type_syntax: HirTypeSyntax::default(),
         panicked: parsed.panicked,
         node_runtime_requests: Vec::new(),
     };
@@ -1750,10 +3672,7 @@ impl Lowerer<'_> {
                 }
                 self.unsupported_statement("TypeScript runtime declaration", statement_span)
             }
-            Statement::TSImportEqualsDeclaration(declaration) => {
-                if declaration.import_kind.is_type() {
-                    return None;
-                }
+            Statement::TSImportEqualsDeclaration(_) => {
                 self.unsupported_statement("TypeScript import equals", statement_span)
             }
 
@@ -3138,6 +5057,7 @@ impl Lowerer<'_> {
                         }
                     }
                     initialisers.push(kiln_hir::ClassInitialiser::Field(kiln_hir::ClassField {
+                        span: HirSpan::new(property.span.start, property.span.end),
                         key,
                         value,
                         is_static: property.r#static,
@@ -3250,11 +5170,13 @@ impl Lowerer<'_> {
                         name_anonymous_function(value, &key);
                     }
                     initialisers.push(kiln_hir::ClassInitialiser::Field(kiln_hir::ClassField {
+                        span: member_span,
                         key: kiln_hir::ObjectKey::Private(storage),
                         value,
                         is_static: accessor.r#static,
                     }));
                     methods.push(kiln_hir::ClassMethod {
+                        span: member_span,
                         key: kiln_hir::ObjectKey::Static(key.clone().into()),
                         function: accessor_function(
                             Vec::new(),
@@ -3267,6 +5189,7 @@ impl Lowerer<'_> {
                         kind: kiln_hir::MethodKind::Get,
                     });
                     methods.push(kiln_hir::ClassMethod {
+                        span: member_span,
                         key: kiln_hir::ObjectKey::Static(key.into()),
                         function: accessor_function(
                             vec![kiln_hir::Parameter {
@@ -3306,6 +5229,7 @@ impl Lowerer<'_> {
                         .member_key(&method.key, method.computed)
                         .ok_or("class method name")?;
                     methods.push(kiln_hir::ClassMethod {
+                        span: HirSpan::new(method.span.start, method.span.end),
                         key,
                         function: lowered,
                         is_static: method.r#static,
@@ -4435,6 +6359,224 @@ mod tests {
                         imported: ImportName::Name("value".into()),
                     }
         }));
+    }
+
+    #[test]
+    fn retained_type_declarations_stay_in_function_and_namespace_scopes() {
+        let only_alias = parse("only.ts", "type Only = number;");
+        let only = only_alias
+            .type_syntax
+            .declarations
+            .iter()
+            .find(|d| d.name.as_deref() == Some("Only"))
+            .unwrap();
+        assert!(
+            only_alias
+                .type_syntax
+                .body
+                .iter()
+                .any(|statement| statement.span == only.span)
+        );
+
+        let module = parse(
+            "scopes.ts",
+            r#"
+function outer() {
+    type Local = string;
+    return () => { type Nested = Local; return "ok"; };
+}
+namespace Outer {
+    type Local = number;
+    namespace Inner { type Nested = Local; }
+}
+"#,
+        );
+        let declaration = |name: &str| {
+            module
+                .type_syntax
+                .declarations
+                .iter()
+                .find(|d| d.name.as_deref() == Some(name))
+                .unwrap()
+        };
+        let local = declaration("Local");
+        let outer_function = module
+            .type_syntax
+            .body
+            .iter()
+            .find_map(|statement| match &statement.kind {
+                HirStatementKind::Function(function)
+                    if function.name.as_deref() == Some("outer") =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            outer_function
+                .body
+                .iter()
+                .any(|statement| statement.span == local.span)
+        );
+        let nested = declaration("Nested");
+        let arrow = outer_function
+            .body
+            .iter()
+            .find_map(|statement| match &statement.kind {
+                HirStatementKind::Return(Some(expression)) => match &expression.kind {
+                    HirExpressionKind::Function(function) => Some(function),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            arrow
+                .body
+                .iter()
+                .any(|statement| statement.span == nested.span)
+        );
+
+        let namespace = declaration("Outer");
+        let namespace_local = module
+            .type_syntax
+            .declarations
+            .iter()
+            .find(|d| d.name.as_deref() == Some("Local") && d.span.start > namespace.span.start)
+            .unwrap();
+        assert!(
+            namespace
+                .body
+                .iter()
+                .any(|statement| statement.span == namespace_local.span)
+        );
+        let inner = module
+            .type_syntax
+            .declarations
+            .iter()
+            .find(|d| d.name.as_deref() == Some("Inner"))
+            .unwrap();
+        let nested_type = module
+            .type_syntax
+            .declarations
+            .iter()
+            .find(|d| d.name.as_deref() == Some("Nested") && d.span.start > inner.span.start)
+            .unwrap();
+        assert!(
+            inner
+                .body
+                .iter()
+                .any(|statement| statement.span == nested_type.span)
+        );
+    }
+
+    #[test]
+    fn export_modifiers_apply_only_to_the_direct_declaration() {
+        let module = parse(
+            "exports.ts",
+            r#"
+export function outer() {
+    type Local = number;
+    class Inner {}
+    return 1;
+}
+export namespace Boxed {
+    type Hidden = string;
+    export type Visible = number;
+}
+export default interface Fallback { value: boolean }
+"#,
+        );
+
+        let declaration = |name: &str| {
+            module
+                .type_syntax
+                .declarations
+                .iter()
+                .find(|declaration| declaration.name.as_deref() == Some(name))
+                .unwrap()
+        };
+        let outer = module
+            .type_syntax
+            .signatures
+            .iter()
+            .find(|signature| signature.has_body)
+            .unwrap();
+        assert!(
+            module
+                .type_syntax
+                .exported_declarations
+                .contains(&outer.owner_span)
+        );
+        assert!(!declaration("Local").exported);
+        assert!(
+            !module
+                .type_syntax
+                .classes
+                .iter()
+                .find(|class| class.name.as_deref() == Some("Inner"))
+                .unwrap()
+                .exported
+        );
+
+        assert!(declaration("Boxed").exported);
+        assert!(!declaration("Hidden").exported);
+        assert!(declaration("Visible").exported);
+
+        assert!(declaration("Fallback").default_exported);
+    }
+
+    #[test]
+    fn type_signatures_retain_destructured_and_rest_parameter_patterns() {
+        let module = parse(
+            "signature-patterns.d.ts",
+            "declare function consume({ value }: { value: number }, ...rest: number[]): void;",
+        );
+        let signature = module
+            .type_syntax
+            .signatures
+            .iter()
+            .find(|site| !site.has_body)
+            .unwrap();
+        assert!(matches!(
+            signature.signature.parameters[0].pattern.as_deref(),
+            Some(kiln_hir::Pattern::Object { .. })
+        ));
+        assert_eq!(
+            signature.signature.parameters[1].pattern.as_deref(),
+            Some(&kiln_hir::Pattern::Identifier("rest".to_owned()))
+        );
+        let rest_span = signature.signature.parameters[1].pattern_span;
+        assert_eq!(
+            module
+                .source
+                .get(rest_span.start as usize..rest_span.end as usize),
+            Some("rest")
+        );
+    }
+
+    #[test]
+    fn captures_triple_slash_reference_directives_from_oxc_comments() {
+        let module = parse(
+            "refs.d.ts",
+            "/// <reference path=\"./base.d.ts\" />\n/// <reference types=\"node\" resolution-mode=\"require\" />\n/// <reference lib=\"esnext\" />\n/// <reference no-default-lib=\"true\" />\ninterface X {}\n",
+        );
+        assert_eq!(module.type_syntax.references.len(), 3);
+        assert_eq!(
+            module.type_syntax.references[0].kind,
+            kiln_hir::TypeReferenceKind::Path
+        );
+        assert_eq!(module.type_syntax.references[0].value, "./base.d.ts");
+        assert_eq!(
+            module.type_syntax.references[1].resolution_mode,
+            Some(kiln_hir::TypeResolutionMode::Require)
+        );
+        assert_eq!(
+            module.type_syntax.references[2].kind,
+            kiln_hir::TypeReferenceKind::Lib
+        );
+        assert!(module.type_syntax.no_default_lib);
     }
 
     #[test]

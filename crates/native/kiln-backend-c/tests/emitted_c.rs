@@ -1105,7 +1105,9 @@ fn runtime_prelude_size() {
     // Independent context witnesses and canonical-key ownership enable candidate-scaled
     // admission (66,653 lines before the symbol change). Sum both branches' ceiling growth.
     // Function/constructor parity repairs and custom-species map authority, intrinsic identity, and species walk: 66,858 measured.
-    const CEILING_LINES: usize = 66_880;
+    // The inherited Reflect.construct newTarget support (a79fa089) adds the shared
+    // construct_with_new_target and is_constructor helpers; the measured prelude is 66,945 lines.
+    const CEILING_LINES: usize = 66_960;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

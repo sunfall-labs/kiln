@@ -557,6 +557,48 @@ pub(super) fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
         *hash,
     );
 
+    // Source contracts affect guarded clone selection even when executable code and
+    // this module's source are unchanged (for example, an imported alias was edited).
+    // Append a distinct, length-delimited record to the persisted encoder.
+    if let Some(annotations) = &function.type_annotations {
+        fn annotation(hash: &mut u64, value: Option<kiln_ir::TypeAnnotation>) {
+            byte(
+                hash,
+                match value {
+                    None => 0,
+                    Some(kiln_ir::TypeAnnotation::Number) => 1,
+                    Some(kiln_ir::TypeAnnotation::Int) => 2,
+                    Some(kiln_ir::TypeAnnotation::Boolean) => 3,
+                    Some(kiln_ir::TypeAnnotation::String) => 4,
+                    Some(kiln_ir::TypeAnnotation::Void) => 5,
+                    Some(kiln_ir::TypeAnnotation::Any) => 6,
+                    Some(kiln_ir::TypeAnnotation::Other) => 7,
+                },
+            );
+        }
+        byte(hash, 0x65);
+        word(hash, annotations.parameters.len() as u64);
+        for value in &annotations.parameters {
+            annotation(hash, *value);
+        }
+        annotation(hash, annotations.return_type);
+        if let Some(source) = &annotations.source_types {
+            byte(hash, 1);
+            word(hash, u64::from(source.version));
+            word(hash, source.checker_identity.len() as u64);
+            for value in source.checker_identity.bytes() {
+                byte(hash, value);
+            }
+            word(hash, source.parameters.len() as u64);
+            for value in &source.parameters {
+                annotation(hash, *value);
+            }
+            annotation(hash, source.return_type);
+        } else {
+            byte(hash, 0);
+        }
+    }
+
     byte(hash, 0x63);
     word(hash, function.upvalues.len() as u64);
     for upvalue in &function.upvalues {

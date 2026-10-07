@@ -7,6 +7,19 @@
 
 use std::sync::Arc;
 
+pub mod source_types;
+pub mod type_syntax;
+pub use type_syntax::{
+    BindingIdentifierSite, EnumMember, EnumMemberNameKind, FunctionSignatureSite,
+    Modifier as TypeModifier, TupleElement as TypeTupleElement, TypeAccessibility,
+    TypeAnnotationSite, TypeClassMemberKind, TypeClassMemberSite, TypeClassSite, TypeDeclaration,
+    TypeDeclarationKind, TypeExpr, TypeExprKind, TypeExpressionWrapperKind,
+    TypeExpressionWrapperSite, TypeImportEquals, TypeImportEqualsReference, TypeInstantiationKind,
+    TypeInstantiationSite, TypeKeyword, TypeLiteral, TypeMember, TypeMemberKind, TypeOperator,
+    TypeParameter, TypeReferenceDirective, TypeReferenceKind, TypeResolutionMode, TypeSignature,
+    TypeSignatureParameter, TypeSite, TypeSyntax,
+};
+
 pub use kiln_string::StringUnits;
 
 /// A byte range in UTF-8 source text, with an exclusive end.
@@ -81,6 +94,8 @@ pub struct Module {
     pub imports: Vec<Import>,
     pub exports: Vec<Export>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Owned source-level TypeScript syntax, captured before erasure or minification.
+    pub type_syntax: TypeSyntax,
     /// Oxc could not recover far enough to produce a meaningful program.
     pub panicked: bool,
     /// Literal Node loader calls discovered by the same Oxc semantic pass as this module.
@@ -358,6 +373,7 @@ pub struct CatchClause {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassField {
+    pub span: Span,
     pub key: ObjectKey,
     /// `None` for `x;`, which initialises to undefined.
     pub value: Option<Expression>,
@@ -366,6 +382,7 @@ pub struct ClassField {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassMethod {
+    pub span: Span,
     pub key: ObjectKey,
     pub function: Function,
     /// Static methods go on the constructor; instance methods go on its prototype.
@@ -1280,6 +1297,7 @@ mod tests {
                 },
             ],
             diagnostics: Vec::new(),
+            type_syntax: TypeSyntax::default(),
             panicked: false,
             node_runtime_requests: Vec::new(),
         };

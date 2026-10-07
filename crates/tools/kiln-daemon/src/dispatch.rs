@@ -15,7 +15,7 @@ use kiln_proto::{
 };
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// What the connection loop should do once the response has been written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +60,16 @@ pub(crate) struct OwnedGraphSnapshot {
     pub(crate) node: bool,
     pub(crate) sources: BTreeMap<PathBuf, OwnedGraphSource>,
     pub(crate) revisions: Vec<GraphSourceRevision>,
+    /// Parsed TS modules and their resolved contracts are immutable for this captured source
+    /// set. Graph construction asks for one payload at a time, so memoize the project check here
+    /// instead of checking once per module.
+    source_types: OnceLock<SnapshotSourceTypes>,
+}
+
+#[derive(Debug)]
+struct SnapshotSourceTypes {
+    modules: BTreeMap<PathBuf, Arc<kiln_hir::Module>>,
+    checked: kiln_hir::source_types::CheckResult,
 }
 
 #[derive(Debug)]
@@ -435,6 +445,7 @@ pub(crate) fn check_with_cache<E: QueryEngine>(
     let mut diagnostics = parsed
         .module
         .diagnostics
+        .clone()
         .into_iter()
         .map(|diagnostic| Diagnostic {
             path: None,
@@ -458,6 +469,23 @@ pub(crate) fn check_with_cache<E: QueryEngine>(
         None
     };
 
+    if diagnostics.is_empty()
+        && matches!(
+            parsed.module.source_kind,
+            kiln_hir::SourceKind::TypeScript | kiln_hir::SourceKind::Tsx
+        )
+    {
+        let checked = engine.source_check(file);
+        diagnostics.extend(checked.diagnostics.into_iter().map(|d| Diagnostic {
+            path: d.path,
+            message: match d.code {
+                Some(code) => format!("TS{code}: {}", d.message),
+                None => d.message,
+            },
+            start: d.span.map(|s| s.start),
+            end: d.span.map(|s| s.end),
+        }));
+    }
     Response::Checked(ModuleSummary {
         path,
         file: FileId(file.0),
@@ -561,12 +589,13 @@ pub(crate) fn graph_run_plan<E: QueryEngine>(
     }
     let canonical_entry = std::fs::canonicalize(&entry)
         .map_err(|error| format!("cannot canonicalize graph entry: {error}"))?;
-    let key = GraphCacheKey::new(
+    let mut key = GraphCacheKey::new(
         canonical_root.clone(),
         canonical_entry.clone(),
         resolutions,
         node,
     );
+    key.source_check_identity = source_check_identity(engine);
     let stale = match cache.lookup(&key, |source| engine.source_revision(source)) {
         GraphCacheLookup::Hit(graph) => {
             return Ok(GraphRunPlan::Cached {
@@ -620,6 +649,7 @@ pub(crate) fn graph_run_plan<E: QueryEngine>(
             node,
             sources,
             revisions,
+            source_types: OnceLock::new(),
         },
         key,
         stale,
@@ -638,6 +668,87 @@ fn canonical_source_path(path: &str, project_root: &Path) -> Option<PathBuf> {
         project_root.join(path)
     };
     std::fs::canonicalize(absolute).ok()
+}
+
+fn is_typescript_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("ts" | "tsx" | "mts" | "cts")
+    )
+}
+
+fn is_source_code_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
+    )
+}
+
+fn snapshot_source_types(snapshot: &OwnedGraphSnapshot) -> Option<&SnapshotSourceTypes> {
+    if !snapshot.sources.keys().any(|path| is_typescript_path(path))
+        || snapshot.entry.to_str().is_none()
+    {
+        return None;
+    }
+    Some(snapshot.source_types.get_or_init(|| {
+        let modules: BTreeMap<_, _> = snapshot
+            .sources
+            .iter()
+            .filter(|(path, _)| is_source_code_path(path))
+            .filter_map(|(path, source)| {
+                let path_string = path.to_str()?;
+                Some((
+                    path.clone(),
+                    Arc::new(kiln_frontend_oxc::parse(path_string, &source.text)),
+                ))
+            })
+            .collect();
+        let check_input: Vec<_> = modules
+            .iter()
+            .filter_map(|(path, module)| Some((path.to_str()?.to_owned(), module.as_ref().clone())))
+            .collect();
+        let checked = crate::server::check_source_types(
+            snapshot.entry.to_str().expect("checked above"),
+            &check_input,
+        );
+        SnapshotSourceTypes { modules, checked }
+    }))
+}
+
+/// Type checking receives the project's TS source set, including ambient declarations which may
+/// not be runtime graph edges. Put that set and checker version into an explicit cache-key field
+/// so additions, removals, and edits cannot reuse stale source contracts. JS-only projects keep
+/// `None` and never pay for checking beyond extension checks.
+fn source_check_identity<E: QueryEngine>(engine: &E) -> Option<kiln_digest::Digest> {
+    let all_sources = engine.source_files();
+    if !all_sources
+        .iter()
+        .any(|(_, path)| is_typescript_path(Path::new(path)))
+    {
+        return None;
+    }
+    let mut sources: Vec<_> = all_sources
+        .into_iter()
+        .filter(|(_, path)| is_source_code_path(Path::new(path)))
+        .filter_map(|(file, path)| {
+            engine
+                .source_revision(file)
+                .map(|revision| (path, revision))
+        })
+        .collect();
+    if sources.is_empty() {
+        return None;
+    }
+    sources.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut identity = b"kiln checker source set v1\0".to_vec();
+    identity.extend_from_slice(kiln_type_checker::CHECKER_VERSION.as_bytes());
+    identity.push(0);
+    for (path, revision) in sources {
+        identity.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        identity.extend_from_slice(path.as_bytes());
+        identity.extend_from_slice(&revision.0.to_le_bytes());
+    }
+    Some(kiln_digest::Digest::hash(&identity))
 }
 
 pub(crate) fn build_graph_from_snapshot(
@@ -761,6 +872,11 @@ pub(crate) fn patch_graph_from_snapshot(
     old: &ModuleGraph,
     changed: GraphSourceRevision,
 ) -> Result<Option<ModuleGraph>, kiln_module_graph::ModuleGraphError> {
+    if graph_uses_typescript(old) {
+        // A changed TS source can alter contracts attached to other modules, including through
+        // type-only or ambient dependencies that have no runtime edge to patch in isolation.
+        return Ok(None);
+    }
     let Some((path, _source)) = snapshot
         .sources
         .iter()
@@ -817,6 +933,11 @@ fn snapshot_module_payload(
             })?;
     #[cfg(test)]
     wait_for_graph_gate(path);
+    let source_types = if is_typescript_path(path) {
+        snapshot_source_types(snapshot)
+    } else {
+        None
+    };
     if source_kind == kiln_module_graph::ModuleSource::CommonJs {
         let (hir, static_requires) =
             kiln_frontend_oxc::parse_commonjs_with_requires(path_string, &source.text);
@@ -833,15 +954,40 @@ fn snapshot_module_payload(
             }
         })?;
         program.dependencies = static_requires;
+        if is_typescript_path(path)
+            && let Some(source_types) = source_types
+        {
+            kiln_ir::apply_source_types(
+                path_string,
+                &hir,
+                &source_types.checked,
+                &source_types.checked.checker_identity,
+                &mut program.program,
+            );
+        }
         return Ok(kiln_module_graph::ModulePayload::Program(program));
     }
-    let hir = kiln_frontend_oxc::parse(path_string, &source.text);
-    let program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
+    let hir = source_types
+        .and_then(|source_types| source_types.modules.get(path))
+        .map(|module| module.as_ref().clone())
+        .unwrap_or_else(|| kiln_frontend_oxc::parse(path_string, &source.text));
+    let mut program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
         kiln_module_graph::ModuleGraphError::Compile {
             path: path.to_path_buf(),
             diagnostics,
         }
     })?;
+    if is_typescript_path(path)
+        && let Some(source_types) = source_types
+    {
+        kiln_ir::apply_source_types(
+            path_string,
+            &hir,
+            &source_types.checked,
+            &source_types.checked.checker_identity,
+            &mut program.program,
+        );
+    }
     Ok(kiln_module_graph::ModulePayload::Program(program))
 }
 
@@ -861,6 +1007,11 @@ pub(crate) fn graph_sources_from_snapshot(
     snapshot: &OwnedGraphSnapshot,
     graph: &ModuleGraph,
 ) -> Option<Vec<GraphSourceRevision>> {
+    if graph_uses_typescript(graph) {
+        // Checker facts can depend on ambient and declaration files which have no runtime edge.
+        // Retain the complete captured source set for TS graphs; JS-only graphs remain narrow.
+        return Some(snapshot.revisions.clone());
+    }
     graph
         .module_order()
         .iter()
@@ -874,6 +1025,13 @@ pub(crate) fn graph_sources_from_snapshot(
                 })
         })
         .collect()
+}
+
+fn graph_uses_typescript(graph: &ModuleGraph) -> bool {
+    graph
+        .module_order()
+        .iter()
+        .any(|path| is_typescript_path(path))
 }
 
 /// Execute an interpreted run after preparation has released the query-engine mutex.
@@ -1315,6 +1473,18 @@ fn graph_sources<E: QueryEngine>(
     engine: &mut E,
     graph: &ModuleGraph,
 ) -> Option<Vec<GraphSourceRevision>> {
+    if graph_uses_typescript(graph) {
+        return engine
+            .source_files()
+            .into_iter()
+            .map(|(file, _)| {
+                Some(GraphSourceRevision {
+                    file,
+                    revision: engine.source_revision(file)?,
+                })
+            })
+            .collect();
+    }
     graph
         .module_order()
         .iter()
@@ -1364,7 +1534,8 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
             kind: error.kind(),
         }
     })?;
-    let key = GraphCacheKey::new(canonical_root, canonical_entry.clone(), resolutions, node);
+    let mut key = GraphCacheKey::new(canonical_root, canonical_entry.clone(), resolutions, node);
+    key.source_check_identity = source_check_identity(engine);
     if let Some(cache) = cache {
         match cache.lookup(&key, |file| engine.source_revision(file)) {
             GraphCacheLookup::Hit(graph) => return Ok(graph),
@@ -1378,7 +1549,8 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
                 // Partial reuse is intentionally limited to ordinary ESM source modules.
                 // CommonJS, JSON, and Node-builtin snapshots take the full rebuild path below;
                 // their materialisation/link semantics are not represented by ModuleProgram.
-                if let Some(path) = path
+                if !graph_uses_typescript(&graph)
+                    && let Some(path) = path
                     && graph.module(&path).is_some_and(|module| {
                         module.source == kiln_module_graph::ModuleSource::Source
                     })
@@ -2405,5 +2577,156 @@ pub(crate) fn stats<E: QueryEngine>(engine: &E) -> Stats {
         validated: stats.validated,
         early_cutoff: stats.early_cutoff,
         ..Stats::default()
+    }
+}
+
+#[cfg(test)]
+mod source_check_cache_tests {
+    use super::*;
+    use kiln_db::MemoEngine;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn engine_with_sources(sources: &[(&str, &str)]) -> MemoEngine {
+        let mut engine = MemoEngine::new(kiln_frontend_oxc::parse);
+        for (path, text) in sources {
+            let file = engine.intern(path);
+            engine.set_source(file, (*text).to_owned());
+        }
+        engine
+    }
+
+    fn key_for(engine: &MemoEngine, root: &Path, entry: &Path) -> GraphCacheKey {
+        let mut key = GraphCacheKey::new(root.to_path_buf(), entry.to_path_buf(), None, false);
+        key.source_check_identity = source_check_identity(engine);
+        key
+    }
+
+    fn revisions(engine: &MemoEngine) -> Vec<GraphSourceRevision> {
+        engine
+            .source_files()
+            .into_iter()
+            .map(|(file, _)| GraphSourceRevision {
+                file,
+                revision: engine
+                    .source_revision(file)
+                    .expect("active source revision"),
+            })
+            .collect()
+    }
+
+    fn graph_fixture(file_name: &str, source: &str) -> (PathBuf, PathBuf, ModuleGraph) {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "kiln-source-check-cache-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("create graph fixture");
+        let entry = root.join(file_name);
+        std::fs::write(&entry, source).expect("write graph entry");
+        let root = std::fs::canonicalize(root).expect("canonical graph root");
+        let entry = std::fs::canonicalize(entry).expect("canonical graph entry");
+        let graph = ModuleGraph::build(
+            &entry,
+            &root,
+            |path: &Path| std::fs::read_to_string(path),
+            kiln_frontend_oxc::parse,
+        )
+        .expect("build one-module graph");
+        (root, entry, graph)
+    }
+
+    #[test]
+    fn type_source_identity_tracks_alias_edits_and_source_membership() {
+        let mut engine = engine_with_sources(&[
+            ("/project/main.ts", "export const value: Alias = 1;"),
+            ("/project/ambient.d.ts", "type Alias = number;"),
+        ]);
+        let root = PathBuf::from("/project");
+        let entry = PathBuf::from("/project/main.ts");
+        let unchanged = key_for(&engine, &root, &entry);
+        assert!(unchanged.source_check_identity.is_some());
+        assert_eq!(key_for(&engine, &root, &entry), unchanged);
+        let (_, _, graph) = graph_fixture("entry.ts", "export const value: number = 1;\n");
+        let mut cache = GraphCache::default();
+        cache.insert(unchanged.clone(), revisions(&engine), graph.clone());
+        assert!(matches!(
+            cache.lookup(&key_for(&engine, &root, &entry), |file| engine
+                .source_revision(file)),
+            GraphCacheLookup::Hit(_)
+        ));
+
+        let alias = engine.intern("/project/ambient.d.ts");
+        engine.set_source(alias, "type Alias = string;".to_owned());
+        let edited_alias = key_for(&engine, &root, &entry);
+        assert_ne!(
+            edited_alias, unchanged,
+            "type-only edits invalidate TS graphs"
+        );
+        assert!(matches!(
+            cache.lookup(&edited_alias, |file| engine.source_revision(file)),
+            GraphCacheLookup::Miss
+        ));
+
+        let added = engine.intern("/project/added.d.ts");
+        engine.set_source(added, "declare const extra: boolean;".to_owned());
+        let with_added_source = key_for(&engine, &root, &entry);
+        assert_ne!(
+            with_added_source, edited_alias,
+            "new ambient files change the source set"
+        );
+        assert!(matches!(
+            cache.lookup(&with_added_source, |file| engine.source_revision(file)),
+            GraphCacheLookup::Miss
+        ));
+        cache.insert(with_added_source, revisions(&engine), graph);
+
+        engine.remove_source(added);
+        let after_removal = key_for(&engine, &root, &entry);
+        assert_eq!(after_removal, edited_alias);
+        assert!(matches!(
+            cache.lookup(&after_removal, |file| engine.source_revision(file)),
+            GraphCacheLookup::Miss
+        ));
+    }
+
+    #[test]
+    fn unchanged_typescript_snapshot_reuses_warm_graph_and_js_unrelated_edits_do_too() {
+        let (root, entry, graph) = graph_fixture("entry.ts", "export const value: number = 1;\n");
+        let mut engine = engine_with_sources(&[
+            ("/project/main.ts", "export const value: number = 1;"),
+            ("/project/types.d.ts", "type Alias = number;"),
+        ]);
+        let key = key_for(&engine, &root, &entry);
+        let mut cache = GraphCache::default();
+        cache.insert(key.clone(), revisions(&engine), graph.clone());
+        assert!(matches!(
+            cache.lookup(&key_for(&engine, &root, &entry), |file| engine
+                .source_revision(file)),
+            GraphCacheLookup::Hit(_)
+        ));
+
+        let (js_root, js_entry, js_graph) = graph_fixture("entry.js", "export const value = 1;\n");
+        let mut js_engine = engine_with_sources(&[
+            ("/project/entry.js", "export const value = 1;"),
+            ("/project/unrelated.js", "export const spare = 0;"),
+        ]);
+        let js_key = key_for(&js_engine, &js_root, &js_entry);
+        assert!(js_key.source_check_identity.is_none());
+        let entry_file = js_engine.intern("/project/entry.js");
+        let js_graph_sources = vec![GraphSourceRevision {
+            file: entry_file,
+            revision: js_engine
+                .source_revision(entry_file)
+                .expect("entry revision"),
+        }];
+        cache.insert(js_key.clone(), js_graph_sources, js_graph);
+        let unrelated = js_engine.intern("/project/unrelated.js");
+        js_engine.set_source(unrelated, "export const spare = 1;".to_owned());
+        assert!(matches!(
+            cache.lookup(&key_for(&js_engine, &js_root, &js_entry), |file| js_engine
+                .source_revision(file)),
+            GraphCacheLookup::Hit(_)
+        ));
     }
 }

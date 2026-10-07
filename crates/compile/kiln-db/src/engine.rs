@@ -19,7 +19,7 @@ use ahash::AHashMap;
 
 use crate::{
     Compiled, CompiledModule, FileId, Frontend, FunctionSummary, Interface, Parsed, Project,
-    QueryEngine, Revision, Stats, SummaryQuery,
+    QueryEngine, Revision, SourceCheck, SourceCheckQuery, Stats, SummaryQuery,
 };
 #[cfg(test)]
 use crate::{Digest, Linkage, hash::content_hash};
@@ -53,6 +53,7 @@ enum QueryKey {
     Ir(FileId),
     ModuleIr(FileId),
     Summaries(FileId),
+    SourceCheck(FileId),
     Interface(FileId),
     Project,
     /// Test-only query whose dependency is the other `Cyclic`. The v0 graph is acyclic by
@@ -92,6 +93,7 @@ struct FileState {
     ir: Option<Memo<Compiled>>,
     module_ir: Option<Memo<CompiledModule>>,
     summaries: Option<Memo<Vec<FunctionSummary>>>,
+    source_check: Option<Memo<SourceCheck>>,
     interface: Option<Memo<Interface>>,
 }
 
@@ -104,6 +106,7 @@ struct FileState {
 pub struct MemoEngine {
     frontend: Frontend,
     summary_query: Option<SummaryQuery>,
+    source_check_query: Option<SourceCheckQuery>,
     files: Vec<FileState>,
     by_path: AHashMap<String, FileId>,
     project: Option<Memo<Project>>,
@@ -135,10 +138,17 @@ impl MemoEngine {
         Self::build(frontend, Some(summary_query))
     }
 
+    /// Register source checking without depending on a concrete checker implementation.
+    pub fn with_source_check_query(mut self, query: SourceCheckQuery) -> Self {
+        self.source_check_query = Some(query);
+        self
+    }
+
     fn build(frontend: Frontend, summary_query: Option<SummaryQuery>) -> Self {
         Self {
             frontend,
             summary_query,
+            source_check_query: None,
             files: Vec::new(),
             by_path: AHashMap::new(),
             project: None,
@@ -268,6 +278,16 @@ impl MemoEngine {
                     &mut self.stats,
                 )
             }
+            QueryKey::SourceCheck(file) => {
+                let (value, deps) = self.compute_source_check(file);
+                store(
+                    &mut self.files[file.0 as usize].source_check,
+                    value,
+                    deps,
+                    now,
+                    &mut self.stats,
+                )
+            }
             QueryKey::Interface(file) => {
                 let (value, deps) = self.compute_interface(file);
                 self.stats.interface_computed += 1;
@@ -308,18 +328,100 @@ impl MemoEngine {
         (Parsed::new(&state.source, module), vec![dep])
     }
 
-    fn compute_ir(&mut self, file: FileId) -> (Compiled, Vec<QueryKey>) {
-        let dep = QueryKey::Parse(file);
-        self.force(dep);
-        let parsed = self.file(file).parse.as_ref().expect(FORCED);
-        (kiln_ir::compile(&parsed.value.module), vec![dep])
+    fn compute_source_check(&mut self, file: FileId) -> (SourceCheck, Vec<QueryKey>) {
+        let Some(query) = self.source_check_query else {
+            return (SourceCheck::default(), Vec::new());
+        };
+        self.force(QueryKey::FileSet);
+        let active = self.source_files();
+        let mut deps = vec![QueryKey::FileSet];
+        let mut modules = Vec::with_capacity(active.len());
+        for (id, path) in active {
+            self.force(QueryKey::Parse(id));
+            deps.push(QueryKey::Parse(id));
+            modules.push((
+                path,
+                self.file(id)
+                    .parse
+                    .as_ref()
+                    .expect(FORCED)
+                    .value
+                    .module
+                    .clone(),
+            ));
+        }
+        let result = query(&self.file(file).path, &modules);
+        (result, deps)
     }
 
+    fn compile_inputs(&mut self, file: FileId) -> (Parsed, Option<SourceCheck>, Vec<QueryKey>) {
+        let parse_dep = QueryKey::Parse(file);
+        self.force(parse_dep);
+        let parsed = self.file(file).parse.as_ref().expect(FORCED).value.clone();
+        let mut deps = vec![parse_dep];
+        let checked = if self.source_check_query.is_some()
+            && matches!(
+                parsed.module.source_kind,
+                kiln_hir::SourceKind::TypeScript | kiln_hir::SourceKind::Tsx
+            ) {
+            // A root check also resolves its imported modules. Reuse those current facts
+            // for compilation, while keeping diagnostic queries rooted at their own entry.
+            // Depending on the supplying check preserves its complete source dependency set.
+            let path = &self.file(file).path;
+            let supplier = self
+                .files
+                .iter()
+                .enumerate()
+                .find_map(|(index, state)| {
+                    let memo = state.source_check.as_ref()?;
+                    (memo.meta.verified_at == self.epoch
+                        && memo.value.complete
+                        && memo.value.types.iter().any(|ty| &ty.path == path))
+                    .then_some(FileId(index as u32))
+                })
+                .unwrap_or(file);
+            self.force(QueryKey::SourceCheck(supplier));
+            deps.push(QueryKey::SourceCheck(supplier));
+            Some(
+                self.file(supplier)
+                    .source_check
+                    .as_ref()
+                    .expect(FORCED)
+                    .value
+                    .clone(),
+            )
+        } else {
+            None
+        };
+        (parsed, checked, deps)
+    }
+    fn compute_ir(&mut self, file: FileId) -> (Compiled, Vec<QueryKey>) {
+        let (parsed, checked, deps) = self.compile_inputs(file);
+        let mut result = kiln_ir::compile(&parsed.module);
+        if let (Ok(program), Some(checked)) = (&mut result, checked) {
+            kiln_ir::apply_source_types(
+                &self.file(file).path,
+                &parsed.module,
+                &checked,
+                &checked.checker_identity,
+                program,
+            );
+        }
+        (result, deps)
+    }
     fn compute_module_ir(&mut self, file: FileId) -> (CompiledModule, Vec<QueryKey>) {
-        let dep = QueryKey::Parse(file);
-        self.force(dep);
-        let parsed = self.file(file).parse.as_ref().expect(FORCED);
-        (kiln_ir::compile_module(&parsed.value.module), vec![dep])
+        let (parsed, checked, deps) = self.compile_inputs(file);
+        let mut result = kiln_ir::compile_module(&parsed.module);
+        if let (Ok(program), Some(checked)) = (&mut result, checked) {
+            kiln_ir::apply_source_types(
+                &self.file(file).path,
+                &parsed.module,
+                &checked,
+                &checked.checker_identity,
+                &mut program.program,
+            );
+        }
+        (result, deps)
     }
 
     fn compute_summaries(&mut self, file: FileId) -> (Vec<FunctionSummary>, Vec<QueryKey>) {
@@ -394,6 +496,9 @@ impl MemoEngine {
             QueryKey::Ir(file) => self.file(file).ir.as_ref().map(|memo| &memo.meta),
             QueryKey::ModuleIr(file) => self.file(file).module_ir.as_ref().map(|memo| &memo.meta),
             QueryKey::Summaries(file) => self.file(file).summaries.as_ref().map(|memo| &memo.meta),
+            QueryKey::SourceCheck(file) => {
+                self.file(file).source_check.as_ref().map(|memo| &memo.meta)
+            }
             QueryKey::Interface(file) => self.file(file).interface.as_ref().map(|memo| &memo.meta),
             QueryKey::Project => self.project.as_ref().map(|memo| &memo.meta),
             #[cfg(test)]
@@ -418,6 +523,11 @@ impl MemoEngine {
             QueryKey::Summaries(file) => self
                 .file_mut(file)
                 .summaries
+                .as_mut()
+                .map(|memo| &mut memo.meta),
+            QueryKey::SourceCheck(file) => self
+                .file_mut(file)
+                .source_check
                 .as_mut()
                 .map(|memo| &mut memo.meta),
             QueryKey::Interface(file) => self
@@ -467,6 +577,7 @@ impl MemoEngine {
             QueryKey::Ir(file) => format!("ir({})", path(file)),
             QueryKey::ModuleIr(file) => format!("module_ir({})", path(file)),
             QueryKey::Summaries(file) => format!("summaries({})", path(file)),
+            QueryKey::SourceCheck(file) => format!("source_check({})", path(file)),
             QueryKey::Interface(file) => format!("interface({})", path(file)),
             QueryKey::Project => "project()".to_string(),
             #[cfg(test)]
@@ -545,6 +656,7 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
     }
 
     Module {
+        type_syntax: kiln_hir::TypeSyntax::default(),
         // No source, deliberately. This frontend synthesizes a fixed shape and never reads
         // `text`, so its spans index into nothing and its bytecode is the same whatever the file
         // says. Handing it the text would imply a relationship that does not exist -- and would
@@ -624,6 +736,7 @@ impl QueryEngine for MemoEngine {
             ir: None,
             module_ir: None,
             summaries: None,
+            source_check: None,
             interface: None,
         });
         self.by_path.insert(path.to_string(), file);
@@ -686,6 +799,7 @@ impl QueryEngine for MemoEngine {
         state.ir = None;
         state.module_ir = None;
         state.summaries = None;
+        state.source_check = None;
         // Keep the small interface memo. Restoring an equal file can still cut off here after its
         // parse is rebuilt, without retaining the heavyweight parse value while it is inactive.
         state.source_set = false;
@@ -708,6 +822,16 @@ impl QueryEngine for MemoEngine {
     fn parse(&mut self, file: FileId) -> Parsed {
         self.force(QueryKey::Parse(file));
         self.file(file).parse.as_ref().expect(FORCED).value.clone()
+    }
+
+    fn source_check(&mut self, file: FileId) -> SourceCheck {
+        self.force(QueryKey::SourceCheck(file));
+        self.file(file)
+            .source_check
+            .as_ref()
+            .expect(FORCED)
+            .value
+            .clone()
     }
 
     fn ir(&mut self, file: FileId) -> Compiled {
@@ -1479,5 +1603,105 @@ mod tests {
             Project::from_interfaces(std::iter::empty::<(&str, &Interface)>())
         );
         assert_eq!(db.revision(), Revision(0));
+    }
+    #[test]
+    fn source_check_tracks_alias_edits_file_set_and_reuses_unchanged_inputs() {
+        use kiln_hir::source_types::{SourceType, TypeClass, TypeRole};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn frontend(path: &str, text: &str) -> Module {
+            let mut module = fixture_frontend(path, text);
+            module.source = text.into();
+            module.source_kind = SourceKind::TypeScript;
+            module
+        }
+        fn checker(entry: &str, modules: &[(String, Module)]) -> SourceCheck {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            let is_string = modules.iter().any(|(_, m)| m.source.contains("string"));
+            SourceCheck {
+                checker_identity: "fixture-v1".into(),
+                complete: true,
+                types: vec![SourceType {
+                    path: entry.into(),
+                    span: Span::new(0, 1),
+                    role: TypeRole::Annotation,
+                    display: if is_string { "string" } else { "number" }.into(),
+                    class: if is_string {
+                        TypeClass::String
+                    } else {
+                        TypeClass::Number
+                    },
+                }],
+                diagnostics: Vec::new(),
+            }
+        }
+        CALLS.store(0, Ordering::SeqCst);
+        let mut db = MemoEngine::new(frontend).with_source_check_query(checker);
+        let root = db.intern("/main.ts");
+        let dependency = db.intern("/alias.ts");
+        db.set_source(root, "import type { Scalar } from './alias';".into());
+        db.set_source(dependency, "type Scalar = number;".into());
+        let old = db.source_check(root);
+        assert_eq!(old.types[0].class, TypeClass::Number);
+        assert_eq!(db.source_check(root), old);
+        db.set_source(dependency, "type Scalar = number;".into());
+        assert_eq!(db.source_check(root), old);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        db.set_source(dependency, "type Scalar = string;".into());
+        assert_eq!(db.source_check(root).types[0].class, TypeClass::String);
+        assert_eq!(old.types[0].class, TypeClass::Number);
+        db.remove_source(dependency);
+        assert_eq!(db.source_check(root).types[0].class, TypeClass::Number);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 3);
+    }
+    #[test]
+    fn compilation_reuses_imported_facts_without_reusing_entry_diagnostics() {
+        use kiln_hir::source_types::{SourceDiagnostic, SourceType, TypeClass, TypeRole};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn frontend(path: &str, text: &str) -> Module {
+            let mut module = fixture_frontend(path, text);
+            module.source = text.into();
+            module.source_kind = SourceKind::TypeScript;
+            module
+        }
+        fn checker(entry: &str, modules: &[(String, Module)]) -> SourceCheck {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            SourceCheck {
+                checker_identity: "shared-facts-v1".into(),
+                complete: true,
+                types: modules
+                    .iter()
+                    .map(|(path, _)| SourceType {
+                        path: path.clone(),
+                        span: Span::new(0, 1),
+                        role: TypeRole::Annotation,
+                        display: "number".into(),
+                        class: TypeClass::Number,
+                    })
+                    .collect(),
+                diagnostics: vec![SourceDiagnostic {
+                    path: Some(entry.into()),
+                    span: None,
+                    code: None,
+                    message: "entry diagnostic".into(),
+                }],
+            }
+        }
+        CALLS.store(0, Ordering::SeqCst);
+        let mut db = MemoEngine::new(frontend).with_source_check_query(checker);
+        let root = db.intern("/main.ts");
+        let dependency = db.intern("/dep.ts");
+        db.set_source(root, "main".into());
+        db.set_source(dependency, "dependency".into());
+        db.source_check(root);
+        assert!(db.ir(dependency).is_ok());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        let own_check = db.source_check(dependency);
+        assert_eq!(own_check.diagnostics[0].path.as_deref(), Some("/dep.ts"));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+        db.set_source(root, "changed ambient input".into());
+        assert!(db.ir(dependency).is_ok());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 3);
     }
 }

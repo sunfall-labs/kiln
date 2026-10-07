@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+kiln-type-checker.workspace = true
 kiln-module-eval = { workspace = true }
 kiln-proto = { workspace = true }
 kiln-backend-c = { workspace = true }

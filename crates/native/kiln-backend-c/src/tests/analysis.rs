@@ -1146,6 +1146,7 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
 
     let untyped_proto = make_proto(None);
     let typed_proto = make_proto(Some(TypeAnnotations {
+        source_types: None,
         parameters: vec![Some(TypeAnnotation::Number), Some(TypeAnnotation::Number)],
         return_type: Some(TypeAnnotation::Number),
     }));
@@ -1256,6 +1257,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
 
     let untyped_proto = make_proto(None);
     let typed_proto = make_proto(Some(TypeAnnotations {
+        source_types: None,
         parameters: vec![Some(TypeAnnotation::Number)],
         return_type: Some(TypeAnnotation::Number),
     }));
@@ -1278,6 +1280,45 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
         functions: vec![typed_proto.clone()],
         template_sites: Vec::new(),
     };
+
+    // Source facts can change after an imported alias edit even when this
+    // module's source and executable instructions are identical.
+    let mut checked_prog = typed_prog.clone();
+    checked_prog.functions[0]
+        .type_annotations
+        .as_mut()
+        .unwrap()
+        .source_types = Some(kiln_ir::SourceTypeAnnotations {
+        version: kiln_ir::SOURCE_TYPE_METADATA_VERSION,
+        checker_identity: "checker-v1".into(),
+        parameters: vec![Some(TypeAnnotation::Number)],
+        return_type: Some(TypeAnnotation::Number),
+    });
+    let checked_hash = crate::identity::hash_program(&checked_prog);
+    assert_eq!(
+        checked_hash,
+        crate::identity::hash_program(&checked_prog.clone())
+    );
+    assert_ne!(checked_hash, crate::identity::hash_program(&typed_prog));
+    for change in 0..4 {
+        let mut changed = checked_prog.clone();
+        let facts = changed.functions[0]
+            .type_annotations
+            .as_mut()
+            .unwrap()
+            .source_types
+            .as_mut()
+            .unwrap();
+        match change {
+            0 => facts.parameters[0] = Some(TypeAnnotation::String),
+            1 => facts.return_type = Some(TypeAnnotation::String),
+            2 => facts.version += 1,
+            _ => facts.checker_identity = "checker-v2".into(),
+        }
+        assert_eq!(changed.functions[0].code, checked_prog.functions[0].code);
+        assert_eq!(changed.source, checked_prog.source);
+        assert_ne!(checked_hash, crate::identity::hash_program(&changed));
+    }
 
     let untyped_graph = build_function_graph(&untyped_proto, &untyped_prog).unwrap();
     let typed_graph = build_function_graph(&typed_proto, &typed_prog).unwrap();

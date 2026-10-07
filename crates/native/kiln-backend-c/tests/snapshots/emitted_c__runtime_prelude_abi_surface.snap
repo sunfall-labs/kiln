@@ -1683,6 +1683,8 @@ static int kiln_c99_proxy_define(kiln_host *host, kiln_value proxy, kiln_value k
 static int kiln_c99_proxy_all_keys(kiln_host *host, kiln_value proxy, kiln_value *out, int depth,
 static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
+static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *result,
+static int kiln_c99_is_constructor(kiln_value value);
 static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
 static int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val callee,
 static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent,
@@ -3818,7 +3820,9 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
 static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
 static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
 static int kiln_c99_validate_dynamic_import_options(kiln_host *host, kiln_value options, int depth,
+static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *result,
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
+static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *result,
 #if KILN_RETAIN_GROUP_TEMPORAL
 #endif
 #if KILN_RETAIN_GROUP_BUFFER
@@ -3836,8 +3840,10 @@ static int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val ca
 static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent,
 static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced) {
 static int kiln_c99_can_be_prototype(kiln_value value) {
+static int kiln_c99_is_constructor(kiln_value value);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
 static int kiln_c99_heritage_constructs(kiln_value value) {
+static int kiln_c99_is_constructor(kiln_value value) {
 static int kiln_c99_set_prototype_checked(kiln_value target, kiln_value prototype,
 static int kiln_c99_intrinsic_has_instance(kiln_value callable) {
 static int kiln_c99_instance_of(kiln_host *host, kiln_value value, kiln_value constructor, int *answer, int depth, kiln_value *thrown) {

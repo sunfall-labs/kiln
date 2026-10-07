@@ -1,0 +1,27 @@
+[package]
+name = "kiln-type-checker"
+version.workspace = true
+edition.workspace = true
+license = "MIT AND Apache-2.0"
+repository.workspace = true
+
+[features]
+baselines = []
+
+[dependencies]
+kiln-hir.workspace = true
+kiln-number-core.workspace = true
+kiln-string.workspace = true
+bitflags.workspace = true
+rustc-hash.workspace = true
+smallvec.workspace = true
+memchr.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+hashbrown = { version = "0.16", features = ["nightly"] }
+bstr = "1"
+libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"] }
+
+[dev-dependencies]
+kiln-frontend-oxc.workspace = true
+kiln-ir.workspace = true

@@ -61,6 +61,47 @@ fn exports_of(text: &str) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn source_check_loads_project_ambient_declarations_without_runtime_edges() {
+    let entry = "/project/main.ts";
+    let ambient = "/project/ambient.d.ts";
+    let modules = vec![
+        (
+            entry.to_owned(),
+            kiln_frontend_oxc::parse(
+                entry,
+                "function add(value: Scalar) { return value + 1; } const limit: Scalar = ambientLimit;",
+            ),
+        ),
+        (
+            ambient.to_owned(),
+            kiln_frontend_oxc::parse(
+                ambient,
+                "type Scalar = number; declare const ambientLimit: Scalar;",
+            ),
+        ),
+    ];
+
+    let result = crate::server::check_source_types(entry, &modules);
+
+    assert!(result.complete, "checker result must be complete");
+    assert!(
+        result.diagnostics.is_empty(),
+        "ambient declarations were not loaded: {:?}",
+        result.diagnostics
+    );
+    assert!(
+        result.types.iter().any(|ty| {
+            ty.path == entry
+                && ty.role == kiln_hir::source_types::TypeRole::Parameter
+                && ty.class == kiln_hir::source_types::TypeClass::Number
+                && ty.display == "number"
+        }),
+        "ambient Scalar alias did not resolve the parameter as number: {:?}",
+        result.types
+    );
+}
+
 /// Test clients keep the current protocol source view automatically. This lets the older daemon
 /// tests focus on query behavior while still exercising the v16 CAS contract.
 struct Client {

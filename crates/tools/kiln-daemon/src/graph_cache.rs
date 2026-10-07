@@ -4,7 +4,9 @@
 //! state lock has been released. Each entry retains the revisions of only the sources it reached,
 //! so unrelated edits do not destroy a warm graph. Keeping this cache separate from the query
 //! database is intentional: a query can memoize one module's IR, while a graph additionally
-//! captures the entry, resolution policy, traversal order, and link-time export origins.
+//! captures the entry, resolution policy, traversal order, and link-time export origins. TS graphs
+//! additionally retain the complete active source set because source contracts may depend on
+//! ambient or type-only declarations with no runtime graph edge.
 
 use kiln_db::{FileId, Revision};
 use kiln_digest::Digest;
@@ -17,7 +19,7 @@ use std::sync::Arc;
 /// Bump when the in-memory graph snapshot contract changes.  The cache is process-local, but the
 /// version keeps key construction explicit and prevents accidental reuse if this ever changes to
 /// a longer-lived backing store.
-pub(crate) const GRAPH_CACHE_FORMAT: u16 = 3;
+pub(crate) const GRAPH_CACHE_FORMAT: u16 = 4;
 
 /// Keep several editor/watch entries warm without retaining an unbounded number of snapshots.
 pub(crate) const DEFAULT_GRAPH_CACHE_CAPACITY: usize = 8;
@@ -35,6 +37,9 @@ pub(crate) struct GraphCacheKey {
     /// `None` means no pinned resolution snapshot was supplied.  It is deliberately distinct from
     /// the identity of an empty [`ResolutionMap`].
     pub(crate) resolution_identity: Option<Digest>,
+    /// Identity of the source set and checker version used to attach source type contracts.
+    /// `None` means the active source set contains no TypeScript files.
+    pub(crate) source_check_identity: Option<Digest>,
     /// Resolution capability: Node mode admits typed builtin identities; deterministic mode does
     /// not. The same source and package snapshot can therefore never reuse the other mode's graph.
     pub(crate) node: bool,
@@ -52,6 +57,7 @@ impl GraphCacheKey {
             project_root,
             entry,
             resolution_identity: resolutions.map(ResolutionMap::identity),
+            source_check_identity: None,
             node,
             format: GRAPH_CACHE_FORMAT,
         }

@@ -65,6 +65,7 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
     }
 
     Module {
+        type_syntax: Default::default(),
         // No source, deliberately. This frontend synthesizes a fixed shape and never reads
         // `text`, so its spans index into nothing and its bytecode is the same whatever the file
         // says. Handing it the text would imply a relationship that does not exist -- and would
@@ -326,6 +327,7 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
     }
 
     Module {
+        type_syntax: Default::default(),
         // No source, deliberately. This frontend synthesizes a fixed shape and never reads
         // `text`, so its spans index into nothing and its bytecode is the same whatever the file
         // says. Handing it the text would imply a relationship that does not exist -- and would

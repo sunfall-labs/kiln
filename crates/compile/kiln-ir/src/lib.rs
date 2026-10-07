@@ -11,7 +11,9 @@ pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 7;
+pub const BYTECODE_VERSION: u16 = 8;
+mod source_types;
+pub use source_types::{SOURCE_TYPE_METADATA_VERSION, SourceTypeAnnotations, apply_source_types};
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -704,6 +706,8 @@ pub struct FunctionProto {
 /// TypeScript type annotations for a function.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TypeAnnotations {
+    /// Resolved source contracts, used only as guarded specialization hints.
+    pub source_types: Option<SourceTypeAnnotations>,
     pub parameters: Vec<Option<TypeAnnotation>>,
     pub return_type: Option<TypeAnnotation>,
 }
@@ -734,14 +738,22 @@ impl FunctionProto {
 
     /// Return the annotated type for parameter `slot`, if any.
     pub fn parameter_type(&self, slot: usize) -> Option<TypeAnnotation> {
-        self.type_annotations
-            .as_ref()
-            .and_then(|ta| ta.parameters.get(slot).copied().flatten())
+        self.type_annotations.as_ref().and_then(|ta| {
+            ta.source_types
+                .as_ref()
+                .and_then(|s| s.parameters.get(slot).copied().flatten())
+                .or_else(|| ta.parameters.get(slot).copied().flatten())
+        })
     }
 
     /// Return the annotated return type, if any.
     pub fn return_type(&self) -> Option<TypeAnnotation> {
-        self.type_annotations.as_ref().and_then(|ta| ta.return_type)
+        self.type_annotations.as_ref().and_then(|ta| {
+            ta.source_types
+                .as_ref()
+                .and_then(|s| s.return_type)
+                .or(ta.return_type)
+        })
     }
 }
 

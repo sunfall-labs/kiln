@@ -1283,6 +1283,7 @@ impl super::Compiler {
         let type_annotations =
             if parameter_types.iter().any(|p| p.is_some()) || function.return_type.is_some() {
                 Some(crate::TypeAnnotations {
+                    source_types: None,
                     parameters: parameter_types,
                     return_type: function.return_type,
                 })
