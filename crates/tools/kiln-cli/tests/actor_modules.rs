@@ -21,6 +21,9 @@ impl Fixture {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).expect("create fixture");
+        // Keep discovery inside this fixture even when the temporary directory has a `.git`
+        // ancestor and other tests create and remove sibling projects concurrently.
+        std::fs::write(root.join("package.json"), "{}\n").expect("write project marker");
         Self(root.canonicalize().expect("canonical fixture"))
     }
 

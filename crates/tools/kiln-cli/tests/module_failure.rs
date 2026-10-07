@@ -15,6 +15,8 @@ impl Fixture {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).expect("create fixture");
+        // A fixture is its own project, including beneath a temporary-directory `.git` ancestor.
+        std::fs::write(root.join("package.json"), "{}\n").expect("write project marker");
         Self(root)
     }
 }
