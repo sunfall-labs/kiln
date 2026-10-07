@@ -10,168 +10,17 @@ use crate::graph::{
     proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
 use crate::prelude::lookup_speculation_invariant;
-use kiln_graph::suspended_local_liveness;
+use kiln_graph::{ArgumentsAnalysis, suspended_local_liveness};
 use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Instruction, Program, UnaryOp};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
+
+pub(crate) use kiln_graph::ArgumentsLengthFact;
 
 // Clang spends more on thousands of distinct local declarations than on one constant-indexed
 // frame. Below this point the brackets cost more source and object bytes than they save; above it
 // the indexed spelling keeps large generated bodies smaller and modestly faster to compile.
 const COMPACT_INDEXED_VALUE_THRESHOLD: u32 = 512;
-
-/// Return arguments-object loads whose only observed use is an own `length` read.
-/// The arguments object exposes a writable length and can be aliased, so this is safe only
-/// when every live load in the function has that exact use and no nested arrow closes over it.
-/// Those reads can then use the call frame's argc directly without allocating the exotic object.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct ArgumentsLengthFact {
-    /// SSA values whose arguments-object length read is emitted directly from `argc`.
-    pub values: HashSet<ValueId>,
-    /// Every reachable arguments-object read in this proto is either absent or proven to be
-    /// the argc-only length case. This is distinct from an empty `values` set: an empty set can
-    /// also mean the proof was rejected.
-    pub reads_elided: bool,
-}
-
-pub(crate) fn arguments_length_fact(
-    graph: &FunctionGraph,
-    proto: &FunctionProto,
-    program: &Program,
-) -> ArgumentsLengthFact {
-    if !proto
-        .code
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::LoadArguments))
-    {
-        return ArgumentsLengthFact {
-            values: HashSet::new(),
-            reads_elided: true,
-        };
-    }
-    if proto.arrow || proto.generator || proto.asynchronous || proto.async_generator {
-        return ArgumentsLengthFact::default();
-    }
-    if proto
-        .code
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
-    {
-        return ArgumentsLengthFact::default();
-    }
-    fn arrow_tree_uses_arguments(index: u32, program: &Program) -> bool {
-        let Some(proto) = program.functions.get(index as usize) else {
-            return false;
-        };
-        if proto
-            .code
-            .iter()
-            .any(|op| matches!(op, Instruction::LoadArguments | Instruction::DirectEval(_)))
-        {
-            return true;
-        }
-        proto.code.iter().any(|instruction| {
-            let Instruction::MakeFunction(child) = instruction else {
-                return false;
-            };
-            program
-                .functions
-                .get(*child as usize)
-                .is_some_and(|child_proto| {
-                    child_proto.arrow && arrow_tree_uses_arguments(*child, program)
-                })
-        })
-    }
-    for instruction in &proto.code {
-        let Instruction::MakeFunction(child) = instruction else {
-            continue;
-        };
-        if program
-            .functions
-            .get(*child as usize)
-            .is_some_and(|child_proto| {
-                child_proto.arrow && arrow_tree_uses_arguments(*child, program)
-            })
-        {
-            return ArgumentsLengthFact::default();
-        }
-    }
-
-    let mut loads = HashSet::new();
-    let mut uses = HashMap::<ValueId, Vec<&GraphOp>>::new();
-    let mut terminator_uses = HashSet::new();
-    for block in &graph.blocks {
-        for (value, operation) in &block.operations {
-            if matches!(
-                operation,
-                GraphOp::Bridge {
-                    instruction: Instruction::LoadArguments,
-                    pushes: 1,
-                    ..
-                }
-            ) {
-                loads.insert(*value);
-            }
-            for input in operation.operands() {
-                uses.entry(input).or_default().push(operation);
-            }
-        }
-        match &block.terminator {
-            Terminator::Branch { condition, .. }
-            | Terminator::BranchNotNullish { condition, .. }
-            | Terminator::Throw(condition) => {
-                terminator_uses.insert(*condition);
-            }
-            Terminator::Return(Some(value)) => {
-                terminator_uses.insert(*value);
-            }
-            Terminator::Suspend {
-                value,
-                spilled,
-                delegate,
-                ..
-            } => {
-                terminator_uses.insert(*value);
-                terminator_uses.extend(spilled.iter().copied());
-                if let Some((iterator, _, _)) = delegate {
-                    terminator_uses.insert(*iterator);
-                }
-            }
-            Terminator::Jump(_) | Terminator::Return(None) | Terminator::Unreachable => {}
-        }
-    }
-    if loads.is_empty() {
-        return ArgumentsLengthFact {
-            values: loads,
-            reads_elided: true,
-        };
-    }
-
-    let mut optimized = HashSet::new();
-    for value in loads.iter().copied() {
-        if terminator_uses.contains(&value) {
-            return ArgumentsLengthFact::default();
-        }
-        let Some(value_uses) = uses.get(&value) else {
-            return ArgumentsLengthFact::default();
-        };
-        if value_uses.len() != 1 {
-            return ArgumentsLengthFact::default();
-        }
-        let GraphOp::GetProperty { object, name, .. } = value_uses[0] else {
-            return ArgumentsLengthFact::default();
-        };
-        let is_length = matches!(program.constants.get(*name as usize), Some(Constant::String(units)) if units.to_scalar_string().as_deref() == Ok("length"));
-        if *object != value || !is_length {
-            return ArgumentsLengthFact::default();
-        }
-        optimized.insert(value);
-    }
-    ArgumentsLengthFact {
-        reads_elided: optimized.len() == loads.len(),
-        values: optimized,
-    }
-}
 
 /// Compact bodies use generic runtime calls rather than the optimized call paths. Determine
 /// their context needs from the rendered body, including tail bridges and suspension setup,
@@ -3011,7 +2860,7 @@ fn emit_blocks(
     let fallback_argument_fact = plan
         .argument_length_values
         .is_none()
-        .then(|| arguments_length_fact(graph, proto, program));
+        .then(|| ArgumentsAnalysis::new(program).argument_length_fact_for(graph, proto));
     let argument_length_values = if matches!(kind, EntryKind::Typed { .. }) {
         // A typed entry has no argc and may be used by callback adapters with a different
         // runtime arity from the proto's declared parameter count. Keep the object path there.

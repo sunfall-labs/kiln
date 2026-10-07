@@ -1,5 +1,6 @@
 //! Backend-neutral value graph construction and analysis over compiled bytecode.
 
+pub mod arguments;
 pub mod closed_world;
 pub mod demanded;
 mod dominators;
@@ -9,6 +10,7 @@ mod suspended_liveness;
 pub mod validation;
 pub mod verifier;
 
+pub use arguments::{ArgumentsAnalysis, ArgumentsLengthFact, ArrowArgumentsCaptureFacts};
 pub use closed_world::{
     closed_world_function_liveness, closed_world_module_live_slots,
     closed_world_module_live_slots_with_declarations, closed_world_namespace_members,

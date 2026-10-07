@@ -3029,10 +3029,11 @@ fn plan_unit(
     if let Some(extra) = extra_entry_slots {
         entry_graph.mark_non_escaping_objects_with_extra_slots(program, Some(extra));
     }
+    let argument_analysis = kiln_graph::ArgumentsAnalysis::new(program);
     let argument_facts: Vec<emit_graph::ArgumentsLengthFact> = graphs
         .iter()
-        .zip(&program.functions)
-        .map(|(graph, proto)| emit_graph::arguments_length_fact(graph, proto, program))
+        .enumerate()
+        .map(|(index, graph)| argument_analysis.argument_length_fact(index, graph))
         .collect();
     let arguments_length_only: Vec<bool> = argument_facts
         .iter()

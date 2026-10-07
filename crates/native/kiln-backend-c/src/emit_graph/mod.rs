@@ -11,7 +11,7 @@ mod clones;
 mod ops;
 pub(crate) mod sites;
 
-pub(crate) use body::{ArgumentsLengthFact, arguments_length_fact};
+pub(crate) use body::ArgumentsLengthFact;
 pub use body::{
     emit_async_entry_body, emit_entry_from_graph, emit_entry_from_graph_with_profile,
     emit_function_from_graph, emit_function_from_graph_with_profile, retain_used_entry_context,

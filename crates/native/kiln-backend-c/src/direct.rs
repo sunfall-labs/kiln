@@ -367,7 +367,14 @@ impl DirectPlan {
                 ),
             };
             if parallel_in_generic {
-                generic.plan_parallel_sites(program, graphs, entry, &publishes_frame, speculate);
+                generic.plan_parallel_sites(
+                    program,
+                    graphs,
+                    entry,
+                    &publishes_frame,
+                    speculate,
+                    argument_length_only,
+                );
             }
             return generic;
         }
@@ -964,6 +971,7 @@ impl DirectPlan {
         entry: &FunctionGraph,
         publishes_frame: &[bool],
         speculate: Option<bool>,
+        argument_length_only: &[bool],
     ) {
         use crate::parallel::{Reason, Refusal};
         let parallel_method = |name: u32| match program.constants.get(name as usize) {
