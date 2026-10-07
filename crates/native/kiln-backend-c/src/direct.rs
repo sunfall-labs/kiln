@@ -1518,10 +1518,14 @@ fn select_generic_optimization_functions_internal(
             );
         }
         let mut groups = Vec::new();
-        for &(_caller, target, weight) in &profile.seed_edges {
+        for &(caller, target, weight) in &profile.seed_edges {
             let target = target as usize;
             if target >= program.functions.len()
                 || weight == 0
+                || caller.is_some_and(|caller| {
+                    available
+                        .is_some_and(|available| !available.get(caller).copied().unwrap_or(false))
+                })
                 || available
                     .is_some_and(|available| !available.get(target).copied().unwrap_or(false))
             {
@@ -1899,6 +1903,55 @@ impl LoopCallProfile {
 #[cfg(test)]
 mod loop_call_profile_tests {
     use super::LoopCallProfile;
+
+    #[test]
+    fn unavailable_loop_callers_cannot_select_live_callee_groups() {
+        // Large non-loop bodies do not qualify for either legacy tier. Only a live loop
+        // seed may select the otherwise live target's callee group.
+        let body = kiln_ir::FunctionProto {
+            inferred_name: None,
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: None,
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            parameter_count: 0,
+            declared_length: 0,
+            mapped_arguments: false,
+            local_count: 0,
+            code: vec![kiln_ir::Instruction::Return; 500],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        };
+        let program = kiln_ir::Program {
+            functions: vec![body.clone(), body],
+            ..Default::default()
+        };
+        let mut profile = LoopCallProfile {
+            seed_edges: vec![(Some(0), 1, 7)],
+            edges: vec![vec![1], vec![]],
+        };
+        let select = |profile: &LoopCallProfile, available: &[bool]| {
+            super::select_generic_optimization_functions_with_profile(
+                &program,
+                &[false, false],
+                Some(available),
+                profile,
+            )
+        };
+        assert_eq!(select(&profile, &[false, true]), [false, false]);
+        assert_eq!(select(&profile, &[true, true]), [false, true]);
+        profile.seed_edges[0].0 = None;
+        assert_eq!(
+            select(&profile, &[false, true]),
+            [false, true],
+            "the module entry remains a live seed without a function caller"
+        );
+    }
 
     #[test]
     fn bounded_depth_propagates_known_edges_through_cycles_and_filters_unavailable_nodes() {
