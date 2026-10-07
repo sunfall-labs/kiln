@@ -43,7 +43,7 @@ fn emitted_proto_flags(source: &str, symbol: &str, index: usize) -> u8 {
 }
 
 #[test]
-fn generic_computed_reads_dispatch_string_keys_to_the_keyed_site() {
+fn generic_computed_reads_dispatch_string_and_symbol_keys_to_the_keyed_site() {
     let hir = kiln_frontend_oxc::parse(
         "fixture/computed-string-site.ts",
         "export function read(receiver: object, key: PropertyKey) { return receiver[key]; }",
@@ -69,6 +69,104 @@ fn generic_computed_reads_dispatch_string_keys_to_the_keyed_site() {
         emitted.source.contains("kiln_c99_val_read_symbol")
             && emitted.source.contains("kiln_c99_val_read_element"),
         "symbols and other computed-key types keep their existing paths"
+    );
+}
+
+#[test]
+fn optimized_computed_reads_dispatch_strings_symbols_and_fallbacks_correctly() {
+    let hir = kiln_frontend_oxc::parse(
+        "fixture/optimized-computed-string-site.ts",
+        r#"
+function read(receiver: any, key: any): any { return receiver[key]; }
+const symbol = Symbol("key");
+const symbolObject = {};
+symbolObject[symbol] = 41;
+let proxyGets = 0;
+const proxy = new Proxy({ value: 17 }, {
+  get(target, key, receiver) {
+    proxyGets += 1;
+    return target[key];
+  }
+});
+let accessorGets = 0;
+const accessor = { get value() { accessorGets += 1; return 23; } };
+let dynamicKey = "val";
+dynamicKey += "ue";
+globalThis.__picFailure = 0;
+try { if (read({ value: 11 }, dynamicKey) !== 11 && globalThis.__picFailure === 0) globalThis.__picFailure = 1; }
+catch { if (globalThis.__picFailure === 0) globalThis.__picFailure = 11; }
+try { if (read([31, 37], 1) !== 37 && globalThis.__picFailure === 0) globalThis.__picFailure = 2; }
+catch { if (globalThis.__picFailure === 0) globalThis.__picFailure = 12; }
+try { if (read(symbolObject, symbol) !== 41 && globalThis.__picFailure === 0) globalThis.__picFailure = 3; }
+catch { if (globalThis.__picFailure === 0) globalThis.__picFailure = 13; }
+try { if ((read(proxy, "value") !== 17 || proxyGets !== 1) && globalThis.__picFailure === 0) globalThis.__picFailure = 4; }
+catch { if (globalThis.__picFailure === 0) globalThis.__picFailure = 14; }
+try { if ((read(accessor, "value") !== 23 || accessorGets !== 1) && globalThis.__picFailure === 0) globalThis.__picFailure = 5; }
+catch { if (globalThis.__picFailure === 0) globalThis.__picFailure = 15; }
+"#,
+    );
+    let program = kiln_ir::compile_module(&hir)
+        .expect("optimized computed property fixture compiles")
+        .program;
+    let read_index = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::GetComputed))
+        })
+        .expect("read function is present");
+    let emitted = emit(&program).expect("optimized computed property fixture emits");
+    let read_body = emitted_function_body(&emitted.source, &emitted.symbol, read_index);
+
+    assert!(
+        read_body.contains("kiln_c99_val_read_string_key"),
+        "optimized string keys should use the keyed PIC helper in the read body"
+    );
+    assert!(
+        read_body.contains("kiln_c99_val_read_symbol")
+            && read_body.contains("kiln_c99_val_read_element"),
+        "symbol and non-keyed fallback paths remain in the optimized read body"
+    );
+
+    let wrapper = format!(
+        r#"
+static int run_module(void *context) {{
+    kiln_value result;
+    kiln_value failure;
+    int found = 0;
+    (void)context;
+    int status = {symbol}(NULL, &result);
+    if (status != KILN_C99_OK) fprintf(stderr, "module entry status=%d\n", status);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_global_binding(NULL, &failure, "__picFailure", 12, &found, 0, NULL);
+    if (status != KILN_C99_OK || !found || failure.tag != KILN_VALUE_NUMBER) return 5;
+    int code = (int)kiln_c99_as_number(failure);
+    if (code != 0) fprintf(stderr, "computed-read assertion code=%d\n", code);
+    return code;
+}}
+int main(void) {{
+    uint64_t realm;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 2;
+    int status = kiln_realm_enter(realm, run_module, NULL);
+    if (status != KILN_C99_OK) return 3;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 4;
+}}
+"#,
+        symbol = emitted.symbol
+    );
+    let linked = linked_source(&emitted.source, &wrapper);
+    if let Ok(path) = std::env::var("KILN_TEST_SAVE_LINKED_SOURCE") {
+        std::fs::write(path, &linked).expect("save linked fixture source when requested");
+    }
+    let run = fixture_cache::run(&linked);
+    assert!(
+        run.status.success(),
+        "optimized computed read diverged: status={:?}, stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
     );
 }
 

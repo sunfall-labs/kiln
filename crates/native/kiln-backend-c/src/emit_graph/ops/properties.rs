@@ -919,15 +919,17 @@ pub(super) fn emit_get_computed(
     } else {
         format!(" && KILN_VAL_IS_NUMBER({vk})")
     };
-    // Realms issue 17: a symbol key reads through the shape and slot caches a named read uses,
-    // from a site of its own allocated the first time it learns (`kiln_c99_val_read_symbol`).
-    let symbol_body = if key_is_int {
+    // Both keyed helpers share a site; keep their out-parameter calls as separate statements so
+    // hoist_out_params can root and copy each result on its own branch.
+    let keyed_body = if key_is_int {
         String::new()
     } else {
         format!(
-            "if (!handled && KILN_VAL_IS_SYMBOL({vk})) {{ \
-                static kiln_c99_symbol_cell kiln_sym_site; \
-                int status = kiln_c99_val_read_symbol(host, v{o}, {vk}, depth, thrown, &kiln_sym_site, &v{v}); \
+            "if (!handled && (KILN_VAL_IS_SYMBOL({vk}) || KILN_VAL_IS_STRING({vk}))) {{ \
+                static kiln_c99_symbol_cell kiln_key_site; \
+                int status; \
+                if (KILN_VAL_IS_SYMBOL({vk})) {{ status = kiln_c99_val_read_symbol(host, v{o}, {vk}, depth, thrown, &kiln_key_site, &v{v}); }} \
+                else {{ status = kiln_c99_val_read_string_key(host, v{o}, {vk}, depth, thrown, &kiln_key_site, &v{v}); }} \
                 if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary({vk})); \
                 {check} \
                 handled = 1; \
@@ -949,7 +951,7 @@ pub(super) fn emit_get_computed(
                 }} else if (!handled && KILN_VAL_IS_STRING(v{o}){number_guard}) {{ \
                     {string_body} \
                 }} \
-                {symbol_body}\
+                {keyed_body}\
                 if (!handled) {{ \
                     int status = kiln_c99_val_read_element(host, v{o}, {vk}, depth, thrown, &v{v}); \
                     if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary({vk})); \
@@ -961,7 +963,7 @@ pub(super) fn emit_get_computed(
                 array_body = array_body,
                 typed_body = typed_body,
                 string_body = string_body,
-                symbol_body = symbol_body,
+                keyed_body = keyed_body,
                 vk = vk,
                 typed_sync = if typed { format!("\n    memcpy(&d{v}, &v{v}, sizeof(d{v}));") } else { String::new() }
             )
