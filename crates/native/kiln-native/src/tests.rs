@@ -56,6 +56,26 @@ fn shared_test_cache_root() -> PathBuf {
     static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
     CACHE_DIR
         .get_or_init(|| {
+            if let Some(configured) = std::env::var_os("KILN_NATIVE_TEST_CACHE_ROOT") {
+                let configured = PathBuf::from(configured);
+                assert!(
+                    !configured.as_os_str().is_empty(),
+                    "KILN_NATIVE_TEST_CACHE_ROOT must not be empty"
+                );
+                assert!(
+                    configured.is_absolute(),
+                    "KILN_NATIVE_TEST_CACHE_ROOT must be an absolute path: {}",
+                    configured.display()
+                );
+                fs::create_dir_all(&configured).unwrap_or_else(|error| {
+                    panic!(
+                        "cannot create KILN_NATIVE_TEST_CACHE_ROOT {}: {error}",
+                        configured.display()
+                    )
+                });
+                return configured;
+            }
+
             if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
                 let target_cache = Path::new(&manifest_dir).join("../../../target/kiln-test-cache");
                 if fs::create_dir_all(&target_cache).is_ok() {
