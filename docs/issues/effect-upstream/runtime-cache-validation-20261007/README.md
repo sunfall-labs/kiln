@@ -34,3 +34,7 @@ remain required. Original 5-second case and 10-second hook deadlines remain.
 The earlier landing gate failed with disk-full/linker errors, provider capability
 configuration errors, and one worker-output ordering mismatch; it is not a green
 gate for this candidate. This commit is a review candidate pending that work.
+
+A fresh diagnostic profile and exact executable-byte-verified symbol attribution
+are retained in `native-profile/`. That diagnostic recorded 46/47, with the
+original parent interrupt-retry-budget timeout; it is not acceptance evidence.
