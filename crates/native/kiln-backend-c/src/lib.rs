@@ -659,6 +659,11 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
 ) -> Result<CModule, EmitError> {
     let (symbol, program_hash, _) =
         module_identity_with_logical_path_and_policy(module, logical_path, &policy)?;
+    // A cycle's split entrypoints no longer contain the full module's initialization stores.
+    // Preserve only their bounded loop-ranking facts; all call resolution remains phase-local.
+    let generic_loop_profile = (instantiate && policy.generic_only)
+        .then(|| direct::generic_loop_profile_for_program(&module.program))
+        .flatten();
     // The runtime bootstrap reads its captured bindings from the realm's unit block, so that its
     // closures capture nothing and live in the shared immutable region (realms issue 08).
     let region = policy
@@ -885,6 +890,7 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                 false,
                 logical_path,
                 true,
+                generic_loop_profile.clone(),
             )
         })?;
         render_prepare_module_cells(
@@ -917,6 +923,7 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                 false,
                 logical_path,
                 instantiate,
+                generic_loop_profile,
             )
         })
     })?;
@@ -3000,6 +3007,7 @@ fn plan_unit(
     parallel_in_generic: bool,
     speculate: Option<bool>,
     extra_entry_slots: Option<&HashSet<u32>>,
+    generic_loop_profile: Option<Arc<direct::LoopCallProfile>>,
 ) -> Result<
     (
         Vec<FunctionGraph>,
@@ -3028,7 +3036,7 @@ fn plan_unit(
         entry_graph.mark_non_escaping_objects_with_extra_slots(program, Some(extra));
     }
     let publishes_frame = compute_publishes_frame(program);
-    let direct = direct::DirectPlan::plan(
+    let direct = direct::DirectPlan::plan_with_loop_profile(
         program,
         &graphs,
         &entry_graph,
@@ -3038,6 +3046,7 @@ fn plan_unit(
         generic_only,
         parallel_in_generic,
         speculate,
+        generic_loop_profile,
     );
     Ok((graphs, body, entry_graph, direct))
 }
@@ -5109,6 +5118,7 @@ fn render_positioned(
         policy.parallel_in_generic,
         policy.speculate,
         extra_entry_slots.as_ref(),
+        None,
     )?;
     if program.has_dynamic_import() {
         output.push_str(
@@ -5256,6 +5266,7 @@ fn render_module(
         commonjs,
         diagnostic_site,
         false,
+        None,
     )
 }
 
@@ -5270,6 +5281,7 @@ fn render_module_with_unit(
     commonjs: bool,
     diagnostic_site: &str,
     force_module_scope: bool,
+    generic_loop_profile: Option<Arc<direct::LoopCallProfile>>,
 ) -> Result<RenderedModule, EmitError> {
     // `parallelMap` site records name positions in the module as written; emission packs the
     // source below. See `parallel::SiteRecord`.
@@ -5285,6 +5297,7 @@ fn render_module_with_unit(
             external_unit,
             export_cells,
             force_module_scope,
+            generic_loop_profile,
         )
     })
 }
@@ -5300,6 +5313,7 @@ fn render_module_positioned(
     external_unit: bool,
     export_cells: bool,
     force_module_scope: bool,
+    generic_loop_profile: Option<Arc<direct::LoopCallProfile>>,
 ) -> Result<RenderedModule, EmitError> {
     let program = &module.program;
     let should_chunk =
@@ -5491,6 +5505,7 @@ fn render_module_positioned(
         policy.parallel_in_generic,
         policy.speculate,
         Some(&extra_entry_slots),
+        generic_loop_profile,
     )?;
     if should_chunk {
         direct.set_should_chunk(true);

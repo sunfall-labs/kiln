@@ -22,19 +22,38 @@ Their loop-call weights were 766 for fn156/fn165 and 387 for fn193/fn200. Before
 filtering, the two-body tier selected `isCyclic` (fn118, 999 IR) and `encodeValue` (fn165, 1,028
 IR), 2,027 IR total. `set_available` reapplies the same bounded policy after liveness. This
 selection is an estimate from static loop context: it can credit cold branch callees such as
-`isCyclic`; it is not a runtime profile. The native replay remains the evidence for whether this
-selection helps the original timeout.
+`isCyclic`; it is not a runtime profile.
 
-Validation ran in the owned worktree at source base `9b6d7041725462c70784d6f1234ba815f04a0009`
+Cycle-module AOT emits separate declaration-instantiation and evaluation entrypoints. The
+instantiation bytecode ends at instruction 920, before the later immutable binding stores that
+make the loop-callee edges visible to the full-module ranking pass. Replanning on that prefix
+selected fn91/fn99 and assigned fn165 weight zero; the full-module profile assigns fn165 weight
+766. The emitter now computes this bounded ranking profile once from the original module and
+shares only those ranking weights with both split entrypoints. Each entrypoint still computes its
+own liveness, availability, and known-call map, so a ranking hint cannot create a static/direct
+call or retain a body that that phase cannot emit. A regression covers an emitted cycle-module
+instantiation body with a later immutable callback binding and a reassigned mutable control.
+
+The pinned Schema diagnostic also calls the production split-module emitter and checks the actual
+instantiation C for fn165: it must not carry the mixed-tier O0 attribute. Calls remain generic
+boxed calls. This verifies that ranking reaches real C emission rather than only the planner.
+
+Validation ran in the owned worktree based on `9b6d7041725462c70784d6f1234ba815f04a0009`
 with Rust 1.97.1 and `mbx`, one Cargo/Kiln/Rayon worker, and the pinned Effect workspace at
 `~/Work/kiln/.scratch/effect-sandbox-integration/.scratch/frozen-clock-native/workspace/source`.
 
-- Focused generic backend tests: 22 passed, 0 failed, 2 ignored.
-- Full `kiln-backend-c --lib` suite: 344 passed, 0 failed, 4 ignored in 108.44 seconds.
-- Pinned Schema selector diagnostic: 1 passed; it is ignored in normal test runs and was run
-  explicitly with `--ignored`.
+- Full `kiln-backend-c --lib` suite: 345 passed, 0 failed, 4 ignored in 105.88 seconds.
+- Pinned Schema selector/emission diagnostic: 1 passed; it is ignored in normal test runs and was
+  run explicitly with `--ignored`. It includes the actual split-module C assertion described above.
+- `cargo fmt --all -- --check` and `git diff --check` passed.
 
-Full raw logs are retained in the owned `.scratch/schema-loop-tier/` directory. The full-suite
-log SHA-256 is `1d4d2ceb49dca9c1716c8ddcbf8f0b19f0573978656d6d49b9471cabd9fa33be`; the focused log
-SHA-256 is `c4c314f79f96521173f650b461c710f6590cb66ef7b15590d20f6851e80b34d4`; and the selector
-log SHA-256 is `33481cec776736ef7fa89070c50e0f87b1586d542cb1053077713832000c1f54`.
+An earlier full-suite attempt without an explicit pinned-toolchain `PATH` was discarded: it selected
+Rust 1.99. The accepted full-suite and Schema-emission runs explicitly set `PATH` and
+`RUSTUP_TOOLCHAIN=1.97.1`; `rustc --version` reported `1.97.1 (8bab26f4f 2026-07-14)`.
+
+Full raw logs are retained in the owned `.scratch/schema-loop-tier/` directory. The pinned full-suite
+log `backend-pinned-final.log` SHA-256 is
+`9e3ba7f4d0111aa73eb506f7ad55e5863499266e131540055401b67721ab597b`; the pinned production-emission
+diagnostic `schema-emission-proof-1.97.log` SHA-256 is
+`39be2d72ba760924a5582eaf0f77c9049387294a11dd520c8e5aa0f90bd760d1`; and the planner diagnostic
+log SHA-256 is `76b9d40bfc47145c8f61662ca1acd811fc4e5316d7ae60901479ddc84a568f7f`.

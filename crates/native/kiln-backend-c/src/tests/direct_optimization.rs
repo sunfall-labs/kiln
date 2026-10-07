@@ -220,9 +220,9 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let hir = kiln_frontend_oxc::parse(&path.to_string_lossy(), &source);
-    let program = kiln_ir::compile_module(&hir)
-        .unwrap_or_else(|error| panic!("compile {}: {error:?}", path.display()))
-        .program;
+    let module = kiln_ir::compile_module(&hir)
+        .unwrap_or_else(|error| panic!("compile {}: {error:?}", path.display()));
+    let program = module.program.clone();
     let graphs = program
         .functions
         .iter()
@@ -259,6 +259,65 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
         .iter()
         .map(|plan| plan.generic_function_optimized)
         .collect::<Vec<_>>();
+    // The native ESM path emits a distinct instantiation entry whose bytecode ends before
+    // evaluation-time stores. Re-run the exact planner on that prefix while retaining the same
+    // function table to see whether those stores are what establish loop-callee ranking facts.
+    let mut instantiation_program = program.clone();
+    instantiation_program
+        .code
+        .truncate(module.link_facts.module_instantiation_end as usize);
+    instantiation_program
+        .code
+        .push(kiln_ir::Instruction::Return);
+    let instantiation_graphs = instantiation_program
+        .functions
+        .iter()
+        .map(|proto| {
+            crate::graph::build_function_graph(proto, &instantiation_program)
+                .expect("build instantiation function graph")
+        })
+        .collect::<Vec<_>>();
+    let instantiation_entry_proto = crate::entry_proto(&instantiation_program);
+    let instantiation_entry_graph =
+        crate::graph::build_function_graph(&instantiation_entry_proto, &instantiation_program)
+            .expect("build instantiation entry graph");
+    let instantiation_publishes = crate::compute_publishes_frame(&instantiation_program);
+    let instantiation_plan = crate::direct::DirectPlan::plan(
+        &instantiation_program,
+        &instantiation_graphs,
+        &instantiation_entry_graph,
+        &instantiation_publishes,
+        true,
+        false,
+        true,
+        false,
+        None,
+    );
+    let instantiation_selected = instantiation_plan
+        .functions
+        .iter()
+        .map(|plan| plan.generic_function_optimized)
+        .collect::<Vec<_>>();
+    let instantiation_weights = instantiation_plan.generic_loop_profile_weights();
+    let shared_profile = crate::direct::generic_loop_profile_for_program(&program);
+    let shared_profile_plan = crate::direct::DirectPlan::plan_with_loop_profile(
+        &instantiation_program,
+        &instantiation_graphs,
+        &instantiation_entry_graph,
+        &instantiation_publishes,
+        true,
+        false,
+        true,
+        false,
+        None,
+        shared_profile,
+    );
+    let shared_profile_selected = shared_profile_plan
+        .functions
+        .iter()
+        .map(|plan| plan.generic_function_optimized)
+        .collect::<Vec<_>>();
+    let shared_profile_weights = shared_profile_plan.generic_loop_profile_weights();
     let targets = [
         (156, "encodeArray"),
         (165, "encodeValue"),
@@ -286,6 +345,16 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
                     .and_then(|weights| weights.get(index))
                     .copied(),
                 "selected": selected[index],
+                "instantiation_loop_call_weight": instantiation_weights
+                    .as_ref()
+                    .and_then(|weights| weights.get(index))
+                    .copied(),
+                "instantiation_selected": instantiation_selected[index],
+                "shared_profile_loop_call_weight": shared_profile_weights
+                    .as_ref()
+                    .and_then(|weights| weights.get(index))
+                    .copied(),
+                "shared_profile_selected": shared_profile_selected[index],
             })
         })
         .collect::<Vec<_>>();
@@ -332,6 +401,8 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
                         "callee_value": callee.0,
                         "callee_definition": definitions.get(callee).map(|op| format!("{op:?}")),
                         "known_target": known_plan.functions[caller].known.get(callee),
+                        "instantiation_known_target":
+                            instantiation_plan.functions[caller].known.get(callee),
                     }))
                 })
                 .collect::<Vec<_>>();
@@ -411,6 +482,12 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
             "body_instructions": program.functions.iter().map(|proto| proto.code.len()).sum::<usize>(),
             "entry_instructions": program.code.len(),
             "selected_protos": selected_protos,
+            "module_instantiation_end": module.link_facts.module_instantiation_end,
+            "instantiation_entry_instructions": instantiation_program.code.len(),
+            "instantiation_selected_protos": instantiation_selected.iter().enumerate()
+                .filter_map(|(index, selected)| selected.then_some(index)).collect::<Vec<_>>(),
+            "shared_profile_selected_protos": shared_profile_selected.iter().enumerate()
+                .filter_map(|(index, selected)| selected.then_some(index)).collect::<Vec<_>>(),
             "selected_names": selected_names,
         "selected_target_rows": rows,
         "loop_profile_present": loop_weights.is_some(),
@@ -439,6 +516,134 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
     assert!(
         selected[165],
         "fn165 enters the bounded tier from proven loop-call evidence"
+    );
+    assert!(
+        !instantiation_selected[165],
+        "the declaration-only entry loses the evaluation stores used by local ranking"
+    );
+    assert!(
+        shared_profile_selected[165],
+        "the full-module ranking profile restores the bounded decision without changing calls"
+    );
+
+    // Exercise the same split-module emitter used by native cyclic-module AOT, not only the
+    // planner helper above. The instantiation C unit contains the hoisted callback body, while
+    // the loop and immutable binding assignment that establish its ranking are in evaluation.
+    let emitted = crate::emit_module_with_logical_path_and_policy_and_instantiation(
+        &module,
+        "packages/effect/src/encoding/SchemaBinary.ts",
+        crate::EmissionPolicy {
+            generic_only: true,
+            ..Default::default()
+        },
+        true,
+    )
+    .expect("the pinned SchemaBinary cycle module emits");
+    let instantiation = emitted
+        .instantiation
+        .expect("the cycle module has a separate instantiation unit");
+    let marker = "/* frontend function 165:";
+    let marker_at = instantiation
+        .source
+        .find(marker)
+        .expect("the pinned encodeValue function is retained in instantiation");
+    let header_end = instantiation.source[marker_at..]
+        .find("static inline int")
+        .map(|offset| marker_at + offset)
+        .expect("encodeValue has an emitted C function");
+    let function_header = &instantiation.source[marker_at..header_end];
+    assert!(
+        !function_header.contains("optnone")
+            && !function_header.contains("optimize(\"O0\")")
+            && (function_header.contains("optimize(\"O1\")")
+                || !function_header.contains("KILN_GENERIC_MIXED_TIER")),
+        "actual SchemaBinary instantiation emits encodeValue in the bounded O1 tier: {function_header}"
+    );
+}
+
+#[test]
+fn cyclic_instantiation_reuses_full_module_loop_ranking_only() {
+    let mut source = String::new();
+    for index in 0..70 {
+        source.push_str(&format!("function filler{index}() {{ return {index}; }}\n"));
+    }
+    source.push_str(
+        "function run(count: number): number { let sum = 0; for (let i = 0; i < count; i++) sum += invoke(i); return sum; }\nconst invoke = (value: number): number => value + 1;\nexport { run };\n",
+    );
+    let hir = kiln_frontend_oxc::parse("fixture/cycle-loop-ranking.ts", &source);
+    let module = kiln_ir::compile_module(&hir).expect("cycle ranking fixture compiles");
+    let find_proto = |name: &str| {
+        module
+            .program
+            .functions
+            .iter()
+            .position(|proto| {
+                proto
+                    .effective_name_units()
+                    .is_some_and(|value| value.to_lossy_string() == name)
+            })
+            .unwrap_or_else(|| panic!("missing function proto {name}"))
+    };
+    let invoke = find_proto("invoke");
+    let profile = crate::direct::generic_loop_profile_for_program(&module.program)
+        .expect("small module receives bounded loop-ranking facts");
+    assert!(profile.weights(None)[invoke] > 0);
+
+    let emitted = crate::emit_module_with_logical_path_and_policy_and_instantiation(
+        &module,
+        "fixture/cycle-loop-ranking.ts",
+        crate::EmissionPolicy {
+            compact: false,
+            generic_only: true,
+            ..Default::default()
+        },
+        true,
+    )
+    .expect("cycle module emits");
+    let instantiation = emitted.instantiation.expect("cycle has instantiate unit");
+    let marker = format!("/* frontend function {invoke}:");
+    let marker_at = instantiation
+        .source
+        .find(&marker)
+        .expect("instantiation emits the callback body");
+    let header_end = instantiation.source[marker_at..]
+        .find("static inline int")
+        .map(|offset| marker_at + offset)
+        .expect("callback has emitted body signature");
+    let function_header = &instantiation.source[marker_at..header_end];
+    assert!(
+        !function_header.contains("optnone") && !function_header.contains("optimize(\"O0\")"),
+        "the callback's boxed body receives the shared O1 ranking decision"
+    );
+    assert!(
+        function_header.contains("optimize(\"O1\")")
+            || !function_header.contains("KILN_GENERIC_MIXED_TIER"),
+        "the selected callback is not emitted with the mixed-tier O0 attribute"
+    );
+    assert!(
+        instantiation.source.contains("kiln_c99_val_call"),
+        "ranking facts must not replace phase-specific calls with direct dispatch"
+    );
+
+    let mutable = "function run(count: number): number { let sum = 0; for (let i = 0; i < count; i++) sum += invoke(i); return sum; }\nlet invoke = (value: number): number => value + 1;\ninvoke = (value: number): number => value * 2;\nexport { run };\n";
+    let mutable_hir = kiln_frontend_oxc::parse("fixture/mutable-loop-ranking.ts", mutable);
+    let mutable_module = kiln_ir::compile_module(&mutable_hir).expect("mutable control compiles");
+    let mutable_invoke = mutable_module
+        .program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|value| value.to_lossy_string() == "invoke")
+        })
+        .expect("mutable callback proto exists");
+    let mutable_profile = crate::direct::generic_loop_profile_for_program(&mutable_module.program)
+        .expect("mutable control fits profile bounds");
+    assert_eq!(
+        mutable_profile.weights(None)[mutable_invoke],
+        0,
+        "reassigned bindings do not contribute speculative ranking edges"
     );
 }
 

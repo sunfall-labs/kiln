@@ -2136,6 +2136,7 @@ fn large_generic_units_share_planning_tables_and_publish_updates() {
         false,
         None,
         None,
+        None,
     )
     .expect("a generic unit should plan without specialization");
     for plan in &plans.functions {

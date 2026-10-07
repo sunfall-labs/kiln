@@ -28,7 +28,10 @@
 //! emitted. This is the "two clones, never more" invariant with the second clone reached by
 //! proof rather than by guess.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use kiln_ir::{Constant, FunctionProto, Instruction, Program, UnaryOp, Upvalue};
 
@@ -173,7 +176,7 @@ pub struct DirectPlan {
     pub entry: CallPlan,
     /// Bounded proven call edges used only to rank the supplemental generic loop tier after
     /// module liveness settles. This does not enable direct calls or change any ABI.
-    generic_loop_calls: Option<LoopCallProfile>,
+    generic_loop_calls: Option<Arc<LoopCallProfile>>,
 }
 
 impl DirectPlan {
@@ -187,6 +190,32 @@ impl DirectPlan {
         generic_only: bool,
         parallel_in_generic: bool,
         speculate: Option<bool>,
+    ) -> Self {
+        Self::plan_with_loop_profile(
+            program,
+            graphs,
+            entry,
+            publishes_frame,
+            compact,
+            compile_regex,
+            generic_only,
+            parallel_in_generic,
+            speculate,
+            None,
+        )
+    }
+
+    pub(crate) fn plan_with_loop_profile(
+        program: &Program,
+        graphs: &[FunctionGraph],
+        entry: &FunctionGraph,
+        publishes_frame: &[bool],
+        compact: bool,
+        compile_regex: bool,
+        generic_only: bool,
+        parallel_in_generic: bool,
+        speculate: Option<bool>,
+        loop_profile_override: Option<Arc<LoopCallProfile>>,
     ) -> Self {
         if generic_only {
             let function_count = graphs.len();
@@ -202,17 +231,19 @@ impl DirectPlan {
             let known = (function_count <= MAX_GENERIC_DIRECT_ANALYSIS_FUNCTIONS
                 && total_instructions <= MAX_GENERIC_DIRECT_ANALYSIS_INSTRUCTIONS)
                 .then(|| known_callees(program, graphs, entry));
-            let generic_loop_calls = if let Some(known) = known.as_ref() {
-                LoopCallProfile::from_known(program, graphs, entry, known)
-            } else if function_count <= MAX_GENERIC_LOOP_CALL_FUNCTIONS
-                && total_instructions <= MAX_GENERIC_LOOP_CALL_INSTRUCTIONS
-                && loop_caller_count(program) <= MAX_GENERIC_LOOP_CALLERS
-            {
-                let known = known_callees(program, graphs, entry);
-                LoopCallProfile::from_known(program, graphs, entry, &known)
-            } else {
-                None
-            };
+            let generic_loop_calls = loop_profile_override.or_else(|| {
+                if let Some(known) = known.as_ref() {
+                    LoopCallProfile::from_known(program, graphs, entry, known).map(Arc::new)
+                } else if function_count <= MAX_GENERIC_LOOP_CALL_FUNCTIONS
+                    && total_instructions <= MAX_GENERIC_LOOP_CALL_INSTRUCTIONS
+                    && loop_caller_count(program) <= MAX_GENERIC_LOOP_CALLERS
+                {
+                    let known = known_callees(program, graphs, entry);
+                    LoopCallProfile::from_known(program, graphs, entry, &known).map(Arc::new)
+                } else {
+                    None
+                }
+            });
             let loop_weights = generic_loop_calls
                 .as_ref()
                 .map(|profile| profile.weights(None));
@@ -1489,9 +1520,37 @@ pub(crate) fn select_generic_optimization_functions_with_weights(
 /// repeated-work weight for a few edges. The graph facts come from the existing conservative
 /// `known_callees` analysis, so unknown/reassigned callables never contribute.
 #[derive(Debug)]
-struct LoopCallProfile {
+pub(crate) struct LoopCallProfile {
     seed_edges: Vec<(Option<usize>, u32, usize)>,
     edges: Vec<Vec<u32>>,
+}
+
+/// Build the bounded loop-callee ranking facts from an unmodified module program. Cycle-module
+/// emission reuses these facts for its declaration-instantiation and evaluation entrypoints,
+/// whose entry bytecode is intentionally truncated or nop-filled. The facts only rank boxed O1
+/// bodies; phase-specific direct-call and liveness decisions continue to come from each unit.
+pub(crate) fn generic_loop_profile_for_program(program: &Program) -> Option<Arc<LoopCallProfile>> {
+    if program.functions.len() > MAX_GENERIC_LOOP_CALL_FUNCTIONS
+        || program
+            .functions
+            .iter()
+            .map(|proto| proto.code.len())
+            .chain(std::iter::once(program.code.len()))
+            .fold(0usize, usize::saturating_add)
+            > MAX_GENERIC_LOOP_CALL_INSTRUCTIONS
+        || loop_caller_count(program) > MAX_GENERIC_LOOP_CALLERS
+    {
+        return None;
+    }
+    let graphs = program
+        .functions
+        .iter()
+        .map(|proto| crate::graph::build_function_graph(proto, program).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let body = crate::entry_proto(program);
+    let entry = crate::graph::build_function_graph(&body, program).ok()?;
+    let known = known_callees(program, &graphs, &entry);
+    LoopCallProfile::from_known(program, &graphs, &entry, &known).map(Arc::new)
 }
 
 impl LoopCallProfile {
@@ -1564,7 +1623,7 @@ impl LoopCallProfile {
         Some(Self { seed_edges, edges })
     }
 
-    fn weights(&self, available: Option<&[bool]>) -> Vec<usize> {
+    pub(crate) fn weights(&self, available: Option<&[bool]>) -> Vec<usize> {
         let mut weights = vec![0usize; self.edges.len()];
         for &(caller, target, weight) in &self.seed_edges {
             let target = target as usize;
