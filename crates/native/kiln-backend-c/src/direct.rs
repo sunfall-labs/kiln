@@ -175,6 +175,10 @@ pub struct CallPlan {
     /// instead of recomputing it -- the emitted C's `plain->publishes_frame` runtime flag must
     /// agree with this at every proto, since call sites branch on both.
     pub publishes_frame: std::sync::Arc<Vec<bool>>,
+    /// Graph-proven `LoadArguments` values whose sole use is `.length`, emitted from `argc`.
+    /// `None` is retained for standalone planner/emitter callers that have not supplied the
+    /// graph facts; module emission installs the exact fact computed during `plan_unit`.
+    pub argument_length_values: Option<std::sync::Arc<HashSet<ValueId>>>,
     /// Whether the translation unit is chunked across multiple C files.
     pub should_chunk: bool,
 }
@@ -232,6 +236,34 @@ impl DirectPlan {
         parallel_in_generic: bool,
         speculate: Option<bool>,
         loop_profile_override: Option<Arc<LoopCallProfile>>,
+    ) -> Self {
+        Self::plan_with_argument_length_facts(
+            program,
+            graphs,
+            entry,
+            publishes_frame,
+            compact,
+            compile_regex,
+            generic_only,
+            parallel_in_generic,
+            speculate,
+            loop_profile_override,
+            &[],
+        )
+    }
+
+    pub(crate) fn plan_with_argument_length_facts(
+        program: &Program,
+        graphs: &[FunctionGraph],
+        entry: &FunctionGraph,
+        publishes_frame: &[bool],
+        compact: bool,
+        compile_regex: bool,
+        generic_only: bool,
+        parallel_in_generic: bool,
+        speculate: Option<bool>,
+        loop_profile_override: Option<Arc<LoopCallProfile>>,
+        argument_length_only: &[bool],
     ) -> Self {
         if generic_only {
             let function_count = graphs.len();
@@ -368,9 +400,11 @@ impl DirectPlan {
             .iter()
             .zip(&has_rest_parameter)
             .zip(&program.functions)
-            .map(|((&direct, &has_rest), proto)| {
+            .enumerate()
+            .map(|(index, ((&direct, &has_rest), proto))| {
                 direct
                     && !has_rest
+                    && !argument_length_only.get(index).copied().unwrap_or(false)
                     && !generic_only
                     && proto.code.len() <= crate::MAX_SPECIALIZED_INSTRUCTIONS
             })
@@ -657,6 +691,7 @@ impl DirectPlan {
                 fast: shared_false.clone(),
                 available: shared_available.clone(),
                 publishes_frame: shared_publishes.clone(),
+                argument_length_values: None,
                 should_chunk: false,
             }
         };
@@ -1013,7 +1048,11 @@ impl DirectPlan {
         let mut typed_eligible = vec![false; count];
         for &t in &targets {
             let proto = &program.functions[t as usize];
-            typed_eligible[t as usize] = direct_callable(proto, publishes_frame[t as usize])
+            typed_eligible[t as usize] = !argument_length_only
+                .get(t as usize)
+                .copied()
+                .unwrap_or(false)
+                && direct_callable(proto, publishes_frame[t as usize])
                 && !proto
                     .code
                     .iter()

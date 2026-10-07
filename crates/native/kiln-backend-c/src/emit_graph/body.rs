@@ -24,20 +24,40 @@ const COMPACT_INDEXED_VALUE_THRESHOLD: u32 = 512;
 /// The arguments object exposes a writable length and can be aliased, so this is safe only
 /// when every live load in the function has that exact use and no nested arrow closes over it.
 /// Those reads can then use the call frame's argc directly without allocating the exotic object.
-fn arguments_length_only_values(
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ArgumentsLengthFact {
+    /// SSA values whose arguments-object length read is emitted directly from `argc`.
+    pub values: HashSet<ValueId>,
+    /// Every reachable arguments-object read in this proto is either absent or proven to be
+    /// the argc-only length case. This is distinct from an empty `values` set: an empty set can
+    /// also mean the proof was rejected.
+    pub reads_elided: bool,
+}
+
+pub(crate) fn arguments_length_fact(
     graph: &FunctionGraph,
     proto: &FunctionProto,
     program: &Program,
-) -> HashSet<ValueId> {
+) -> ArgumentsLengthFact {
+    if !proto
+        .code
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::LoadArguments))
+    {
+        return ArgumentsLengthFact {
+            values: HashSet::new(),
+            reads_elided: true,
+        };
+    }
     if proto.arrow || proto.generator || proto.asynchronous || proto.async_generator {
-        return HashSet::new();
+        return ArgumentsLengthFact::default();
     }
     if proto
         .code
         .iter()
         .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
     {
-        return HashSet::new();
+        return ArgumentsLengthFact::default();
     }
     fn arrow_tree_uses_arguments(index: u32, program: &Program) -> bool {
         let Some(proto) = program.functions.get(index as usize) else {
@@ -73,7 +93,7 @@ fn arguments_length_only_values(
                 child_proto.arrow && arrow_tree_uses_arguments(*child, program)
             })
         {
-            return HashSet::new();
+            return ArgumentsLengthFact::default();
         }
     }
 
@@ -121,30 +141,36 @@ fn arguments_length_only_values(
         }
     }
     if loads.is_empty() {
-        return loads;
+        return ArgumentsLengthFact {
+            values: loads,
+            reads_elided: true,
+        };
     }
 
     let mut optimized = HashSet::new();
     for value in loads.iter().copied() {
         if terminator_uses.contains(&value) {
-            return HashSet::new();
+            return ArgumentsLengthFact::default();
         }
         let Some(value_uses) = uses.get(&value) else {
-            return HashSet::new();
+            return ArgumentsLengthFact::default();
         };
         if value_uses.len() != 1 {
-            return HashSet::new();
+            return ArgumentsLengthFact::default();
         }
         let GraphOp::GetProperty { object, name, .. } = value_uses[0] else {
-            return HashSet::new();
+            return ArgumentsLengthFact::default();
         };
         let is_length = matches!(program.constants.get(*name as usize), Some(Constant::String(units)) if units.to_scalar_string().as_deref() == Ok("length"));
         if *object != value || !is_length {
-            return HashSet::new();
+            return ArgumentsLengthFact::default();
         }
         optimized.insert(value);
     }
-    optimized
+    ArgumentsLengthFact {
+        reads_elided: optimized.len() == loads.len(),
+        values: optimized,
+    }
 }
 
 /// Compact bodies use generic runtime calls rather than the optimized call paths. Determine
@@ -2981,7 +3007,23 @@ fn emit_blocks(
         .iter()
         .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
         .collect();
-    let argument_length_values = arguments_length_only_values(graph, proto, program);
+    let no_argument_length_values = HashSet::new();
+    let fallback_argument_fact = plan
+        .argument_length_values
+        .is_none()
+        .then(|| arguments_length_fact(graph, proto, program));
+    let argument_length_values = if matches!(kind, EntryKind::Typed { .. }) {
+        // A typed entry has no argc and may be used by callback adapters with a different
+        // runtime arity from the proto's declared parameter count. Keep the object path there.
+        &no_argument_length_values
+    } else {
+        plan.argument_length_values.as_deref().unwrap_or_else(|| {
+            &fallback_argument_fact
+                .as_ref()
+                .expect("fallback graph fact was prepared")
+                .values
+        })
+    };
     let use_counts = graph_value_use_counts(graph);
     // A read of `length` bounds a loop below 2^32.
     let length_bounds: HashSet<ValueId> = ops
