@@ -543,6 +543,7 @@ mod weak_get_or_insert_tests {
             inferred_name: None,
             upvalues: vec![Rc::clone(&counter)],
             realm: RealmId::PRIMARY,
+            arguments_length_only: false,
             captured_arguments: None,
             captured_new_target: None,
             captured_this: None,

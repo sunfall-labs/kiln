@@ -1016,8 +1016,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.unwind(thrown, current)?;
                 }
                 Instruction::LoadArguments => {
-                    let arguments = self.arguments_object();
-                    self.stack.push(arguments);
+                    let optimized = self.function.as_ref().is_some_and(|closure| {
+                        closure.arguments_length_only
+                            && Self::code(&program, self.function.as_ref())
+                                .get(self.instruction)
+                                .is_some_and(|next| match next {
+                                    Instruction::GetProperty(name) => matches!(
+                                        program.constants.get(*name as usize),
+                                        Some(Constant::String(value)) if value.eq("length")
+                                    ),
+                                    _ => false,
+                                })
+                    });
+                    if optimized {
+                        let closure = self.function.as_ref().expect("proof belongs to a closure");
+                        self.stack.push(Value::Number(self.arguments.len() as f64));
+                        let depth = self.frames.len();
+                        if self.arguments_length_markers.len() <= depth {
+                            self.arguments_length_markers.resize(depth + 1, None);
+                        }
+                        self.arguments_length_markers[depth] = Some(ArgumentsLengthMarker {
+                            load_instruction: current,
+                            instruction: self.instruction,
+                            program: Rc::as_ptr(&program) as usize,
+                            function: closure.function,
+                            frame_depth: depth,
+                        });
+                    } else {
+                        let arguments = self.arguments_object();
+                        self.stack.push(arguments);
+                    }
                 }
                 // A rest parameter is always the *call's* arguments, arrow or not.
                 Instruction::RestArguments(from) => {
@@ -1868,6 +1896,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::GetProperty(name) => {
                     let name = self.string_constant_units(*name, current)?;
                     let target = self.pop(current)?;
+                    let marker_matches = self
+                        .function
+                        .as_ref()
+                        .is_some_and(|closure| closure.arguments_length_only)
+                        && self
+                            .arguments_length_markers
+                            .get(self.frames.len())
+                            .copied()
+                            .flatten()
+                            .is_some_and(|marker| {
+                                marker.load_instruction.checked_add(1) == Some(marker.instruction)
+                                    && marker.instruction == current
+                                    && marker.program == Rc::as_ptr(&program) as usize
+                                    && self
+                                        .function
+                                        .as_ref()
+                                        .is_some_and(|closure| marker.function == closure.function)
+                                    && marker.frame_depth == self.frames.len()
+                            });
+                    if marker_matches && name.eq("length") {
+                        self.arguments_length_markers[self.frames.len()] = None;
+                        debug_assert!(matches!(target, Value::Number(_)));
+                        self.stack.push(Value::Number(self.arguments.len() as f64));
+                        continue;
+                    }
                     if target.is_nullish() {
                         let shown = name.to_lossy_string();
                         self.throw_error(
@@ -2645,6 +2698,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction: self.instruction,
             stack_base,
         });
+        self.reset_arguments_marker_for_current_frame();
         self.function = Some(Rc::clone(closure));
         self.mapped_arguments = closure.has_mapped_arguments();
         self.instruction = 0;
@@ -3097,6 +3151,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction: self.instruction,
             stack_base,
         });
+        self.reset_arguments_marker_for_current_frame();
         self.function = Some(closure);
         self.mapped_arguments = self
             .function

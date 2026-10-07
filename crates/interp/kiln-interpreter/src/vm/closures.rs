@@ -64,7 +64,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .get(function as usize)
             .ok_or(ExecutionError::UnknownFunction { function })?
             .arrow;
-        let captured_arguments = arrow.then(|| self.arguments_object());
+        let (captures_lexical_arguments, arguments_length_only) =
+            self.argument_object_proofs(function);
+        let captured_arguments =
+            (arrow && captures_lexical_arguments).then(|| self.arguments_object());
         let Some(proto) = self.program.functions.get(function as usize) else {
             return Err(ExecutionError::UnknownFunction { function });
         };
@@ -114,6 +117,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             name: proto.name.as_deref().map(Rc::from),
             inferred_name: proto.inferred_name.clone(),
             upvalues,
+            arguments_length_only,
             realm: self.current_realm,
             // An arrow takes `this` from where it is written; an ordinary function takes it from
             // how it is called, so it captures nothing here.
