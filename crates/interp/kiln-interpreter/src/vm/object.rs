@@ -1965,6 +1965,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Ordinary arrays with untouched intrinsic numeric properties cannot encounter
             // a setter. Otherwise reuse the same descriptor walk as the other exotic stores.
             if (self.intrinsics.indexed_array_prototype.get()
+                || self
+                    .intrinsics
+                    .indexed_prototype_chain_is_custom(RealmId::PRIMARY)
                 || items.properties.borrow().prototype().is_some())
                 && self.chain_setter_key(
                     target,

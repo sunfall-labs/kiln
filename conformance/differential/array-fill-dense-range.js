@@ -124,6 +124,38 @@ console.log(
   objectPrototypeReceiver[3]
 )
 
+const originalArrayPrototypeParent = Object.getPrototypeOf(Array.prototype)
+const inheritedArrayIndexParent = Object.create(null)
+const inheritedArrayReceiver = new Array(4)
+let inheritedArraySetterCalls = 0
+let inheritedArraySetterReceiver = false
+Object.defineProperty(inheritedArrayIndexParent, "3", {
+  configurable: true,
+  set(value) {
+    inheritedArraySetterCalls++
+    inheritedArraySetterReceiver = this === inheritedArrayReceiver && value === 14
+  }
+})
+const inheritedArrayEnd = {
+  valueOf() {
+    Object.setPrototypeOf(Array.prototype, inheritedArrayIndexParent)
+    return 4
+  }
+}
+try {
+  inheritedArrayReceiver.fill(14, 0, inheritedArrayEnd)
+} finally {
+  Object.setPrototypeOf(Array.prototype, originalArrayPrototypeParent)
+}
+console.log(
+  "inherited-array-prototype-setter",
+  inheritedArraySetterCalls,
+  inheritedArraySetterReceiver,
+  Object.prototype.hasOwnProperty.call(inheritedArrayReceiver, "3"),
+  inheritedArrayReceiver[0],
+  inheritedArrayReceiver[2]
+)
+
 const nonExtensibleSetter = new Array(1)
 let nonExtensibleCalls = 0
 const setterPrototype = Object.create(Array.prototype)
