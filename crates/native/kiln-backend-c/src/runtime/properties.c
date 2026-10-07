@@ -21,44 +21,45 @@ static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_
     return KILN_C99_OK;
 }
 
-/* The index a key names, or -1.  A key is an index only when it round-trips through the
- * canonical decimal spelling, which is what keeps `a["01"]` a named property and `a["1"]` an
- * element -- the distinction the language draws and the one a naive `atoi` erases. */
+/* Parse the small grammar of an ECMAScript array index directly.  After the caller has
+ * established that the key is an ASCII digit string, this is exact integer arithmetic: the
+ * grammar has at most ten digits and values stop at 2^32-2.  Going through the number provider
+ * and formatting the resulting double back to text did the same proof with two FFI calls. */
+static double kiln_c99_key_index_digits(const unsigned char *digits, size_t key_len) {
+    uint64_t number = 0;
+    size_t index;
+    if (key_len == 0 || key_len > 10 || (key_len > 1 && digits[0] == '0')) return -1.0;
+    for (index = 0; index < key_len; ++index) {
+        unsigned char digit = digits[index];
+        if (digit < '0' || digit > '9') return -1.0;
+        number = number * 10u + (uint32_t)(digit - '0');
+        if (number > UINT32_C(4294967294)) return -1.0;
+    }
+    return (double)number;
+}
+
+/* The index a key names, or -1. A key is an index only when it has the canonical decimal
+ * spelling, which keeps `a["01"]` a named property and `a["1"]` an element. */
 static double kiln_c99_key_index(const char *key, size_t key_len) {
-    char buffer[64];
-    double number;
-    int length;
-    /* Every canonical index spelling is one to ten ASCII digits with no sign and no leading
-     * space: the largest index is 4294967294, and a number that round-trips cannot begin with
-     * anything but a digit.  Both are *necessary* conditions, so failing either is a decision
-     * this can make without the provider -- which matters because the provider call is a
-     * cross-crate FFI hop and every property write on every object makes one.  Nothing about
-     * `a["01"]` or `a["1"]` moves: the round-trip below still decides those. */
-    if (key_len == 0 || key_len > 10 ||
-        (unsigned char)(key[0] - '0') > 9u) {
-        return -1.0;
-    }
-    number = kiln_string_to_number(key, key_len);
-    if (!(number >= 0.0) || floor(number) != number || number > 4294967294.0) {
-        return -1.0;
-    }
-    length = kiln_c99_double_to_js(number, buffer);
-    if (length != key_len || memcmp(buffer, key, key_len) != 0) {
-        return -1.0;
-    }
-    return number;
+    if (key == NULL) return -1.0;
+    return kiln_c99_key_index_digits((const unsigned char *)key, key_len);
 }
 
 static double kiln_c99_key_index_key(const kiln_string *key) {
-    char buffer[64];
+    uint64_t number = 0;
     size_t index;
-    if (key == NULL || key->unit_len == 0 || key->unit_len > 10) return -1.0;
+    if (key == NULL || kiln_c99_key_is_reserved(key) || key->unit_len == 0 ||
+        key->unit_len > 10) return -1.0;
+    if (key->unit_len > 1 && kiln_string_unit_at(key, 0) == '0') return -1.0;
     for (index = 0; index < key->unit_len; ++index) {
         uint32_t unit = kiln_string_unit_at(key, index);
-        if (unit > 0x7f) return -1.0;
-        buffer[index] = (char)unit;
+        uint32_t digit;
+        if (unit < '0' || unit > '9') return -1.0;
+        digit = unit - '0';
+        number = number * 10u + digit;
+        if (number > UINT32_C(4294967294)) return -1.0;
     }
-    return kiln_c99_key_index(buffer, key->unit_len);
+    return (double)number;
 }
 
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name) {

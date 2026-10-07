@@ -1469,11 +1469,11 @@ fn select_generic_optimization_functions_internal(
     const MAX_FUNCTION_INSTRUCTIONS: usize = 320;
     const MAX_TOTAL_INSTRUCTIONS: usize = 4096;
     const MAX_LOOP_FUNCTIONS: usize = 2;
-    const MAX_LOOP_GROUPS: usize = 8;
-    const MAX_LOOP_PROFILE_FUNCTIONS: usize = 8;
+    const MAX_LOOP_GROUPS: usize = MAX_GENERIC_LOOP_CALLERS;
+    const MAX_LOOP_PROFILE_FUNCTIONS: usize = MAX_GENERIC_LOOP_CALL_FUNCTIONS;
     const MAX_LOOP_FUNCTION_INSTRUCTIONS: usize = MAX_GENERIC_LOOP_PROFILE_CALLER_INSTRUCTIONS;
     const MAX_LOOP_TOTAL_INSTRUCTIONS: usize = 2048;
-    const MAX_LOOP_PROFILE_TOTAL_INSTRUCTIONS: usize = 4096;
+    const MAX_LOOP_PROFILE_TOTAL_INSTRUCTIONS: usize = MAX_GENERIC_LOOP_CALL_INSTRUCTIONS;
     const MAX_LOOP_GROUP_FUNCTIONS: usize = 4;
 
     let mut selected = vec![false; program.functions.len()];
@@ -1502,7 +1502,10 @@ fn select_generic_optimization_functions_internal(
     // Large bodies, generators and other frame-publishing bodies may dominate repeated work
     // while remaining outside the legacy bucket above. O1 only changes the host compiler's
     // treatment of the existing boxed body; it does not introduce a direct or typed entry. Admit
-    // a separately-budgeted set of such loop bodies and proven callees. With call evidence,
+    // a separately-budgeted set of such loop bodies and proven callees. The module profile is
+    // bounded at 512 bodies / 32,768 total instructions before this tier is entered; reuse those
+    // bounds here instead of imposing a second eight-body ceiling. Each connected group remains
+    // limited to four bodies and each body to 1,536 instructions. With call evidence,
     // rank bounded callee groups by repeated body work (context weight times body size), then
     // weight and body size. Without known edges,
     // preserve the previous span/backedge ranking. Proto index is the final stable tie break.
@@ -1533,6 +1536,7 @@ fn select_generic_optimization_functions_internal(
             }
             let group = profile.loop_group(
                 program,
+                caller,
                 target,
                 available,
                 &selected,
@@ -1553,21 +1557,38 @@ fn select_generic_optimization_functions_internal(
                 .iter()
                 .map(|index| program.functions[*index].code.len())
                 .sum::<usize>();
-            groups.push((target, group, instructions, body_work, weight));
+            groups.push((caller, target, group, instructions, body_work, weight));
         }
         groups.sort_by(|left, right| {
-            let left_work = (left.3 as u128) * (left.4 as u128);
-            let right_work = (right.3 as u128) * (right.4 as u128);
+            let left_work = (left.4 as u128) * (left.5 as u128);
+            let right_work = (right.4 as u128) * (right.5 as u128);
             right_work
                 .cmp(&left_work)
-                .then_with(|| right.3.cmp(&left.3))
                 .then_with(|| right.4.cmp(&left.4))
+                .then_with(|| right.5.cmp(&left.5))
+                .then_with(|| left.1.cmp(&right.1))
                 .then_with(|| left.0.cmp(&right.0))
         });
+        // Several call edges from one loop can each describe a plausible group. Give the best
+        // group from every distinct loop caller a chance before a caller's additional edges can
+        // consume the bounded module budget. The second pass preserves the ordinary score order
+        // for any capacity left over.
+        let mut first_by_caller = Vec::new();
+        let mut deferred_groups = Vec::new();
+        let mut seen_callers = Vec::new();
+        for group in groups {
+            if seen_callers.contains(&group.0) {
+                deferred_groups.push(group);
+            } else {
+                seen_callers.push(group.0);
+                first_by_caller.push(group);
+            }
+        }
+        first_by_caller.extend(deferred_groups);
         let mut loop_count = 0usize;
         let mut loop_instructions = 0usize;
         let mut loop_functions = 0usize;
-        for (_, group, _, _, _) in groups {
+        for (_, _, group, _, _, _) in first_by_caller {
             let new_functions = group.iter().filter(|index| !selected[**index]).count();
             let new_instructions = group
                 .iter()
@@ -1697,9 +1718,10 @@ pub(crate) fn generic_loop_profile_for_program(program: &Program) -> Option<Arc<
 }
 
 impl LoopCallProfile {
-    fn loop_group(
+    pub(crate) fn loop_group(
         &self,
         program: &Program,
+        loop_caller: Option<usize>,
         root: usize,
         available: Option<&[bool]>,
         selected: &[bool],
@@ -1719,18 +1741,53 @@ impl LoopCallProfile {
             return Vec::new();
         }
 
-        // The seed is a known callee reached from a loop. Add its bounded known-callee closure,
-        // not the caller loop itself: compiling the hot callback path gives value even when the
-        // larger loop body cannot fit in the same instruction budget.
-        let mut members = if selected[root] {
-            Vec::new()
-        } else {
-            vec![root]
-        };
-        let mut visited = vec![false; program.functions.len()];
+        // Keep traversal state separate from group membership. A loop caller can already be
+        // selected by another group (or be too large to admit here) and still lead to useful
+        // known callees through a cycle in this group's graph.
+        let mut traversed = vec![false; program.functions.len()];
+        let mut included = vec![false; program.functions.len()];
+        let mut members = Vec::new();
+        let mut instructions = 0usize;
+
+        // A seed edge originates in a loop in `loop_caller`. Keep that repeated-work driver
+        // with its known callee closure when it fits the same bounded group. Ranking-only O1
+        // selection changes no call targets or runtime semantics; an unavailable, oversized or
+        // already-selected caller does not consume this group's budget.
+        if let Some(caller) = loop_caller
+            && caller < program.functions.len()
+            && !selected[caller]
+            && !available.is_some_and(|available| !available.get(caller).copied().unwrap_or(false))
+        {
+            let proto = &program.functions[caller];
+            let size = proto.code.len();
+            let root_needs_admission = !selected[root] && caller != root;
+            let required_functions = 1 + usize::from(root_needs_admission);
+            let required_instructions =
+                size.saturating_add(if root_needs_admission { root_size } else { 0 });
+            if loop_work(proto).is_some()
+                && size > 0
+                && size <= max_function_instructions
+                && members.len().saturating_add(required_functions) <= max_functions
+                && instructions.saturating_add(required_instructions) <= max_total_instructions
+            {
+                members.push(caller);
+                included[caller] = true;
+                instructions = instructions.saturating_add(size);
+            }
+        }
+
         let mut frontier = vec![root];
-        let mut instructions = if selected[root] { 0 } else { root_size };
-        visited[root] = true;
+        traversed[root] = true;
+        if !selected[root] && !included[root] {
+            if members.len() >= max_functions
+                || instructions.saturating_add(root_size) > max_total_instructions
+            {
+                return Vec::new();
+            }
+            members.push(root);
+            included[root] = true;
+            instructions = instructions.saturating_add(root_size);
+        }
         for _ in 0..MAX_GENERIC_LOOP_CALL_DEPTH {
             let mut next = Vec::new();
             for caller in frontier {
@@ -1739,7 +1796,7 @@ impl LoopCallProfile {
                     .map(|target| *target as usize)
                     .filter(|target| {
                         *target < program.functions.len()
-                            && !visited[*target]
+                            && !traversed[*target]
                             && !program.functions[*target].code.is_empty()
                             && program.functions[*target].code.len() <= max_function_instructions
                             && !available.is_some_and(|available| {
@@ -1759,20 +1816,19 @@ impl LoopCallProfile {
                         .then_with(|| right_weight.cmp(&left_weight))
                         .then_with(|| left.cmp(right))
                 });
+                candidates.dedup();
                 for target in candidates {
-                    visited[target] = true;
-                    if selected[target] {
-                        next.push(target);
-                        continue;
-                    }
+                    traversed[target] = true;
                     let size = program.functions[target].code.len();
-                    if members.len() >= max_functions
-                        || instructions.saturating_add(size) > max_total_instructions
-                    {
-                        continue;
+                    if !selected[target] && !included[target] {
+                        if members.len() < max_functions
+                            && instructions.saturating_add(size) <= max_total_instructions
+                        {
+                            members.push(target);
+                            included[target] = true;
+                            instructions = instructions.saturating_add(size);
+                        }
                     }
-                    members.push(target);
-                    instructions += size;
                     next.push(target);
                 }
             }

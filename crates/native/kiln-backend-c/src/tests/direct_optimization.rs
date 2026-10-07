@@ -191,11 +191,11 @@ fn generic_loop_callee_weight_ranks_bounded_repeated_work_deterministically() {
 fn generic_loop_callee_groups_keep_a_hot_call_chain_within_the_budget() {
     let source = r#"
 function leaf(value: number): number { return value + 1; }
-function wrapper(value: number): number { return leaf(value); }
+function wrapper(value: number): number { return run(value); }
 function run(count: number): number {
   let total = 0;
   for (let index = 0; index < count; index++) total = wrapper(total);
-  return total;
+  return leaf(total);
 }
 export { run };
 "#;
@@ -228,8 +228,47 @@ export { run };
     assert!(selected[wrapper], "loop-reached wrapper is selected");
     assert!(selected[leaf], "known leaf stays grouped with its wrapper");
     assert!(
-        !selected[run],
-        "the loop caller does not consume the callee-group budget"
+        selected[run],
+        "the repeated loop driver is selected with its known callee chain"
+    );
+    assert!(
+        selected[leaf],
+        "the known-callee walk crosses wrapper -> loop driver -> leaf"
+    );
+
+    let unavailable = vec![false; program.functions.len()];
+    let zero_weights = vec![0; program.functions.len()];
+    let too_few_members = profile.loop_group(
+        &program,
+        Some(run),
+        wrapper,
+        None,
+        &unavailable,
+        &zero_weights,
+        1,
+        1_536,
+        4_096,
+    );
+    assert_eq!(
+        too_few_members,
+        vec![wrapper],
+        "the caller is not admitted if it would crowd out the seed target"
+    );
+    let too_few_instructions = profile.loop_group(
+        &program,
+        Some(run),
+        wrapper,
+        None,
+        &unavailable,
+        &zero_weights,
+        4,
+        1_536,
+        program.functions[wrapper].code.len(),
+    );
+    assert_eq!(
+        too_few_instructions,
+        vec![wrapper],
+        "caller instructions are checked before group admission"
     );
 
     let unavailable_leaf = crate::direct::select_generic_optimization_functions_with_profile(
@@ -249,6 +288,93 @@ export { run };
     assert!(
         unavailable_leaf[wrapper],
         "the available wrapper remains eligible"
+    );
+
+    let caller_unavailable = crate::direct::select_generic_optimization_functions_with_profile(
+        &program,
+        &vec![true; program.functions.len()],
+        Some(
+            &program
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(index, _)| index != run)
+                .collect::<Vec<_>>(),
+        ),
+        &profile,
+    );
+    assert!(!caller_unavailable[run]);
+    assert!(
+        !caller_unavailable[wrapper] && !caller_unavailable[leaf],
+        "a callee group is not selected when its only loop driver is unavailable"
+    );
+}
+
+#[test]
+fn generic_loop_callee_groups_cover_distinct_callers_before_extra_edges() {
+    let large_leaf = |name: &str| {
+        let mut body = format!("function {name}(value: number): number {{\n");
+        for _ in 0..180 {
+            body.push_str("value = value + 1;\n");
+        }
+        body.push_str("return value;\n}\n");
+        body
+    };
+    let mut source = String::new();
+    for name in ["aLeaf1", "aLeaf2", "aLeaf3", "bLeaf"] {
+        source.push_str(&large_leaf(name));
+    }
+    source.push_str(
+        "function a1(value: number): number { return aLeaf1(value); }\n\
+         function a2(value: number): number { return aLeaf2(value); }\n\
+         function a3(value: number): number { return aLeaf3(value); }\n\
+         function b1(value: number): number { return bLeaf(value); }\n\
+         function runA(count: number): number { let x = 0; for (let i = 0; i < count; i++) { x = a1(x); x = a2(x); x = a3(x); } return x; }\n\
+         function runB(count: number): number { let x = 0; for (let i = 0; i < count; i++) x = b1(x); return x; }\n\
+         export { runA, runB };\n",
+    );
+    let hir = kiln_frontend_oxc::parse("fixture/loop-caller-diversity.ts", &source);
+    let program = kiln_ir::compile_module(&hir)
+        .expect("caller-diversity fixture compiles")
+        .program;
+    let find = |name: &str| {
+        program
+            .functions
+            .iter()
+            .position(|proto| {
+                proto
+                    .effective_name_units()
+                    .is_some_and(|value| value.to_lossy_string() == name)
+            })
+            .unwrap_or_else(|| panic!("missing proto {name}"))
+    };
+    let profile = crate::direct::generic_loop_profile_for_program(&program)
+        .expect("fixture fits the bounded call profile");
+    let selected = crate::direct::select_generic_optimization_functions_with_profile(
+        &program,
+        &vec![true; program.functions.len()],
+        None,
+        &profile,
+    );
+    let run_a = find("runA");
+    let run_b = find("runB");
+    let b1 = find("b1");
+    let b_leaf = find("bLeaf");
+    assert!(selected[run_a]);
+    assert!(selected[run_b] && selected[b1] && selected[b_leaf]);
+    assert!(
+        selected.iter().filter(|selected| **selected).count() > 8,
+        "the loop tier is no longer silently limited to eight supplemental bodies"
+    );
+    assert!(
+        selected
+            .iter()
+            .enumerate()
+            .filter(|(_, selected)| **selected)
+            .map(|(index, _)| program.functions[index].code.len())
+            .sum::<usize>()
+            <= 32_768,
+        "selected loop bodies remain within the profile instruction envelope"
     );
 }
 
@@ -384,7 +510,7 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
         true,
         false,
         None,
-        shared_profile,
+        shared_profile.clone(),
     );
     shared_profile_plan.set_available(
         &instantiation_program,
@@ -396,6 +522,19 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
         .map(|plan| plan.generic_function_optimized)
         .collect::<Vec<_>>();
     let shared_profile_weights = shared_profile_plan.generic_loop_profile_weights();
+    let decode_array_group = shared_profile.as_ref().map(|profile| {
+        profile.loop_group(
+            &program,
+            Some(193),
+            199,
+            None,
+            &vec![false; program.functions.len()],
+            &shared_profile_weights.clone().unwrap_or_default(),
+            4,
+            1_536,
+            4_096,
+        )
+    });
     let targets = [
         (156, "encodeArray"),
         (165, "encodeValue"),
@@ -566,6 +705,7 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
                 .filter_map(|(index, selected)| selected.then_some(index)).collect::<Vec<_>>(),
             "shared_profile_selected_protos": shared_profile_selected.iter().enumerate()
                 .filter_map(|(index, selected)| selected.then_some(index)).collect::<Vec<_>>(),
+            "decode_array_group": decode_array_group,
             "selected_names": selected_names,
         "selected_target_rows": rows,
         "loop_profile_present": loop_weights.is_some(),
@@ -596,10 +736,6 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
         "the encode callee remains selected under its loop weight"
     );
     assert!(
-        selected[199] && selected[200],
-        "the decode callee chain is selected as a group"
-    );
-    assert!(
         !instantiation_selected[165],
         "the declaration-only entry loses the evaluation stores used by local ranking"
     );
@@ -615,10 +751,15 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
         shared_profile_selected[200],
         "decodeValueUnchecked remains grouped with its hot wrapper"
     );
+    assert!(
+        shared_profile_selected[193],
+        "the repeated decodeArray loop driver is selected with its callee chain"
+    );
 
     // Exercise the same split-module emitter used by native cyclic-module AOT, not only the
     // planner helper above. The instantiation C unit contains the hoisted callback body, while
     // the loop and immutable binding assignment that establish its ranking are in evaluation.
+    let emit_started = std::time::Instant::now();
     let emitted = crate::emit_module_with_logical_path_and_policy_and_instantiation(
         &module,
         "packages/effect/src/encoding/SchemaBinary.ts",
@@ -632,6 +773,21 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
     let instantiation = emitted
         .instantiation
         .expect("the cycle module has a separate instantiation unit");
+    println!(
+        "schema_emission_stats {}",
+        serde_json::json!({
+            "evaluation_c_bytes": emitted.source.len(),
+            "instantiation_c_bytes": instantiation.source.len(),
+            "emission_elapsed_ms": emit_started.elapsed().as_millis(),
+            "selected_function_count": shared_profile_selected.iter().filter(|selected| **selected).count(),
+            "selected_function_instructions": shared_profile_selected.iter().enumerate()
+                .filter(|(_, selected)| **selected)
+                .map(|(index, _)| program.functions[index].code.len())
+                .sum::<usize>(),
+            "tier_profile_function_limit": 512,
+            "tier_profile_instruction_limit": 32_768,
+        })
+    );
     assert!(
         instantiation.generic_mixed_optimization,
         "the instantiation unit carries its own mixed-tier compile requirement"
@@ -680,8 +836,8 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
         .expect("decodeArray has an emitted C function");
     let driver_header = &instantiation.source[driver_marker_at..driver_header_end];
     assert!(
-        driver_header.contains("optnone") || driver_header.contains("optimize(\"O0\")"),
-        "unselected decodeArray remains explicitly O0 inside the mixed-tier unit: {driver_header}"
+        !driver_header.contains("optnone") && !driver_header.contains("optimize(\"O0\")"),
+        "actual SchemaBinary instantiation emits decodeArray in the bounded O1 tier: {driver_header}"
     );
 }
 
