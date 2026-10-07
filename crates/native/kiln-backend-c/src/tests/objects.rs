@@ -6,7 +6,14 @@ fn candidate_pointer_store_memoizes_membership_lookups_without_losing_edges() {
         .expect("empty program emits runtime prelude");
     generated
         .source
-        .insert_str(0, "#define KILN_C99_TEST_STORE_LOOKUP_COUNTS 1\n");
+        .insert_str(
+            0,
+            "#include <stddef.h>\n\
+             static size_t kiln_c99_test_store_lookup_count;\n\
+             static size_t kiln_c99_test_store_interior_lookup_count;\n\
+             #define KILN_C99_STORE_LOOKUP_COUNT() (++kiln_c99_test_store_lookup_count)\n\
+             #define KILN_C99_STORE_INTERIOR_LOOKUP_COUNT() (++kiln_c99_test_store_interior_lookup_count)\n",
+        );
     let wrapper = r#"
 static int store_lookup_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();

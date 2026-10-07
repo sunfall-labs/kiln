@@ -3084,13 +3084,10 @@ static kiln_c99_candidate_group *kiln_c99_candidate_block_group(
 
 static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *, uintptr_t);
 
-#if defined(KILN_C99_TEST_STORE_LOOKUP_COUNTS)
-static size_t kiln_c99_test_store_lookup_count;
-static size_t kiln_c99_test_store_interior_lookup_count;
-#define KILN_C99_STORE_LOOKUP_COUNT() (++kiln_c99_test_store_lookup_count)
-#define KILN_C99_STORE_INTERIOR_LOOKUP_COUNT() (++kiln_c99_test_store_interior_lookup_count)
-#else
+#ifndef KILN_C99_STORE_LOOKUP_COUNT
 #define KILN_C99_STORE_LOOKUP_COUNT() ((void)0)
+#endif
+#ifndef KILN_C99_STORE_INTERIOR_LOOKUP_COUNT
 #define KILN_C99_STORE_INTERIOR_LOOKUP_COUNT() ((void)0)
 #endif
 

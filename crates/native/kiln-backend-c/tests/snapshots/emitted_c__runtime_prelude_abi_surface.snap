@@ -2394,7 +2394,15 @@ static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const
 static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
 static kiln_c99_candidate_group *kiln_c99_candidate_block_group(
 static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *, uintptr_t);
+#ifndef KILN_C99_STORE_LOOKUP_COUNT
+#define KILN_C99_STORE_LOOKUP_COUNT() ((void)0)
+#endif
+#ifndef KILN_C99_STORE_INTERIOR_LOOKUP_COUNT
+#define KILN_C99_STORE_INTERIOR_LOOKUP_COUNT() ((void)0)
+#endif
 static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
+#undef KILN_C99_STORE_LOOKUP_COUNT
+#undef KILN_C99_STORE_INTERIOR_LOOKUP_COUNT
 static KILN_ALWAYS_INLINE inline void kiln_c99_candidate_record_val_store(
 static void kiln_c99_heap_record_pointer(const void *owner_payload, const void *pointer) {
 static KILN_ALWAYS_INLINE inline const void *kiln_c99_gc_value_pointer(kiln_value value) {
@@ -2617,6 +2625,7 @@ static const kiln_string *kiln_c99_intern_shared_key(const kiln_string *string);
 static int kiln_c99_register_static_keys(const kiln_string *const *keys, const kiln_string **out,
 static int kiln_c99_keys_check_mode = -1;
 static int kiln_c99_keys_checked(void) {
+static inline uint64_t kiln_c99_key_hash_mix_word(uint64_t hash, uint64_t word,
 static uint64_t kiln_c99_key_hash(const kiln_string *string) {
 static kiln_key_entry *kiln_c99_key_probe(const kiln_key_table *table, const kiln_string *string,
 static void kiln_c99_key_place(kiln_key_table *table, kiln_key_entry entry) {
