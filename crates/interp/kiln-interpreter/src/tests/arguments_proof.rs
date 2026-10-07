@@ -36,7 +36,7 @@ fn program_with_functions(
     functions: Vec<kiln_ir::FunctionProto>,
 ) -> Program {
     Program {
-        source: String::new(),
+        source: String::new().into(),
         template_sites: Vec::new(),
         debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
@@ -50,7 +50,7 @@ fn program_with_functions(
     }
 }
 
-fn host() -> TestHost {
+fn test_host() -> TestHost {
     TestHost {
         calls: Vec::new(),
         clock_now: None,
@@ -89,7 +89,7 @@ fn length_only_function_uses_the_actual_argument_count_including_surplus_argumen
         0,
         vec![length_reader(false)],
     );
-    let mut host = host();
+    let mut host = test_host();
     let (mut vm, function) = root_function(&program, &mut host);
     let Value::Function(closure) = &function else {
         panic!("MakeFunction returns a closure");
@@ -131,7 +131,7 @@ fn arguments_object_observes_indices_and_mutation_when_the_body_needs_the_object
         0,
         vec![function],
     );
-    let mut host = host();
+    let mut host = test_host();
     let (mut vm, function) = root_function(&program, &mut host);
     let Value::Function(closure) = &function else {
         panic!("MakeFunction returns a closure");
@@ -189,7 +189,7 @@ fn a_local_alias_of_sloppy_arguments_remains_the_same_mutable_object() {
         0,
         vec![function],
     );
-    let mut host = host();
+    let mut host = test_host();
     let (mut vm, function) = root_function(&program, &mut host);
     let Value::Function(closure) = &function else {
         panic!("MakeFunction returns a closure");
@@ -232,7 +232,7 @@ fn unused_arrow_does_not_capture_arguments_but_a_descendant_reader_does() {
             ),
         ],
     );
-    let mut host = host();
+    let mut host = test_host();
     let unused = run_vm(&unused, &mut host);
     let Value::Function(unused) = unused else {
         panic!("outer call returns the unused arrow");
@@ -266,7 +266,7 @@ fn unused_arrow_does_not_capture_arguments_but_a_descendant_reader_does() {
             ),
         ],
     );
-    let mut host = host();
+    let mut host = test_host();
     let mut vm = test_vm(&length_arrow_program, &mut host);
     let parent = vm.run().expect("module creates parent").value;
     let arrow = vm
@@ -331,7 +331,7 @@ fn unused_arrow_does_not_capture_arguments_but_a_descendant_reader_does() {
             ),
         ],
     );
-    let mut host = host();
+    let mut host = test_host();
     let mut vm = test_vm(&nested, &mut host);
     let parent = vm.run().expect("module creates parent").value;
     let Value::Function(parent_closure) = &parent else {
@@ -392,7 +392,7 @@ fn arrow_this_and_new_target_captures_do_not_require_an_arguments_capture() {
             ),
         ],
     );
-    let mut host = host();
+    let mut host = test_host();
     let mut vm = test_vm(&this_program, &mut host);
     let parent = vm.run().expect("module creates parent").value;
     let receiver = object(&[("marker", Value::Number(5.0))]);
@@ -514,7 +514,7 @@ fn argument_facts_are_scoped_to_the_exact_program_in_a_reused_realm() {
         )],
     );
     let mut runtime = realm_runtime().expect("realm runtime");
-    let mut host = host();
+    let mut host = test_host();
     let length_closure = execute_in_runtime_with_strictness(
         Rc::new(length_program.clone()),
         Rc::new(Strictness::sloppy(&length_program)),
@@ -578,7 +578,7 @@ fn direct_eval_keeps_arguments_visible_after_a_length_read() {
         global_var_scope: false,
         argc: Some(1),
         home: None,
-        new_target: EvalNewTarget::Caller,
+        new_target: kiln_ir::EvalNewTarget::Caller,
         private_scopes: Vec::new(),
         blocked_var_names: Vec::new(),
     };
@@ -607,7 +607,7 @@ fn direct_eval_keeps_arguments_visible_after_a_length_read() {
         0,
         vec![function],
     );
-    let mut host = host();
+    let mut host = test_host();
     let mut vm = Vm::with_entropy_seed(
         Rc::new(program.clone()),
         Rc::new(Strictness::sloppy(&program)),
@@ -650,7 +650,7 @@ fn paired_length_read_obeys_step_limit_for_both_instructions() {
         0,
         vec![length_reader(false)],
     );
-    let mut host = host();
+    let mut host = test_host();
     let error = execute(
         Rc::new(program),
         &mut host,
@@ -678,7 +678,7 @@ fn pending_length_read_survives_a_bounded_run_between_the_pair() {
         0,
         vec![length_reader(false)],
     );
-    let mut host = host();
+    let mut host = test_host();
     let mut vm = test_vm(&program, &mut host);
     // Stop at callee PC 1, after LoadArguments ran and before its adjacent GetProperty.
     let partial = vm
@@ -719,7 +719,7 @@ fn get_property_is_not_rewritten_when_a_branch_enters_from_another_predecessor()
         0,
         vec![function],
     );
-    let mut host = host();
+    let mut host = test_host();
     let (mut vm, function) = root_function(&program, &mut host);
     let supplied = object(&[("length", Value::Number(77.0))]);
     assert_eq!(
