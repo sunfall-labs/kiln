@@ -134,6 +134,27 @@
     return timeClip(days * 86400000 + clock);
   }
 
+  // The four UTC time-of-day setters keep the date's UTC day and only normalize the clock
+  // fields. Avoid converting that day to civil year/month/day and immediately converting it
+  // back again; MakeDate(day, MakeTime(...)) is exactly dayStart + normalized clock.
+  function sameUTCDateWithTime(time: number, hour: number, minute: number, second: number, millisecond: number): number {
+    if (
+      !numberIsFinite(hour) ||
+      !numberIsFinite(minute) ||
+      !numberIsFinite(second) ||
+      !numberIsFinite(millisecond)
+    ) {
+      return NaN;
+    }
+    const days = mathFloor(mathTrunc(time) / 86400000);
+    const h = mathTrunc(hour);
+    const min = mathTrunc(minute);
+    const sec = mathTrunc(second);
+    const ms = mathTrunc(millisecond);
+    const clock = ((h * 3600000 + min * 60000) + sec * 1000) + ms;
+    return timeClip(days * 86400000 + clock);
+  }
+
 
   // --- Getters ---
   const getTime = { getTime(this: Date): number {
@@ -253,11 +274,11 @@
     const se = arguments.length > 2 ? +sec : undefined;
     const mil = arguments.length > 3 ? +ms : undefined;
     if (numberIsNaN(t)) return NaN;
-    const p = dateParts(t)!;
-    const newMin = mi !== undefined ? mi : p.minute;
-    const newSec = se !== undefined ? se : p.second;
-    const newMs = mil !== undefined ? mil : p.millisecond;
-    const newTime = partsToInstant(p.year, p.month, p.date, h, newMin, newSec, newMs);
+    const within = floorMod(mathTrunc(t), 86400000);
+    const newMin = mi !== undefined ? mi : mathFloor(within / 60000) % 60;
+    const newSec = se !== undefined ? se : mathFloor(within / 1000) % 60;
+    const newMs = mil !== undefined ? mil : within % 1000;
+    const newTime = sameUTCDateWithTime(t, h, newMin, newSec, newMs);
     return rawSetTime.call(this, newTime);
   } }.setUTCHours;
 
@@ -267,10 +288,11 @@
     const se = arguments.length > 1 ? +sec : undefined;
     const mil = arguments.length > 2 ? +ms : undefined;
     if (numberIsNaN(t)) return NaN;
-    const p = dateParts(t)!;
-    const newSec = se !== undefined ? se : p.second;
-    const newMs = mil !== undefined ? mil : p.millisecond;
-    const newTime = partsToInstant(p.year, p.month, p.date, p.hour, m, newSec, newMs);
+    const within = floorMod(mathTrunc(t), 86400000);
+    const hour = mathFloor(within / 3600000);
+    const newSec = se !== undefined ? se : mathFloor(within / 1000) % 60;
+    const newMs = mil !== undefined ? mil : within % 1000;
+    const newTime = sameUTCDateWithTime(t, hour, m, newSec, newMs);
     return rawSetTime.call(this, newTime);
   } }.setUTCMinutes;
 
@@ -279,9 +301,11 @@
     const s = +sec;
     const mil = arguments.length > 1 ? +ms : undefined;
     if (numberIsNaN(t)) return NaN;
-    const p = dateParts(t)!;
-    const newMs = mil !== undefined ? mil : p.millisecond;
-    const newTime = partsToInstant(p.year, p.month, p.date, p.hour, p.minute, s, newMs);
+    const within = floorMod(mathTrunc(t), 86400000);
+    const hour = mathFloor(within / 3600000);
+    const minute = mathFloor(within / 60000) % 60;
+    const newMs = mil !== undefined ? mil : within % 1000;
+    const newTime = sameUTCDateWithTime(t, hour, minute, s, newMs);
     return rawSetTime.call(this, newTime);
   } }.setUTCSeconds;
 
@@ -289,8 +313,11 @@
     const t = rawGetTime.call(this);
     const m = +ms;
     if (numberIsNaN(t)) return NaN;
-    const p = dateParts(t)!;
-    const newTime = partsToInstant(p.year, p.month, p.date, p.hour, p.minute, p.second, m);
+    const within = floorMod(mathTrunc(t), 86400000);
+    const hour = mathFloor(within / 3600000);
+    const minute = mathFloor(within / 60000) % 60;
+    const second = mathFloor(within / 1000) % 60;
+    const newTime = sameUTCDateWithTime(t, hour, minute, second, m);
     return rawSetTime.call(this, newTime);
   } }.setUTCMilliseconds;
 
