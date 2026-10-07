@@ -22,6 +22,10 @@ function aliasAndMutate() {
 function capturesArguments() {
   return () => arguments.length;
 }
+function capturesObjectAfterLength() {
+  const before = arguments.length;
+  return () => arguments[0];
+}
 function evaluatedArguments() {
   const beforeEval = arguments.length;
   return [beforeEval, eval('arguments.length')];
@@ -50,10 +54,11 @@ function newTargetArguments() { return [arguments.length, new.target]; }
         .iter()
         .map(|proto| crate::graph::build_function_graph(proto, &program).expect("build graph"))
         .collect::<Vec<_>>();
+    let arguments_analysis = kiln_graph::ArgumentsAnalysis::new(&program);
     let facts = graphs
         .iter()
-        .zip(&program.functions)
-        .map(|(graph, proto)| crate::emit_graph::arguments_length_fact(graph, proto, &program))
+        .enumerate()
+        .map(|(function, graph)| arguments_analysis.argument_length_fact(function, graph))
         .collect::<Vec<_>>();
     let publishes = crate::compute_publishes_frame_with_argument_facts(&program, &facts);
 
@@ -69,7 +74,11 @@ function newTargetArguments() { return [arguments.length, new.target]; }
         "an argc-only arguments read must not publish the observable arguments frame"
     );
 
-    for name in ["aliasAndMutate", "capturesArguments", "evaluatedArguments"] {
+    for name in [
+        "aliasAndMutate",
+        "capturesObjectAfterLength",
+        "evaluatedArguments",
+    ] {
         let index = function_index(name);
         assert!(
             !facts[index].reads_elided,
@@ -77,6 +86,13 @@ function newTargetArguments() { return [arguments.length, new.target]; }
         );
         assert!(publishes[index], "{name} requires its arguments frame");
     }
+    let parent_capture = function_index("capturesArguments");
+    assert!(facts[parent_capture].reads_elided);
+    assert!(facts[parent_capture].values.is_empty());
+    assert!(
+        publishes[parent_capture],
+        "a parent with no own LoadArguments still publishes its frame when a child arrow captures arguments"
+    );
     for name in ["generatorArguments", "asyncArguments"] {
         let index = function_index(name);
         assert!(!facts[index].reads_elided, "{name} remains conservative");

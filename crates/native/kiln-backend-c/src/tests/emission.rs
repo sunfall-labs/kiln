@@ -1,10 +1,55 @@
 use super::*;
 
+fn emitted_function_body<'a>(source: &'a str, symbol: &str, index: usize) -> &'a str {
+    let needle = format!("{symbol}_fn_{index}(");
+    let mut search_from = 0;
+    loop {
+        let relative = source[search_from..]
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing emitted function {symbol}_fn_{index}"));
+        let start = search_from + relative;
+        let suffix = &source[start..];
+        let open = suffix.find('{');
+        let semicolon = suffix.find(';');
+        if let Some(open) = open.filter(|open| semicolon.is_none_or(|semicolon| *open < semicolon))
+        {
+            let body_start = start + open;
+            let close = source[body_start..]
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("missing end of emitted function {symbol}_fn_{index}"));
+            return &source[start..body_start + close + 3];
+        }
+        search_from = start + needle.len();
+    }
+}
+
+fn emitted_proto_flags(source: &str, symbol: &str, index: usize) -> u8 {
+    let marker = format!("(kiln_body_fn){symbol}_fn_{index},");
+    let line = source
+        .lines()
+        .find(|line| line.contains(&marker))
+        .unwrap_or_else(|| panic!("missing emitted proto metadata for {symbol}_fn_{index}"));
+    let metadata_prefix = line
+        .split(", {0}")
+        .next()
+        .expect("proto metadata has its trailing reserved field");
+    metadata_prefix
+        .rsplit(", ")
+        .next()
+        .expect("proto metadata contains flags")
+        .trim()
+        .parse::<u8>()
+        .expect("proto flags are a byte")
+}
+
 #[test]
 fn argc_only_arguments_length_emits_without_publishing_an_arguments_frame() {
     let hir = kiln_frontend_oxc::parse(
         "fixture/arguments-length-emission.ts",
-        "function argcOnly() { return arguments.length; }\nargcOnly(1, 2, 3);",
+        "function argcOnly() { return arguments.length; }\n\
+         function capturesArguments() { return () => arguments.length; }\n\
+         function capturesObjectAfterLength() { const before = arguments.length; return () => arguments[0]; }\n\
+         argcOnly(1, 2, 3);",
     );
     let program = kiln_ir::compile_module(&hir)
         .expect("arguments-length fixture compiles")
@@ -18,18 +63,6 @@ fn argc_only_arguments_length_emits_without_publishing_an_arguments_frame() {
     )
     .expect("arguments-length module emits");
 
-    assert!(
-        emitted.source.contains("(double)argc"),
-        "the proven length read comes from the actual call argc"
-    );
-    assert!(
-        !emitted.source.contains("kiln_c99_visible_arguments"),
-        "the eligible body does not materialize the visible arguments array"
-    );
-    assert!(
-        !emitted.source.contains("kiln_c99_frame_mapped_arguments ="),
-        "an argc-only body does not publish an observable arguments object"
-    );
     let argc_only = program
         .functions
         .iter()
@@ -39,28 +72,49 @@ fn argc_only_arguments_length_emits_without_publishing_an_arguments_frame() {
                 .is_some_and(|name| name.to_lossy_string() == "argcOnly")
         })
         .expect("argcOnly proto");
-    let marker = format!("(kiln_body_fn){}_fn_{argc_only},", emitted.symbol);
-    let proto_metadata = emitted
-        .source
-        .lines()
-        .find(|line| line.contains(&marker))
-        .expect("emitted proto metadata for argcOnly");
-    let metadata_prefix = proto_metadata
-        .split(", {0}")
-        .next()
-        .expect("proto metadata has its trailing reserved field");
-    let flags = metadata_prefix
-        .rsplit(", ")
-        .next()
-        .expect("proto metadata contains flags")
-        .trim()
-        .parse::<u8>()
-        .expect("proto flags are a byte");
+    let captures_arguments = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|name| name.to_lossy_string() == "capturesArguments")
+        })
+        .expect("capturesArguments proto");
+    let captures_object_after_length = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|name| name.to_lossy_string() == "capturesObjectAfterLength")
+        })
+        .expect("capturesObjectAfterLength proto");
+    let body = emitted_function_body(&emitted.source, &emitted.symbol, argc_only);
+    assert!(
+        body.contains("(double)argc"),
+        "the proven length read comes from the actual call argc"
+    );
+    assert!(
+        !body.contains("kiln_c99_visible_arguments"),
+        "the exact argc-only body does not materialize the visible arguments array"
+    );
+    assert!(
+        !body.contains("kiln_c99_frame_mapped_arguments ="),
+        "the exact argc-only body does not publish an observable arguments object"
+    );
     assert_eq!(
-        flags & (1 << 6),
+        emitted_proto_flags(&emitted.source, &emitted.symbol, argc_only) & (1 << 6),
         0,
         "the exact argcOnly proto metadata clears publishes_frame"
     );
+    for index in [captures_arguments, captures_object_after_length] {
+        assert_ne!(
+            emitted_proto_flags(&emitted.source, &emitted.symbol, index) & (1 << 6),
+            0,
+            "an arrow that captures the parent arguments keeps that exact parent frame published"
+        );
+    }
 }
 
 #[test]
