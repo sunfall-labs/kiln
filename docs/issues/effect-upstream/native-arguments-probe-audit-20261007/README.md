@@ -30,6 +30,5 @@ with `KILN_JOBS=1` and `RAYON_NUM_THREADS=1`. Candidate and baseline native runs
 ordinary and `KILN_GC_STRESS=1` modes. Full output logs and checksums are under `raw/`.
 
 The newly added CJS file is retained only as a standalone unsupported-behavior reproduction; it is
-not in `conformance/native/`. The supported MJS corpus update has not yet been tested with a native
-CLI after the added retained-object case; that is the next validation step on the active candidate
-build.
+not in `conformance/native/`. The supported MJS corpus update was run through the official
+`scripts/native.sh` on frozen db691 CLI `d7d45c4248864468e4af54719e1a62275c533567d795a9ac18bd200930c10049`: `arguments-length-frame.mjs`, `arguments-length-fast-path.js`, and `json-shaped-build-edges.js` matched 3/3 in ordinary mode and 3/3 under `KILN_NATIVE_GC_STRESS=1`. The full raw outputs, commands, and CLI/provider receipt are retained under `raw/official-native-*`.
