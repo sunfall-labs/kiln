@@ -1,0 +1,7 @@
+# Current ClusterWorkflowEngine native replay
+
+The original pinned 47-case direct-TypeScript file completed in a quiet window after the green routine gate and all separate compilers finished. It passed 46 cases and failed the same original five-second case, `ClusterWorkflowEngine > a parent stays suspended past the activity interrupt retry budget`. The full suite remains incomplete.
+
+The frozen compiler SHA-256 is `cdae5bcf3bd90f73412e0e0b3d35d0cefc8204fb388502476673d0e700ae6df2`, with the production code tested by the green `f53e22c6` gate and landed at `ab63eaee`. Native executable SHA-256 is `3125bfcd12d2e58c4eef7e12fc4f733a0ed885b14594b83b64af648b4166466b`. The explicit provider manifest has SHA-256 `4b68a2200f148e19ff7fcd146cacd5c8ffb546692d67e52478fb3b266c19621b`. Build and execution evidence are separate; staging took 438.163 seconds, including 398.392 seconds compilation, with one worker and the original source. Execution took 35.262 seconds. These are acceptance diagnostics, not benchmark scores.
+
+All 47 registered cases map to the official Node/Vitest inventory, with zero inventory/mode/mapping errors, zero skipped cases and one outcome mismatch. The original sources, assertions and deadlines were unchanged; there was no whole-file timeout. The original binary is losslessly compressed in the owned scratch output with its runner's verified original digest and size; all reports/logs and their archive hashes are retained here.
