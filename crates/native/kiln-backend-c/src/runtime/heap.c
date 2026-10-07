@@ -3034,6 +3034,7 @@ static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const
     uint64_t *bitmap;
     size_t words;
     kiln_gc_block *block;
+    uintptr_t q_address;
     int located;
     if (heap == NULL || payload == NULL) return NULL;
     located = (uintptr_t)p >= sizeof(kiln_gc_block) &&
@@ -3043,15 +3044,18 @@ static kiln_gc_block *kiln_c99_gc_lookup_nursery(const kiln_gc_heap *heap, const
         if (block != NULL) return block;
     }
     if ((uintptr_t)p >= sizeof(kiln_string) + sizeof(kiln_gc_block)) {
-        const char *q = p - sizeof(kiln_string);
+        const char *q = (const char *)((uintptr_t)p - sizeof(kiln_string));
+        q_address = (uintptr_t)q;
         /* String `data` pointers and their header-adjusted candidate live in the same nursery
-         * region. Reuse the membership result when the first candidate located that region;
-         * only do the second region lookup when the adjusted pointer crosses a region boundary. */
-        if ((!located || q < base || q >= limit) &&
+         * candidate usually share a region. Reuse the membership result only when the adjusted
+         * candidate remains in it; otherwise locate that candidate independently. */
+        if ((!located || q_address < (uintptr_t)base || q_address >= (uintptr_t)limit) &&
             !kiln_c99_nursery_locate(heap, q, &base, &limit, &bitmap, &words)) {
             return NULL;
         }
-        block = kiln_c99_nursery_block_at(base, limit, bitmap, words, q - sizeof(kiln_gc_block));
+        block = kiln_c99_nursery_block_at(
+            base, limit, bitmap, words,
+            (const char *)(q_address - sizeof(kiln_gc_block)));
         if (block != NULL && ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING ||
                               (block->kind & KILN_GC_KIND_MASK) == KILN_GC_SLICED_STRING)) return block;
     }
