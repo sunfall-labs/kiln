@@ -143,12 +143,30 @@ impl<'program> ArgumentsAnalysis<'program> {
         let Some(proto) = self.program.functions.get(function) else {
             return ArgumentsLengthFact::default();
         };
-        self.argument_length_fact_for(graph, proto)
+        self.argument_length_fact_for_member(graph, proto)
     }
 
-    /// Proof for graphless callers is useful only as a conservative fallback; the graph-based
-    /// module path should use `argument_length_fact` so phase and proto identity stay coupled.
+    /// Standalone fallback for callers that do not have a function index. The proto must be an
+    /// element of this analysis's exact Program; otherwise its constant and child indexes could
+    /// be interpreted against the wrong program. The indexed planner path uses
+    /// [`Self::argument_length_fact`] and avoids this linear membership check.
     pub fn argument_length_fact_for(
+        &self,
+        graph: &FunctionGraph,
+        proto: &FunctionProto,
+    ) -> ArgumentsLengthFact {
+        if !self
+            .program
+            .functions
+            .iter()
+            .any(|member| std::ptr::eq(member, proto))
+        {
+            return ArgumentsLengthFact::default();
+        }
+        self.argument_length_fact_for_member(graph, proto)
+    }
+
+    fn argument_length_fact_for_member(
         &self,
         graph: &FunctionGraph,
         proto: &FunctionProto,
@@ -372,5 +390,19 @@ mod tests {
         let facts = ArrowArgumentsCaptureFacts::for_program(&first);
         assert!(ArgumentsAnalysis::with_arrow_capture_facts(&first, &facts).is_some());
         assert!(ArgumentsAnalysis::with_arrow_capture_facts(&second, &facts).is_none());
+    }
+
+    #[test]
+    fn standalone_length_proof_rejects_proto_from_another_program() {
+        let first = program(vec![proto(false, vec![Instruction::LoadArguments])]);
+        let second = program(vec![proto(false, vec![Instruction::LoadArguments])]);
+        let analysis = ArgumentsAnalysis::new(&first);
+        let foreign_proto = &second.functions[0];
+        let graph = crate::build_function_graph(foreign_proto, &second)
+            .expect("the identical-index foreign proto should form a valid graph");
+
+        let fact = analysis.argument_length_fact_for(&graph, foreign_proto);
+        assert!(!fact.reads_elided);
+        assert!(fact.values.is_empty());
     }
 }
