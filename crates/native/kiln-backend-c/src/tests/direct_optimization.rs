@@ -1,6 +1,179 @@
 use super::*;
 
 #[test]
+fn arguments_length_graph_fact_is_shared_by_frame_and_generic_tier_planning() {
+    let source = r#"
+function argcLoop(limit) {
+  let index = 0;
+  let total = 0;
+  while (index < limit) {
+    total += arguments.length;
+    index++;
+  }
+  return total;
+}
+function simpleLength(parameter) { return arguments.length; }
+function callsSimpleLengthWithExtraActuals() { return simpleLength(1, 2, 3); }
+function aliasAndMutate() {
+  const alias = arguments;
+  alias.length = 1;
+  return arguments.length;
+}
+function capturesArguments() {
+  return () => arguments.length;
+}
+function capturesObjectAfterLength() {
+  const before = arguments.length;
+  return () => arguments[0];
+}
+function evaluatedArguments() {
+  const args = arguments;
+  const beforeEval = args.length;
+  return [beforeEval, eval('arguments.length')];
+}
+function* generatorArguments() { yield arguments.length; }
+async function asyncArguments() { return arguments.length; }
+function newTargetArguments() { return [arguments.length, new.target]; }
+"#;
+    let hir = kiln_frontend_oxc::parse("fixture/arguments-length-facts.ts", source);
+    let program = kiln_ir::compile_module(&hir)
+        .expect("arguments-length fixture compiles")
+        .program;
+    let function_index = |name: &str| {
+        program
+            .functions
+            .iter()
+            .position(|proto| {
+                proto
+                    .effective_name_units()
+                    .is_some_and(|units| units.to_lossy_string() == name)
+            })
+            .unwrap_or_else(|| panic!("missing function {name}"))
+    };
+    let graphs = program
+        .functions
+        .iter()
+        .map(|proto| crate::graph::build_function_graph(proto, &program).expect("build graph"))
+        .collect::<Vec<_>>();
+    let arguments_analysis = kiln_graph::ArgumentsAnalysis::new(&program);
+    let facts = graphs
+        .iter()
+        .enumerate()
+        .map(|(function, graph)| arguments_analysis.argument_length_fact(function, graph))
+        .collect::<Vec<_>>();
+    let publishes = crate::compute_publishes_frame_with_argument_facts(&program, &facts);
+
+    let argc_loop = function_index("argcLoop");
+    assert!(facts[argc_loop].reads_elided);
+    assert!(!facts[argc_loop].values.is_empty());
+    assert!(
+        crate::compute_publishes_frame(&program)[argc_loop],
+        "the conservative graphless answer still treats LoadArguments as observable"
+    );
+    assert!(
+        !publishes[argc_loop],
+        "an argc-only arguments read must not publish the observable arguments frame"
+    );
+
+    for name in [
+        "aliasAndMutate",
+        "capturesObjectAfterLength",
+        "evaluatedArguments",
+    ] {
+        let index = function_index(name);
+        assert!(
+            !facts[index].reads_elided,
+            "{name} observes or can mutate the arguments object"
+        );
+        assert!(publishes[index], "{name} requires its arguments frame");
+    }
+    let parent_capture = function_index("capturesArguments");
+    assert!(facts[parent_capture].reads_elided);
+    assert!(facts[parent_capture].values.is_empty());
+    assert!(
+        publishes[parent_capture],
+        "a parent with no own LoadArguments still publishes its frame when a child arrow captures arguments"
+    );
+    for name in ["generatorArguments", "asyncArguments"] {
+        let index = function_index(name);
+        assert!(!facts[index].reads_elided, "{name} remains conservative");
+        assert!(publishes[index], "{name} retains its resumable frame");
+    }
+    let new_target = function_index("newTargetArguments");
+    assert!(facts[new_target].reads_elided);
+    assert!(
+        publishes[new_target],
+        "eliding arguments.length must not elide an independent new.target frame use"
+    );
+
+    let entry_proto = crate::entry_proto(&program);
+    let entry_graph =
+        crate::graph::build_function_graph(&entry_proto, &program).expect("build entry graph");
+    let generic = crate::direct::DirectPlan::plan(
+        &program,
+        &graphs,
+        &entry_graph,
+        &publishes,
+        true,
+        false,
+        true,
+        false,
+        None,
+    );
+    assert!(
+        generic.functions[argc_loop].generic_function_optimized,
+        "the shared nonpublishing fact leaves the looping boxed body eligible for O1"
+    );
+    assert_eq!(
+        generic.functions[argc_loop].publishes_frame[argc_loop], publishes[argc_loop],
+        "the call plan carries the same per-callee publication fact"
+    );
+
+    let length_only = facts
+        .iter()
+        .map(|fact| !fact.values.is_empty())
+        .collect::<Vec<_>>();
+    let specialized = crate::direct::DirectPlan::plan_with_argument_length_facts(
+        &program,
+        &graphs,
+        &entry_graph,
+        &publishes,
+        true,
+        false,
+        false,
+        false,
+        None,
+        None,
+        &length_only,
+    );
+    assert!(
+        specialized.typed[argc_loop].is_none(),
+        "a typed ABI without argc cannot receive a body that lowers arguments.length"
+    );
+    assert!(
+        crate::direct::direct_callable(&program.functions[argc_loop], publishes[argc_loop]),
+        "the frame-free boxed/direct-call path remains eligible"
+    );
+    let simple_length = function_index("simpleLength");
+    assert!(facts[simple_length].reads_elided);
+    assert!(
+        specialized.typed[simple_length].is_none(),
+        "a small length-only body still needs the boxed actual-argc ABI"
+    );
+    assert!(crate::direct::direct_callable(
+        &program.functions[simple_length],
+        publishes[simple_length]
+    ));
+    let wrong_arity_caller = function_index("callsSimpleLengthWithExtraActuals");
+    assert!(
+        specialized.functions[wrong_arity_caller]
+            .known
+            .values()
+            .any(|&target| target == simple_length as u32)
+    );
+}
+
+#[test]
 fn generic_optimization_selection_is_bounded_ordered_and_frame_conservative() {
     let first = function(vec![Instruction::Return]);
     let mut generator = function(vec![Instruction::Return]);

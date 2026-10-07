@@ -134,6 +134,10 @@ pub struct ModuleMap {
     /// The weak program edge keeps cached analyses from extending a dead module's lifetime.
     pub(super) gc_suspended_locals: HashMap<(usize, u32), SuspendedLocalCache>,
     pub(super) gc_suspended_locals_prune_at: usize,
+    /// Per-program argument-object proofs. The weak edge keeps cache entries from extending a
+    /// module program's lifetime; each function's facts are immutable once its program is built.
+    pub(super) arguments_facts: HashMap<usize, ArgumentsFactsCache>,
+    pub(super) arguments_facts_prune_at: usize,
 }
 
 pub(super) struct SuspendedLocalCache {
@@ -141,6 +145,12 @@ pub(super) struct SuspendedLocalCache {
     // Every suspended instance of this proto uses the same immutable CFG facts. Sharing the
     // table keeps each collector visit from copying all suspension points and live-slot sets.
     pub(super) by_yield_pc: Rc<HashMap<usize, std::collections::HashSet<u32>>>,
+}
+
+pub(super) struct ArgumentsFactsCache {
+    pub(super) program: Weak<Program>,
+    pub(super) arrow_captures: Rc<kiln_graph::ArrowArgumentsCaptureFacts>,
+    pub(super) length_only: HashMap<u32, bool>,
 }
 
 /// The map as the session shares it between every machine that runs one of its modules.

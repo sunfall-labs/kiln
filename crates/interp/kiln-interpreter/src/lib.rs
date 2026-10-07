@@ -868,6 +868,9 @@ pub struct Closure {
     pub inferred_name: Option<StringUnits>,
     /// One cell per [`kiln_ir::FunctionProto::upvalues`] entry, in the same order.
     pub upvalues: Vec<Cell>,
+    /// The body has a graph proof that each `LoadArguments` is used only for `.length`.
+    /// This authorizes the paired-instruction fast path without changing the boxed fallback.
+    pub(crate) arguments_length_only: bool,
     /// The realm this function was created in.
     ///
     /// `GetFunctionRealm`, and the only thing that makes it observable: a constructor whose

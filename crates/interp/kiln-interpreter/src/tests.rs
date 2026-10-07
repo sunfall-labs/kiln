@@ -683,6 +683,7 @@ fn every_prototype_table() -> Vec<PrototypeTable> {
     ]
 }
 
+mod arguments_proof;
 mod language;
 mod node;
 mod objects;

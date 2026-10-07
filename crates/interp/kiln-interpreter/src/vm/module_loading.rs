@@ -703,6 +703,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction: self.instruction,
             stack_base: self.stack.len(),
         });
+        self.reset_arguments_marker_for_current_frame();
         self.module_path = module_path;
         self.module_generation = module_generation;
         self.module_generation_owner = self

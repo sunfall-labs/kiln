@@ -197,6 +197,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction: self.instruction,
             stack_base: self.stack.len(),
         });
+        self.reset_arguments_marker_for_current_frame();
         self.function = Some(closure);
         self.mapped_arguments = self
             .function
@@ -395,6 +396,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction: self.instruction,
             stack_base: self.stack.len(),
         });
+        self.reset_arguments_marker_for_current_frame();
         // A direct eval evaluates in the caller's scope, so its `arguments` is the caller's --
         // the same object, of the same kind. An indirect one is global code with no call around
         // it and no `arguments` at all.
