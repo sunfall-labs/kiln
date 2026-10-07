@@ -22,6 +22,10 @@ impl Fixture {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).expect("create fixture");
+        // `temp_dir()` can live beneath a user's checkout (including a `.git` ancestor). Mark
+        // each fixture as its own project so concurrent CLI runs do not discover sibling
+        // fixtures as one shared source tree.
+        std::fs::write(root.join("package.json"), "{}\n").expect("write project marker");
         Self(root.canonicalize().expect("canonical fixture"))
     }
 
