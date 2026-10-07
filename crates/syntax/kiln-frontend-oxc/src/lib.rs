@@ -133,6 +133,89 @@ pub fn parse(path: &str, source: &str) -> Module {
     parse_source(Some(path), source, source_type)
 }
 
+/// Discover package-like source specifiers without constructing the owned executable HIR.
+///
+/// This is intended for source synchronization and metadata discovery, not diagnostics: callers
+/// that need parser errors must use [`parse`]. Oxc's module record supplies static imports and
+/// exports; the small visitor adds TypeScript import types and external `import = require(...)`
+/// declarations, which are type-resolution edges rather than ECMAScript module requests.
+pub fn discover_module_specifiers(path: &str, source: &str) -> Vec<String> {
+    let mut source_type = SourceType::from_path(Path::new(path))
+        .unwrap_or_else(|_| SourceType::default().with_module(true));
+    if !path.ends_with(".cjs") {
+        source_type = source_type.with_module(true);
+    }
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+
+    #[derive(Default)]
+    struct TypeRequestCollector {
+        specifiers: BTreeSet<String>,
+    }
+    impl<'a> Visit<'a> for TypeRequestCollector {
+        fn visit_ts_import_type(&mut self, node: &oxc_ast::ast::TSImportType<'a>) {
+            self.specifiers.insert(node.source.value.to_string());
+            walk::walk_ts_import_type(self, node);
+        }
+
+        fn visit_ts_import_equals_declaration(
+            &mut self,
+            node: &oxc_ast::ast::TSImportEqualsDeclaration<'a>,
+        ) {
+            if let oxc_ast::ast::TSModuleReference::ExternalModuleReference(reference) =
+                &node.module_reference
+            {
+                self.specifiers
+                    .insert(reference.expression.value.to_string());
+            }
+            walk::walk_ts_import_equals_declaration(self, node);
+        }
+    }
+
+    let mut specifiers = parsed
+        .module_record
+        .requested_modules
+        .keys()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let mut type_requests = TypeRequestCollector::default();
+    type_requests.visit_program(&parsed.program);
+    specifiers.extend(type_requests.specifiers);
+
+    // Triple-slash `types` references are package-resolution edges. `path` is a source-relative
+    // file reference and `lib` names a built-in library, so neither belongs in this package list.
+    for comment in &parsed.program.comments {
+        if comment.kind != oxc_ast::ast::CommentKind::Line {
+            continue;
+        }
+        let start = (comment.span.start as usize).min(source.len());
+        let end = (comment.span.end as usize).min(source.len()).max(start);
+        let Some(content) = source
+            .get(start..end)
+            .and_then(|raw| raw.strip_prefix("///"))
+        else {
+            continue;
+        };
+        let content = content.trim();
+        if !content.starts_with("<reference") {
+            continue;
+        }
+        for token in content.split_whitespace().skip(1) {
+            let token = token.trim_end_matches(['/', '>']);
+            if let Some(("types", value)) = token.split_once('=') {
+                specifiers.insert(value.trim_matches(['"', '\'']).to_owned());
+            }
+        }
+    }
+
+    specifiers.into_iter().collect()
+}
+
 /// Parse an ESM module after specializing its directly declared exports to a
 /// closed-world demanded set and running Oxc's conservative DCE pass.
 ///
@@ -1179,6 +1262,171 @@ fn parse_source_in_context(
     module
 }
 
+fn module_attribute_keyword_span(
+    source: &str,
+    statement: Span,
+    clause_start: u32,
+    keyword: &str,
+) -> Option<HirSpan> {
+    fn identifier_continue(ch: char) -> bool {
+        ch == '_' || ch == '$' || ch.is_alphanumeric() || (!ch.is_ascii() && !ch.is_whitespace())
+    }
+    fn trivia_ends_at(source: &str, mut cursor: usize, end: usize) -> bool {
+        let bytes = source.as_bytes();
+        while cursor < end {
+            if bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            } else if bytes
+                .get(cursor..cursor + 2)
+                .is_some_and(|token| token == b"/*")
+            {
+                let Some(relative_end) = source[cursor + 2..end].find("*/") else {
+                    return false;
+                };
+                cursor += relative_end + 4;
+            } else if bytes
+                .get(cursor..cursor + 2)
+                .is_some_and(|token| token == b"//")
+            {
+                cursor += 2;
+                while cursor < end && !matches!(bytes[cursor], b'\n' | b'\r') {
+                    cursor += 1;
+                }
+            } else {
+                return false;
+            }
+        }
+        cursor == end
+    }
+
+    let start = (statement.start as usize).min(source.len());
+    let end = (clause_start as usize).min(source.len());
+    let slice = source.get(start..end)?;
+    for (relative, _) in slice.rmatch_indices(keyword) {
+        let candidate = start + relative;
+        let after = candidate + keyword.len();
+        let before_boundary = source[..candidate]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !identifier_continue(ch));
+        let after_boundary = source[after..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !identifier_continue(ch));
+        if before_boundary && after_boundary && trivia_ends_at(source, after, end) {
+            return Some(HirSpan::new(candidate as u32, after as u32));
+        }
+    }
+    None
+}
+
+fn module_attribute_record(
+    source: &str,
+    statement_span: Span,
+    with_clause: &oxc_ast::ast::WithClause<'_>,
+) -> kiln_hir::TypeModuleAttributes {
+    use oxc_ast::ast::{ImportAttributeKey, WithClauseKeyword};
+    let keyword = match with_clause.keyword {
+        WithClauseKeyword::With => kiln_hir::TypeModuleAttributesKeyword::With,
+        WithClauseKeyword::Assert => kiln_hir::TypeModuleAttributesKeyword::Assert,
+    };
+    let keyword_len = match keyword {
+        kiln_hir::TypeModuleAttributesKeyword::With => 4,
+        kiln_hir::TypeModuleAttributesKeyword::Assert => 6,
+    };
+    let keyword_text = match keyword {
+        kiln_hir::TypeModuleAttributesKeyword::With => "with",
+        kiln_hir::TypeModuleAttributesKeyword::Assert => "assert",
+    };
+    let keyword_span =
+        module_attribute_keyword_span(source, statement_span, with_clause.span.start, keyword_text)
+            .unwrap_or_else(|| {
+                HirSpan::new(with_clause.span.start, with_clause.span.start + keyword_len)
+            });
+    kiln_hir::TypeModuleAttributes {
+        statement_span: HirSpan::new(statement_span.start, statement_span.end),
+        keyword_span,
+        attributes_span: HirSpan::new(with_clause.span.start, with_clause.span.end),
+        keyword,
+        attributes: with_clause
+            .with_entries
+            .iter()
+            .map(|attribute| {
+                let (key, key_kind, key_span) = match &attribute.key {
+                    ImportAttributeKey::Identifier(identifier) => (
+                        StringUnits::from(identifier.name.as_str()),
+                        kiln_hir::TypeModuleAttributeKeyKind::Identifier,
+                        identifier.span,
+                    ),
+                    ImportAttributeKey::StringLiteral(literal) => (
+                        oxc_string_units(literal.value.as_str(), literal.lone_surrogates),
+                        kiln_hir::TypeModuleAttributeKeyKind::StringLiteral,
+                        literal.span,
+                    ),
+                };
+                kiln_hir::TypeModuleAttribute {
+                    key,
+                    key_kind,
+                    value: oxc_string_units(
+                        attribute.value.value.as_str(),
+                        attribute.value.lone_surrogates,
+                    ),
+                    span: HirSpan::new(attribute.span.start, attribute.span.end),
+                    key_span: HirSpan::new(key_span.start, key_span.end),
+                    value_span: HirSpan::new(attribute.value.span.start, attribute.value.span.end),
+                }
+            })
+            .collect(),
+    }
+}
+
+fn capture_module_attributes(
+    source: &str,
+    program: &oxc_ast::ast::Program<'_>,
+) -> Vec<kiln_hir::TypeModuleAttributes> {
+    struct Collector<'s> {
+        source: &'s str,
+        attributes: Vec<kiln_hir::TypeModuleAttributes>,
+    }
+    impl<'a> Visit<'a> for Collector<'_> {
+        fn visit_import_declaration(&mut self, node: &oxc_ast::ast::ImportDeclaration<'a>) {
+            if let Some(with_clause) = node.with_clause.as_deref() {
+                self.attributes
+                    .push(module_attribute_record(self.source, node.span, with_clause));
+            }
+            walk::walk_import_declaration(self, node);
+        }
+
+        fn visit_export_from_declaration(
+            &mut self,
+            node: &oxc_ast::ast::ExportFromDeclaration<'a>,
+        ) {
+            if let Some(with_clause) = node.with_clause.as_deref() {
+                self.attributes
+                    .push(module_attribute_record(self.source, node.span, with_clause));
+            }
+            walk::walk_export_from_declaration(self, node);
+        }
+
+        fn visit_export_all_declaration(&mut self, node: &oxc_ast::ast::ExportAllDeclaration<'a>) {
+            if let Some(with_clause) = node.with_clause.as_deref() {
+                self.attributes
+                    .push(module_attribute_record(self.source, node.span, with_clause));
+            }
+            walk::walk_export_all_declaration(self, node);
+        }
+    }
+    let mut collector = Collector {
+        source,
+        attributes: Vec::new(),
+    };
+    collector.visit_program(program);
+    collector
+        .attributes
+        .sort_by_key(|attributes| attributes.statement_span.start);
+    collector.attributes
+}
+
 /// Copy source-level TS declarations and annotation expressions out of Oxc's arena before any
 /// transformer or minifier can erase them. Raw type text is retained even when this adapter has
 /// not yet gained a structured lowering for a particular Oxc type node.
@@ -1188,8 +1436,12 @@ fn capture_type_syntax(
     program: &oxc_ast::ast::Program<'_>,
     native_import_meta: Option<bool>,
 ) -> HirTypeSyntax {
+    let module_attributes = capture_module_attributes(source, program);
     if !program.source_type.is_typescript() {
-        return HirTypeSyntax::default();
+        return HirTypeSyntax {
+            module_attributes,
+            ..HirTypeSyntax::default()
+        };
     }
     struct Collector<'s> {
         source: &'s str,
@@ -1229,6 +1481,86 @@ fn capture_type_syntax(
                 native_import_meta: self.native_import_meta,
             };
             lowerer.member_key(key, computed)
+        }
+        fn type_name_parts(&self, name: &oxc_ast::ast::TSTypeName<'_>) -> Vec<String> {
+            match name {
+                oxc_ast::ast::TSTypeName::IdentifierReference(identifier) => {
+                    vec![identifier.name.to_string()]
+                }
+                oxc_ast::ast::TSTypeName::QualifiedName(qualified) => {
+                    self.qualified_type_name_parts(qualified)
+                }
+                oxc_ast::ast::TSTypeName::ThisExpression(_) => vec!["this".to_owned()],
+            }
+        }
+        fn query_name_parts(&self, name: &oxc_ast::ast::TSTypeQueryExprName<'_>) -> Vec<String> {
+            match name {
+                oxc_ast::ast::TSTypeQueryExprName::IdentifierReference(identifier) => {
+                    vec![identifier.name.to_string()]
+                }
+                oxc_ast::ast::TSTypeQueryExprName::QualifiedName(qualified) => {
+                    self.qualified_type_name_parts(qualified)
+                }
+                oxc_ast::ast::TSTypeQueryExprName::ThisExpression(_) => vec!["this".to_owned()],
+                oxc_ast::ast::TSTypeQueryExprName::TSImportType(_) => Vec::new(),
+            }
+        }
+        fn qualified_type_name_parts(
+            &self,
+            name: &oxc_ast::ast::TSQualifiedName<'_>,
+        ) -> Vec<String> {
+            let mut parts = self.type_name_parts(&name.left);
+            parts.push(name.right.name.to_string());
+            parts
+        }
+        fn import_qualifier_parts(
+            &self,
+            qualifier: &oxc_ast::ast::TSImportTypeQualifier<'_>,
+        ) -> Vec<String> {
+            match qualifier {
+                oxc_ast::ast::TSImportTypeQualifier::Identifier(identifier) => {
+                    vec![identifier.name.to_string()]
+                }
+                oxc_ast::ast::TSImportTypeQualifier::QualifiedName(qualified) => {
+                    let mut parts = self.import_qualifier_parts(&qualified.left);
+                    parts.push(qualified.right.name.to_string());
+                    parts
+                }
+            }
+        }
+        fn heritage_name_parts(
+            &self,
+            expression: &oxc_ast::ast::Expression<'_>,
+        ) -> Option<Vec<String>> {
+            match expression {
+                oxc_ast::ast::Expression::Identifier(identifier) => {
+                    Some(vec![identifier.name.to_string()])
+                }
+                oxc_ast::ast::Expression::StaticMemberExpression(member) => {
+                    let mut parts = self.heritage_name_parts(&member.object)?;
+                    parts.push(member.property.name.to_string());
+                    Some(parts)
+                }
+                oxc_ast::ast::Expression::ParenthesizedExpression(parenthesized) => {
+                    self.heritage_name_parts(&parenthesized.expression)
+                }
+                _ => None,
+            }
+        }
+        fn import_type_options(
+            &self,
+            options: Option<&oxc_ast::ast::ObjectExpression<'_>>,
+        ) -> Option<Box<kiln_hir::Expression>> {
+            let options = options?;
+            let mut lowerer = Lowerer {
+                text: self.source,
+                path: self.path.as_deref(),
+                native_import_meta: self.native_import_meta,
+            };
+            Some(Box::new(lowerer.object_literal(
+                options,
+                HirSpan::new(options.span.start, options.span.end),
+            )))
         }
         fn operand_span(&self, expression: &oxc_ast::ast::Expression<'_>) -> HirSpan {
             let mut expression = expression;
@@ -1381,13 +1713,7 @@ fn capture_type_syntax(
                     &n.return_type,
                 )),
                 T::TSTypeReference(n) => {
-                    let mut name = self
-                        .raw(n.type_name.span())
-                        .split('.')
-                        .map(str::trim)
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>();
-                    name.retain(|part| !part.is_empty());
+                    let name = self.type_name_parts(&n.type_name);
                     HirTypeExprKind::Reference {
                         name,
                         arguments: n
@@ -1516,17 +1842,11 @@ fn capture_type_syntax(
                     if let oxc_ast::ast::TSTypeQueryExprName::TSImportType(import) = &n.expr_name {
                         HirTypeExprKind::Import {
                             specifier: import.source.value.to_string(),
+                            options: self.import_type_options(import.options.as_deref()),
                             qualifier: import
                                 .qualifier
                                 .as_ref()
-                                .map(|q| {
-                                    self.raw(q.span())
-                                        .split('.')
-                                        .map(str::trim)
-                                        .map(str::to_owned)
-                                        .filter(|s| !s.is_empty())
-                                        .collect()
-                                })
+                                .map(|q| self.import_qualifier_parts(q))
                                 .unwrap_or_default(),
                             arguments: import
                                 .type_arguments
@@ -1537,13 +1857,7 @@ fn capture_type_syntax(
                         }
                     } else {
                         HirTypeExprKind::Typeof {
-                            name: self
-                                .raw(n.expr_name.span())
-                                .split('.')
-                                .map(str::trim)
-                                .map(str::to_owned)
-                                .filter(|s| !s.is_empty())
-                                .collect(),
+                            name: self.query_name_parts(&n.expr_name),
                             arguments: n
                                 .type_arguments
                                 .as_ref()
@@ -1554,17 +1868,11 @@ fn capture_type_syntax(
                 }
                 T::TSImportType(n) => HirTypeExprKind::Import {
                     specifier: n.source.value.to_string(),
+                    options: self.import_type_options(n.options.as_deref()),
                     qualifier: n
                         .qualifier
                         .as_ref()
-                        .map(|q| {
-                            self.raw(q.span())
-                                .split('.')
-                                .map(str::trim)
-                                .map(str::to_owned)
-                                .filter(|s| !s.is_empty())
-                                .collect()
-                        })
+                        .map(|q| self.import_qualifier_parts(q))
                         .unwrap_or_default(),
                     arguments: n
                         .type_arguments
@@ -1591,7 +1899,12 @@ fn capture_type_syntax(
                     out: n.type_parameter.out,
                 }),
                 T::TSTypePredicate(n) => HirTypeExprKind::Predicate {
-                    parameter: self.raw(n.parameter_name.span()).trim().to_owned(),
+                    parameter: match &n.parameter_name {
+                        oxc_ast::ast::TSTypePredicateName::Identifier(identifier) => {
+                            identifier.name.to_string()
+                        }
+                        oxc_ast::ast::TSTypePredicateName::This(_) => "this".to_owned(),
+                    },
                     asserts: n.asserts,
                     ty: n
                         .type_annotation
@@ -1880,38 +2193,48 @@ fn capture_type_syntax(
         fn visit_class(&mut self, node: &oxc_ast::ast::Class<'a>) {
             use oxc_ast::ast::{ClassElement, MethodDefinitionKind};
             let type_ref =
-                |span: oxc_span::Span,
+                |expression: &oxc_ast::ast::Expression<'_>,
                  args: Option<&oxc_ast::ast::TSTypeParameterInstantiation<'_>>| {
+                    let span = expression.span();
                     HirTypeExpr {
                         span: HirSpan::new(span.start, span.end),
                         kind: HirTypeExprKind::Reference {
-                            name: self
-                                .raw(span)
-                                .split('.')
-                                .map(str::trim)
-                                .map(str::to_owned)
-                                .filter(|s| !s.is_empty())
-                                .collect(),
+                            name: self.heritage_name_parts(expression).unwrap_or_else(|| {
+                                self.raw(span)
+                                    .split('.')
+                                    .map(str::trim)
+                                    .map(str::to_owned)
+                                    .filter(|s| !s.is_empty())
+                                    .collect()
+                            }),
                             arguments: args
                                 .map(|a| a.params.iter().map(|t| self.convert(t)).collect())
                                 .unwrap_or_default(),
                         },
                     }
                 };
-            let extends = node.heritage.as_ref().map(|heritage| {
-                type_ref(
-                    heritage.expression.span(),
-                    heritage.type_arguments.as_deref(),
-                )
-            });
+            let extends = node
+                .heritage
+                .as_ref()
+                .map(|heritage| type_ref(&heritage.expression, heritage.type_arguments.as_deref()));
             let implements = node
                 .implements
                 .iter()
                 .map(|heritage| {
-                    type_ref(
-                        heritage.expression.span(),
-                        heritage.type_arguments.as_deref(),
-                    )
+                    let span = heritage.span;
+                    HirTypeExpr {
+                        span: HirSpan::new(span.start, span.end),
+                        kind: HirTypeExprKind::Reference {
+                            name: self.type_name_parts(&heritage.expression),
+                            arguments: heritage
+                                .type_arguments
+                                .as_ref()
+                                .map(|arguments| {
+                                    arguments.params.iter().map(|ty| self.convert(ty)).collect()
+                                })
+                                .unwrap_or_default(),
+                        },
+                    }
                 })
                 .collect();
             let mut members: Vec<kiln_hir::TypeClassMemberSite> = node
@@ -2304,12 +2627,7 @@ fn capture_type_syntax(
                 }
                 oxc_ast::ast::TSModuleReference::QualifiedName(reference) => {
                     kiln_hir::TypeImportEqualsReference::EntityName(
-                        self.raw(reference.span)
-                            .split('.')
-                            .map(str::trim)
-                            .map(str::to_owned)
-                            .filter(|s| !s.is_empty())
-                            .collect(),
+                        self.qualified_type_name_parts(reference),
                     )
                 }
             };
@@ -2526,13 +2844,7 @@ fn capture_type_syntax(
                         HirTypeExpr {
                             span: HirSpan::new(span.start, span.end),
                             kind: HirTypeExprKind::Reference {
-                                name: self
-                                    .raw(e.type_name.span())
-                                    .split('.')
-                                    .map(str::trim)
-                                    .map(str::to_owned)
-                                    .filter(|s| !s.is_empty())
-                                    .collect(),
+                                name: self.type_name_parts(&e.type_name),
                                 arguments: e
                                     .type_arguments
                                     .as_ref()
@@ -2720,7 +3032,10 @@ fn capture_type_syntax(
         source,
         path: path.map(str::to_owned),
         native_import_meta,
-        result: HirTypeSyntax::default(),
+        result: HirTypeSyntax {
+            module_attributes,
+            ..HirTypeSyntax::default()
+        },
         classified: HashSet::new(),
     };
     for comment in &program.comments {
@@ -2793,6 +3108,10 @@ fn capture_type_syntax(
         .result
         .default_exported_declarations
         .sort_by_key(|span| (span.start, span.end));
+    collector
+        .result
+        .module_attributes
+        .sort_by_key(|attributes| attributes.statement_span.start);
     collector
         .result
         .declarations
@@ -6314,6 +6633,42 @@ mod tests {
     }
 
     #[test]
+    fn lightweight_module_specifiers_cover_static_and_typescript_requests() {
+        let source = r#"
+            /// <reference types="@types/pkg" />
+            import type { Shape } from "pkg\x2fstatic";
+            export type { Shape as ExportedShape } from "pkg\u002fexport";
+            type Imported = import("pkg\x2ftype").Shape;
+            import Alias = require("pkg\x2fequals");
+        "#;
+        let module = parse("module.ts", source);
+        let found = discover_module_specifiers("module.ts", source);
+        let expected_static = module
+            .requested_modules
+            .iter()
+            .map(|request| request.specifier.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            expected_static
+                .iter()
+                .all(|specifier| found.iter().any(|found| found == specifier)),
+            "static module-record requests must be retained: {found:?}"
+        );
+        for expected in [
+            "pkg/static",
+            "pkg/export",
+            "pkg/type",
+            "pkg/equals",
+            "@types/pkg",
+        ] {
+            assert!(
+                found.iter().any(|specifier| specifier == expected),
+                "missing decoded module specifier {expected:?} from {found:?}"
+            );
+        }
+    }
+
+    #[test]
     fn preserves_aliases_defaults_namespaces_and_type_only_bindings() {
         let module = parse(
             "module.ts",
@@ -6554,6 +6909,144 @@ export default interface Fallback { value: boolean }
                 .get(rest_span.start as usize..rest_span.end as usize),
             Some("rest")
         );
+    }
+
+    #[test]
+    fn type_names_use_decoded_oxc_identifiers_instead_of_source_spelling() {
+        let module = parse(
+            "escaped-types.ts",
+            r#"type Exported\u0042ase = string;
+type Ref = Exported\u0042ase;
+type Query = typeof Exported\u0042ase;"#,
+        );
+        let alias = module
+            .type_syntax
+            .declarations
+            .iter()
+            .find(|declaration| declaration.name.as_deref() == Some("Ref"))
+            .unwrap();
+        assert!(matches!(
+            &alias.kind,
+            kiln_hir::TypeDeclarationKind::Alias(kiln_hir::TypeExpr {
+                kind: kiln_hir::TypeExprKind::Reference { name, .. },
+                ..
+            }) if name == &["ExportedBase"]
+        ));
+
+        let query = module
+            .type_syntax
+            .declarations
+            .iter()
+            .find(|declaration| declaration.name.as_deref() == Some("Query"))
+            .unwrap();
+        assert!(matches!(
+            &query.kind,
+            kiln_hir::TypeDeclarationKind::Alias(kiln_hir::TypeExpr {
+                kind: kiln_hir::TypeExprKind::Typeof { name, .. },
+                ..
+            }) if name == &["ExportedBase"]
+        ));
+    }
+
+    #[test]
+    fn import_type_options_are_owned_for_import_and_typeof_import_forms() {
+        let module = parse(
+            "import-type-options.ts",
+            r#"type Direct = import("pkg", { with: { "resolution-mode": "require" } }).Entry;
+type Queried = typeof import("pkg", { with: { "resolution-mode": "require" } }).Entry;"#,
+        );
+        let options_for = |name: &str| {
+            let declaration = module
+                .type_syntax
+                .declarations
+                .iter()
+                .find(|declaration| declaration.name.as_deref() == Some(name))
+                .unwrap();
+            let kiln_hir::TypeDeclarationKind::Alias(ty) = &declaration.kind else {
+                panic!("expected alias type for {name}");
+            };
+            let kiln_hir::TypeExprKind::Import {
+                options: Some(options),
+                ..
+            } = &ty.kind
+            else {
+                panic!("expected preserved import options for {name}");
+            };
+            options
+        };
+        for name in ["Direct", "Queried"] {
+            let options = options_for(name);
+            assert!(matches!(
+                &options.kind,
+                kiln_hir::ExpressionKind::Object { .. }
+            ));
+            let source = module
+                .source
+                .get(options.span.start as usize..options.span.end as usize)
+                .unwrap();
+            assert!(source.contains("resolution-mode"), "{source}");
+            assert!(source.contains("require"), "{source}");
+        }
+    }
+
+    #[test]
+    fn static_module_attributes_retain_keyword_key_value_and_spans() {
+        let module = parse(
+            "module-attributes.ts",
+            r#"import value from "with-package" with /* keyword trivia */ { "resolution-mode": "require" };
+export { value } from "pkg" with { "resolution-mode": "invalid-mode" };
+export * from "legacy" assert { type: "json" };"#,
+        );
+        assert_eq!(module.type_syntax.module_attributes.len(), 3);
+        let with_import = &module.type_syntax.module_attributes[0];
+        assert_eq!(
+            with_import.keyword,
+            kiln_hir::TypeModuleAttributesKeyword::With
+        );
+        assert_eq!(with_import.attributes.len(), 1);
+        assert_eq!(with_import.attributes[0].key, "resolution-mode");
+        assert_eq!(with_import.attributes[0].value, "require");
+        assert_eq!(
+            with_import.attributes[0].key_kind,
+            kiln_hir::TypeModuleAttributeKeyKind::StringLiteral
+        );
+        assert_eq!(
+            module.source.get(
+                with_import.keyword_span.start as usize..with_import.keyword_span.end as usize
+            ),
+            Some("with")
+        );
+        let attributes_span = with_import.attributes_span;
+        assert_eq!(
+            module
+                .source
+                .get(attributes_span.start as usize..attributes_span.end as usize),
+            Some(r#"{ "resolution-mode": "require" }"#)
+        );
+
+        let with_export = &module.type_syntax.module_attributes[1];
+        assert_eq!(with_export.attributes[0].value, "invalid-mode");
+        let assert_export = &module.type_syntax.module_attributes[2];
+        assert_eq!(
+            assert_export.keyword,
+            kiln_hir::TypeModuleAttributesKeyword::Assert
+        );
+        assert_eq!(assert_export.attributes[0].key, "type");
+        assert_eq!(assert_export.attributes[0].value, "json");
+        assert_eq!(
+            module.source.get(
+                assert_export.keyword_span.start as usize..assert_export.keyword_span.end as usize
+            ),
+            Some("assert")
+        );
+
+        let javascript = parse(
+            "attrs.mjs",
+            "import value from 'pkg' with { type: 'json' }; function f(x) { return x; }",
+        );
+        assert_eq!(javascript.type_syntax.module_attributes.len(), 1);
+        assert!(javascript.type_syntax.signatures.is_empty());
+        assert!(javascript.type_syntax.body.is_empty());
     }
 
     #[test]

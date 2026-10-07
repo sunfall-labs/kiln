@@ -5,5 +5,5 @@ Copyright Bun contributors. Infrastructure under MIT.
 Binder and checker contain ports of microsoft/typescript-go, Copyright Microsoft Corporation, Apache License 2.0.
 Local integration and owned syntax adaptation: Kiln contributors.
 
-ECMAScript declaration libraries: TypeScript 7.0.2, Copyright Microsoft Corporation, Apache License 2.0.
-Source: @typescript/native-preview-linux-x64 7.0.2 npm package, lib/lib.es*.d.ts and lib.decorators*.d.ts.
+Standard declaration libraries (ECMAScript, DOM, worker and host): TypeScript 7.0.2, Copyright Microsoft Corporation, Apache License 2.0.
+Source: @typescript/native-preview-linux-x64 7.0.2 npm package, lib/lib*.d.ts.

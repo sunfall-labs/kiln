@@ -23,7 +23,11 @@ pub type CompiledModule = Result<ModuleProgram, Vec<CompileDiagnostic>>;
 /// Backend-owned query used to register function summaries with the memo engine.
 pub use kiln_hir::source_types::CheckResult as SourceCheck;
 /// Source checker injected at the composition root; checker internals stay out of the database.
-pub type SourceCheckQuery = fn(&str, &[(String, HirModule)]) -> SourceCheck;
+pub type SourceCheckQuery = fn(
+    &str,
+    &[(String, std::sync::Arc<HirModule>)],
+    &[(String, std::sync::Arc<[u8]>)],
+) -> SourceCheck;
 pub type SummaryQuery = fn(&Program) -> Vec<FunctionSummary>;
 
 /// A parser/lowerer injected into the memo engine.
@@ -50,7 +54,7 @@ pub struct Parsed {
     /// HIR is retained below for subsequent lowering and interpreter queries.
     pub exports: Vec<String>,
     pub lines: usize,
-    pub module: HirModule,
+    pub module: std::sync::Arc<HirModule>,
 }
 
 impl Parsed {
@@ -59,7 +63,7 @@ impl Parsed {
             implementation_hash: content_hash(source),
             exports: module.runtime_export_names(),
             lines: source.lines().count(),
-            module,
+            module: std::sync::Arc::new(module),
         }
     }
 }

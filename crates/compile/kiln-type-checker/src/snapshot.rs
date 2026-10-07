@@ -13,7 +13,7 @@ use crate::{
 use kiln_hir::{Module, Span};
 use std::{
     borrow::Cow,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
@@ -23,12 +23,23 @@ pub struct SourceSnapshot {
     pub modules: BTreeMap<String, Arc<Module>>,
     pub auxiliary_files: BTreeMap<String, Arc<[u8]>>,
 }
+/// Select owned facts without changing checking or diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FactSelection {
+    #[default]
+    All,
+    FunctionContracts,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckOptions {
     pub strict: bool,
     pub no_unchecked_indexed_access: bool,
     pub libraries: Vec<String>,
     pub current_directory: String,
+    pub facts: FactSelection,
+    /// Optional tsconfig path in the immutable snapshot. Its compiler options replace
+    /// the standalone strict preset; explicit roots remain caller-owned.
+    pub config_path: Option<String>,
 }
 impl Default for CheckOptions {
     fn default() -> Self {
@@ -37,6 +48,8 @@ impl Default for CheckOptions {
             no_unchecked_indexed_access: true,
             libraries: Vec::new(),
             current_directory: "/".into(),
+            facts: FactSelection::All,
+            config_path: None,
         }
     }
 }
@@ -44,6 +57,35 @@ pub use kiln_hir::source_types::{CheckResult, SourceDiagnostic, SourceType, Type
 struct SnapshotHost<'a> {
     snapshot: &'a SourceSnapshot,
     unsupported: Mutex<Vec<SourceDiagnostic>>,
+    directories: BTreeMap<String, BTreeSet<Vec<u8>>>,
+}
+impl<'a> SnapshotHost<'a> {
+    fn new(snapshot: &'a SourceSnapshot) -> Self {
+        let mut directories: BTreeMap<String, BTreeSet<Vec<u8>>> = BTreeMap::new();
+        for path in snapshot
+            .modules
+            .keys()
+            .chain(snapshot.auxiliary_files.keys())
+        {
+            let mut remaining = path.as_str();
+            while let Some((parent, name)) = remaining.rsplit_once('/') {
+                let directory = if parent.is_empty() { "/" } else { parent };
+                directories
+                    .entry(directory.into())
+                    .or_default()
+                    .insert(name.as_bytes().to_vec());
+                if parent.is_empty() {
+                    break;
+                }
+                remaining = parent;
+            }
+        }
+        Self {
+            snapshot,
+            unsupported: Mutex::new(Vec::new()),
+            directories,
+        }
+    }
 }
 impl Host for SnapshotHost<'_> {
     fn read(&self, path: &[u8]) -> Option<Cow<'static, [u8]>> {
@@ -68,13 +110,14 @@ impl Host for SnapshotHost<'_> {
         let Ok(path) = std::str::from_utf8(path) else {
             return false;
         };
-        let prefix = format!("{}/", path.trim_end_matches('/'));
-        self.snapshot
-            .modules
-            .keys()
-            .chain(self.snapshot.auxiliary_files.keys())
-            .any(|p| p.starts_with(&prefix))
+        let directory = if path == "/" {
+            path
+        } else {
+            path.trim_end_matches('/')
+        };
+        self.directories.contains_key(directory)
     }
+
     fn realpath(&self, path: &[u8]) -> Vec<u8> {
         path.to_vec()
     }
@@ -82,21 +125,16 @@ impl Host for SnapshotHost<'_> {
         let Ok(path) = std::str::from_utf8(path) else {
             return Vec::new();
         };
-        let prefix = format!("{}/", path.trim_end_matches('/'));
-        let mut names: Vec<_> = self
-            .snapshot
-            .modules
-            .keys()
-            .chain(self.snapshot.auxiliary_files.keys())
-            .filter_map(|p| {
-                p.strip_prefix(&prefix)
-                    .map(|n| n.split('/').next().unwrap().as_bytes().to_vec())
-            })
-            .collect();
-        names.sort();
-        names.dedup();
-        names
+        let directory = if path == "/" {
+            path
+        } else {
+            path.trim_end_matches('/')
+        };
+        self.directories
+            .get(directory)
+            .map_or_else(Vec::new, |children| children.iter().cloned().collect())
     }
+
     fn script_kind(&self, _: &[u8]) -> Option<ScriptKind> {
         None
     }
@@ -110,12 +148,39 @@ impl Host for SnapshotHost<'_> {
         &self,
         arena: &'s Arena,
         path: &[u8],
-        _: &[u8],
+        text: &[u8],
         atoms: &Interner<'s>,
         _: &Options,
     ) -> hir::File<'s> {
         let name = String::from_utf8_lossy(path).into_owned();
+        if name.ends_with(".json") || name.ends_with(".jsonc") {
+            return crate::support::json::parse_source_file(arena, atoms.session(), atoms, text);
+        }
         if let Some(module) = self.snapshot.modules.get(&name) {
+            // Owned parser diagnostics remain authoritative. Checking a recovered AST
+            // must neither erase them nor publish specialization facts as complete.
+            if module.panicked || !module.diagnostics.is_empty() {
+                let mut errors = self.unsupported.lock().unwrap();
+                errors.extend(
+                    module
+                        .diagnostics
+                        .iter()
+                        .map(|diagnostic| SourceDiagnostic {
+                            path: Some(name.clone()),
+                            span: diagnostic.span,
+                            code: None,
+                            message: diagnostic.message.clone(),
+                        }),
+                );
+                if module.panicked && module.diagnostics.is_empty() {
+                    errors.push(SourceDiagnostic {
+                        path: Some(name.clone()),
+                        span: None,
+                        code: None,
+                        message: "source parser could not recover a complete module".into(),
+                    });
+                }
+            }
             // The loader's arena belongs to this session. Its lifetime is narrowed to the parse call.
             let (mut file, unsupported) = Lower::new(module, atoms).finish(arena, atoms.session());
             if name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts") {
@@ -159,13 +224,34 @@ impl Host for SnapshotHost<'_> {
 }
 /// Check one immutable project. No filesystem reads or parser/checker identities escape.
 pub fn check(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions) -> CheckResult {
+    if let Some(path) = snapshot
+        .modules
+        .keys()
+        .find(|path| snapshot.auxiliary_files.contains_key(*path))
+    {
+        return CheckResult {
+            checker_identity: crate::CHECKER_VERSION.into(),
+            complete: false,
+            diagnostics: vec![SourceDiagnostic {
+                path: Some(path.clone()),
+                span: None,
+                code: None,
+                message: "source snapshot contains colliding module and auxiliary paths".into(),
+            }],
+            ..Default::default()
+        };
+    }
     // Resolver ancestor walks require absolute lexical paths. Virtual callers may
     // supply relative names; resolve them against the explicit snapshot directory,
     // then translate results back without consulting the process's filesystem.
     let needs_normalization = |path: &str| {
         !path.starts_with('/') || path.split('/').any(|part| matches!(part, "." | ".."))
     };
-    if needs_normalization(&options.current_directory)
+    if options
+        .config_path
+        .as_ref()
+        .is_some_and(|path| needs_normalization(path))
+        || needs_normalization(&options.current_directory)
         || snapshot
             .modules
             .keys()
@@ -198,15 +284,36 @@ pub fn check(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions
             original_paths.insert(normalized_path, path.clone());
         }
         for (path, bytes) in &snapshot.auxiliary_files {
-            normalized
+            let normalized_path = lexical_path(path, &directory);
+            if normalized
                 .auxiliary_files
-                .insert(lexical_path(path, &directory), bytes.clone());
+                .insert(normalized_path.clone(), bytes.clone())
+                .is_some()
+                || normalized.modules.contains_key(&normalized_path)
+            {
+                return CheckResult {
+                    checker_identity: crate::CHECKER_VERSION.into(),
+                    complete: false,
+                    diagnostics: vec![SourceDiagnostic {
+                        path: Some(path.clone()),
+                        span: None,
+                        code: None,
+                        message: "source snapshot contains colliding normalized paths".into(),
+                    }],
+                    ..Default::default()
+                };
+            }
+            original_paths.insert(normalized_path, path.clone());
         }
         let roots = roots
             .iter()
             .map(|p| lexical_path(p, &directory))
             .collect::<Vec<_>>();
         let mut options = options.clone();
+        options.config_path = options
+            .config_path
+            .as_ref()
+            .map(|path| lexical_path(path, &directory));
         options.current_directory = directory;
         let mut checked = check_with_stack(&normalized, &roots, &options);
         for ty in &mut checked.types {
@@ -265,35 +372,48 @@ fn check_with_stack(
 }
 fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions) -> CheckResult {
     let session = Session::new();
-    let host = SnapshotHost {
-        snapshot,
-        unsupported: Mutex::new(Vec::new()),
+    let host = SnapshotHost::new(snapshot);
+    let mut config_errors = Vec::new();
+    let mut opts = if let Some(path) = &options.config_path {
+        let project =
+            crate::engine::config::load_overriding(&host, &session, path.as_bytes(), &|_| {
+                Vec::new()
+            });
+        config_errors = project.errors;
+        project.options
+    } else {
+        let mut opts = Options::default();
+        opts.base_dir = options.current_directory.as_bytes().to_vec();
+        opts.strict_null_checks = options.strict;
+        opts.strict_function_types = options.strict;
+        opts.no_implicit_any = options.strict;
+        opts.strict_bind_call_apply = options.strict;
+        opts.strict_property_initialization = options.strict;
+        opts.use_unknown_in_catch_variables = options.strict;
+        opts.no_implicit_this = options.strict;
+        opts.strict_builtin_iterator_return = options.strict;
+        opts.no_unchecked_indexed_access = options.no_unchecked_indexed_access;
+        opts.allow_importing_ts_extensions = true;
+        opts.target = crate::engine::resolve::ScriptTarget::ESNext;
+        opts.module = crate::engine::resolve::ModuleKind::Preserve;
+        // Preserve uses bundler resolution, including package exports/imports.
+        // Options::default alone does not derive the module-dependent flags.
+        opts.resolve_package_json_exports = true;
+        opts.resolve_package_json_imports = true;
+        opts.resolve_json_module = true;
+        opts.skip_lib_check = true;
+        opts.skip_default_lib_check = true;
+        opts.no_lib = options.libraries.is_empty();
+        opts.libs = options
+            .libraries
+            .iter()
+            .map(|path| path.as_bytes().to_vec())
+            .collect();
+        opts
     };
-    let mut opts = Options::default();
     opts.current_directory = options.current_directory.as_bytes().to_vec();
-    opts.base_dir = opts.current_directory.clone();
-    opts.strict_null_checks = options.strict;
-    opts.strict_function_types = options.strict;
-    opts.no_implicit_any = options.strict;
-    opts.strict_bind_call_apply = options.strict;
-    opts.strict_property_initialization = options.strict;
-    opts.use_unknown_in_catch_variables = options.strict;
-    opts.no_implicit_this = options.strict;
-    opts.strict_builtin_iterator_return = options.strict;
-    opts.no_unchecked_indexed_access = options.no_unchecked_indexed_access;
-    opts.allow_importing_ts_extensions = true;
     opts.no_emit = true;
-    opts.target = crate::engine::resolve::ScriptTarget::ESNext;
-    opts.module = crate::engine::resolve::ModuleKind::Preserve;
     opts.lib_dir = b"/__kiln_typescript_lib".to_vec();
-    opts.skip_lib_check = true;
-    opts.skip_default_lib_check = true;
-    opts.no_lib = options.libraries.is_empty();
-    opts.libs = options
-        .libraries
-        .iter()
-        .map(|p| p.as_bytes().to_vec())
-        .collect();
     let roots: Vec<_> = roots.iter().map(|p| p.as_bytes().to_vec()).collect();
     let files = session
         .arena()
@@ -309,6 +429,28 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
         complete: true,
         ..Default::default()
     };
+    let configuration_valid = config_errors.is_empty();
+    for error in config_errors {
+        let mut message = Vec::new();
+        if let Some((_, template)) = crate::engine::messages::message(error.code) {
+            crate::engine::messages::format(&mut message, template, &error.args);
+        }
+        let (path, span) =
+            error
+                .at
+                .map_or((options.config_path.clone(), None), |(path, start, end)| {
+                    (
+                        Some(String::from_utf8_lossy(&path).into_owned()),
+                        Some(Span::new(start, end)),
+                    )
+                });
+        result.diagnostics.push(SourceDiagnostic {
+            path,
+            span,
+            code: Some(error.code),
+            message: String::from_utf8_lossy(&message).into_owned(),
+        });
+    }
     for &id in files.order {
         let checked = checker.check_file(id);
         let module = files.module(id);
@@ -318,15 +460,17 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
         if path.starts_with("/__kiln_typescript_lib/") {
             continue;
         }
-        for (index, e) in module.hir.exprs.iter().enumerate() {
-            let ty = checker.type_of_expr(id, hir::ExprId(index as u32));
-            result.types.push(export_type(
-                &mut checker,
-                &path,
-                Span::new(e.pos, e.end),
-                TypeRole::Expression,
-                ty,
-            ));
+        if options.facts == FactSelection::All {
+            for (index, e) in module.hir.exprs.iter().enumerate() {
+                let ty = checker.type_of_expr(id, hir::ExprId(index as u32));
+                result.types.push(export_type(
+                    &mut checker,
+                    &path,
+                    Span::new(e.pos, e.end),
+                    TypeRole::Expression,
+                    ty,
+                ));
+            }
         }
         for (index, p) in module.hir.params.iter().enumerate() {
             let ty = checker.type_of_param(id, hir::ParamId(index as u32));
@@ -391,7 +535,7 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
         });
     }
     let unsupported = host.unsupported.into_inner().unwrap();
-    result.complete = unsupported.is_empty() && !ran_out;
+    result.complete = configuration_valid && unsupported.is_empty() && !ran_out;
     result.diagnostics.extend(unsupported);
     if ran_out {
         result.diagnostics.push(SourceDiagnostic {

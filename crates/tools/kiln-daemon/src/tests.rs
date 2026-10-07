@@ -82,7 +82,14 @@ fn source_check_loads_project_ambient_declarations_without_runtime_edges() {
         ),
     ];
 
-    let result = crate::server::check_source_types(entry, &modules);
+    let result = crate::server::check_source_types(
+        entry,
+        &modules
+            .into_iter()
+            .map(|(p, m)| (p, std::sync::Arc::new(m)))
+            .collect::<Vec<_>>(),
+        &[],
+    );
 
     assert!(result.complete, "checker result must be complete");
     assert!(
@@ -99,6 +106,53 @@ fn source_check_loads_project_ambient_declarations_without_runtime_edges() {
         }),
         "ambient Scalar alias did not resolve the parameter as number: {:?}",
         result.types
+    );
+}
+
+#[test]
+fn source_check_uses_nearest_uploaded_config_and_isolates_external_ambient_types() {
+    use std::sync::Arc;
+    let entry = "project/src/main.ts";
+    let modules = vec![
+        (
+            entry.into(),
+            Arc::new(kiln_frontend_oxc::parse(
+                entry,
+                "const value: number = null;",
+            )),
+        ),
+        (
+            "project/node_modules/unrelated/index.d.ts".into(),
+            Arc::new(kiln_frontend_oxc::parse(
+                "project/node_modules/unrelated/index.d.ts",
+                "declare const broken: MissingType;",
+            )),
+        ),
+    ];
+    let outer = (
+        "project/tsconfig.json".into(),
+        Arc::<[u8]>::from(br#"{"compilerOptions":{"strict":true,"skipLibCheck":true}}"#.as_slice()),
+    );
+    let nearest = (
+        "project/src/tsconfig.json".into(),
+        Arc::<[u8]>::from(
+            br#"{"compilerOptions":{"strict":false,"skipLibCheck":true}}"#.as_slice(),
+        ),
+    );
+    let relaxed = crate::server::check_source_types(entry, &modules, &[outer.clone(), nearest]);
+    assert!(relaxed.complete, "{:?}", relaxed.diagnostics);
+    assert!(relaxed.diagnostics.is_empty(), "{:?}", relaxed.diagnostics);
+    let strict = crate::server::check_source_types(entry, &modules, &[outer]);
+    assert!(strict.complete, "{:?}", strict.diagnostics);
+    assert!(
+        strict.diagnostics.iter().any(|d| d.code == Some(2322)),
+        "{:?}",
+        strict.diagnostics
+    );
+    assert!(
+        !strict.diagnostics.iter().any(|d| d.code == Some(2304)),
+        "{:?}",
+        strict.diagnostics
     );
 }
 
@@ -262,7 +316,7 @@ impl QueryEngine for StubEngine {
             implementation_hash: hash(text.as_bytes()),
             exports: exports_of(text),
             lines: text.lines().count(),
-            module: kiln_frontend_oxc::parse("stub.js", text),
+            module: std::sync::Arc::new(kiln_frontend_oxc::parse("stub.js", text)),
         };
         self.stats.parse_computed += 1;
         parsed
@@ -2153,7 +2207,8 @@ fn the_default_daemon_serves_the_real_query_engine() {
     assert_eq!(stats.parse_computed, 1);
     assert_eq!(stats.interface_computed, 1);
     assert_eq!(stats.project_computed, 0);
-    assert_eq!(stats.early_cutoff, 2);
+    // Interface, source-check diagnostics, and project results are unchanged.
+    assert_eq!(stats.early_cutoff, 3);
 
     client
         .request(&Request::SetSource {

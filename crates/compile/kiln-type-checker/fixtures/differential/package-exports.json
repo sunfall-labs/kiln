@@ -1,0 +1,12 @@
+{
+  "id": "package-exports-types-condition",
+  "options": { "strict": true, "no_unchecked_indexed_access": true, "libraries": ["es5"], "current_directory": "/project" },
+  "roots": ["/project/main.ts"],
+  "files": {
+    "/project/main.ts": "import { value } from '@sample/values'; const answer: 42 = value;",
+    "/project/node_modules/@sample/values/package.json": "{\"name\":\"@sample/values\",\"exports\":{\".\":{\"types\":\"./types/index.d.ts\",\"default\":\"./dist/index.js\"}}}",
+    "/project/node_modules/@sample/values/types/index.d.ts": "export declare const value: 42;"
+  },
+  "expected": { "complete": true, "diagnostics": [], "facts": [] },
+  "oracle": { "version": "Version 7.0.2", "diagnostics": [] }
+}

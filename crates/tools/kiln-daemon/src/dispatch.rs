@@ -63,11 +63,11 @@ pub(crate) struct OwnedGraphSnapshot {
     /// Parsed TS modules and their resolved contracts are immutable for this captured source
     /// set. Graph construction asks for one payload at a time, so memoize the project check here
     /// instead of checking once per module.
-    source_types: OnceLock<SnapshotSourceTypes>,
+    source_types: Arc<OnceLock<SnapshotSourceTypes>>,
 }
 
 #[derive(Debug)]
-struct SnapshotSourceTypes {
+pub(crate) struct SnapshotSourceTypes {
     modules: BTreeMap<PathBuf, Arc<kiln_hir::Module>>,
     checked: kiln_hir::source_types::CheckResult,
 }
@@ -589,13 +589,28 @@ pub(crate) fn graph_run_plan<E: QueryEngine>(
     }
     let canonical_entry = std::fs::canonicalize(&entry)
         .map_err(|error| format!("cannot canonicalize graph entry: {error}"))?;
+    let active_sources = engine
+        .source_files()
+        .into_iter()
+        .map(|(source_file, source_path)| {
+            let revision = engine.source_revision(source_file).ok_or_else(|| {
+                format!("query engine listed {source_path} without a source revision")
+            })?;
+            Ok((source_file, source_path, revision))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let source_identity_inputs: Vec<_> = active_sources
+        .iter()
+        .filter(|(_, path, _)| is_source_check_input_path(Path::new(path)))
+        .map(|(_, path, revision)| (path.as_str(), *revision))
+        .collect();
     let mut key = GraphCacheKey::new(
         canonical_root.clone(),
         canonical_entry.clone(),
         resolutions,
         node,
     );
-    key.source_check_identity = source_check_identity(engine);
+    key.source_check_identity = source_check_identity_for_sources(&source_identity_inputs);
     let stale = match cache.lookup(&key, |source| engine.source_revision(source)) {
         GraphCacheLookup::Hit(graph) => {
             return Ok(GraphRunPlan::Cached {
@@ -611,15 +626,13 @@ pub(crate) fn graph_run_plan<E: QueryEngine>(
         }
         GraphCacheLookup::Stale { .. } | GraphCacheLookup::Miss => None,
     };
+    let source_types = key.source_check_identity.clone().map(|identity| {
+        cache.source_check_slot(key.project_root.clone(), key.entry.clone(), identity)
+    });
 
     let mut sources = BTreeMap::new();
     let mut revisions = Vec::new();
-    for (source_file, source_path) in engine.source_files() {
-        let Some(revision) = engine.source_revision(source_file) else {
-            return Err(format!(
-                "query engine listed {source_path} without a source revision"
-            ));
-        };
+    for (source_file, source_path, revision) in active_sources {
         let Some(text) = engine.source(source_file) else {
             return Err(format!(
                 "query engine listed {source_path} without source bytes"
@@ -649,7 +662,7 @@ pub(crate) fn graph_run_plan<E: QueryEngine>(
             node,
             sources,
             revisions,
-            source_types: OnceLock::new(),
+            source_types: source_types.unwrap_or_else(|| Arc::new(OnceLock::new())),
         },
         key,
         stale,
@@ -684,6 +697,17 @@ fn is_source_code_path(path: &Path) -> bool {
     )
 }
 
+fn is_checker_auxiliary_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("json" | "jsonc")
+    )
+}
+
+fn is_source_check_input_path(path: &Path) -> bool {
+    is_source_code_path(path) || is_checker_auxiliary_path(path)
+}
+
 fn snapshot_source_types(snapshot: &OwnedGraphSnapshot) -> Option<&SnapshotSourceTypes> {
     if !snapshot.sources.keys().any(|path| is_typescript_path(path))
         || snapshot.entry.to_str().is_none()
@@ -705,11 +729,23 @@ fn snapshot_source_types(snapshot: &OwnedGraphSnapshot) -> Option<&SnapshotSourc
             .collect();
         let check_input: Vec<_> = modules
             .iter()
-            .filter_map(|(path, module)| Some((path.to_str()?.to_owned(), module.as_ref().clone())))
+            .filter_map(|(path, module)| Some((path.to_str()?.to_owned(), Arc::clone(module))))
+            .collect();
+        let auxiliary: Vec<_> = snapshot
+            .sources
+            .iter()
+            .filter(|(path, _)| is_checker_auxiliary_path(path))
+            .filter_map(|(path, source)| {
+                Some((
+                    path.to_str()?.to_owned(),
+                    Arc::<[u8]>::from(source.text.as_bytes()),
+                ))
+            })
             .collect();
         let checked = crate::server::check_source_types(
             snapshot.entry.to_str().expect("checked above"),
             &check_input,
+            &auxiliary,
         );
         SnapshotSourceTypes { modules, checked }
     }))
@@ -727,15 +763,26 @@ fn source_check_identity<E: QueryEngine>(engine: &E) -> Option<kiln_digest::Dige
     {
         return None;
     }
-    let mut sources: Vec<_> = all_sources
-        .into_iter()
-        .filter(|(_, path)| is_source_code_path(Path::new(path)))
+    let sources: Vec<_> = all_sources
+        .iter()
+        .filter(|(_, path)| is_source_check_input_path(Path::new(path)))
         .filter_map(|(file, path)| {
             engine
-                .source_revision(file)
-                .map(|revision| (path, revision))
+                .source_revision(*file)
+                .map(|revision| (path.as_str(), revision))
         })
         .collect();
+    source_check_identity_for_sources(&sources)
+}
+
+fn source_check_identity_for_sources(sources: &[(&str, Revision)]) -> Option<kiln_digest::Digest> {
+    if !sources
+        .iter()
+        .any(|(path, _)| is_typescript_path(Path::new(path)))
+    {
+        return None;
+    }
+    let mut sources = sources.to_vec();
     if sources.is_empty() {
         return None;
     }
@@ -969,9 +1016,9 @@ fn snapshot_module_payload(
     }
     let hir = source_types
         .and_then(|source_types| source_types.modules.get(path))
-        .map(|module| module.as_ref().clone())
-        .unwrap_or_else(|| kiln_frontend_oxc::parse(path_string, &source.text));
-    let mut program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
+        .cloned()
+        .unwrap_or_else(|| Arc::new(kiln_frontend_oxc::parse(path_string, &source.text)));
+    let mut program = kiln_ir::compile_module(hir.as_ref()).map_err(|diagnostics| {
         kiln_module_graph::ModuleGraphError::Compile {
             path: path.to_path_buf(),
             diagnostics,
@@ -982,7 +1029,7 @@ fn snapshot_module_payload(
     {
         kiln_ir::apply_source_types(
             path_string,
-            &hir,
+            hir.as_ref(),
             &source_types.checked,
             &source_types.checked.checker_identity,
             &mut program.program,
@@ -2636,6 +2683,36 @@ mod source_check_cache_tests {
         (root, entry, graph)
     }
 
+    fn source_snapshot(
+        root: &Path,
+        entry: &Path,
+        sources: &[(&str, &str)],
+        source_types: Arc<OnceLock<SnapshotSourceTypes>>,
+    ) -> OwnedGraphSnapshot {
+        OwnedGraphSnapshot {
+            source_view: SourceView(0),
+            project_root: root.to_path_buf(),
+            entry: entry.to_path_buf(),
+            resolutions: None,
+            node: false,
+            sources: sources
+                .iter()
+                .map(|(path, text)| {
+                    (
+                        PathBuf::from(path),
+                        OwnedGraphSource {
+                            file: DbFileId(0),
+                            text: (*text).to_owned(),
+                            revision: Revision(0),
+                        },
+                    )
+                })
+                .collect(),
+            revisions: Vec::new(),
+            source_types,
+        }
+    }
+
     #[test]
     fn type_source_identity_tracks_alias_edits_and_source_membership() {
         let mut engine = engine_with_sources(&[
@@ -2693,7 +2770,7 @@ mod source_check_cache_tests {
     #[test]
     fn unchanged_typescript_snapshot_reuses_warm_graph_and_js_unrelated_edits_do_too() {
         let (root, entry, graph) = graph_fixture("entry.ts", "export const value: number = 1;\n");
-        let mut engine = engine_with_sources(&[
+        let engine = engine_with_sources(&[
             ("/project/main.ts", "export const value: number = 1;"),
             ("/project/types.d.ts", "type Alias = number;"),
         ]);
@@ -2728,5 +2805,171 @@ mod source_check_cache_tests {
                 .source_revision(file)),
             GraphCacheLookup::Hit(_)
         ));
+    }
+
+    #[test]
+    fn source_check_slots_share_by_identity_and_isolate_entries_and_edits() {
+        let root = PathBuf::from("/project");
+        let entry = PathBuf::from("/project/main.ts");
+        let other_entry = PathBuf::from("/project/other.ts");
+        let mut engine = engine_with_sources(&[
+            (
+                "/project/main.ts",
+                "import type { Amount } from './types'; const amount: Amount = 'wrong';",
+            ),
+            ("/project/other.ts", "const label: string = 'ok';"),
+            ("/project/types.ts", "export type Amount = number;"),
+        ]);
+        let original_identity = source_check_identity(&engine).expect("TS source identity");
+        let mut cache = GraphCache::default();
+        let original_slot = cache.source_check_slot(root.clone(), entry.clone(), original_identity);
+        let original_snapshot = source_snapshot(
+            &root,
+            &entry,
+            &[
+                (
+                    "/project/main.ts",
+                    "import type { Amount } from './types'; const amount: Amount = 'wrong';",
+                ),
+                ("/project/other.ts", "const label: string = 'ok';"),
+                ("/project/types.ts", "export type Amount = number;"),
+            ],
+            Arc::clone(&original_slot),
+        );
+        let before = snapshot_source_types(&original_snapshot)
+            .expect("TypeScript snapshot is checked")
+            .checked
+            .clone();
+        assert!(before.complete);
+
+        let same_entry_slot =
+            cache.source_check_slot(root.clone(), entry.clone(), original_identity);
+        assert!(Arc::ptr_eq(&original_slot, &same_entry_slot));
+        let same_snapshot = source_snapshot(
+            &root,
+            &entry,
+            &[
+                (
+                    "/project/main.ts",
+                    "import type { Amount } from './types'; const amount: Amount = 'wrong';",
+                ),
+                ("/project/other.ts", "const label: string = 'ok';"),
+                ("/project/types.ts", "export type Amount = number;"),
+            ],
+            Arc::clone(&same_entry_slot),
+        );
+        assert!(std::ptr::eq(
+            original_slot
+                .get()
+                .expect("first snapshot initialized slot"),
+            snapshot_source_types(&same_snapshot).expect("shared slot is initialized")
+        ));
+        let other_entry_slot =
+            cache.source_check_slot(root.clone(), other_entry.clone(), original_identity);
+        assert!(!Arc::ptr_eq(&original_slot, &other_entry_slot));
+        let other_snapshot = source_snapshot(
+            &root,
+            &other_entry,
+            &[
+                (
+                    "/project/main.ts",
+                    "import type { Amount } from './types'; const amount: Amount = 'wrong';",
+                ),
+                ("/project/other.ts", "const label: string = 'ok';"),
+                ("/project/types.ts", "export type Amount = number;"),
+            ],
+            Arc::clone(&other_entry_slot),
+        );
+        let other = snapshot_source_types(&other_snapshot)
+            .expect("second TypeScript entry is checked")
+            .checked
+            .clone();
+        assert!(other.complete);
+        assert!(
+            !other.diagnostics.iter().any(|d| d.code == Some(2322)),
+            "the other entry must not inherit main.ts diagnostics"
+        );
+
+        let declarations = engine.intern("/project/types.ts");
+        engine.set_source(
+            declarations,
+            "export type Amount = string; const valid: Amount = 'ok';".to_owned(),
+        );
+        let edited_identity = source_check_identity(&engine).expect("edited TS identity");
+        assert_ne!(edited_identity, original_identity);
+        let edited_slot = cache.source_check_slot(root.clone(), entry.clone(), edited_identity);
+        assert!(!Arc::ptr_eq(&original_slot, &edited_slot));
+        let edited_snapshot = source_snapshot(
+            &root,
+            &entry,
+            &[
+                (
+                    "/project/main.ts",
+                    "import type { Amount } from './types'; const amount: Amount = 'wrong';",
+                ),
+                ("/project/other.ts", "const label: string = 'ok';"),
+                (
+                    "/project/types.ts",
+                    "export type Amount = string; const valid: Amount = 'ok';",
+                ),
+            ],
+            Arc::clone(&edited_slot),
+        );
+        let after = snapshot_source_types(&edited_snapshot)
+            .expect("edited TypeScript snapshot is checked")
+            .checked
+            .clone();
+        assert!(after.complete);
+        assert_ne!(
+            before, after,
+            "the alias edit must change checked contracts"
+        );
+        assert!(before.diagnostics.iter().any(|d| d.code == Some(2322)));
+        assert!(!after.diagnostics.iter().any(|d| d.code == Some(2322)));
+        assert_eq!(
+            snapshot_source_types(&original_snapshot)
+                .expect("old snapshot remains available")
+                .checked,
+            before,
+            "editing sources must not mutate an in-flight snapshot result"
+        );
+
+        // A third identity evicts the oldest cache entry, but snapshots already holding its Arc
+        // keep their immutable result. Explicit graph invalidation then prevents lookup reuse.
+        let extra_slot = cache.source_check_slot(
+            root.clone(),
+            entry.clone(),
+            kiln_digest::Digest::hash(b"third source identity"),
+        );
+        assert!(!Arc::ptr_eq(&extra_slot, &original_slot));
+        assert_eq!(
+            snapshot_source_types(&original_snapshot)
+                .expect("eviction cannot invalidate an in-flight snapshot")
+                .checked,
+            before
+        );
+        cache.invalidate();
+        let post_invalidation = cache.source_check_slot(root, entry, original_identity);
+        assert!(!Arc::ptr_eq(&post_invalidation, &original_slot));
+    }
+
+    #[test]
+    fn json_auxiliary_edits_get_a_fresh_source_check_slot() {
+        let root = PathBuf::from("/project");
+        let entry = PathBuf::from("/project/main.ts");
+        let mut engine = engine_with_sources(&[
+            ("/project/main.ts", "export const value = 1;"),
+            ("/project/data.json", "{\"mode\":\"before\"}"),
+        ]);
+        let before = source_check_identity(&engine).expect("TS source identity");
+        let mut cache = GraphCache::default();
+        let before_slot = cache.source_check_slot(root.clone(), entry.clone(), before);
+
+        let json = engine.intern("/project/data.json");
+        engine.set_source(json, "{\"mode\":\"after\"}".to_owned());
+        let after = source_check_identity(&engine).expect("updated TS source identity");
+        assert_ne!(before, after, "JSON is an auxiliary source-check input");
+        let after_slot = cache.source_check_slot(root, entry, after);
+        assert!(!Arc::ptr_eq(&before_slot, &after_slot));
     }
 }

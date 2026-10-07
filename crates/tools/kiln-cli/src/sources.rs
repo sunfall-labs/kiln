@@ -7,7 +7,7 @@
 //! sorted depth-first traversal so even a bounded result - and therefore every `FileId` - is
 //! reproducible.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -85,6 +85,11 @@ fn captured_importer_path(raw: &str) -> Result<PathBuf> {
 use rayon::prelude::*;
 
 const SOURCE_EXTENSIONS: [&str; 8] = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"];
+
+const MAX_CHECKER_METADATA_FILES: usize = 2_048;
+const MAX_CHECKER_METADATA_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CHECKER_METADATA_PACKAGES: usize = 256;
+const MAX_CHECKER_METADATA_DIRECTORIES: usize = 8_192;
 
 /// Directories that are never project sources. Anything starting with `.` is skipped too.
 const SKIP_DIRS: [&str; 5] = ["node_modules", "target", "dist", "build", "coverage"];
@@ -413,11 +418,28 @@ pub(crate) fn include_reachable_dependencies_with_includes(
     Vec<NodeSourceFormat>,
     Vec<DeclaredInclude>,
 )> {
+    let (resolutions, formats, includes, _) =
+        include_reachable_dependencies_with_checker_metadata(root, entry, texts, node, false)?;
+    Ok((resolutions, formats, includes))
+}
+
+pub(crate) fn include_reachable_dependencies_with_checker_metadata(
+    root: &Path,
+    entry: &str,
+    texts: &mut Vec<(String, String)>,
+    node: bool,
+    capture_checker_metadata: bool,
+) -> Result<(
+    Vec<PackageResolution>,
+    Vec<NodeSourceFormat>,
+    Vec<DeclaredInclude>,
+    Vec<(String, String)>,
+)> {
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
     let entry = PathBuf::from(entry);
     if !entry.starts_with(resolver.project_root()) {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
 
     let mut indexes = texts
@@ -445,6 +467,7 @@ pub(crate) fn include_reachable_dependencies_with_includes(
     // reject the whole snapshot when a descendant is unavailable.
     let mut pending = vec![(entry, true)];
     let mut declared_includes = Vec::new();
+    let mut checker_metadata = BTreeMap::<String, String>::new();
     if node {
         let package_importer = resolver.project_root().join("package.json");
         for specifier in declared_include_specifiers(resolver.project_root())? {
@@ -557,6 +580,31 @@ pub(crate) fn include_reachable_dependencies_with_includes(
         } else {
             (kiln_frontend_oxc::parse(importer_path, importer_text), None)
         };
+        if capture_checker_metadata && !commonjs {
+            for requested in &module.requested_modules {
+                if !requested
+                    .occurrences
+                    .iter()
+                    .any(|occurrence| occurrence.type_only)
+                {
+                    continue;
+                }
+                if kiln_module_resolver::NodeBuiltin::parse(&requested.specifier).is_some() {
+                    continue;
+                }
+                let Ok(resolved) = resolver.resolve_with_metadata_for_request(
+                    &requested.specifier,
+                    &importer,
+                    NodeRequestKind::Import,
+                ) else {
+                    continue;
+                };
+                if let Some(package_json) = resolved.package_json.as_deref() {
+                    let _ =
+                        capture_package_json(package_json, texts, &indexes, &mut checker_metadata)?;
+                }
+            }
+        }
         let mut requests: Vec<(String, NodeRequestKind, bool, PathBuf)> = if commonjs {
             static_requires
                 .expect("CommonJS facts exist")
@@ -664,18 +712,19 @@ pub(crate) fn include_reachable_dependencies_with_includes(
             if node || !exact_explicit {
                 let package_json = resolved.package_json.as_deref();
                 let (package_json, package_json_hash) = if let Some(package_json) = package_json {
-                    let package_json_text =
-                        std::fs::read_to_string(package_json).map_err(|source| {
-                            Error::io(format!("cannot read {}", package_json.display()), source)
-                        })?;
-                    let package_json = package_json.to_str().ok_or_else(|| {
+                    let package_json_text = if capture_checker_metadata {
+                        capture_package_json(package_json, texts, &indexes, &mut checker_metadata)?
+                    } else {
+                        package_json_source(package_json, texts, &indexes)?
+                    };
+                    let package_json_path = package_json.to_str().ok_or_else(|| {
                         Error::BadInput(format!(
                             "path is not valid UTF-8: {}",
                             package_json.display()
                         ))
                     })?;
                     (
-                        Some(package_json.to_owned()),
+                        Some(package_json_path.to_owned()),
                         Some(source_digest(&package_json_text)),
                     )
                 } else {
@@ -717,6 +766,7 @@ pub(crate) fn include_reachable_dependencies_with_includes(
     }
 
     texts.sort_by(|left, right| left.0.cmp(&right.0));
+    let checker_metadata = checker_metadata.into_iter().collect();
     Ok((
         resolutions.into_values().collect(),
         node_formats
@@ -727,7 +777,627 @@ pub(crate) fn include_reachable_dependencies_with_includes(
             })
             .collect(),
         declared_includes,
+        checker_metadata,
     ))
+}
+
+fn package_json_source(
+    path: &Path,
+    texts: &[(String, String)],
+    indexes: &HashMap<PathBuf, usize>,
+) -> Result<String> {
+    if let Some(index) = indexes.get(path) {
+        return Ok(texts[*index].1.clone());
+    }
+    std::fs::read_to_string(path)
+        .map_err(|source| Error::io(format!("cannot read {}", path.display()), source))
+}
+
+fn capture_package_json(
+    path: &Path,
+    texts: &[(String, String)],
+    indexes: &HashMap<PathBuf, usize>,
+    metadata: &mut BTreeMap<String, String>,
+) -> Result<String> {
+    let path_string = path
+        .to_str()
+        .ok_or_else(|| Error::BadInput(format!("path is not valid UTF-8: {}", path.display())))?;
+    if let Some(source) = metadata.get(path_string) {
+        return Ok(source.clone());
+    }
+    let source = package_json_source(path, texts, indexes)?;
+    metadata
+        .entry(path_string.to_owned())
+        .or_insert_with(|| source.clone());
+    Ok(source)
+}
+
+/// Add checker inputs outside the ordinary code walk without changing its file limit, ordering,
+/// or source count. These bytes still travel through the normal SourceHash/StageSource handshake.
+pub(crate) fn capture_checker_metadata(
+    root: &Path,
+    walked_sources: &[PathBuf],
+    texts: &mut Vec<(String, String)>,
+    source_override: Option<(&str, &str)>,
+    package_metadata: Vec<(String, String)>,
+) -> Result<()> {
+    let canonical_root = PathBuf::from(crate::commands::canonical_path(root)?);
+    let mut walked_paths = HashSet::new();
+    for source in walked_sources {
+        let relative = source.strip_prefix(root).map_err(|_| {
+            Error::BadInput(format!(
+                "{} is not under the project root {}",
+                source.display(),
+                root.display()
+            ))
+        })?;
+        walked_paths.insert(canonical_root.join(relative).to_string_lossy().into_owned());
+    }
+    let mut capture = CheckerInputCapture {
+        walked_paths,
+        texts,
+        source_override,
+        extra: BTreeMap::new(),
+        total_bytes: 0,
+        directories_scanned: 0,
+    };
+    let mut package_manifests = BTreeSet::new();
+    for (path, text) in package_metadata {
+        let canonical = capture.record_supplied(Path::new(&path), text)?;
+        package_manifests.insert(PathBuf::from(canonical));
+    }
+
+    // A runtime resolver can reject a valid type-only dependency when a package has no JS
+    // entrypoint or exposes only an `exports.types` target. Checker discovery needs the package
+    // manifest and declaration candidates, while the checker host remains responsible for
+    // choosing the actual type target. Inspect every walked TS source, even when no entry
+    // override is present (the whole project is then the checker input). This includes ordinary
+    // imports too: a runtime-unresolvable package can still provide type declarations through an
+    // `exports.types` condition, and discovering its metadata must not relax runtime resolution.
+    let resolver = NodePackageResolver::new(root)
+        .map_err(|error| Error::BadInput(format!("cannot resolve checker metadata: {error}")))?;
+    for source in walked_sources.iter().filter(|path| is_typescript(path)) {
+        let absolute = canonical_root.join(source.strip_prefix(root).map_err(|_| {
+            Error::BadInput(format!(
+                "{} is not under the project root {}",
+                source.display(),
+                root.display()
+            ))
+        })?);
+        let (source_text, importer) = capture.capture(&absolute)?;
+        let importer_text = importer.to_str().ok_or_else(|| {
+            Error::BadInput(format!(
+                "checker source path is not valid UTF-8: {}",
+                importer.display()
+            ))
+        })?;
+        let specifiers = kiln_frontend_oxc::discover_module_specifiers(importer_text, &source_text);
+        for specifier in specifiers {
+            if specifier.starts_with('.')
+                || Path::new(&specifier).is_absolute()
+                || kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some()
+            {
+                continue;
+            }
+            let manifest = resolver
+                .resolve_with_metadata_for_request(&specifier, &importer, NodeRequestKind::Import)
+                .ok()
+                .and_then(|resolved| resolved.package_json)
+                .or_else(|| find_package_manifest(&canonical_root, &importer, &specifier));
+            if let Some(manifest) = manifest {
+                let (_, canonical) = capture.capture(&manifest)?;
+                package_manifests.insert(canonical);
+            }
+        }
+    }
+
+    let mut context_dirs = BTreeSet::from([canonical_root.clone()]);
+    for file in walked_sources.iter().filter(|path| is_typescript(path)) {
+        let absolute = canonical_root.join(file.strip_prefix(root).map_err(|_| {
+            Error::BadInput(format!(
+                "{} is not under the project root {}",
+                file.display(),
+                root.display()
+            ))
+        })?);
+        add_ancestor_dirs(&canonical_root, absolute.parent(), &mut context_dirs);
+    }
+    if let Some((override_path, _)) = source_override
+        && is_typescript(Path::new(override_path))
+    {
+        let override_path = PathBuf::from(override_path);
+        if override_path.starts_with(&canonical_root) {
+            add_ancestor_dirs(&canonical_root, override_path.parent(), &mut context_dirs);
+        }
+    }
+    if context_dirs.len() > MAX_CHECKER_METADATA_DIRECTORIES {
+        return Err(Error::BadInput(format!(
+            "checker metadata capture exceeds {} configuration directories",
+            MAX_CHECKER_METADATA_DIRECTORIES
+        )));
+    }
+
+    let mut config_queue = BTreeSet::new();
+    for directory in &context_dirs {
+        let package = directory.join("package.json");
+        if package.is_file() {
+            let (_, canonical) = capture.capture(&package)?;
+            package_manifests.insert(canonical);
+        }
+        let entries = std::fs::read_dir(directory)
+            .map_err(|source| Error::io(format!("cannot read {}", directory.display()), source))?;
+        for entry in entries {
+            let entry = entry.map_err(|source| {
+                Error::io(format!("cannot inspect {}", directory.display()), source)
+            })?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with("tsconfig")
+                && matches!(
+                    path.extension().and_then(|extension| extension.to_str()),
+                    Some("json" | "jsonc")
+                )
+                && entry
+                    .file_type()
+                    .map_err(|source| {
+                        Error::io(format!("cannot inspect {}", path.display()), source)
+                    })?
+                    .is_file()
+            {
+                config_queue.insert(path);
+            }
+        }
+    }
+
+    let mut checked_configs = HashSet::new();
+    while let Some(config) = config_queue.pop_first() {
+        let (text, canonical) = capture.capture(&config)?;
+        if !checked_configs.insert(canonical.clone()) {
+            continue;
+        }
+        let value = parse_metadata_json(&canonical, &text)?;
+        let Some(extends) = value.get("extends") else {
+            continue;
+        };
+        let references: Vec<&str> = match extends {
+            serde_json::Value::String(reference) => vec![reference],
+            serde_json::Value::Array(references) => references
+                .iter()
+                .map(|reference| {
+                    reference.as_str().ok_or_else(|| {
+                        Error::BadInput(format!(
+                            "{}: every `extends` entry must be a string",
+                            canonical.display()
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            _ => {
+                return Err(Error::BadInput(format!(
+                    "{}: `extends` must be a string or array of strings",
+                    canonical.display()
+                )));
+            }
+        };
+        for reference in references {
+            let target = if reference.starts_with('.') || Path::new(reference).is_absolute() {
+                resolve_relative_config(&canonical, reference)?
+            } else {
+                let resolved = resolver.resolve_with_metadata_for_request(
+                    reference,
+                    &canonical,
+                    NodeRequestKind::Import,
+                );
+                let mut runtime_error = None;
+                let runtime_target = match resolved {
+                    Ok(resolved) => {
+                        if let Some(package_json) = resolved.package_json.as_deref() {
+                            let (_, manifest) = capture.capture(package_json)?;
+                            package_manifests.insert(manifest);
+                        }
+                        let target = resolved.module.path;
+                        is_json_config_path(&target).then_some(target)
+                    }
+                    Err(error) => {
+                        runtime_error = Some(error.to_string());
+                        None
+                    }
+                };
+                match runtime_target {
+                    Some(target) => target,
+                    None => resolve_package_config_fallback(
+                        &canonical,
+                        reference,
+                        &canonical_root,
+                        &mut capture,
+                        &mut package_manifests,
+                    )?
+                    .ok_or_else(|| {
+                        let detail = runtime_error
+                            .unwrap_or_else(|| "resolved to a non-JSON runtime target".into());
+                        Error::BadInput(format!(
+                            "{}: cannot resolve tsconfig `extends` {reference:?}: {detail}",
+                            canonical.display()
+                        ))
+                    })?,
+                }
+            };
+            config_queue.insert(target);
+        }
+    }
+
+    let mut package_roots = BTreeSet::new();
+    for manifest in &package_manifests {
+        if manifest
+            .parent()
+            .is_some_and(|parent| parent != canonical_root)
+            && (manifest
+                .components()
+                .any(|part| part.as_os_str() == "node_modules")
+                || !manifest.starts_with(&canonical_root))
+        {
+            if let Some(parent) = manifest.parent() {
+                package_roots.insert(parent.to_path_buf());
+            }
+        }
+    }
+    let mut scanned_packages = HashSet::new();
+    let mut declaration_queue = Vec::new();
+    while let Some(package_root) = package_roots.pop_first() {
+        if !scanned_packages.insert(package_root.clone()) {
+            continue;
+        }
+        if scanned_packages.len() > MAX_CHECKER_METADATA_PACKAGES {
+            return Err(Error::BadInput(format!(
+                "checker metadata capture exceeds {} reachable packages",
+                MAX_CHECKER_METADATA_PACKAGES
+            )));
+        }
+        scan_package_declarations(&package_root, &mut capture, &mut declaration_queue)?;
+        // Declarations may reference type-only packages with no runtime graph edge. Follow those
+        // imports through the same package resolver and capture each package's declaration tree.
+        let declarations = std::mem::take(&mut declaration_queue);
+        for (path, text) in declarations {
+            let Some(path_string) = path.to_str() else {
+                return Err(Error::BadInput(format!(
+                    "declaration path is not valid UTF-8: {}",
+                    path.display()
+                )));
+            };
+            let specifiers = kiln_frontend_oxc::discover_module_specifiers(path_string, &text);
+            for specifier in specifiers {
+                if specifier.starts_with('.')
+                    || Path::new(&specifier).is_absolute()
+                    || kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some()
+                {
+                    continue;
+                }
+                let manifest = resolver
+                    .resolve_with_metadata_for_request(&specifier, &path, NodeRequestKind::Import)
+                    .ok()
+                    .and_then(|resolved| resolved.package_json)
+                    .or_else(|| find_package_manifest(&canonical_root, &path, &specifier));
+                if let Some(package_json) = manifest {
+                    let (_, manifest) = capture.capture(&package_json)?;
+                    if let Some(parent) = manifest.parent() {
+                        if manifest
+                            .components()
+                            .any(|part| part.as_os_str() == "node_modules")
+                            || !manifest.starts_with(&canonical_root)
+                        {
+                            package_roots.insert(parent.to_path_buf());
+                        }
+                    }
+                    package_manifests.insert(manifest);
+                }
+            }
+        }
+    }
+
+    capture.texts.extend(capture.extra);
+    Ok(())
+}
+
+struct CheckerInputCapture<'a> {
+    walked_paths: HashSet<String>,
+    texts: &'a mut Vec<(String, String)>,
+    source_override: Option<(&'a str, &'a str)>,
+    extra: BTreeMap<String, String>,
+    total_bytes: usize,
+    directories_scanned: usize,
+}
+
+impl CheckerInputCapture<'_> {
+    fn capture(&mut self, path: &Path) -> Result<(String, PathBuf)> {
+        let canonical = std::fs::canonicalize(path).map_err(|source| {
+            Error::io(
+                format!("cannot resolve checker input {}", path.display()),
+                source,
+            )
+        })?;
+        let path_string = canonical.to_str().ok_or_else(|| {
+            Error::BadInput(format!(
+                "checker input path is not valid UTF-8: {}",
+                canonical.display()
+            ))
+        })?;
+        let text = if let Some((override_path, override_text)) = self.source_override
+            && override_path == path_string
+        {
+            override_text.to_owned()
+        } else if let Some((_, text)) = self.texts.iter().find(|(known, _)| known == path_string) {
+            text.clone()
+        } else if let Some(text) = self.extra.get(path_string) {
+            text.clone()
+        } else {
+            std::fs::read_to_string(&canonical).map_err(|source| {
+                Error::io(
+                    format!("cannot read checker input {}", canonical.display()),
+                    source,
+                )
+            })?
+        };
+        self.store(path_string, &text)?;
+        Ok((text, canonical))
+    }
+
+    fn record_supplied(&mut self, path: &Path, text: String) -> Result<PathBuf> {
+        let canonical = std::fs::canonicalize(path).map_err(|source| {
+            Error::io(
+                format!("cannot resolve checker input {}", path.display()),
+                source,
+            )
+        })?;
+        let path_string = canonical.to_str().ok_or_else(|| {
+            Error::BadInput(format!(
+                "checker input path is not valid UTF-8: {}",
+                canonical.display()
+            ))
+        })?;
+        self.store(path_string, &text)?;
+        Ok(canonical)
+    }
+
+    fn store(&mut self, path: &str, text: &str) -> Result<()> {
+        if self.walked_paths.contains(path) || self.texts.iter().any(|(known, _)| known == path) {
+            return Ok(());
+        }
+        if self.extra.contains_key(path) {
+            return Ok(());
+        }
+        if self.extra.len() >= MAX_CHECKER_METADATA_FILES {
+            return Err(Error::BadInput(format!(
+                "checker metadata capture exceeds {} files at {path}",
+                MAX_CHECKER_METADATA_FILES
+            )));
+        }
+        self.total_bytes = self.total_bytes.saturating_add(text.len());
+        if self.total_bytes > MAX_CHECKER_METADATA_BYTES {
+            return Err(Error::BadInput(format!(
+                "checker metadata capture exceeds {} bytes at {path}",
+                MAX_CHECKER_METADATA_BYTES
+            )));
+        }
+        self.extra.insert(path.to_owned(), text.to_owned());
+        Ok(())
+    }
+}
+
+fn add_ancestor_dirs(root: &Path, mut directory: Option<&Path>, output: &mut BTreeSet<PathBuf>) {
+    while let Some(path) = directory {
+        if !path.starts_with(root) {
+            break;
+        }
+        output.insert(path.to_path_buf());
+        if path == root {
+            break;
+        }
+        directory = path.parent();
+    }
+}
+
+fn find_package_manifest(root: &Path, importer: &Path, specifier: &str) -> Option<PathBuf> {
+    let package_name = if let Some(scoped) = specifier.strip_prefix('@') {
+        let (scope, package) = scoped.split_once('/')?;
+        format!("@{scope}/{package}")
+    } else {
+        specifier.split('/').next()?.to_owned()
+    };
+    let mut directory = importer.parent()?;
+    loop {
+        let manifest = directory
+            .join("node_modules")
+            .join(&package_name)
+            .join("package.json");
+        if manifest.is_file() {
+            return Some(manifest);
+        }
+        if directory == root {
+            break;
+        }
+        directory = directory.parent()?;
+        if !directory.starts_with(root) {
+            break;
+        }
+    }
+    None
+}
+
+fn resolve_package_config_fallback(
+    importer: &Path,
+    reference: &str,
+    root: &Path,
+    capture: &mut CheckerInputCapture<'_>,
+    package_manifests: &mut BTreeSet<PathBuf>,
+) -> Result<Option<PathBuf>> {
+    let manifest = find_package_manifest(root, importer, reference);
+    let package_name = package_name_from_specifier(reference).unwrap_or(reference);
+    let subpath = reference
+        .strip_prefix(package_name)
+        .unwrap_or("")
+        .trim_start_matches('/');
+    let (package_root, manifest) = if let Some(manifest) = manifest {
+        let (text, manifest) = capture.capture(&manifest)?;
+        package_manifests.insert(manifest.clone());
+        let value = parse_metadata_json(&manifest, &text)?;
+        let package_root = manifest.parent().unwrap_or(root).to_path_buf();
+        if !subpath.is_empty() {
+            let target = resolve_relative_config(&manifest, subpath)?;
+            return Ok(Some(target));
+        }
+        if let Some(config) = value.get("tsconfig").and_then(serde_json::Value::as_str) {
+            let target = resolve_relative_config(&manifest, config)?;
+            return Ok(Some(target));
+        }
+        (package_root, manifest)
+    } else {
+        return Ok(None);
+    };
+
+    for candidate in [
+        package_root.join("tsconfig.json"),
+        package_root.join("tsconfig.jsonc"),
+    ] {
+        if candidate.is_file() {
+            return std::fs::canonicalize(&candidate)
+                .map(Some)
+                .map_err(|source| {
+                    Error::io(
+                        format!("cannot resolve package tsconfig {}", candidate.display()),
+                        source,
+                    )
+                });
+        }
+    }
+    Ok(None)
+}
+
+fn package_name_from_specifier(specifier: &str) -> Option<&str> {
+    if specifier.starts_with('@') {
+        let scope_slash = specifier.find('/')?;
+        if let Some(package_slash) = specifier[scope_slash + 1..].find('/') {
+            Some(&specifier[..package_slash + scope_slash + 1])
+        } else {
+            Some(specifier)
+        }
+    } else {
+        specifier.split('/').next()
+    }
+}
+
+fn parse_metadata_json(path: &Path, text: &str) -> Result<serde_json::Value> {
+    let json = kiln_data_formats::parse_data_to_json(path, text).map_err(|error| {
+        Error::BadInput(format!(
+            "cannot parse checker metadata {}: {error}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str(&json).map_err(|error| {
+        Error::BadInput(format!(
+            "cannot parse checker metadata {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn is_json_config_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("json" | "jsonc")
+    )
+}
+
+fn resolve_relative_config(importer: &Path, reference: &str) -> Result<PathBuf> {
+    let base = if Path::new(reference).is_absolute() {
+        PathBuf::from(reference)
+    } else {
+        importer.parent().unwrap_or(Path::new("/")).join(reference)
+    };
+    let mut candidates = Vec::new();
+    if base.extension().is_some() {
+        candidates.push(base.clone());
+    } else {
+        candidates.push(base.with_extension("json"));
+        candidates.push(base.with_extension("jsonc"));
+        candidates.push(base.join("tsconfig.json"));
+        candidates.push(base.join("tsconfig.jsonc"));
+    }
+    for candidate in candidates {
+        if candidate.is_file() && is_json_config_path(&candidate) {
+            return std::fs::canonicalize(&candidate).map_err(|source| {
+                Error::io(
+                    format!("cannot resolve tsconfig extends {}", candidate.display()),
+                    source,
+                )
+            });
+        }
+    }
+    Err(Error::BadInput(format!(
+        "{}: cannot find tsconfig extends target {reference:?}",
+        importer.display()
+    )))
+}
+
+fn scan_package_declarations(
+    root: &Path,
+    capture: &mut CheckerInputCapture<'_>,
+    declarations: &mut Vec<(PathBuf, String)>,
+) -> Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        capture.directories_scanned += 1;
+        if capture.directories_scanned > MAX_CHECKER_METADATA_DIRECTORIES {
+            return Err(Error::BadInput(format!(
+                "checker metadata capture exceeds {} package directories",
+                MAX_CHECKER_METADATA_DIRECTORIES
+            )));
+        }
+        let entries = std::fs::read_dir(&directory).map_err(|source| {
+            Error::io(
+                format!("cannot read package {}", directory.display()),
+                source,
+            )
+        })?;
+        let mut children = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| {
+                Error::io(
+                    format!("cannot inspect package {}", directory.display()),
+                    source,
+                )
+            })?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let file_type = entry.file_type().map_err(|source| {
+                Error::io(format!("cannot inspect {}", path.display()), source)
+            })?;
+            if file_type.is_dir() {
+                if name != "node_modules" && name != ".git" {
+                    children.push(path);
+                }
+            } else if file_type.is_file()
+                && [".d.ts", ".d.mts", ".d.cts"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+            {
+                children.push(path);
+            }
+        }
+        children.sort();
+        for path in children.into_iter().rev() {
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let (text, canonical) = capture.capture(&path)?;
+                declarations.push((canonical, text));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn to_wire_node_format(format: ResolverNodeModuleFormat) -> NodeModuleFormat {
@@ -925,6 +1595,13 @@ fn is_source(path: &Path) -> bool {
         .is_some_and(|e| SOURCE_EXTENSIONS.contains(&e))
 }
 
+pub(crate) fn is_typescript(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("ts" | "tsx" | "mts" | "cts")
+    )
+}
+
 /// Whether a filesystem event names a file the authoritative project walk would discover.
 ///
 /// Watch receives recursive events from ignored trees too. Keeping this predicate in the source
@@ -989,6 +1666,294 @@ mod tests {
             bounded_threads(MAX_READ_THREADS, 32, [Some("9999"), None]),
             8
         );
+    }
+
+    #[test]
+    fn checker_metadata_captures_project_configs_without_changing_walk() {
+        let tree = Tree::new("checker-config-metadata");
+        tree.file("src/main.ts");
+        std::fs::write(
+            tree.0.join("package.json"),
+            r#"{"name":"fixture","type":"module"}"#,
+        )
+        .expect("write package manifest");
+        std::fs::create_dir_all(tree.0.join("configs")).expect("create config directory");
+        std::fs::write(
+            tree.0.join("tsconfig.jsonc"),
+            "{\n  // project config\n  \"extends\": \"./configs/base\"\n}\n",
+        )
+        .expect("write JSONC project config");
+        std::fs::write(
+            tree.0.join("configs/base.json"),
+            r#"{"compilerOptions":{"strict":true}}"#,
+        )
+        .expect("write extended config");
+
+        let walk = collect(&tree.0).expect("walk sources");
+        let original_count = walk.files.len();
+        let root = tree.0.canonicalize().expect("canonical root");
+        let mut texts = walk
+            .files
+            .iter()
+            .map(|path| {
+                (
+                    path.canonicalize()
+                        .expect("canonical source")
+                        .to_string_lossy()
+                        .into_owned(),
+                    std::fs::read_to_string(path).expect("read source"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        capture_checker_metadata(&root, &walk.files, &mut texts, None, Vec::new())
+            .expect("capture project config inputs");
+
+        assert_eq!(
+            walk.files.len(),
+            original_count,
+            "metadata must not alter walk inventory"
+        );
+        let paths = texts
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(paths.contains(root.join("package.json").to_str().unwrap()));
+        assert!(paths.contains(root.join("tsconfig.jsonc").to_str().unwrap()));
+        assert!(paths.contains(root.join("configs/base.json").to_str().unwrap()));
+        assert_eq!(texts.len(), original_count + 3);
+    }
+
+    #[test]
+    fn checker_metadata_captures_reachable_package_declarations_and_reports_limits() {
+        let tree = Tree::new("checker-package-metadata");
+        tree.file("src/main.ts");
+        std::fs::create_dir_all(tree.0.join("node_modules/pkg")).expect("create package");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/package.json"),
+            r#"{"name":"pkg","types":"index.d.ts","typesVersions":{"*":{"*": ["types/*.d.ts"]}}}"#,
+        )
+        .expect("write package manifest");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/index.d.ts"),
+            "import type { Extra } from 'types-dep'; export interface Item { extra: Extra }\n",
+        )
+        .expect("write package declarations");
+        std::fs::create_dir_all(tree.0.join("node_modules/pkg/types"))
+            .expect("create typesVersions directory");
+        std::fs::write(
+            tree.0.join("node_modules/pkg/types/item.d.ts"),
+            "export interface Item {}\n",
+        )
+        .expect("write typesVersions candidate");
+        std::fs::create_dir_all(tree.0.join("node_modules/types-dep"))
+            .expect("create type package");
+        std::fs::write(
+            tree.0.join("node_modules/types-dep/package.json"),
+            r#"{"name":"types-dep","types":"index.d.ts"}"#,
+        )
+        .expect("write type dependency manifest");
+        std::fs::write(
+            tree.0.join("node_modules/types-dep/index.d.ts"),
+            "export interface Extra {}\n",
+        )
+        .expect("write type dependency declarations");
+
+        let walk = collect(&tree.0).expect("walk sources");
+        let root = tree.0.canonicalize().expect("canonical root");
+        let mut texts = walk
+            .files
+            .iter()
+            .map(|path| {
+                (
+                    path.canonicalize()
+                        .expect("canonical source")
+                        .to_string_lossy()
+                        .into_owned(),
+                    std::fs::read_to_string(path).expect("read source"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let package_manifest = root.join("node_modules/pkg/package.json");
+        let supplied = vec![(
+            package_manifest.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&package_manifest).expect("read package manifest"),
+        )];
+
+        capture_checker_metadata(&root, &walk.files, &mut texts, None, supplied)
+            .expect("capture package type inputs");
+
+        let paths = texts
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<BTreeSet<_>>();
+        for relative in [
+            "node_modules/pkg/package.json",
+            "node_modules/pkg/index.d.ts",
+            "node_modules/pkg/types/item.d.ts",
+            "node_modules/types-dep/package.json",
+            "node_modules/types-dep/index.d.ts",
+        ] {
+            assert!(
+                paths.contains(root.join(relative).to_str().unwrap()),
+                "missing {relative}"
+            );
+        }
+        assert_eq!(
+            walk.files.len(),
+            1,
+            "declaration inputs stay outside the code walk"
+        );
+
+        let mut capture = CheckerInputCapture {
+            walked_paths: HashSet::new(),
+            texts: &mut Vec::new(),
+            source_override: None,
+            extra: BTreeMap::new(),
+            total_bytes: 0,
+            directories_scanned: 0,
+        };
+        for index in 0..MAX_CHECKER_METADATA_FILES {
+            capture
+                .store(&format!("metadata-{index}.json"), "{}")
+                .expect("within file limit");
+        }
+        let error = capture
+            .store("one-too-many.json", "{}")
+            .expect_err("file cap is explicit");
+        assert!(
+            error
+                .to_string()
+                .contains("checker metadata capture exceeds")
+        );
+    }
+
+    #[test]
+    fn checker_metadata_finds_type_only_package_without_runtime_entrypoint() {
+        let tree = Tree::new("checker-types-only-package");
+        tree.file("src/main.ts");
+        std::fs::write(
+            tree.0.join("src/main.ts"),
+            "import type { Shape } from 'types-only/subpath'; export type { Shape };\n",
+        )
+        .expect("write type-only importer");
+        std::fs::create_dir_all(tree.0.join("node_modules/types-only/types"))
+            .expect("create type package");
+        std::fs::write(
+            tree.0.join("node_modules/types-only/package.json"),
+            r#"{"name":"types-only","exports":{"./subpath":{"types":"./types/subpath.d.ts"}}}"#,
+        )
+        .expect("write types-only manifest");
+        std::fs::write(
+            tree.0.join("node_modules/types-only/types/subpath.d.ts"),
+            "export interface Shape {}\n",
+        )
+        .expect("write type-only declaration");
+
+        let walk = collect(&tree.0).expect("walk project sources");
+        let root = tree.0.canonicalize().expect("canonical root");
+        let mut texts = walk
+            .files
+            .iter()
+            .map(|path| {
+                (
+                    path.canonicalize()
+                        .expect("canonical source")
+                        .to_string_lossy()
+                        .into_owned(),
+                    std::fs::read_to_string(path).expect("read source"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        capture_checker_metadata(&root, &walk.files, &mut texts, None, Vec::new())
+            .expect("capture type-only package");
+
+        let paths = texts
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            paths.contains(
+                root.join("node_modules/types-only/package.json")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert!(
+            paths.contains(
+                root.join("node_modules/types-only/types/subpath.d.ts")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            walk.files.len(),
+            1,
+            "declarations stay outside runtime walk"
+        );
+    }
+
+    #[test]
+    fn checker_metadata_follows_bare_config_extends_without_runtime_main() {
+        let tree = Tree::new("checker-package-config-extends");
+        tree.file("src/main.ts");
+        std::fs::write(
+            tree.0.join("tsconfig.json"),
+            r#"{"extends":"@tsconfig/node22"}"#,
+        )
+        .expect("write project config");
+        std::fs::create_dir_all(tree.0.join("node_modules/@tsconfig/node22"))
+            .expect("create config package");
+        std::fs::write(
+            tree.0.join("node_modules/@tsconfig/node22/package.json"),
+            r#"{"name":"@tsconfig/node22","tsconfig":"tsconfig.json"}"#,
+        )
+        .expect("write config package manifest");
+        std::fs::write(
+            tree.0.join("node_modules/@tsconfig/node22/tsconfig.json"),
+            r#"{"compilerOptions":{"target":"ES2022"}}"#,
+        )
+        .expect("write package config");
+
+        let walk = collect(&tree.0).expect("walk sources");
+        let root = tree.0.canonicalize().expect("canonical root");
+        let mut texts = walk
+            .files
+            .iter()
+            .map(|path| {
+                (
+                    path.canonicalize()
+                        .expect("canonical source")
+                        .to_string_lossy()
+                        .into_owned(),
+                    std::fs::read_to_string(path).expect("read source"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        capture_checker_metadata(&root, &walk.files, &mut texts, None, Vec::new())
+            .expect("capture package config extends");
+
+        let paths = texts
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            paths.contains(
+                root.join("node_modules/@tsconfig/node22/package.json")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert!(
+            paths.contains(
+                root.join("node_modules/@tsconfig/node22/tsconfig.json")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(walk.files.len(), 1, "config inputs stay outside code walk");
     }
 
     /// A throwaway tree under the OS temp directory, removed when the test ends.

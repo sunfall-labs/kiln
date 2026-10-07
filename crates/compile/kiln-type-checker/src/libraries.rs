@@ -1,6 +1,7 @@
-//! Pinned TypeScript 7.0.2 ECMAScript declarations (Apache-2.0).
+//! Pinned TypeScript 7.0.2 declaration libraries (Apache-2.0).
 /// Inputs for a frontend; the checker never reparses or reads these implicitly.
 pub const STANDARD_LIBRARIES: &[(&str, &str)] = &[
+    ("lib.d.ts", include_str!("../lib/lib.d.ts")),
     (
         "lib.decorators.d.ts",
         include_str!("../lib/lib.decorators.d.ts"),
@@ -8,6 +9,15 @@ pub const STANDARD_LIBRARIES: &[(&str, &str)] = &[
     (
         "lib.decorators.legacy.d.ts",
         include_str!("../lib/lib.decorators.legacy.d.ts"),
+    ),
+    (
+        "lib.dom.asynciterable.d.ts",
+        include_str!("../lib/lib.dom.asynciterable.d.ts"),
+    ),
+    ("lib.dom.d.ts", include_str!("../lib/lib.dom.d.ts")),
+    (
+        "lib.dom.iterable.d.ts",
+        include_str!("../lib/lib.dom.iterable.d.ts"),
     ),
     (
         "lib.es2015.collection.d.ts",
@@ -354,5 +364,25 @@ pub const STANDARD_LIBRARIES: &[(&str, &str)] = &[
     (
         "lib.esnext.typedarrays.d.ts",
         include_str!("../lib/lib.esnext.typedarrays.d.ts"),
+    ),
+    (
+        "lib.scripthost.d.ts",
+        include_str!("../lib/lib.scripthost.d.ts"),
+    ),
+    (
+        "lib.webworker.asynciterable.d.ts",
+        include_str!("../lib/lib.webworker.asynciterable.d.ts"),
+    ),
+    (
+        "lib.webworker.d.ts",
+        include_str!("../lib/lib.webworker.d.ts"),
+    ),
+    (
+        "lib.webworker.importscripts.d.ts",
+        include_str!("../lib/lib.webworker.importscripts.d.ts"),
+    ),
+    (
+        "lib.webworker.iterable.d.ts",
+        include_str!("../lib/lib.webworker.iterable.d.ts"),
     ),
 ];

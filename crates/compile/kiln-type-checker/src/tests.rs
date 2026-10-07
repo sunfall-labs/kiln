@@ -1,8 +1,8 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::{
-    CheckOptions, CheckResult, SourceDiagnostic, SourceSnapshot, SourceType, TypeClass, TypeRole,
-    check,
+    CheckOptions, CheckResult, FactSelection, SourceDiagnostic, SourceSnapshot, SourceType,
+    TypeClass, TypeRole, check,
 };
 
 const LIB_ROOT: &str = "/__kiln_typescript_lib";
@@ -56,6 +56,14 @@ fn check_sources(sources: &[(&str, &str)]) -> CheckResult {
 fn check_sources_with_options(sources: &[(&str, &str)], options: &CheckOptions) -> CheckResult {
     let (snapshot, roots) = snapshot_with(sources);
     check(&snapshot, &roots, options)
+}
+
+fn check_snapshot_with_options(
+    snapshot: &SourceSnapshot,
+    roots: &[String],
+    options: &CheckOptions,
+) -> CheckResult {
+    check(snapshot, roots, options)
 }
 
 fn assert_complete(result: &CheckResult) {
@@ -120,6 +128,354 @@ fn reports_bun_engine_negative_annotation_as_ts2322() {
         has_code(&result, 2322),
         "{}",
         format_diagnostics(&result.diagnostics)
+    );
+}
+
+#[test]
+fn es5_dom_declarations_retain_statement_modifiers_and_index_member_types() {
+    let path = "/project/main.ts";
+    let mut declaration_options = options();
+    declaration_options.libraries = vec!["es5".into(), "dom".into()];
+    let (mut snapshot, roots) = snapshot_with(&[
+        (path, "const root: Node = document.documentElement;"),
+        (
+            "/project/modifiers.d.ts",
+            "export declare const declaredValue: number; export declare function declaredFunction(): void;",
+        ),
+    ]);
+    snapshot.auxiliary_files.insert(
+        "/project/tsconfig.json".into(),
+        Arc::from(br#"{"compilerOptions":{"lib":["es5","dom"],"skipLibCheck":false}}"#.as_slice()),
+    );
+    declaration_options.config_path = Some("/project/tsconfig.json".into());
+    let result = check_snapshot_with_options(&snapshot, &roots, &declaration_options);
+    assert_complete(&result);
+    assert!(
+        result.diagnostics.is_empty(),
+        "ES5/DOM declaration libraries and `export declare` statements should check cleanly: {}",
+        format_diagnostics(&result.diagnostics)
+    );
+}
+
+#[test]
+fn strict_option_controls_null_assignability() {
+    let path = "/project/main.ts";
+    let source = "const value: string = null;";
+    let strict_result = check_sources(&[(path, source)]);
+    assert_complete(&strict_result);
+    assert!(
+        has_code(&strict_result, 2322),
+        "strict null checking should reject null: {}",
+        format_diagnostics(&strict_result.diagnostics)
+    );
+
+    let mut loose_options = options();
+    loose_options.strict = false;
+    let loose_result = check_sources_with_options(&[(path, source)], &loose_options);
+    assert_complete(&loose_result);
+    assert_clean(&loose_result);
+}
+
+#[test]
+fn jsonc_config_facade_applies_overriding_options_from_snapshot() {
+    let path = "/project/main.ts";
+    let source = "const value: string = null;";
+    let (mut snapshot, roots) = snapshot_with(&[(path, source)]);
+    snapshot.auxiliary_files.insert(
+        "/project/tsconfig.json".into(),
+        Arc::from(
+            br#"{
+              // JSONC comments and trailing commas are accepted by tsconfig.
+              "compilerOptions": { "strict": false, "skipLibCheck": true, },
+            }"#
+            .as_slice(),
+        ),
+    );
+    let mut configured = options();
+    configured.config_path = Some("/project/tsconfig.json".into());
+    let result = check_snapshot_with_options(&snapshot, &roots, &configured);
+    assert_complete(&result);
+    assert_clean(&result);
+}
+
+#[test]
+fn config_facade_inherits_path_mappings_and_child_option_overrides() {
+    let path = "/project/main.ts";
+    let source =
+        "import { amount } from '@amount'; const copy: number = amount; const bad: string = null;";
+    let (mut snapshot, roots) = snapshot_with(&[(path, source)]);
+    snapshot.auxiliary_files.insert(
+        "/project/base.json".into(),
+        Arc::from(
+            br#"{
+              "compilerOptions": {
+                "paths": { "@amount": ["./types.d.ts"] },
+                "strict": false,
+                "skipLibCheck": true,
+              },
+            }"#
+            .as_slice(),
+        ),
+    );
+    snapshot.auxiliary_files.insert(
+        "/project/tsconfig.json".into(),
+        Arc::from(
+            br#"{
+              "extends": "./base.json",
+              "compilerOptions": { "strictNullChecks": true, },
+            }"#
+            .as_slice(),
+        ),
+    );
+    snapshot.modules.insert(
+        "/project/types.d.ts".into(),
+        Arc::new(kiln_frontend_oxc::parse(
+            "/project/types.d.ts",
+            "export declare const amount: number;",
+        )),
+    );
+    let mut configured = options();
+    configured.config_path = Some("/project/tsconfig.json".into());
+    let result = check_snapshot_with_options(&snapshot, &roots, &configured);
+    assert_complete(&result);
+    assert!(
+        has_code(&result, 2322),
+        "child strictNullChecks must override inherited strict=false: {}",
+        format_diagnostics(&result.diagnostics)
+    );
+    assert!(
+        !has_code(&result, 2307),
+        "inherited paths mapping should resolve @amount: {}",
+        format_diagnostics(&result.diagnostics)
+    );
+}
+
+#[test]
+fn config_facade_reports_unknown_and_malformed_options() {
+    let path = "/project/main.ts";
+    let (mut snapshot, roots) = snapshot_with(&[(path, "const value = 1;")]);
+    snapshot.auxiliary_files.insert(
+        "/project/unknown.json".into(),
+        Arc::from(br#"{"compilerOptions":{"skipLibCheck":true,"unknownOption":true}}"#.as_slice()),
+    );
+    snapshot.auxiliary_files.insert(
+        "/project/malformed.json".into(),
+        Arc::from(br#"{"compilerOptions":{"strict":true}"#.as_slice()),
+    );
+    let mut configured = options();
+    configured.config_path = Some("/project/unknown.json".into());
+    let unknown = check_snapshot_with_options(&snapshot, &roots, &configured);
+    assert!(
+        has_code(&unknown, 5023),
+        "unknown option should report TS5023: {}",
+        format_diagnostics(&unknown.diagnostics)
+    );
+    let valid_module =
+        kiln_frontend_oxc::parse(path, "function add(value: number) { return value + 1; }");
+    let mut program = kiln_ir::compile_module(&valid_module).expect("valid source compiles");
+    kiln_ir::apply_source_types(
+        path,
+        &valid_module,
+        &unknown,
+        crate::CHECKER_VERSION,
+        &mut program.program,
+    );
+    assert!(
+        program.program.functions.iter().all(|function| !function
+            .type_annotations
+            .as_ref()
+            .is_some_and(|annotations| annotations.source_types.is_some())),
+        "invalid config must not publish compiler annotations"
+    );
+
+    configured.config_path = Some("/project/malformed.json".into());
+    let malformed = check_snapshot_with_options(&snapshot, &roots, &configured);
+    assert!(
+        has_code(&malformed, 1005),
+        "missing closing brace should report TS1005: {}",
+        format_diagnostics(&malformed.diagnostics)
+    );
+}
+
+#[test]
+fn unchecked_indexed_access_option_controls_array_index_type() {
+    let path = "/project/main.ts";
+    let source = "const values: number[] = []; const value: number = values[0];";
+    let checked = check_sources(&[(path, source)]);
+    assert_complete(&checked);
+    assert!(
+        has_code(&checked, 2322),
+        "unchecked array access should include undefined: {}",
+        format_diagnostics(&checked.diagnostics)
+    );
+
+    let mut unchecked_options = options();
+    unchecked_options.no_unchecked_indexed_access = false;
+    let unchecked = check_sources_with_options(&[(path, source)], &unchecked_options);
+    assert_complete(&unchecked);
+    assert_clean(&unchecked);
+}
+
+#[test]
+fn unresolved_relative_import_reports_ts2307() {
+    let path = "/project/main.ts";
+    let source = "import { value } from \"./missing\"; const result = value;";
+    let result = check_sources(&[(path, source)]);
+    assert_complete(&result);
+    assert!(
+        has_code(&result, 2307),
+        "unresolved import should report TS2307: {}",
+        format_diagnostics(&result.diagnostics)
+    );
+}
+
+#[test]
+fn package_exports_types_condition_resolves_in_snapshot() {
+    let path = "/project/main.ts";
+    let source = "import { value } from \"@sample/values\"; const exact: 42 = value;";
+    let (mut snapshot, roots) = snapshot_with(&[(path, source)]);
+    snapshot.auxiliary_files.insert(
+        "/project/node_modules/@sample/values/package.json".into(),
+        Arc::from(
+            br#"{"name":"@sample/values","exports":{".":{"types":"./types/index.d.ts","default":"./dist/index.js"}}}"#
+                .as_slice(),
+        ),
+    );
+    let declaration = "/project/node_modules/@sample/values/types/index.d.ts";
+    snapshot.modules.insert(
+        declaration.into(),
+        Arc::new(kiln_frontend_oxc::parse(
+            declaration,
+            "export declare const value: 42;",
+        )),
+    );
+    let result = check_snapshot_with_options(&snapshot, &roots, &options());
+    assert_complete(&result);
+    assert_clean(&result);
+}
+
+#[test]
+fn import_type_resolution_mode_selects_package_condition_and_reports_invalid_mode() {
+    let path = "/project/main.ts";
+    let source = r#"import type { Entry as ImportEntry } from "modepkg";
+type RequireEntry = import("modepkg", { with: { "resolution-mode": "require" } }).Entry;
+type InvalidEntry = import("modepkg", { with: { "resolution-mode": "other" } }).Entry;
+const imported: ImportEntry = "import";
+const required: RequireEntry = "require";
+const wrong: RequireEntry = "import";"#;
+    let (mut snapshot, roots) = snapshot_with(&[(path, source)]);
+    snapshot.auxiliary_files.insert(
+        "/project/node_modules/modepkg/package.json".into(),
+        Arc::from(
+            br#"{"name":"modepkg","type":"module","exports":{".":{"import":{"types":"./types/import.d.ts","default":"./dist/esm.js"},"require":{"types":"./types/require.d.cts","default":"./dist/cjs.cjs"}}}}"#
+                .as_slice(),
+        ),
+    );
+    let import_declaration = "/project/node_modules/modepkg/types/import.d.ts";
+    snapshot.modules.insert(
+        import_declaration.into(),
+        Arc::new(kiln_frontend_oxc::parse(
+            import_declaration,
+            "export type Entry = \"import\";",
+        )),
+    );
+    let require_declaration = "/project/node_modules/modepkg/types/require.d.cts";
+    snapshot.modules.insert(
+        require_declaration.into(),
+        Arc::new(kiln_frontend_oxc::parse(
+            require_declaration,
+            "export type Entry = \"require\";",
+        )),
+    );
+    let result = check_snapshot_with_options(&snapshot, &roots, &options());
+    assert_complete(&result);
+    assert!(
+        has_code(&result, 1453),
+        "invalid resolution-mode should report TS1453: {}",
+        format_diagnostics(&result.diagnostics)
+    );
+    assert!(
+        has_code(&result, 2322),
+        "require-mode import should resolve the require condition: {}",
+        format_diagnostics(&result.diagnostics)
+    );
+    assert!(
+        !has_code(&result, 2307),
+        "valid import modes should resolve package exports: {}",
+        format_diagnostics(&result.diagnostics)
+    );
+}
+
+#[test]
+fn import_aliases_and_reexport_chains_preserve_type_and_value_bindings() {
+    let (barrel, middle, main) = (
+        "/project/barrel.ts",
+        "/project/middle.ts",
+        "/project/main.ts",
+    );
+    let result = check_sources(&[
+        (
+            barrel,
+            "export interface Item { value: number } export const item: Item = { value: 1 };",
+        ),
+        (
+            middle,
+            "export { item as publicItem } from \"./barrel\"; export type { Item as PublicItem } from \"./barrel\";",
+        ),
+        (
+            main,
+            "import { publicItem as selected } from \"./middle\"; import type { PublicItem } from \"./middle\"; const checked: PublicItem = selected;",
+        ),
+    ]);
+    assert_complete(&result);
+    assert_clean(&result);
+}
+
+#[test]
+fn malformed_typescript_preserves_parser_diagnostics_and_is_incomplete() {
+    let path = "/project/main.ts";
+    let source = "function add(value: number) { return value + 1; } const bad: number = ;";
+    let module = kiln_frontend_oxc::parse(path, source);
+    assert!(
+        !module.diagnostics.is_empty(),
+        "fixture should produce an owned parser diagnostic"
+    );
+    let result = check_sources(&[(path, source)]);
+    assert!(!result.complete, "recovered malformed source is incomplete");
+    for parser_diagnostic in &module.diagnostics {
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.path.as_deref() == Some(path)
+                    && diagnostic.span == parser_diagnostic.span
+                    && diagnostic.code.is_none()
+                    && diagnostic.message == parser_diagnostic.message
+            }),
+            "original parser diagnostic was not preserved: {:?}; result: {:?}",
+            parser_diagnostic,
+            result.diagnostics
+        );
+    }
+
+    let valid_module =
+        kiln_frontend_oxc::parse(path, "function add(value: number) { return value + 1; }");
+    let mut program = kiln_ir::compile_module(&valid_module).expect("valid source compiles");
+    kiln_ir::apply_source_types(
+        path,
+        &valid_module,
+        &result,
+        crate::CHECKER_VERSION,
+        &mut program.program,
+    );
+    let add = program
+        .program
+        .functions
+        .iter()
+        .find(|function| function.name.as_deref() == Some("add"))
+        .expect("add function prototype");
+    assert!(
+        !add.type_annotations
+            .as_ref()
+            .is_some_and(|annotations| { annotations.source_types.is_some() })
     );
 }
 
@@ -496,6 +852,76 @@ fn source_contracts_annotate_bytecode_without_changing_executable_code() {
     assert_eq!(add.parameter_type(0), Some(kiln_ir::TypeAnnotation::Number));
     assert_eq!(compiled.program.code, original_code);
     assert_eq!(compiled.program.constants, original_constants);
+}
+
+#[test]
+fn function_contract_fact_selection_preserves_checking_and_bytecode_metadata() {
+    let path = "/project/contracts.ts";
+    let source = "type Scalar = number; function add(value: Scalar): Scalar { return value + 1; } const answer = add(41);";
+    let mut all_options = options();
+    all_options.libraries = vec!["esnext".into()];
+    let all = check_sources_with_options(&[(path, source)], &all_options);
+    assert_complete(&all);
+
+    let mut contract_options = all_options.clone();
+    contract_options.facts = FactSelection::FunctionContracts;
+    let contracts = check_sources_with_options(&[(path, source)], &contract_options);
+    assert_eq!(contracts.complete, all.complete);
+    assert_eq!(contracts.diagnostics, all.diagnostics);
+    assert!(
+        all.types
+            .iter()
+            .any(|fact| fact.role == TypeRole::Expression),
+        "full fact selection should include expression facts"
+    );
+    assert!(
+        contracts
+            .types
+            .iter()
+            .all(|fact| fact.role != TypeRole::Expression),
+        "function-contract selection should omit expression facts"
+    );
+    let contract_facts = |result: &CheckResult| {
+        result
+            .types
+            .iter()
+            .filter(|fact| matches!(&fact.role, TypeRole::Parameter | TypeRole::Return))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(contract_facts(&all), contract_facts(&contracts));
+
+    let module = kiln_frontend_oxc::parse(path, source);
+    let mut all_program = kiln_ir::compile_module(&module).expect("source compiles as JavaScript");
+    let mut contract_program =
+        kiln_ir::compile_module(&module).expect("source compiles as JavaScript");
+    kiln_ir::apply_source_types(
+        path,
+        &module,
+        &all,
+        crate::CHECKER_VERSION,
+        &mut all_program.program,
+    );
+    kiln_ir::apply_source_types(
+        path,
+        &module,
+        &contracts,
+        crate::CHECKER_VERSION,
+        &mut contract_program.program,
+    );
+    let source_annotations = |program: &kiln_ir::Program| {
+        program
+            .functions
+            .iter()
+            .find(|function| function.name.as_deref() == Some("add"))
+            .and_then(|function| function.type_annotations.as_ref())
+            .and_then(|annotations| annotations.source_types.clone())
+            .expect("add function source contracts")
+    };
+    assert_eq!(
+        source_annotations(&all_program.program),
+        source_annotations(&contract_program.program)
+    );
 }
 
 #[test]

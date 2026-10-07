@@ -8,13 +8,14 @@
 //! additionally retain the complete active source set because source contracts may depend on
 //! ambient or type-only declarations with no runtime graph edge.
 
+use crate::dispatch::SnapshotSourceTypes;
 use kiln_db::{FileId, Revision};
 use kiln_digest::Digest;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::ResolutionMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Bump when the in-memory graph snapshot contract changes.  The cache is process-local, but the
 /// version keeps key construction explicit and prevents accidental reuse if this ever changes to
@@ -23,6 +24,10 @@ pub(crate) const GRAPH_CACHE_FORMAT: u16 = 4;
 
 /// Keep several editor/watch entries warm without retaining an unbounded number of snapshots.
 pub(crate) const DEFAULT_GRAPH_CACHE_CAPACITY: usize = 8;
+
+/// Source checks can retain every parsed project module. Keep their independent cache smaller
+/// than the graph cache so warming several entries does not pin an unbounded set of HIR trees.
+const SOURCE_CHECK_CACHE_CAPACITY: usize = 2;
 
 /// The stable lookup context for one graph. Reachable content identity lives on the cache entry as
 /// exact source revisions, because it differs for every graph under the same global engine state.
@@ -103,7 +108,15 @@ pub(crate) struct GraphSourceRevision {
 pub(crate) struct GraphCache {
     capacity: usize,
     entries: VecDeque<Entry>,
+    source_checks: VecDeque<(SourceCheckCacheKey, Arc<OnceLock<SnapshotSourceTypes>>)>,
     stats: GraphCacheStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceCheckCacheKey {
+    project_root: PathBuf,
+    entry: PathBuf,
+    identity: Digest,
 }
 
 impl Default for GraphCache {
@@ -118,6 +131,7 @@ impl GraphCache {
         Self {
             capacity,
             entries: VecDeque::with_capacity(capacity),
+            source_checks: VecDeque::with_capacity(SOURCE_CHECK_CACHE_CAPACITY),
             stats: GraphCacheStats::default(),
         }
     }
@@ -207,11 +221,47 @@ impl GraphCache {
         graph
     }
 
+    /// Share one source-check initialization across graph snapshots for the same project entry
+    /// and complete source identity. The slot is cloned into the immutable snapshot before the
+    /// daemon lock is released; the expensive parse/check then runs without that lock.
+    pub(crate) fn source_check_slot(
+        &mut self,
+        project_root: PathBuf,
+        entry: PathBuf,
+        identity: Digest,
+    ) -> Arc<OnceLock<SnapshotSourceTypes>> {
+        let key = SourceCheckCacheKey {
+            project_root,
+            entry,
+            identity,
+        };
+        if let Some(index) = self
+            .source_checks
+            .iter()
+            .position(|(candidate, _)| *candidate == key)
+        {
+            let entry = self
+                .source_checks
+                .remove(index)
+                .expect("located source-check cache slot exists");
+            let slot = Arc::clone(&entry.1);
+            self.source_checks.push_back(entry);
+            return slot;
+        }
+        while self.source_checks.len() >= SOURCE_CHECK_CACHE_CAPACITY {
+            self.source_checks.pop_front();
+        }
+        let slot = Arc::new(OnceLock::new());
+        self.source_checks.push_back((key, Arc::clone(&slot)));
+        slot
+    }
+
     /// Drop every retained graph after a failed mutation whose effects are uncertain. Ordinary
     /// source edits are validated selectively through each entry's reachable-source revisions.
     pub(crate) fn invalidate(&mut self) {
         self.stats.invalidations += 1;
         self.entries.clear();
+        self.source_checks.clear();
     }
 
     pub(crate) fn reset_stats(&mut self) {

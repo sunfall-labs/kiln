@@ -27,6 +27,8 @@ pub struct TypeSyntax {
     pub instantiations: Vec<TypeInstantiationSite>,
     /// Source-level expression wrappers removed by executable HIR lowering.
     pub expression_wrappers: Vec<TypeExpressionWrapperSite>,
+    /// Import attributes attached to static imports and re-exports.
+    pub module_attributes: Vec<TypeModuleAttributes>,
     /// `import X = ...` aliases, which Oxc's executable HIR intentionally erases.
     pub import_equals: Vec<TypeImportEquals>,
     /// Triple-slash references retained from the parser's comment table.
@@ -49,6 +51,38 @@ pub struct TypeReferenceDirective {
     pub value: String,
     pub position: u32,
     pub resolution_mode: Option<TypeResolutionMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeModuleAttributesKeyword {
+    With,
+    Assert,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeModuleAttributeKeyKind {
+    Identifier,
+    StringLiteral,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeModuleAttributes {
+    pub statement_span: Span,
+    pub keyword_span: Span,
+    /// Exact `{ ... }` span, including empty clauses and any inner comments.
+    pub attributes_span: Span,
+    pub keyword: TypeModuleAttributesKeyword,
+    pub attributes: Vec<TypeModuleAttribute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeModuleAttribute {
+    pub key: StringUnits,
+    pub key_kind: TypeModuleAttributeKeyKind,
+    pub value: StringUnits,
+    pub span: Span,
+    pub key_span: Span,
+    pub value_span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,6 +333,8 @@ pub enum TypeExprKind {
     },
     Import {
         specifier: String,
+        /// Import attributes/options from `import("module", options)`.
+        options: Option<Box<crate::Expression>>,
         qualifier: Vec<String>,
         arguments: Vec<TypeExpr>,
         is_typeof: bool,

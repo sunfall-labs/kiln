@@ -50,6 +50,75 @@ fn package_json_preserves_duplicate_keys_and_condition_order() {
 }
 
 #[test]
+fn jsonc_config_reader_keeps_ordered_duplicate_properties_and_source_spans() {
+    use crate::engine::{
+        atom::Interner,
+        hir::{ExprKind, StmtKind},
+        session::Session,
+    };
+
+    let session = Session::new();
+    let atoms = Interner::new_in(&session);
+    let source = br#"{
+      // config comment
+      "compilerOptions": { "strict": true, "strict": false, },
+      "negative": -2,
+    }"#;
+    let hir = json::parse_source_file(session.arena(), &session, &atoms, source);
+    assert!(!hir.has_errors);
+    let stmt = hir.ids(hir.body).next().unwrap();
+    let root = match hir[stmt].kind {
+        StmtKind::ExportAssign(expr) => expr,
+        _ => panic!("JSON root expression expected"),
+    };
+    let ExprKind::Object(root_props) = hir[root].kind else {
+        panic!("JSON root object expected")
+    };
+    let props: Vec<_> = root_props.iter().map(|id| hir[id]).collect();
+    assert_eq!(props.len(), 2);
+    assert_eq!(
+        atoms.bytes(props[0].key.name().unwrap()),
+        b"compilerOptions"
+    );
+    let ExprKind::Object(options) = hir[props[0].value].kind else {
+        panic!("compilerOptions object expected")
+    };
+    let option_props: Vec<_> = options.iter().map(|id| hir[id]).collect();
+    assert_eq!(option_props.len(), 2);
+    assert!(option_props[0].pos < option_props[0].end);
+    assert!(option_props[0].end <= option_props[1].pos);
+    assert_eq!(atoms.bytes(option_props[0].key.name().unwrap()), b"strict");
+    assert_eq!(atoms.bytes(option_props[1].key.name().unwrap()), b"strict");
+    assert!(matches!(
+        hir[props[1].value].kind,
+        ExprKind::Unary {
+            op: crate::engine::hir::UnOp::Minus,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn jsonc_config_reader_accepts_bom_and_marks_malformed_input() {
+    use crate::engine::{atom::Interner, session::Session};
+
+    let session = Session::new();
+    let atoms = Interner::new_in(&session);
+    let valid =
+        json::parse_source_file(session.arena(), &session, &atoms, b"\xef\xbb\xbf{\"a\":1,}");
+    assert!(!valid.has_errors);
+
+    let malformed = json::parse_source_file(session.arena(), &session, &atoms, b"{\"a\":1");
+    assert!(malformed.has_errors);
+    assert!(malformed.has_parse_diagnostics);
+    assert_eq!(malformed.syntax_errors, 1);
+    let diagnostic = &malformed.diagnostics[0];
+    assert_eq!(diagnostic.code, 1005);
+    assert_eq!(diagnostic.args[0].as_ref(), b"}");
+    assert_eq!(diagnostic.start as usize, 6);
+}
+
+#[test]
 fn relative_path_keeps_rooted_path_components() {
     assert_eq!(
         relative_normalized::<Posix, true>(b"/root/project", b"/root/target").as_ref(),

@@ -337,7 +337,9 @@ fn parse_config(
             } else {
                 b"tsconfig.json"
             };
-            errors.push(ConfigError::new(5092, &[name]));
+            if errors.len() == reported {
+                errors.push(ConfigError::new(5092, &[name]));
+            }
             Json::Object(Vec::new())
         }
     };

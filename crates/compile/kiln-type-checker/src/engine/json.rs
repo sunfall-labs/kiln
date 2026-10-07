@@ -283,11 +283,12 @@ impl<'s> TsConfigSourceFile<'s> {
         hir.text = text;
         let is_object =
             |e: &ExprId| matches!(hir[*e].kind, ExprKind::Object(_)) && !is_parenthesized(&hir, *e);
-        let root = root_expression(&hir).filter(|_| !hir.has_errors)?;
-        let root = match hir[root].kind {
+        // Keep recovered parser diagnostics even when no root survived. The
+        // immutable metadata reader must not turn a syntax error into "cannot read".
+        let root = root_expression(&hir).and_then(|root| match hir[root].kind {
             ExprKind::Array(items) => hir.ids(items).find(is_object),
             _ => Some(root).filter(is_object),
-        };
+        });
         Some(TsConfigSourceFile { hir, atoms, root })
     }
 

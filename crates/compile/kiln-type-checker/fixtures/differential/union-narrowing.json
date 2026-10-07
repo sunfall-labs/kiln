@@ -1,0 +1,14 @@
+{
+  "id": "typeof-union-narrowing",
+  "options": { "strict": true, "no_unchecked_indexed_access": true, "libraries": ["es5"], "current_directory": "/project" },
+  "roots": ["/project/main.ts"],
+  "files": {
+    "/project/main.ts": "function label(value: string | number): string { if (typeof value === \"string\") return value.toUpperCase(); return value.toFixed(0); }"
+  },
+  "expected": {
+    "complete": true,
+    "diagnostics": [],
+    "facts": [{ "file": "/project/main.ts", "role": "Parameter", "needle": "value: string | number", "occurrence": 0, "class": "Composite", "display": "string | number" }]
+  },
+  "oracle": { "version": "Version 7.0.2", "diagnostics": [] }
+}

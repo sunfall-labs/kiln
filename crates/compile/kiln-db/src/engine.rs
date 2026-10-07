@@ -336,7 +336,18 @@ impl MemoEngine {
         let active = self.source_files();
         let mut deps = vec![QueryKey::FileSet];
         let mut modules = Vec::with_capacity(active.len());
+        let mut auxiliary = Vec::new();
         for (id, path) in active {
+            if path.ends_with(".json") || path.ends_with(".jsonc") {
+                let source = QueryKey::Source(id);
+                self.force(source);
+                deps.push(source);
+                auxiliary.push((
+                    path,
+                    std::sync::Arc::<[u8]>::from(self.file(id).source.as_bytes()),
+                ));
+                continue;
+            }
             self.force(QueryKey::Parse(id));
             deps.push(QueryKey::Parse(id));
             modules.push((
@@ -350,7 +361,7 @@ impl MemoEngine {
                     .clone(),
             ));
         }
-        let result = query(&self.file(file).path, &modules);
+        let result = query(&self.file(file).path, &modules, &auxiliary);
         (result, deps)
     }
 
@@ -465,7 +476,7 @@ impl MemoEngine {
             .files
             .iter()
             .enumerate()
-            .filter(|(_, state)| state.source_set)
+            .filter(|(_, state)| state.source_set && !is_checker_auxiliary(&state.path))
             .map(|(index, _)| FileId(index as u32))
             .collect();
         active_files.sort_by(|left, right| self.file(*left).path.cmp(&self.file(*right).path));
@@ -584,6 +595,10 @@ impl MemoEngine {
             QueryKey::Cyclic(slot) => format!("cyclic({slot})"),
         }
     }
+}
+
+fn is_checker_auxiliary(path: &str) -> bool {
+    path.ends_with(".json") || path.ends_with(".jsonc")
 }
 
 const UNINTERNED: &str = "FileId was not interned by this engine";
@@ -1615,7 +1630,11 @@ mod tests {
             module.source_kind = SourceKind::TypeScript;
             module
         }
-        fn checker(entry: &str, modules: &[(String, Module)]) -> SourceCheck {
+        fn checker(
+            entry: &str,
+            modules: &[(String, std::sync::Arc<Module>)],
+            _auxiliary: &[(String, std::sync::Arc<[u8]>)],
+        ) -> SourceCheck {
             CALLS.fetch_add(1, Ordering::SeqCst);
             let is_string = modules.iter().any(|(_, m)| m.source.contains("string"));
             SourceCheck {
@@ -1654,6 +1673,80 @@ mod tests {
         assert_eq!(db.source_check(root).types[0].class, TypeClass::Number);
         assert_eq!(CALLS.load(Ordering::SeqCst), 3);
     }
+
+    #[test]
+    fn checker_json_inputs_are_dependencies_but_not_project_modules() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn frontend(path: &str, text: &str) -> Module {
+            let mut module = fixture_frontend(path, text);
+            module.source = text.into();
+            module.source_kind = if path.ends_with(".ts") {
+                SourceKind::TypeScript
+            } else {
+                SourceKind::JavaScript
+            };
+            module
+        }
+        fn checker(
+            _entry: &str,
+            modules: &[(String, std::sync::Arc<Module>)],
+            auxiliary: &[(String, std::sync::Arc<[u8]>)],
+        ) -> SourceCheck {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(modules.len(), 2);
+            assert!(modules.iter().any(|(path, _)| path == "/project/virtual"));
+            assert!(
+                auxiliary
+                    .iter()
+                    .any(|(path, _)| path == "/project/tsconfig.jsonc")
+            );
+            SourceCheck {
+                checker_identity: "json-auxiliary-v1".into(),
+                complete: true,
+                types: Vec::new(),
+                diagnostics: Vec::new(),
+            }
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        let mut db = MemoEngine::new(frontend).with_source_check_query(checker);
+        let entry = db.intern("/project/main.ts");
+        let virtual_source = db.intern("/project/virtual");
+        let config = db.intern("/project/tsconfig.jsonc");
+        db.set_source(entry, "export const x = 1;".into());
+        db.set_source(virtual_source, "export const y = 2;".into());
+        db.set_source(config, "{\"compilerOptions\":{}}".into());
+
+        db.source_check(entry);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(db.project().modules, 2);
+        assert_eq!(
+            db.stats().parse_computed,
+            2,
+            "config must not be parsed as JS/TS"
+        );
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+
+        db.set_source(config, "{\"compilerOptions\":{\"strict\":true}}".into());
+        db.source_check(entry);
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            2,
+            "config bytes invalidate checking"
+        );
+        assert_eq!(
+            db.project().modules,
+            2,
+            "config is excluded from project inventory"
+        );
+        assert_eq!(
+            db.stats().parse_computed,
+            2,
+            "config remains auxiliary after edits"
+        );
+    }
+
     #[test]
     fn compilation_reuses_imported_facts_without_reusing_entry_diagnostics() {
         use kiln_hir::source_types::{SourceDiagnostic, SourceType, TypeClass, TypeRole};
@@ -1665,7 +1758,11 @@ mod tests {
             module.source_kind = SourceKind::TypeScript;
             module
         }
-        fn checker(entry: &str, modules: &[(String, Module)]) -> SourceCheck {
+        fn checker(
+            entry: &str,
+            modules: &[(String, std::sync::Arc<Module>)],
+            _auxiliary: &[(String, std::sync::Arc<[u8]>)],
+        ) -> SourceCheck {
             CALLS.fetch_add(1, Ordering::SeqCst);
             SourceCheck {
                 checker_identity: "shared-facts-v1".into(),

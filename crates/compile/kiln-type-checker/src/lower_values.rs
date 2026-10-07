@@ -6,6 +6,27 @@ use crate::lower::Lower;
 use kiln_hir as k;
 
 impl<'a, 's> Lower<'a, 's> {
+    /// Attach the source modifiers represented by retained declaration metadata. The checker
+    /// grammar gates declaration files on the statement modifier list, even when the declaration
+    /// itself also stores flags (for example, on a VarDecl or Class).
+    pub(super) fn declaration_modifiers(
+        &mut self,
+        flags: b::Flags,
+        pos: u32,
+    ) -> b::Span<b::ModifierId> {
+        // Keep the canonical TypeScript modifier order: export precedes declare, and default
+        // follows both. The checker validates this sequence and declaration emit uses it too.
+        let modifiers = [b::Flags::EXPORT, b::Flags::AMBIENT, b::Flags::DEFAULT]
+            .into_iter()
+            .filter(|flag| flags.contains(*flag))
+            .map(|flag| b::Modifier {
+                kind: b::ModifierKind::Keyword(flag),
+                pos,
+            })
+            .collect::<Vec<_>>();
+        self.file.add_modifiers(&modifiers)
+    }
+
     /// Oxc removes `export` from executable statements in namespace bodies. The
     /// module-record export table only describes file-level exports, so recover
     /// that modifier from the retained declaration span for namespace members.
@@ -1573,6 +1594,7 @@ impl<'a, 's> Lower<'a, 's> {
         }
         members.sort_by_key(|member| member.start);
         let members = self.file.add_members(&members);
+        let class_modifiers = self.declaration_modifiers(flags, span.start);
         let class = self.file.add_class(b::Class {
             name,
             name_pos: site.name_pos,
@@ -1585,9 +1607,10 @@ impl<'a, 's> Lower<'a, 's> {
             other_implements: b::IdList::EMPTY,
             members,
             start: span.start,
-            modifiers: b::Span::EMPTY,
+            modifiers: class_modifiers,
         });
         let stmt = self.file.stmt(b::StmtKind::Class(class), span.start);
+        self.file[stmt].modifiers = class_modifiers;
         self.file[stmt].loc = Self::loc(span);
         Some(stmt)
     }
@@ -1687,7 +1710,7 @@ impl<'a, 's> Lower<'a, 's> {
             } else {
                 b::Flags::empty()
             },
-            ty: b::TypeNodeId::NONE,
+            ty: ret,
             init: b::ExprId::NONE,
             func,
             name_pos: member.span.start,

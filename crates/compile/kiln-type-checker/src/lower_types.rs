@@ -167,6 +167,8 @@ impl<'a, 's> Lower<'a, 's> {
                     let stmt = self
                         .file
                         .stmt(b::StmtKind::Var(vars), declaration.span.start);
+                    self.file[stmt].modifiers =
+                        self.declaration_modifiers(flags, declaration.span.start);
                     self.file[stmt].loc = Self::loc(declaration.span);
                     return stmt;
                 }
@@ -351,6 +353,7 @@ impl<'a, 's> Lower<'a, 's> {
             }
         };
         let stmt = self.file.stmt(kind, declaration.span.start);
+        self.file[stmt].modifiers = self.declaration_modifiers(flags, declaration.span.start);
         self.file[stmt].loc = Self::loc(declaration.span);
         stmt
     }
@@ -524,18 +527,34 @@ impl<'a, 's> Lower<'a, 's> {
                 qualifier,
                 arguments,
                 is_typeof,
+                options,
             } => {
                 let name = self.name(qualifier, t.span.start);
                 let args = self.ty_list(arguments);
+                let (mode, attributes) = self.import_type_attributes(options.as_deref());
+                let spec = self.atom(specifier);
+                let spec_pos = self
+                    .module
+                    .source
+                    .get(t.span.start as usize..t.span.end as usize)
+                    .and_then(|source| source.find(['\'', '"']))
+                    .map_or(t.span.start, |offset| t.span.start + offset as u32);
+                self.file.specifier_uses.push(b::SpecifierUse {
+                    spec,
+                    pos: spec_pos,
+                    kind: b::SpecifierKind::ImportType,
+                    mode,
+                });
                 b::TypeNodeKind::Import {
-                    spec: self.atom(specifier),
+                    spec,
                     name,
                     args,
                     is_typeof: *is_typeof,
-                    mode: b::ResolutionMode::None,
-                    attributes: b::ImportAttributesToken::None,
+                    mode,
+                    attributes,
                 }
             }
+
             T::Predicate {
                 parameter,
                 asserts,
@@ -609,6 +628,66 @@ impl<'a, 's> Lower<'a, 's> {
             }
         };
         self.file.ty(kind, t.span.start, t.span.end)
+    }
+
+    fn import_type_attributes(
+        &mut self,
+        options: Option<&k::Expression>,
+    ) -> (b::ResolutionMode, b::ImportAttributesToken) {
+        let Some(options) = options else {
+            return (b::ResolutionMode::None, b::ImportAttributesToken::None);
+        };
+        let k::ExpressionKind::Object { members } = &options.kind else {
+            self.error(options.span, "import type options must be an object");
+            return (b::ResolutionMode::None, b::ImportAttributesToken::None);
+        };
+        let Some(property) = members.iter().find_map(|member| match member {
+            k::ObjectMember::Property(property) => Some(property),
+            _ => None,
+        }) else {
+            self.error(options.span, "import type options missing attributes");
+            return (b::ResolutionMode::None, b::ImportAttributesToken::None);
+        };
+        let token = match &property.key {
+            k::ObjectKey::Static(key) if key == &k::StringUnits::from("assert") => {
+                self.file.error(
+                    b::DiagnosticKind::Parse,
+                    property.span.start,
+                    property.span.end,
+                    2880,
+                );
+                b::ImportAttributesToken::Assert
+            }
+            _ => b::ImportAttributesToken::With,
+        };
+        let mode = match &property.value.kind {
+            k::ExpressionKind::Object {
+                members: attributes,
+            } if attributes.len() == 1 => match &attributes[0] {
+                k::ObjectMember::Property(attribute) if matches!(&attribute.key, k::ObjectKey::Static(key) if key == &k::StringUnits::from("resolution-mode")) => {
+                    match &attribute.value.kind {
+                        k::ExpressionKind::Literal(k::Literal::String(value))
+                            if value == &k::StringUnits::from("require") =>
+                        {
+                            b::ResolutionMode::Require
+                        }
+                        k::ExpressionKind::Literal(k::Literal::String(value))
+                            if value == &k::StringUnits::from("import") =>
+                        {
+                            b::ResolutionMode::Import
+                        }
+                        _ => b::ResolutionMode::None,
+                    }
+                }
+                _ => b::ResolutionMode::None,
+            },
+            _ => b::ResolutionMode::None,
+        };
+        let object = self.expr(&property.value);
+        self.file
+            .import_attributes
+            .push((property.span.start, object));
+        (mode, token)
     }
 
     fn signature_parameter(&mut self, p: &k::TypeSignatureParameter) -> b::Param {
@@ -737,6 +816,7 @@ impl<'a, 's> Lower<'a, 's> {
                             loc: Self::loc(m.span),
                         }]);
                         let ret = self.ty(value_type);
+                        ty = ret;
                         func = self.file.add_fn(b::Func {
                             kind: b::FnKind::IndexSignature,
                             flags: b::Flags::empty(),
@@ -859,6 +939,12 @@ impl<'a, 's> Lower<'a, 's> {
                 },
             ));
         }
+        self.file
+            .import_attributes
+            .sort_by_key(|attributes| attributes.0);
+        self.file
+            .specifier_uses
+            .sort_by_key(|specifier| specifier.pos);
         let (mut file, _) = self.file.into_arena(arena, session);
         file.finish_nodes();
         (file, self.unsupported)

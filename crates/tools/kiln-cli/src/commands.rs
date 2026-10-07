@@ -853,20 +853,29 @@ fn sync_project_sources_with_override(
     // re-read to be re-hashed. Text is fetched only where it is actually consumed: the reachable
     // closure below, and whatever the daemon says it is missing.
     let walked = sources::digest_all(root, &walk.files, source_override)?;
+    let has_typescript = walk.files.iter().any(|path| sources::is_typescript(path))
+        || source_override.is_some_and(|(path, _)| sources::is_typescript(Path::new(path)));
     let mut texts: Vec<(String, String)> = Vec::new();
-    let (resolution_entries, node_formats, declared_includes) = if let Some((entry, _)) =
-        source_override
-    {
-        // Starting from an empty snapshot makes this read the entry and its closure and nothing
-        // else; every module it reaches is absent from `texts` and so is read on the same terms
-        // the entry always was.
-        let (resolutions, formats, includes) =
-            sources::include_reachable_dependencies_with_includes(root, entry, &mut texts, node)?;
-        notes.extend(sources::audit_phantom_dependencies(root, &resolutions));
-        (resolutions, formats, includes)
-    } else {
-        (Vec::new(), Vec::new(), Vec::new())
-    };
+    let mut checker_metadata = Vec::new();
+    let (resolution_entries, node_formats, declared_includes) =
+        if let Some((entry, _)) = source_override {
+            // Starting from an empty snapshot makes this read the entry and its closure and nothing
+            // else; every module it reaches is absent from `texts` and so is read on the same terms
+            // the entry always was.
+            let (resolutions, formats, includes, metadata) =
+                sources::include_reachable_dependencies_with_checker_metadata(
+                    root,
+                    entry,
+                    &mut texts,
+                    node,
+                    has_typescript,
+                )?;
+            checker_metadata = metadata;
+            notes.extend(sources::audit_phantom_dependencies(root, &resolutions));
+            (resolutions, formats, includes)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
     // The caller's snapshot is authoritative for its own path. The closure above reads the entry
     // from disk when the walk did not volunteer it, so a save landing between the two would
     // otherwise advertise bytes the caller never saw -- which is the one thing the override
@@ -876,6 +885,15 @@ fn sync_project_sources_with_override(
             Some((_, text)) => *text = override_text.to_owned(),
             None => texts.push((override_path.to_owned(), override_text.to_owned())),
         }
+    }
+    if has_typescript {
+        sources::capture_checker_metadata(
+            root,
+            &walk.files,
+            &mut texts,
+            source_override,
+            checker_metadata,
+        )?;
     }
     // Walk order first, then anything the closure added. `FileId` assignment keys on position,
     // so this order is part of the contract and a map's ordering is not a substitute for it.

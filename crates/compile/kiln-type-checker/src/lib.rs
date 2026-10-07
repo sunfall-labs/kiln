@@ -13,11 +13,11 @@ mod snapshot;
 mod support;
 pub use libraries::STANDARD_LIBRARIES;
 pub use snapshot::{
-    CheckOptions, CheckResult, SourceDiagnostic, SourceSnapshot, SourceType, TypeClass, TypeRole,
-    check,
+    CheckOptions, CheckResult, FactSelection, SourceDiagnostic, SourceSnapshot, SourceType,
+    TypeClass, TypeRole, check,
 };
 /// Cache identity for the checker algorithms and owned-syntax adapter.
-pub const CHECKER_VERSION: &str = "bun-bbdc5a519e0a06d1b3133b564f91096b9ba10a31/kiln-owned-v1";
+pub const CHECKER_VERSION: &str = "bun-bbdc5a519e0a06d1b3133b564f91096b9ba10a31/kiln-owned-v2";
 
 #[cfg(test)]
 mod tests;

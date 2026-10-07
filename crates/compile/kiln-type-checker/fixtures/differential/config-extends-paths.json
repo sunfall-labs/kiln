@@ -1,0 +1,17 @@
+{
+  "id": "config-extends-paths-and-option-override",
+  "options": { "strict": true, "no_unchecked_indexed_access": true, "libraries": ["es5"], "current_directory": "/project", "config_path": "/project/tsconfig.json" },
+  "roots": ["/project/main.ts"],
+  "files": {
+    "/project/main.ts": "import { amount } from '@amount'; const copy: number = amount; const bad: string = null;",
+    "/project/base.json": "{\"compilerOptions\":{\"paths\":{\"@amount\":[\"./types.d.ts\"]},\"strict\":false,\"skipLibCheck\":true}}",
+    "/project/tsconfig.json": "{\"extends\":\"./base.json\",\"compilerOptions\":{\"strictNullChecks\":true}}",
+    "/project/types.d.ts": "export declare const amount: number;"
+  },
+  "expected": {
+    "complete": true,
+    "diagnostics": [{ "code": 2322, "file": "/project/main.ts", "needle": "bad" }],
+    "facts": []
+  },
+  "oracle": { "version": "Version 7.0.2", "diagnostics": [{ "file": "main.ts", "code": 2322, "line": 1, "column": 70 }] }
+}

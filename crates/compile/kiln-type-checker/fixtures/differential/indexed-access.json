@@ -1,0 +1,12 @@
+{
+  "id": "unchecked-indexed-access",
+  "options": { "strict": true, "no_unchecked_indexed_access": true, "libraries": ["es5"], "current_directory": "/project" },
+  "roots": ["/project/main.ts"],
+  "files": { "/project/main.ts": "const values: number[] = []; const answer: number = values[0];" },
+  "expected": {
+    "complete": true,
+    "diagnostics": [{ "code": 2322, "file": "/project/main.ts", "needle": "answer" }],
+    "facts": []
+  },
+  "oracle": { "version": "Version 7.0.2", "diagnostics": [{ "file": "main.ts", "code": 2322, "line": 1, "column": 36 }] }
+}

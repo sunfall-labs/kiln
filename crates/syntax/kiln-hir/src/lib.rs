@@ -15,9 +15,11 @@ pub use type_syntax::{
     TypeAnnotationSite, TypeClassMemberKind, TypeClassMemberSite, TypeClassSite, TypeDeclaration,
     TypeDeclarationKind, TypeExpr, TypeExprKind, TypeExpressionWrapperKind,
     TypeExpressionWrapperSite, TypeImportEquals, TypeImportEqualsReference, TypeInstantiationKind,
-    TypeInstantiationSite, TypeKeyword, TypeLiteral, TypeMember, TypeMemberKind, TypeOperator,
-    TypeParameter, TypeReferenceDirective, TypeReferenceKind, TypeResolutionMode, TypeSignature,
-    TypeSignatureParameter, TypeSite, TypeSyntax,
+    TypeInstantiationSite, TypeKeyword, TypeLiteral, TypeMember, TypeMemberKind,
+    TypeModuleAttribute, TypeModuleAttributeKeyKind, TypeModuleAttributes,
+    TypeModuleAttributesKeyword, TypeOperator, TypeParameter, TypeReferenceDirective,
+    TypeReferenceKind, TypeResolutionMode, TypeSignature, TypeSignatureParameter, TypeSite,
+    TypeSyntax,
 };
 
 pub use kiln_string::StringUnits;

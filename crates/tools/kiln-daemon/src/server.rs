@@ -191,7 +191,8 @@ fn production_engine() -> MemoEngine {
 /// The composition root supplies immutable parsed library inputs; neither database nor checker reads disk.
 pub(crate) fn check_source_types(
     entry: &str,
-    modules: &[(String, kiln_hir::Module)],
+    modules: &[(String, std::sync::Arc<kiln_hir::Module>)],
+    auxiliary: &[(String, std::sync::Arc<[u8]>)],
 ) -> kiln_hir::source_types::CheckResult {
     use std::collections::BTreeMap;
     use std::sync::{Arc, OnceLock};
@@ -210,21 +211,40 @@ pub(crate) fn check_source_types(
     snapshot
         .modules
         .extend(libraries.iter().map(|(p, m)| (p.clone(), m.clone())));
-    snapshot.modules.extend(
-        modules
-            .iter()
-            .map(|(p, m)| (p.clone(), Arc::new(m.clone()))),
-    );
+    snapshot
+        .modules
+        .extend(modules.iter().map(|(p, m)| (p.clone(), Arc::clone(m))));
+    snapshot.auxiliary_files.extend(auxiliary.iter().cloned());
     // Ambient declarations belong to the explicit project snapshot even when
     // no runtime import reaches them. Standard libraries remain option-driven.
     let mut roots = vec![entry.to_owned()];
     roots.extend(modules.iter().filter_map(|(path, _)| {
         (path != entry
+            && !std::path::Path::new(path)
+                .components()
+                .any(|part| part.as_os_str() == "node_modules")
             && (path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")))
         .then(|| path.clone())
     }));
+    // The closest uploaded project configuration owns checker options. Reading only
+    // the immutable input set keeps editor revisions and compiler facts coherent.
+    let config_path = std::path::Path::new(entry)
+        .parent()
+        .into_iter()
+        .flat_map(|parent| parent.ancestors())
+        .map(|parent| parent.join("tsconfig.json").to_string_lossy().into_owned())
+        .find(|path| snapshot.auxiliary_files.contains_key(path));
+    let current_directory = config_path
+        .as_deref()
+        .and_then(|path| std::path::Path::new(path).parent())
+        .filter(|parent| parent.is_absolute())
+        .map(|parent| parent.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".into());
     let options = kiln_type_checker::CheckOptions {
+        config_path,
+        current_directory,
         libraries: vec!["esnext".into()],
+        facts: kiln_type_checker::FactSelection::FunctionContracts,
         ..Default::default()
     };
     kiln_type_checker::check(&snapshot, &roots, &options)
