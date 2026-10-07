@@ -1712,6 +1712,21 @@ enum MethodKeySource {
     Binding(Binding),
 }
 
+#[derive(Default)]
+struct ComputedMethodCandidates {
+    strings: HashMap<kiln_ir::StringUnits, Vec<u32>>,
+    bindings: HashMap<Binding, Vec<u32>>,
+}
+
+impl ComputedMethodCandidates {
+    fn get(&self, source: &MethodKeySource) -> Option<&Vec<u32>> {
+        match source {
+            MethodKeySource::String(key) => self.strings.get(key),
+            MethodKeySource::Binding(binding) => self.bindings.get(binding),
+        }
+    }
+}
+
 /// Recover only direct string constants, same-module global reads, and values passed through
 /// ToPropertyKey. The latter preserves provenance, not a value guarantee: this analysis only
 /// ranks which existing boxed bodies receive O1 and never changes runtime key conversion.
@@ -1765,7 +1780,7 @@ fn computed_method_candidates(
     graphs: &[FunctionGraph],
     entry: &FunctionGraph,
     known: &Known,
-) -> Option<HashMap<MethodKeySource, Vec<u32>>> {
+) -> Option<ComputedMethodCandidates> {
     // This pass is part of the same bounded analysis as loop-call propagation. Do not let
     // candidate indexing scan an oversized graph or retain an unbounded number of target edges.
     if graphs.len() > MAX_GENERIC_LOOP_CALL_FUNCTIONS {
@@ -1823,16 +1838,20 @@ fn computed_method_candidates(
             }
         }
     }
-    Some(
-        candidates
-            .into_iter()
-            .map(|(key, targets)| {
-                let mut targets: Vec<_> = targets.into_iter().collect();
-                targets.sort_unstable();
-                (key, targets)
-            })
-            .collect(),
-    )
+    let mut indexed = ComputedMethodCandidates::default();
+    for (key, targets) in candidates {
+        let mut targets: Vec<_> = targets.into_iter().collect();
+        targets.sort_unstable();
+        match key {
+            MethodKeySource::String(key) => {
+                indexed.strings.insert(key, targets);
+            }
+            MethodKeySource::Binding(binding) => {
+                indexed.bindings.insert(binding, targets);
+            }
+        }
+    }
+    Some(indexed)
 }
 
 /// Build the bounded loop-callee ranking facts from an unmodified module program. Cycle-module
@@ -2008,51 +2027,36 @@ impl LoopCallProfile {
         let mut seed_edges = Vec::new();
         let mut edges = vec![Vec::new(); graphs.len()];
         let mut edge_count = 0usize;
-        let method_candidates = computed_method_candidates(graphs, entry, known)?;
+        // Computed keys add optional ranking hints. An oversized candidate table must never
+        // discard the pre-existing known-call profile, so collection failure means no hints.
+        let method_candidates = computed_method_candidates(graphs, entry, known);
+        let mut method_seed_edges = Vec::new();
+        let mut method_edges = vec![Vec::new(); graphs.len()];
+        let mut method_edge_count = 0usize;
+        let mut method_edge_overflow = false;
         let mut add_owner = |graph: &FunctionGraph,
                              code: &[Instruction],
                              known_values: &KnownValues,
                              caller: Option<usize>| {
             let contexts = loop_context_weights(code);
             let owner = caller.map_or(Owner::Entry, |index| Owner::Function(index as u32));
-            let key_sources = method_key_sources(graph, owner, known);
+            let key_sources = method_candidates
+                .as_ref()
+                .map(|_| method_key_sources(graph, owner, known))
+                .unwrap_or_default();
             for block in &graph.blocks {
                 for (result, op) in &block.operations {
                     // Each candidate here is only evidence that its existing boxed body might
                     // serve a dynamic site. No call target is changed, and key provenance is
                     // allowed to be conservative because it controls ranking only.
                     let mut direct_target = None;
-                    let mut method_key = None;
                     match op {
                         GraphOp::Call { callee, .. } => {
                             direct_target = known_values.known.get(callee).copied();
                         }
-                        GraphOp::CallMethod { name, .. } => {
-                            if let Some(Constant::String(key)) =
-                                program.constants.get(*name as usize)
-                            {
-                                method_key = Some(MethodKeySource::String(key.clone()));
-                            }
-                        }
-                        GraphOp::Bridge {
-                            instruction: Instruction::CallComputed { .. },
-                            operands,
-                            ..
-                        } => {
-                            method_key = operands
-                                .get(1)
-                                .and_then(|key| key_sources.get(key))
-                                .cloned();
-                        }
                         _ => {}
                     };
-                    let method_targets = method_key
-                        .as_ref()
-                        .and_then(|key| method_candidates.get(key));
-                    for target in direct_target
-                        .into_iter()
-                        .chain(method_targets.into_iter().flatten().copied())
-                    {
+                    if let Some(target) = direct_target {
                         edge_count = edge_count.saturating_add(1);
                         if edge_count > MAX_GENERIC_LOOP_CALL_EDGES {
                             return false;
@@ -2065,6 +2069,48 @@ impl LoopCallProfile {
                             && *weight > 0
                         {
                             seed_edges.push((caller, target, *weight));
+                        }
+                    }
+                    let method_targets = match op {
+                        GraphOp::CallMethod { name, .. } => {
+                            match program.constants.get(*name as usize) {
+                                Some(Constant::String(key)) => method_candidates
+                                    .as_ref()
+                                    .and_then(|candidates| candidates.strings.get(key)),
+                                _ => None,
+                            }
+                        }
+                        GraphOp::Bridge {
+                            instruction: Instruction::CallComputed { .. },
+                            operands,
+                            ..
+                        } => operands
+                            .get(1)
+                            .and_then(|key| key_sources.get(key))
+                            .and_then(|source| {
+                                method_candidates
+                                    .as_ref()
+                                    .and_then(|candidates| candidates.get(source))
+                            }),
+                        _ => None,
+                    };
+                    if !method_edge_overflow && let Some(targets) = method_targets {
+                        for &target in targets {
+                            if method_edge_count >= MAX_GENERIC_LOOP_CALL_EDGES {
+                                method_edge_overflow = true;
+                                break;
+                            }
+                            method_edge_count += 1;
+                            if let Some(caller) = caller {
+                                method_edges[caller].push(target);
+                            }
+                            if let Some(pc) =
+                                graph.origins.get(result).map(|origin| origin.pc as usize)
+                                && let Some(weight) = contexts.get(pc)
+                                && *weight > 0
+                            {
+                                method_seed_edges.push((caller, target, *weight));
+                            }
                         }
                     }
                 }
@@ -2084,6 +2130,16 @@ impl LoopCallProfile {
         }
         if !add_owner(entry, &program.code, &known.entry, None) {
             return None;
+        }
+        // Keep the old known-call profile intact if the optional method hints would exceed
+        // the same edge budget. Do not partially bias selection from a truncated candidate set.
+        if !method_edge_overflow
+            && method_edge_count <= MAX_GENERIC_LOOP_CALL_EDGES.saturating_sub(edge_count)
+        {
+            seed_edges.extend(method_seed_edges);
+            for (edges, methods) in edges.iter_mut().zip(method_edges) {
+                edges.extend(methods);
+            }
         }
         Some(Self { seed_edges, edges })
     }
@@ -2477,6 +2533,181 @@ mod loop_call_profile_tests {
                 .any(|edge| edge.0 == Some(2) && edge.1 == 0),
             "ambiguous closure creation must not lend one capture's key identity to another"
         );
+    }
+
+    #[test]
+    fn oversized_optional_method_index_preserves_known_call_profile() {
+        use kiln_ir::{Constant, Instruction};
+
+        let candidate_count = super::MAX_GENERIC_LOOP_CALL_EDGES + 1;
+        let program = kiln_ir::Program {
+            functions: vec![
+                proto(vec![Instruction::Return], true),
+                proto(vec![Instruction::Nop, Instruction::Jump(0)], false),
+            ],
+            constants: (0..candidate_count)
+                .map(|index| {
+                    Constant::String(kiln_ir::StringUnits::from(
+                        format!("method_{index}").as_str(),
+                    ))
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let target = FunctionGraph::new(None, 0, 0);
+        let caller = graph(
+            vec![
+                (ValueId(0), GraphOp::LoadLocal(0)),
+                (
+                    ValueId(1),
+                    GraphOp::Call {
+                        callee: ValueId(0),
+                        args: Vec::new(),
+                        site: SiteId(0),
+                        line: 0,
+                        column: 0,
+                    },
+                ),
+            ],
+            &[(1, 0)],
+        );
+        let mut definitions = Vec::with_capacity(candidate_count * 3);
+        for index in 0..candidate_count {
+            let key = ValueId((index * 3) as u32);
+            let function = ValueId((index * 3 + 1) as u32);
+            definitions.push((
+                key,
+                GraphOp::Const {
+                    index: index as u32,
+                    constant: program.constants[index].clone(),
+                },
+            ));
+            definitions.push((
+                function,
+                GraphOp::MakeFunction {
+                    index: 0,
+                    site: SiteId(index as u32),
+                },
+            ));
+            definitions.push((
+                ValueId((index * 3 + 2) as u32),
+                GraphOp::Bridge {
+                    instruction: Instruction::DefineNamedProperty {
+                        name_function: false,
+                    },
+                    operands: vec![ValueId((candidate_count * 3) as u32), key, function],
+                    pushes: 1,
+                },
+            ));
+        }
+        let entry = graph(definitions, &[]);
+        let graphs = vec![target, caller];
+        let mut known = Known {
+            functions: vec![KnownValues::default(); 2],
+            entry: KnownValues::default(),
+            captures: vec![Vec::new(); 2],
+            capture_bindings: vec![HashMap::new(); 2],
+            captured_closures: vec![HashMap::new(); 2],
+        };
+        known.functions[1].known.insert(ValueId(0), 0);
+
+        // The optional method index exceeds its edge bound, but the old direct-call seed remains.
+        let profile = LoopCallProfile::from_known(&program, &graphs, &entry, &known).unwrap();
+        assert_eq!(profile.seed_edges, [(Some(1), 0, 2)]);
+        assert_eq!(profile.edges[1], [0]);
+    }
+
+    #[test]
+    fn optional_method_fanout_cannot_consume_known_call_edge_budget() {
+        use kiln_ir::{Constant, Instruction};
+
+        let site_count = super::MAX_GENERIC_LOOP_CALL_EDGES + 1;
+        let key = Constant::String(kiln_ir::StringUnits::from("evaluate"));
+        let program = kiln_ir::Program {
+            functions: vec![
+                proto(vec![Instruction::Return], true),
+                proto(vec![Instruction::Nop, Instruction::Jump(0)], false),
+            ],
+            constants: vec![key.clone()],
+            ..Default::default()
+        };
+        let target = FunctionGraph::new(None, 0, 0);
+        let mut caller_ops = vec![
+            (ValueId(0), GraphOp::LoadLocal(0)),
+            (
+                ValueId(1),
+                GraphOp::Call {
+                    callee: ValueId(0),
+                    args: Vec::new(),
+                    site: SiteId(0),
+                    line: 0,
+                    column: 0,
+                },
+            ),
+            (
+                ValueId(2),
+                GraphOp::Const {
+                    index: 0,
+                    constant: key,
+                },
+            ),
+        ];
+        let mut origins = vec![(1, 0)];
+        for index in 0..site_count {
+            let value = ValueId(index as u32 + 3);
+            caller_ops.push((
+                value,
+                GraphOp::Bridge {
+                    instruction: Instruction::CallComputed { argc: 0 },
+                    operands: vec![ValueId(90000), ValueId(2), ValueId(90001)],
+                    pushes: 1,
+                },
+            ));
+            origins.push((value.0, 0));
+        }
+        let caller = graph(caller_ops, &origins);
+        let entry = graph(
+            vec![
+                (
+                    ValueId(0),
+                    GraphOp::Const {
+                        index: 0,
+                        constant: program.constants[0].clone(),
+                    },
+                ),
+                (
+                    ValueId(1),
+                    GraphOp::MakeFunction {
+                        index: 0,
+                        site: SiteId(1),
+                    },
+                ),
+                (
+                    ValueId(2),
+                    GraphOp::Bridge {
+                        instruction: Instruction::DefineNamedProperty {
+                            name_function: false,
+                        },
+                        operands: vec![ValueId(80000), ValueId(0), ValueId(1)],
+                        pushes: 1,
+                    },
+                ),
+            ],
+            &[],
+        );
+        let graphs = vec![target, caller];
+        let mut known = Known {
+            functions: vec![KnownValues::default(); 2],
+            entry: KnownValues::default(),
+            captures: vec![Vec::new(); 2],
+            capture_bindings: vec![HashMap::new(); 2],
+            captured_closures: vec![HashMap::new(); 2],
+        };
+        known.functions[1].known.insert(ValueId(0), 0);
+
+        let profile = LoopCallProfile::from_known(&program, &graphs, &entry, &known).unwrap();
+        assert_eq!(profile.seed_edges, [(Some(1), 0, 2)]);
+        assert_eq!(profile.edges[1], [0]);
     }
 
     #[test]
