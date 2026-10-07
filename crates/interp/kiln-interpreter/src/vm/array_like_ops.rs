@@ -117,7 +117,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             #[expect(clippy::cast_possible_truncation)]
             let at = index as usize;
             let mut elements = items.borrow_mut();
-            if at < elements.len() {
+            if at < elements.len() && !Self::is_hole(&elements[at]) {
                 elements[at] = value;
                 return Ok(());
             }
