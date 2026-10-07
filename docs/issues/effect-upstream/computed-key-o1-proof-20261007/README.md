@@ -60,3 +60,19 @@ It passed all 37 tests (0 failed, 0 ignored). Full command output is retained in
 [`focused-loop-tests.log`](focused-loop-tests.log) and [`emitted-c-tests.log`](emitted-c-tests.log).
 These checks validate planner behavior and C emission. They do not include a native AOT workload
 or an Effect replay.
+
+The actual generated Effect module was subsequently found to exceed the original profile's
+independent 512-proto admission bound. Its retained generated C has SHA256
+`8b3065777651a4d92c3a6197dedbcfb4db4cb0ee5871f85e62852380fd9203d5`, payload SHA256
+`40abce548e10301f3b35c1160673b475767e63009749b712f60d0fbbe0ee00fc`, 739 proto indices (0–738),
+and 20,004 instructions represented by frontend-function metadata. The emitted body still showed
+fn120 as O0. The profile returned before computed-key analysis because of the proto-count bound.
+
+Commit `948c52bb8bd03d83f1bdd3823fb8ef06294eac88` raises only that analysis admission cap to 1,024.
+The 32,768-instruction, 256-loop-caller, 4,096-edge and depth-4 analysis limits remain; the O1
+selector's separate 512-function bound remains unchanged. A focused regression builds the same
+captured-key candidate graph with 739 protos and checks that it is admitted, then checks rejection
+at 1,025. The focused suite passed 6/6; its complete log is
+[`cap1024-focused-tests.log`](cap1024-focused-tests.log). This does not yet prove that the actual
+Effect method is selected or that fn120's emitted attribute changes; the integrated AOT emission
+must verify that separately.
