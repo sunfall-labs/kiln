@@ -27,3 +27,22 @@ SHA-256 are in `evidence/old-kiln-cli-receipt.txt`, `evidence/old-kiln-interpret
 - Fixture SHA-256: recorded in `evidence/SHA256SUMS`.
 - Node: v26.8.1 with `--experimental-strip-types` for importing the TypeScript bootstrap.
 - Bun: v1.4.2.
+
+## UTC time-of-day setter fast path
+
+Commit `95c17bf9` changes only `setUTCHours`, `setUTCMinutes`, `setUTCSeconds`, and
+`setUTCMilliseconds`: they now compute the UTC day start and normalized clock directly instead of
+converting through civil year/month/day and back. The helper uses the existing captured
+`Math.floor`/`Math.trunc`, `Number.isFinite`, and `timeClip` authorities. The setters still read the
+receiver's time before coercing arguments, convert all present arguments in order (including
+explicit `undefined`), and only then branch on invalid time; BigInt rejection remains unary-plus
+ToNumber behavior.
+
+The host differential harness `evidence/utc-setter-controls.mjs` compares the candidate against the
+original host setters after importing `date.ts`. It covers eleven boundaries including both
+TimeClip limits, explicit undefined, fractions, overflow, infinities/NaN, 1,024 deterministic
+randomized cases, argument coercion that mutates the receiver, and invalid-Date coercion side effects.
+Prior source is exactly commit `39c7924e`; candidate is `95c17bf9`. Node 26.8.1 and Bun 1.4.2 each
+reported 1,384 cases and zero mismatches for both prior and candidate source (raw outputs in
+`evidence/utc-*-*.log`). These are host equivalence controls, not a performance claim; no CLI/native
+build was run while the parent Date build owned the compile slot.
