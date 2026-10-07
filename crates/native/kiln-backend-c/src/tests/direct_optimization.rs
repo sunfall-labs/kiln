@@ -365,7 +365,7 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
         .collect::<Vec<_>>();
     let instantiation_weights = instantiation_plan.generic_loop_profile_weights();
     let shared_profile = crate::direct::generic_loop_profile_for_program(&program);
-    let shared_profile_plan = crate::direct::DirectPlan::plan_with_loop_profile(
+    let mut shared_profile_plan = crate::direct::DirectPlan::plan_with_loop_profile(
         &instantiation_program,
         &instantiation_graphs,
         &instantiation_entry_graph,
@@ -376,6 +376,10 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
         false,
         None,
         shared_profile,
+    );
+    shared_profile_plan.set_available(
+        &instantiation_program,
+        &vec![true; instantiation_program.functions.len()],
     );
     let shared_profile_selected = shared_profile_plan
         .functions
@@ -681,6 +685,68 @@ fn cyclic_instantiation_reuses_full_module_loop_ranking_only() {
     let profile = crate::direct::generic_loop_profile_for_program(&module.program)
         .expect("small module receives bounded loop-ranking facts");
     assert!(profile.weights(None)[invoke] > 0);
+
+    // The production emitter reruns selection after module liveness is known. That pass must
+    // preserve the loop-callee grouping rather than reduce it to independent per-proto weights.
+    let mut instantiation_program = module.program.clone();
+    instantiation_program
+        .code
+        .truncate(module.link_facts.module_instantiation_end as usize);
+    instantiation_program
+        .code
+        .push(kiln_ir::Instruction::Return);
+    let instantiation_graphs = instantiation_program
+        .functions
+        .iter()
+        .map(|proto| {
+            crate::graph::build_function_graph(proto, &instantiation_program)
+                .expect("build instantiation graph")
+        })
+        .collect::<Vec<_>>();
+    let instantiation_entry = crate::entry_proto(&instantiation_program);
+    let instantiation_entry_graph =
+        crate::graph::build_function_graph(&instantiation_entry, &instantiation_program)
+            .expect("build instantiation entry graph");
+    let instantiation_publishes = crate::compute_publishes_frame(&instantiation_program);
+    let mut available_plan = crate::direct::DirectPlan::plan_with_loop_profile(
+        &instantiation_program,
+        &instantiation_graphs,
+        &instantiation_entry_graph,
+        &instantiation_publishes,
+        true,
+        false,
+        true,
+        false,
+        None,
+        Some(profile.clone()),
+    );
+    available_plan.set_available(
+        &instantiation_program,
+        &vec![true; instantiation_program.functions.len()],
+    );
+    assert!(
+        available_plan.functions[invoke].generic_function_optimized,
+        "liveness recomputation must retain the bounded loop-callee group"
+    );
+    let mut unavailable = vec![true; instantiation_program.functions.len()];
+    unavailable[invoke] = false;
+    let mut unavailable_plan = crate::direct::DirectPlan::plan_with_loop_profile(
+        &instantiation_program,
+        &instantiation_graphs,
+        &instantiation_entry_graph,
+        &instantiation_publishes,
+        true,
+        false,
+        true,
+        false,
+        None,
+        Some(profile.clone()),
+    );
+    unavailable_plan.set_available(&instantiation_program, &unavailable);
+    assert!(
+        !unavailable_plan.functions[invoke].generic_function_optimized,
+        "an unavailable member of a ranked callee group cannot be selected"
+    );
 
     let emitted = crate::emit_module_with_logical_path_and_policy_and_instantiation(
         &module,

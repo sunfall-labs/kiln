@@ -1260,16 +1260,21 @@ impl DirectPlan {
         // retained bodies: selecting first and masking later lets dead declarations displace
         // executable functions from the bounded tier.
         if self.entry.generic_only {
-            let loop_weights = self
-                .generic_loop_calls
-                .as_ref()
-                .map(|profile| profile.weights(Some(available)));
-            let selected = select_generic_optimization_functions_with_weights(
-                program,
-                &self.entry.publishes_frame,
-                Some(available),
-                loop_weights.as_deref(),
-            );
+            let selected = if let Some(profile) = self.generic_loop_calls.as_ref() {
+                select_generic_optimization_functions_with_profile(
+                    program,
+                    &self.entry.publishes_frame,
+                    Some(available),
+                    profile,
+                )
+            } else {
+                select_generic_optimization_functions_with_weights(
+                    program,
+                    &self.entry.publishes_frame,
+                    Some(available),
+                    None,
+                )
+            };
             for (plan, selected) in self.functions.iter_mut().zip(selected) {
                 plan.generic_function_optimized = selected;
             }
