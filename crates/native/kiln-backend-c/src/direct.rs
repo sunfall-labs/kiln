@@ -44,6 +44,12 @@ use crate::graph::{
 /// runtime fallback for anything that publishes a frame or can suspend.
 const MAX_GENERIC_DIRECT_ANALYSIS_FUNCTIONS: usize = 128;
 const MAX_GENERIC_DIRECT_ANALYSIS_INSTRUCTIONS: usize = 8_192;
+pub(crate) const MAX_GENERIC_LOOP_CALL_FUNCTIONS: usize = 512;
+pub(crate) const MAX_GENERIC_LOOP_CALL_INSTRUCTIONS: usize = 32_768;
+pub(crate) const MAX_GENERIC_LOOP_CALLERS: usize = 256;
+const MAX_GENERIC_LOOP_CALL_EDGES: usize = 4_096;
+const MAX_GENERIC_LOOP_CALL_DEPTH: usize = 4;
+const MAX_GENERIC_LOOP_PROFILE_CALLER_INSTRUCTIONS: usize = 1_536;
 
 /// Which body a graph belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -165,6 +171,9 @@ pub struct DirectPlan {
     /// `parallel::ParallelShape`, which the clone receives as `double`s the call site guarded.
     pub parallel: Vec<Option<CallPlan>>,
     pub entry: CallPlan,
+    /// Bounded proven call edges used only to rank the supplemental generic loop tier after
+    /// module liveness settles. This does not enable direct calls or change any ABI.
+    generic_loop_calls: Option<LoopCallProfile>,
 }
 
 impl DirectPlan {
@@ -193,8 +202,26 @@ impl DirectPlan {
             let known = (function_count <= MAX_GENERIC_DIRECT_ANALYSIS_FUNCTIONS
                 && total_instructions <= MAX_GENERIC_DIRECT_ANALYSIS_INSTRUCTIONS)
                 .then(|| known_callees(program, graphs, entry));
-            let optimized_functions =
-                select_generic_optimization_functions(program, publishes_frame, None);
+            let generic_loop_calls = if let Some(known) = known.as_ref() {
+                LoopCallProfile::from_known(program, graphs, entry, known)
+            } else if function_count <= MAX_GENERIC_LOOP_CALL_FUNCTIONS
+                && total_instructions <= MAX_GENERIC_LOOP_CALL_INSTRUCTIONS
+                && loop_caller_count(program) <= MAX_GENERIC_LOOP_CALLERS
+            {
+                let known = known_callees(program, graphs, entry);
+                LoopCallProfile::from_known(program, graphs, entry, &known)
+            } else {
+                None
+            };
+            let loop_weights = generic_loop_calls
+                .as_ref()
+                .map(|profile| profile.weights(None));
+            let optimized_functions = select_generic_optimization_functions_with_weights(
+                program,
+                publishes_frame,
+                None,
+                loop_weights.as_deref(),
+            );
             let generic_verdicts = std::sync::Arc::new(vec![
                 Err(crate::parallel::Refusal::new(
                     if parallel_in_generic {
@@ -245,6 +272,7 @@ impl DirectPlan {
                     .collect(),
                 typed: vec![None; function_count],
                 parallel: vec![None; function_count],
+                generic_loop_calls,
                 entry: plan(
                     false,
                     known
@@ -810,6 +838,7 @@ impl DirectPlan {
             typed,
             parallel,
             entry: entry_plan,
+            generic_loop_calls: None,
         };
         for plan in plan
             .functions
@@ -1194,10 +1223,15 @@ impl DirectPlan {
         // retained bodies: selecting first and masking later lets dead declarations displace
         // executable functions from the bounded tier.
         if self.entry.generic_only {
-            let selected = select_generic_optimization_functions(
+            let loop_weights = self
+                .generic_loop_calls
+                .as_ref()
+                .map(|profile| profile.weights(Some(available)));
+            let selected = select_generic_optimization_functions_with_weights(
                 program,
                 &self.entry.publishes_frame,
                 Some(available),
+                loop_weights.as_deref(),
             );
             for (plan, selected) in self.functions.iter_mut().zip(selected) {
                 plan.generic_function_optimized = selected;
@@ -1328,24 +1362,41 @@ impl DirectPlan {
     pub fn has_typed_entry(&self, index: u32) -> bool {
         self.typed.get(index as usize).is_some_and(Option::is_some)
     }
+
+    #[cfg(test)]
+    pub(crate) fn generic_loop_profile_weights(&self) -> Option<Vec<usize>> {
+        self.generic_loop_calls
+            .as_ref()
+            .map(|profile| profile.weights(None))
+    }
 }
 
 /// Select bounded, deterministic generic bodies to compile at O1 inside otherwise O0 large
 /// modules. This is only a compiler tier: every selected function retains its original boxed ABI
-/// and generic emitted body. The original frame-free bucket remains source ordered; a separate,
-/// smaller bucket admits frame-publishing bodies only when their bytecode contains a loop
-/// backedge. Static loop work ranks those candidates, and explicit instruction/function caps
-/// make object growth predictable without a library-specific allowlist.
+/// and generic emitted body. The original small frame-free bucket remains source ordered; a
+/// separate, smaller bucket admits larger loop bodies and the bounded set of known callees they
+/// invoke. Proven loop-call context estimates repeated body work, and explicit instruction, edge,
+/// and function caps make analysis and object growth predictable without a library-specific
+/// allowlist.
 pub(crate) fn select_generic_optimization_functions(
     program: &Program,
     publishes_frame: &[bool],
     available: Option<&[bool]>,
 ) -> Vec<bool> {
+    select_generic_optimization_functions_with_weights(program, publishes_frame, available, None)
+}
+
+pub(crate) fn select_generic_optimization_functions_with_weights(
+    program: &Program,
+    publishes_frame: &[bool],
+    available: Option<&[bool]>,
+    loop_call_weights: Option<&[usize]>,
+) -> Vec<bool> {
     const MAX_FUNCTIONS: usize = 64;
     const MAX_FUNCTION_INSTRUCTIONS: usize = 320;
     const MAX_TOTAL_INSTRUCTIONS: usize = 4096;
     const MAX_LOOP_FUNCTIONS: usize = 2;
-    const MAX_LOOP_FUNCTION_INSTRUCTIONS: usize = 1024;
+    const MAX_LOOP_FUNCTION_INSTRUCTIONS: usize = MAX_GENERIC_LOOP_PROFILE_CALLER_INSTRUCTIONS;
     const MAX_LOOP_TOTAL_INSTRUCTIONS: usize = 2048;
 
     let mut selected = vec![false; program.functions.len()];
@@ -1371,12 +1422,13 @@ pub(crate) fn select_generic_optimization_functions(
         instructions += size;
     }
 
-    // Generator and frame-publishing bodies carry the VM frame across calls/suspensions, so
-    // they are deliberately absent from `direct_callable` and the legacy bucket above. O1 only
-    // changes the host compiler's treatment of the existing boxed body; it does not introduce a
-    // direct or typed entry. Admit a tiny, separately-budgeted set of such bodies when their
-    // bytecode has statically identifiable loop work. Rank by summed backedge span, then number
-    // of backedges, then original proto index so selection is stable and favors loop-heavy code.
+    // Large bodies, generators and other frame-publishing bodies may dominate repeated work
+    // while remaining outside the legacy bucket above. O1 only changes the host compiler's
+    // treatment of the existing boxed body; it does not introduce a direct or typed entry. Admit
+    // a tiny, separately-budgeted set of such loop bodies and proven callees. With call evidence,
+    // rank by estimated repeated body instructions (context weight times body size), then weight
+    // and static loop work. Without known edges,
+    // preserve the previous span/backedge ranking. Proto index is the final stable tie break.
     let mut loop_candidates = Vec::new();
     for (index, proto) in program.functions.iter().enumerate() {
         if selected[index]
@@ -1384,26 +1436,36 @@ pub(crate) fn select_generic_optimization_functions(
         {
             continue;
         }
-        let publishes = publishes_frame.get(index).copied();
-        let retains_frame = publishes == Some(true)
-            || proto.generator
-            || proto.asynchronous
-            || proto.async_generator;
-        if !retains_frame
-            || proto.code.is_empty()
-            || proto.code.len() > MAX_LOOP_FUNCTION_INSTRUCTIONS
-        {
+        if proto.code.is_empty() || proto.code.len() > MAX_LOOP_FUNCTION_INSTRUCTIONS {
             continue;
         }
-        let Some((loop_span, backedges)) = loop_work(proto) else {
+        let call_weight = loop_call_weights
+            .and_then(|weights| weights.get(index))
+            .copied()
+            .unwrap_or(0);
+        let own_loop = loop_work(proto);
+        if own_loop.is_none() && call_weight == 0 {
             continue;
-        };
+        }
+        let (loop_span, backedges) = own_loop.unwrap_or_default();
         loop_candidates.push((index, proto.code.len(), loop_span, backedges));
     }
     loop_candidates.sort_by(|left, right| {
-        right
-            .2
-            .cmp(&left.2)
+        let left_call_weight = loop_call_weights
+            .and_then(|weights| weights.get(left.0))
+            .copied()
+            .unwrap_or(0);
+        let right_call_weight = loop_call_weights
+            .and_then(|weights| weights.get(right.0))
+            .copied()
+            .unwrap_or(0);
+        let left_repeated_work = (left_call_weight as u128) * (left.1 as u128);
+        let right_repeated_work = (right_call_weight as u128) * (right.1 as u128);
+        (right_call_weight > 0)
+            .cmp(&(left_call_weight > 0))
+            .then_with(|| right_repeated_work.cmp(&left_repeated_work))
+            .then_with(|| right_call_weight.cmp(&left_call_weight))
+            .then_with(|| right.2.cmp(&left.2))
             .then_with(|| right.3.cmp(&left.3))
             .then_with(|| left.0.cmp(&right.0))
     });
@@ -1420,6 +1482,213 @@ pub(crate) fn select_generic_optimization_functions(
         loop_instructions += size;
     }
     selected
+}
+
+/// A compact graph-proven call profile for the supplemental O1 tier. `seed_weights` records
+/// known callees called from a bytecode loop; known calls inside those callees propagate the
+/// repeated-work weight for a few edges. The graph facts come from the existing conservative
+/// `known_callees` analysis, so unknown/reassigned callables never contribute.
+#[derive(Debug)]
+struct LoopCallProfile {
+    seed_edges: Vec<(Option<usize>, u32, usize)>,
+    edges: Vec<Vec<u32>>,
+}
+
+impl LoopCallProfile {
+    fn from_known(
+        program: &Program,
+        graphs: &[FunctionGraph],
+        entry: &FunctionGraph,
+        known: &Known,
+    ) -> Option<Self> {
+        if graphs.len() > MAX_GENERIC_LOOP_CALL_FUNCTIONS
+            || program
+                .functions
+                .iter()
+                .map(|proto| proto.code.len())
+                .chain(std::iter::once(program.code.len()))
+                .fold(0usize, usize::saturating_add)
+                > MAX_GENERIC_LOOP_CALL_INSTRUCTIONS
+            || loop_caller_count(program) > MAX_GENERIC_LOOP_CALLERS
+        {
+            return None;
+        }
+
+        let mut seed_edges = Vec::new();
+        let mut edges = vec![Vec::new(); graphs.len()];
+        let mut edge_count = 0usize;
+        let mut add_owner = |graph: &FunctionGraph,
+                             code: &[Instruction],
+                             known_values: &KnownValues,
+                             caller: Option<usize>| {
+            let contexts = loop_context_weights(code);
+            for block in &graph.blocks {
+                for (result, op) in &block.operations {
+                    let GraphOp::Call { callee, .. } = op else {
+                        continue;
+                    };
+                    let Some(&target) = known_values.known.get(callee) else {
+                        continue;
+                    };
+                    edge_count = edge_count.saturating_add(1);
+                    if edge_count > MAX_GENERIC_LOOP_CALL_EDGES {
+                        return false;
+                    }
+                    if let Some(caller) = caller {
+                        edges[caller].push(target);
+                    }
+                    if let Some(pc) = graph.origins.get(result).map(|origin| origin.pc as usize)
+                        && let Some(weight) = contexts.get(pc)
+                        && *weight > 0
+                    {
+                        seed_edges.push((caller, target, *weight));
+                    }
+                }
+            }
+            true
+        };
+
+        for (index, graph) in graphs.iter().enumerate() {
+            if !add_owner(
+                graph,
+                &program.functions[index].code,
+                &known.functions[index],
+                Some(index),
+            ) {
+                return None;
+            }
+        }
+        if !add_owner(entry, &program.code, &known.entry, None) {
+            return None;
+        }
+        Some(Self { seed_edges, edges })
+    }
+
+    fn weights(&self, available: Option<&[bool]>) -> Vec<usize> {
+        let mut weights = vec![0usize; self.edges.len()];
+        for &(caller, target, weight) in &self.seed_edges {
+            let target = target as usize;
+            let caller_available = caller.is_none_or(|caller| {
+                available.is_none_or(|available| available.get(caller).copied().unwrap_or(false))
+            });
+            let target_available =
+                available.is_none_or(|available| available.get(target).copied().unwrap_or(false));
+            if caller_available && target_available {
+                weights[target] = weights[target].saturating_add(weight);
+            }
+        }
+        let mut propagated = vec![vec![0usize; MAX_GENERIC_LOOP_CALL_DEPTH + 1]; weights.len()];
+        let mut queue = std::collections::VecDeque::new();
+        for (index, &weight) in weights.iter().enumerate() {
+            if weight > 0 {
+                propagated[index][0] = weight;
+                queue.push_back((index, weight, 0usize));
+            }
+        }
+        while let Some((caller, weight, depth)) = queue.pop_front() {
+            if depth == MAX_GENERIC_LOOP_CALL_DEPTH {
+                continue;
+            }
+            if available.is_some_and(|available| !available.get(caller).copied().unwrap_or(false)) {
+                continue;
+            }
+            for &target in &self.edges[caller] {
+                let target = target as usize;
+                if available
+                    .is_some_and(|available| !available.get(target).copied().unwrap_or(false))
+                {
+                    continue;
+                }
+                let next_depth = depth + 1;
+                if weight > propagated[target][next_depth] {
+                    propagated[target][next_depth] = weight;
+                    weights[target] = weights[target].max(weight);
+                    queue.push_back((target, weight, next_depth));
+                }
+            }
+        }
+        weights
+    }
+}
+
+#[cfg(test)]
+mod loop_call_profile_tests {
+    use super::LoopCallProfile;
+
+    #[test]
+    fn bounded_depth_propagates_known_edges_through_cycles_and_filters_unavailable_nodes() {
+        let profile = LoopCallProfile {
+            seed_edges: vec![(Some(2), 0, 7)],
+            edges: vec![vec![1], vec![0], vec![]],
+        };
+        assert_eq!(profile.weights(None), [7, 7, 0]);
+        assert_eq!(
+            profile.weights(Some(&[true, true, false])),
+            [0, 0, 0],
+            "an unavailable loop caller cannot seed an otherwise live target"
+        );
+        assert_eq!(
+            profile.weights(Some(&[true, false, true])),
+            [7, 0, 0],
+            "propagation stops at an unavailable intermediate body"
+        );
+
+        let chain = LoopCallProfile {
+            seed_edges: vec![(None, 0, 3)],
+            edges: vec![vec![1], vec![2], vec![3], vec![4], vec![5], vec![]],
+        };
+        assert_eq!(
+            chain.weights(None),
+            [3, 3, 3, 3, 3, 0],
+            "transitive propagation stops at the configured depth"
+        );
+    }
+}
+
+fn loop_caller_count(program: &Program) -> usize {
+    program
+        .functions
+        .iter()
+        // Only loop bodies that can enter the bounded supplemental tier need graph call facts.
+        // Large unrelated loops must not disable profiling of a few eligible callers.
+        .filter(|proto| {
+            proto.code.len() <= MAX_GENERIC_LOOP_CALL_INSTRUCTIONS
+                && proto.code.len() <= MAX_GENERIC_LOOP_PROFILE_CALLER_INSTRUCTIONS
+                && loop_work(proto).is_some()
+        })
+        .count()
+        .saturating_add(usize::from(
+            loop_context_weights(&program.code).iter().any(|w| *w > 0),
+        ))
+}
+
+/// For each bytecode instruction, sum the spans of backward-edge loops containing it.
+fn loop_context_weights(code: &[Instruction]) -> Vec<usize> {
+    let mut delta = vec![0isize; code.len().saturating_add(1)];
+    for (pc, instruction) in code.iter().enumerate() {
+        let target = match instruction {
+            Instruction::Jump(target)
+            | Instruction::JumpIfFalse(target)
+            | Instruction::JumpIfTruthy(target)
+            | Instruction::JumpIfNotNullish(target)
+            | Instruction::JumpIfReturnSignal(target) => *target as usize,
+            _ => continue,
+        };
+        if target <= pc && pc < code.len() {
+            let span = pc.saturating_sub(target).saturating_add(1) as isize;
+            delta[target] = delta[target].saturating_add(span);
+            delta[pc + 1] = delta[pc + 1].saturating_sub(span);
+        }
+    }
+    let mut current = 0isize;
+    delta
+        .into_iter()
+        .take(code.len())
+        .map(|change| {
+            current = current.saturating_add(change);
+            current.max(0) as usize
+        })
+        .collect()
 }
 
 /// Return the total static span of backward control-flow edges and their count, if any.

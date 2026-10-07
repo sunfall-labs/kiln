@@ -95,7 +95,7 @@ fn generic_optimization_selects_loop_heavy_frame_bodies_in_a_separate_bounded_ti
     let publishes = [true, true, true, true, true];
 
     let selected = crate::direct::select_generic_optimization_functions(&prog, &publishes, None);
-    assert_eq!(selected, [false, false, true, true, false]);
+    assert_eq!(selected, [false, false, true, false, true]);
     assert_eq!(
         selected,
         crate::direct::select_generic_optimization_functions(&prog, &publishes, None),
@@ -105,13 +105,340 @@ fn generic_optimization_selects_loop_heavy_frame_bodies_in_a_separate_bounded_ti
     let mut available = [true, true, false, true, true];
     let retained =
         crate::direct::select_generic_optimization_functions(&prog, &publishes, Some(&available));
-    assert_eq!(retained, [false, true, false, true, false]);
+    assert_eq!(retained, [false, false, false, true, true]);
     available[1] = false;
     available[3] = false;
     assert_eq!(
         crate::direct::select_generic_optimization_functions(&prog, &publishes, Some(&available),),
-        [false; 5],
+        [false, false, false, false, true],
         "unavailable functions never spend the loop tier budget"
+    );
+}
+
+#[test]
+fn generic_optimization_selects_large_loop_bodies_under_the_existing_loop_budget() {
+    let loop_body = |length: usize| {
+        let mut code = vec![Instruction::Return; length];
+        code[length - 1] = Instruction::Jump(0);
+        function(code)
+    };
+    let mut small_loop = loop_body(47);
+    small_loop.generator = true;
+    let mut prog = program(Vec::new(), vec![Instruction::Return], 0);
+    // The source-ordered tier cannot take the 873- and 1,028-instruction bodies. They fit
+    // together under the loop tier's 2,048-instruction cap and outrank the shorter loop.
+    prog.functions = vec![
+        loop_body(1028),
+        loop_body(873),
+        loop_body(1537),
+        loop_body(306),
+        loop_body(594),
+        small_loop,
+    ];
+    let selected = crate::direct::select_generic_optimization_functions(&prog, &[false; 6], None);
+    assert_eq!(selected, [true, true, false, true, false, false]);
+    assert_eq!(
+        selected,
+        crate::direct::select_generic_optimization_functions(&prog, &[false; 6], None),
+        "loop-work selection remains deterministic"
+    );
+}
+
+#[test]
+fn generic_loop_callee_weight_ranks_bounded_repeated_work_deterministically() {
+    let loop_body = |length: usize| {
+        let mut code = vec![Instruction::Return; length];
+        code[length - 1] = Instruction::Jump(0);
+        function(code)
+    };
+    let mut prog = program(Vec::new(), vec![Instruction::Return], 0);
+    prog.functions = vec![
+        loop_body(400),
+        function(vec![Instruction::Return; 500]),
+        loop_body(600),
+    ];
+    let weights = [1, 10, 5];
+    let selected = crate::direct::select_generic_optimization_functions_with_weights(
+        &prog,
+        &[false; 3],
+        None,
+        Some(&weights),
+    );
+    assert_eq!(selected, [false, true, true]);
+    assert_eq!(
+        selected,
+        crate::direct::select_generic_optimization_functions_with_weights(
+            &prog,
+            &[false; 3],
+            None,
+            Some(&weights),
+        ),
+        "weighted selection and proto-index tie breaks are deterministic"
+    );
+    assert_eq!(
+        crate::direct::select_generic_optimization_functions_with_weights(
+            &prog,
+            &[false; 3],
+            Some(&[true, false, true]),
+            Some(&weights),
+        ),
+        [true, false, true],
+        "an unavailable weighted candidate cannot spend the bounded tier"
+    );
+}
+
+fn diagnostic_loop_work(proto: &kiln_ir::FunctionProto) -> Option<(usize, usize)> {
+    let mut span = 0usize;
+    let mut count = 0usize;
+    for (pc, instruction) in proto.code.iter().enumerate() {
+        let target = match instruction {
+            Instruction::Jump(target)
+            | Instruction::JumpIfFalse(target)
+            | Instruction::JumpIfTruthy(target)
+            | Instruction::JumpIfNotNullish(target)
+            | Instruction::JumpIfReturnSignal(target) => *target as usize,
+            _ => continue,
+        };
+        if target <= pc {
+            span = span.saturating_add(pc.saturating_sub(target).saturating_add(1));
+            count = count.saturating_add(1);
+        }
+    }
+    (count > 0).then_some((span, count))
+}
+
+/// Read-only diagnostic for the pinned SchemaBinary source. It prints the selection and
+/// backedge ranking for the per-element encode/decode functions in the timeout's loop stack.
+#[test]
+#[ignore = "one-off pinned SchemaBinary generic O1 selection diagnostic"]
+fn diagnose_pinned_schema_binary_generic_optimization_selection() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("KILN_EFFECT_SOURCE_ROOT")
+            .expect("set KILN_EFFECT_SOURCE_ROOT to the pinned Effect source root"),
+    );
+    let path = root.join("packages/effect/src/encoding/SchemaBinary.ts");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let hir = kiln_frontend_oxc::parse(&path.to_string_lossy(), &source);
+    let program = kiln_ir::compile_module(&hir)
+        .unwrap_or_else(|error| panic!("compile {}: {error:?}", path.display()))
+        .program;
+    let graphs = program
+        .functions
+        .iter()
+        .map(|proto| crate::graph::build_function_graph(proto, &program).expect("build graph"))
+        .collect::<Vec<_>>();
+    let entry_proto = crate::entry_proto(&program);
+    let entry_graph =
+        crate::graph::build_function_graph(&entry_proto, &program).expect("build entry graph");
+    let publishes = crate::compute_publishes_frame(&program);
+    let known_plan = crate::direct::DirectPlan::plan(
+        &program,
+        &graphs,
+        &entry_graph,
+        &publishes,
+        true,
+        false,
+        false,
+        false,
+        None,
+    );
+    let generic_plan = crate::direct::DirectPlan::plan(
+        &program,
+        &graphs,
+        &entry_graph,
+        &publishes,
+        true,
+        false,
+        true,
+        false,
+        None,
+    );
+    let selected = generic_plan
+        .functions
+        .iter()
+        .map(|plan| plan.generic_function_optimized)
+        .collect::<Vec<_>>();
+    let targets = [
+        (156, "encodeArray"),
+        (165, "encodeValue"),
+        (193, "decodeArray"),
+        (200, "decodeValueUnchecked"),
+    ];
+    let loop_weights = generic_plan.generic_loop_profile_weights();
+    let rows = targets
+        .into_iter()
+        .map(|(index, expected_name)| {
+            let proto = &program.functions[index];
+            let name = proto
+                .effective_name_units()
+                .map(|name| name.to_lossy_string());
+            let loop_work = diagnostic_loop_work(proto);
+            serde_json::json!({
+                "proto": index,
+                "expected_name": expected_name,
+                "name": name,
+                "instructions": proto.code.len(),
+                "publishes_frame": publishes.get(index).copied().unwrap_or(true),
+                "loop_work": loop_work,
+                "loop_call_weight": loop_weights
+                    .as_ref()
+                    .and_then(|weights| weights.get(index))
+                    .copied(),
+                "selected": selected[index],
+            })
+        })
+        .collect::<Vec<_>>();
+    let weighted_candidates = loop_weights.as_ref().map(|weights| {
+        let mut rows = (0..program.functions.len())
+            .filter_map(|index| {
+                let weight = weights[index];
+                (weight > 0).then(|| {
+                    serde_json::json!({
+                        "proto": index,
+                        "name": program.functions[index].effective_name_units()
+                            .map(|name| name.to_lossy_string()),
+                        "instructions": program.functions[index].code.len(),
+                        "weight": weight,
+                        "selected": selected[index],
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| std::cmp::Reverse(row["weight"].as_u64().unwrap_or_default()));
+        rows.truncate(24);
+        rows
+    });
+    let hot_loop_calls = [156usize, 193]
+        .into_iter()
+        .map(|caller| {
+            let graph = &graphs[caller];
+            let definitions = graph
+                .blocks
+                .iter()
+                .flat_map(|block| block.operations.iter())
+                .map(|(value, op)| (*value, op))
+                .collect::<std::collections::HashMap<_, _>>();
+            let calls = graph
+                .blocks
+                .iter()
+                .flat_map(|block| block.operations.iter())
+                .filter_map(|(result, op)| {
+                    let crate::graph::GraphOp::Call { callee, .. } = op else {
+                        return None;
+                    };
+                    Some(serde_json::json!({
+                        "pc": graph.origins.get(result).map(|origin| origin.pc),
+                        "callee_value": callee.0,
+                        "callee_definition": definitions.get(callee).map(|op| format!("{op:?}")),
+                        "known_target": known_plan.functions[caller].known.get(callee),
+                    }))
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "caller": caller,
+                "name": program.functions[caller]
+                    .effective_name_units()
+                    .map(|name| name.to_lossy_string()),
+                "calls": calls,
+            })
+        })
+        .collect::<Vec<_>>();
+    let selected_protos = selected
+        .iter()
+        .enumerate()
+        .filter_map(|(index, selected)| selected.then_some(index))
+        .collect::<Vec<_>>();
+    let selected_names = selected_protos
+        .iter()
+        .map(|&index| {
+            serde_json::json!({
+                "proto": index,
+                "name": program.functions[index]
+                    .effective_name_units()
+                    .map(|name| name.to_lossy_string()),
+                "instructions": program.functions[index].code.len(),
+                "loop_work": diagnostic_loop_work(&program.functions[index]),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut loop_candidates = program
+        .functions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, proto)| {
+            if !(128..=1536).contains(&proto.code.len()) {
+                return None;
+            }
+            diagnostic_loop_work(proto).map(|(span, backedges)| {
+                serde_json::json!({
+                    "proto": index,
+                    "name": proto.effective_name_units().map(|name| name.to_lossy_string()),
+                    "instructions": proto.code.len(),
+                    "span": span,
+                    "backedges": backedges,
+                    "loop_call_weight": loop_weights
+                        .as_ref()
+                        .and_then(|weights| weights.get(index))
+                        .copied()
+                        .unwrap_or_default(),
+                    "selected": selected[index],
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    loop_candidates.sort_by(|left, right| {
+        let left_span = left["span"].as_u64().unwrap_or(0);
+        let right_span = right["span"].as_u64().unwrap_or(0);
+        let left_backedges = left["backedges"].as_u64().unwrap_or(0);
+        let right_backedges = right["backedges"].as_u64().unwrap_or(0);
+        let left_instructions = left["instructions"].as_u64().unwrap_or(1);
+        let right_instructions = right["instructions"].as_u64().unwrap_or(1);
+        (right_backedges * left_instructions)
+            .cmp(&(left_backedges * right_instructions))
+            .then_with(|| {
+                right_span
+                    .cmp(&left_span)
+                    .then_with(|| right_backedges.cmp(&left_backedges))
+            })
+    });
+    println!(
+        "{}",
+        serde_json::json!({
+            "source": "packages/effect/src/encoding/SchemaBinary.ts",
+            "source_bytes": source.len(),
+            "proto_count": program.functions.len(),
+            "body_instructions": program.functions.iter().map(|proto| proto.code.len()).sum::<usize>(),
+            "entry_instructions": program.code.len(),
+            "selected_protos": selected_protos,
+            "selected_names": selected_names,
+        "selected_target_rows": rows,
+        "loop_profile_present": loop_weights.is_some(),
+        "weighted_candidates": weighted_candidates,
+            "hot_loop_calls": hot_loop_calls,
+            "top_loop_candidates": loop_candidates.into_iter().take(32).collect::<Vec<_>>(),
+        })
+    );
+    for (index, expected_name) in targets {
+        assert_eq!(
+            program.functions[index]
+                .effective_name_units()
+                .map(|name| name.to_lossy_string())
+                .as_deref(),
+            Some(expected_name),
+            "the pinned function IDs must still resolve to the profiled source functions"
+        );
+    }
+    let weights = generic_plan
+        .generic_loop_profile_weights()
+        .expect("Schema graph fits the explicit bounded loop-call profile caps");
+    assert!(
+        weights[200] > 0,
+        "the in-loop fn193 -> fn199 -> fn200 chain is credited"
+    );
+    assert!(
+        selected[165],
+        "fn165 enters the bounded tier from proven loop-call evidence"
     );
 }
 

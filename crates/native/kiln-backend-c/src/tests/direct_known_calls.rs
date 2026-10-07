@@ -89,6 +89,73 @@ fn bounded_generic_plan_keeps_safe_known_callees_without_typed_entries() {
 }
 
 #[test]
+fn loop_profile_follows_immutable_known_call_edges_but_not_mutable_captures() {
+    let (program, plan) = generic_plan(
+        "function leaf() { return 1; }\n\
+         function wrapper() { return leaf(); }\n\
+         for (let i = 0; i < 3; i++) wrapper();",
+    );
+    let index = |name: &str| {
+        program
+            .functions
+            .iter()
+            .position(|proto| {
+                proto
+                    .effective_name_units()
+                    .is_some_and(|actual| actual.to_lossy_string() == name)
+            })
+            .expect("function proto")
+    };
+    let weights = plan
+        .generic_loop_profile_weights()
+        .expect("bounded loop call profile");
+    let wrapper = index("wrapper");
+    let leaf = index("leaf");
+    assert!(weights[wrapper] > 0, "loop calls the immutable wrapper");
+    assert!(
+        weights[leaf] >= weights[wrapper],
+        "known transitive edge is credited"
+    );
+
+    let (program, plan) = generic_plan(
+        "function first() { return 1; }\n\
+         function second() { return 2; }\n\
+         let callback = first;\n\
+         function invoke() { return callback(); }\n\
+         for (let i = 0; i < 3; i++) invoke();\n\
+         callback = second;",
+    );
+    let index = |name: &str| {
+        program
+            .functions
+            .iter()
+            .position(|proto| {
+                proto
+                    .effective_name_units()
+                    .is_some_and(|actual| actual.to_lossy_string() == name)
+            })
+            .expect("function proto")
+    };
+    let weights = plan
+        .generic_loop_profile_weights()
+        .expect("bounded loop call profile");
+    assert!(
+        weights[index("invoke")] > 0,
+        "known loop entry remains weighted"
+    );
+    assert_eq!(
+        weights[index("first")],
+        0,
+        "mutable capture is not treated as stable"
+    );
+    assert_eq!(
+        weights[index("second")],
+        0,
+        "reassigned target is not inferred"
+    );
+}
+
+#[test]
 fn generic_plan_skips_known_callee_analysis_above_module_budget() {
     let mut source = String::new();
     for index in 0..MAX_GENERIC_DIRECT_ANALYSIS_FUNCTIONS + 1 {
@@ -98,6 +165,27 @@ fn generic_plan_skips_known_callee_analysis_above_module_budget() {
     let (_, plan) = generic_plan(&source);
     assert!(plan.functions.iter().all(|body| body.known.is_empty()));
     assert!(plan.entry.known.is_empty());
+}
+
+#[test]
+fn generic_loop_profile_respects_function_and_loop_caller_caps() {
+    let mut too_many_functions = String::new();
+    for index in 0..=crate::direct::MAX_GENERIC_LOOP_CALL_FUNCTIONS {
+        too_many_functions.push_str(&format!("function f{index}() {{ return {index}; }}\n"));
+    }
+    too_many_functions.push_str("f0();\n");
+    let (_, plan) = generic_plan(&too_many_functions);
+    assert!(plan.generic_loop_profile_weights().is_none());
+
+    let mut too_many_loop_callers = String::new();
+    for index in 0..=crate::direct::MAX_GENERIC_LOOP_CALLERS {
+        too_many_loop_callers.push_str(&format!(
+            "function f{index}() {{ for (let i = 0; i < 1; i++) {{}} }}\n"
+        ));
+    }
+    too_many_loop_callers.push_str("f0();\n");
+    let (_, plan) = generic_plan(&too_many_loop_callers);
+    assert!(plan.generic_loop_profile_weights().is_none());
 }
 
 /// Read-only diagnostic for a pinned Effect source checkout. Run with
