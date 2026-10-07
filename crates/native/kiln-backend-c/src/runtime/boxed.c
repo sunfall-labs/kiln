@@ -1307,6 +1307,13 @@ static const kiln_string *kiln_c99_compiler_named_key(const kiln_string *key) {
     };
     size_t index;
     if (key == NULL || kiln_c99_key_is_symbol(key)) return key;
+    /* Compiler-reserved names all begin with two ASCII at-sign code units. Most property
+     * accesses are ordinary names, so reject them before checking the private prefix and the
+     * fixed well-known-symbol table. Use code-unit access rather than inspecting the backing
+     * bytes: callers may supply Latin-1 or UTF-16 property keys. */
+    if (key->unit_len < sizeof "@@dispose" - 1 ||
+        kiln_string_unit_at(key, 0) != '@' ||
+        kiln_string_unit_at(key, 1) != '@') return key;
     if (key->unit_len >= sizeof "@@private:" - 1 &&
         kiln_c99_key_has_prefix(key, "@@private:")) {
         kiln_string private_key = *key;

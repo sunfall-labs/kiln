@@ -158,6 +158,104 @@ int main(void) {
 }
 
 #[test]
+fn compiler_named_key_preserves_the_reserved_name_matrix() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits the shared runtime");
+    let wrapper = r#"
+int main(void) {
+    static const char *const well_known[] = {
+        "@@iterator", "@@asyncIterator", "@@dispose", "@@asyncDispose"
+    };
+    static const char *const ordinary[] = {
+        "", "@", "@x", "x@@iterator", "@@", "@@iterato", "@@iteratorx",
+        "@@hasInstance", "@@private", "@@privateX:value", "ordinary"
+    };
+
+    /* Ordinary source strings must pass through unchanged, including nearby reserved-looking
+     * spellings. These are the common case for compiler-named property access. */
+    for (size_t i = 0; i < sizeof ordinary / sizeof ordinary[0]; ++i) {
+        kiln_string key = {
+            (uint32_t)strlen(ordinary[i]), KILN_STRING_LATIN1, ordinary[i]
+        };
+        if (kiln_c99_compiler_named_key(&key) != &key) return 1;
+    }
+    /* No reserved spelling is shorter than @@dispose. A short malformed view must be
+     * rejected by length before code-unit decoding touches its absent backing storage. */
+    kiln_string empty_view = { 0, KILN_STRING_UTF16, NULL };
+    kiln_string short_view = { 8, KILN_STRING_UTF16, NULL };
+    if (kiln_c99_compiler_named_key(&empty_view) != &empty_view ||
+        kiln_c99_compiler_named_key(&short_view) != &short_view) return 9;
+
+    /* Only the compiler's four named protocol keys enter the symbol domain. */
+    for (size_t i = 0; i < sizeof well_known / sizeof well_known[0]; ++i) {
+        kiln_string key = {
+            (uint32_t)strlen(well_known[i]), KILN_STRING_LATIN1, well_known[i]
+        };
+        const kiln_string *classified = kiln_c99_compiler_named_key(&key);
+        if (classified == NULL || !kiln_c99_key_is_symbol(classified) ||
+            (classified->flags & KILN_STRING_PRIVATE_KEY) != 0 ||
+            classified->unit_len != key.unit_len ||
+            !kiln_c99_key_has_prefix(classified, well_known[i])) return 2;
+    }
+
+    /* Private slots have a separate domain; a symbol input is already classified and stays
+     * untouched. */
+    static const char private_name[] = "@@private:Scope.state";
+    kiln_string private_key = {
+        (uint32_t)(sizeof private_name - 1), KILN_STRING_LATIN1, private_name
+    };
+    const kiln_string *private_classified = kiln_c99_compiler_named_key(&private_key);
+    if (private_classified == NULL || kiln_c99_key_is_symbol(private_classified) ||
+        (private_classified->flags & KILN_STRING_PRIVATE_KEY) == 0) return 3;
+    kiln_string existing_symbol = {
+        (uint32_t)strlen("@@iterator"), KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY,
+        "@@iterator"
+    };
+    if (kiln_c99_compiler_named_key(&existing_symbol) != &existing_symbol) return 4;
+    if (kiln_c99_compiler_named_key(NULL) != NULL) return 5;
+
+    /* The same code-unit prefixes work for UTF-16 backing storage, including non-ASCII
+     * ordinary names and reserved names. */
+    uint16_t wide_symbol[] = {
+        '@', '@', 'a', 's', 'y', 'n', 'c', 'D', 'i', 's', 'p', 'o', 's', 'e'
+    };
+    kiln_string wide = {
+        (uint32_t)(sizeof wide_symbol / sizeof wide_symbol[0]), KILN_STRING_UTF16,
+        wide_symbol
+    };
+    const kiln_string *wide_classified = kiln_c99_compiler_named_key(&wide);
+    if (wide_classified == NULL || !kiln_c99_key_is_symbol(wide_classified)) return 6;
+    uint16_t wide_ordinary[] = { 0xd800, '@', 'x' };
+    kiln_string wide_nonprefix = {
+        (uint32_t)(sizeof wide_ordinary / sizeof wide_ordinary[0]), KILN_STRING_UTF16,
+        wide_ordinary
+    };
+    if (kiln_c99_compiler_named_key(&wide_nonprefix) != &wide_nonprefix) return 7;
+    uint16_t wide_private[] = {
+        '@', '@', 'p', 'r', 'i', 'v', 'a', 't', 'e', ':', 'x'
+    };
+    kiln_string wide_private_key = {
+        (uint32_t)(sizeof wide_private / sizeof wide_private[0]), KILN_STRING_UTF16,
+        wide_private
+    };
+    const kiln_string *wide_private_classified =
+        kiln_c99_compiler_named_key(&wide_private_key);
+    if (wide_private_classified == NULL ||
+        (wide_private_classified->flags & KILN_STRING_PRIVATE_KEY) == 0 ||
+        kiln_c99_key_is_symbol(wide_private_classified)) return 8;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "compiler-named-key-reserved-matrix");
+    assert!(
+        run.status.success(),
+        "compiler named key classification changed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn canonical_array_index_parser_matches_previous_round_trip_and_respects_domains() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits the shared runtime");
