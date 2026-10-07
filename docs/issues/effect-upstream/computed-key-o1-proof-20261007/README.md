@@ -35,5 +35,28 @@ in multiple files. The function/source relationship is inferred from generated b
 closure capture vectors, the module import table, and the pinned source—not from a span-to-source
 slice. The ranking hint uses generated lexical-cell identity and does not change call dispatch.
 
-This is source/provenance evidence only. The candidate commit has no build or test result attached;
-its focused backend tests must run after the gate releases the test lane.
+## Backend validation
+
+The planner tests and emitted-C integration target were run from repository HEAD
+`6716e78879d37f8655d42b3d6dfa2ceba0d1f8a9`; `crates/native/kiln-backend-c/src/direct.rs` had
+SHA256 `5955757668cd0d943ebdaef0187bc47e26e2de7d342feb354969dd7dccb1dbaa`. The environment used
+Rust 1.97.1, the shared mbx cache, `CARGO_BUILD_JOBS=1`, `KILN_JOBS=1`,
+`RAYON_NUM_THREADS=1`, and `--test-threads=1`.
+
+The focused planner command was:
+
+```sh
+mbx test -p kiln-backend-c --offline loop_call_profile_tests -- --test-threads=1
+```
+
+It passed 6 tests (0 failed, 0 ignored); the other integration target had 37 filtered tests.
+The meaningful emitted-C target was then run with:
+
+```sh
+mbx test -p kiln-backend-c --offline --test emitted_c -- --test-threads=1
+```
+
+It passed all 37 tests (0 failed, 0 ignored). Full command output is retained in
+[`focused-loop-tests.log`](focused-loop-tests.log) and [`emitted-c-tests.log`](emitted-c-tests.log).
+These checks validate planner behavior and C emission. They do not include a native AOT workload
+or an Effect replay.
