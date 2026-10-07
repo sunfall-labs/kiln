@@ -38,9 +38,10 @@ def budget(environment, cpus: int, memory_mb: int, *, quick: bool = False):
         test262 = max(1, total - tests - native - benchmark_worker)
     else:
         tests, native, test262 = min(8, total), min(16, total), total
-    # The standalone Test262 runner retains its 4 GiB default. A full gate sizes its own
-    # capped process to its reserved workers, never more than half physical memory or 16 GiB.
-    memory = int(environment.get("KILN_TEST262_MEMORY_MB", min(16384, max(64, memory_mb // 2), test262 * 1024)))
+    # Worker count bounds overlapping cases, not the memory needed by one case. In particular,
+    # the extended generated-eval tests exceed 1 GiB even with one worker. Retain the standalone
+    # runner's 4 GiB allowance at small CPU budgets; still cap it at half physical memory/16 GiB.
+    memory = int(environment.get("KILN_TEST262_MEMORY_MB", min(16384, max(64, memory_mb // 2), max(4096, test262 * 1024))))
     if memory < 64:
         raise ValueError("KILN_TEST262_MEMORY_MB must be at least 64")
     test262 = min(test262, max(1, memory // 1024))

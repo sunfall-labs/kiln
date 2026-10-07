@@ -3,10 +3,11 @@
 //! Provides the `URL` and `URLSearchParams` objects, URL property reflection,
 //! and Node file URL / path conversions (`fileURLToPath`, `pathToFileURL`, legacy `parse`).
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{ArrayData, ExecutionError, Native, NodeObject, ObjectData, RealmId, Value};
+use crate::{
+    ArrayData, ExecutionError, Native, NodeObject, ObjectData, RealmId, Value, tracked_object,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct UrlState {
@@ -30,7 +31,7 @@ pub(crate) fn url_object(state: UrlState) -> Value {
         node_object: Some(NodeObject::Url(state)),
         ..Default::default()
     };
-    Value::Object(Rc::new(RefCell::new(object)))
+    Value::Object(tracked_object(object))
 }
 
 pub(crate) fn url_search_params_object(state: Rc<UrlState>) -> Value {
@@ -54,7 +55,7 @@ pub(crate) fn url_search_params_object(state: Rc<UrlState>) -> Value {
         "toString",
         Value::Native(Native::UrlSearchParamsToString, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(object)))
+    Value::Object(tracked_object(object))
 }
 
 pub(crate) fn parse_url(input: &str, base: Option<&str>) -> Result<UrlState, ExecutionError> {
@@ -145,7 +146,7 @@ pub(crate) fn node_legacy_url_parse(input: &str) -> Value {
             Value::Null
         },
     );
-    Value::Object(Rc::new(RefCell::new(object)))
+    Value::Object(tracked_object(object))
 }
 
 pub(crate) fn property(prop: &str) -> Option<Value> {

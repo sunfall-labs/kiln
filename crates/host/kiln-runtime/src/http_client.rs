@@ -26,7 +26,7 @@ use crate::HttpCloseMode;
 use crate::http_body::{BodyEvent, ResponseBodyDriver};
 use crate::http_engine::{
     Dispatcher, EngineBody, HashMap, HostTransport, HttpDispatch, HttpEvent, HttpEventKind,
-    flatten_header_map, trace,
+    UpgradeTransport, flatten_header_map, trace,
 };
 use crate::node_stream::WriteDisposition;
 
@@ -35,6 +35,7 @@ use crate::node_stream::WriteDisposition;
 #[derive(Default)]
 pub struct HttpClientEngine {
     connections: Rc<RefCell<HashMap<ResourceId, ClientConnection>>>,
+    upgraded: Rc<RefCell<HashMap<ResourceId, UpgradeTransport>>>,
 }
 
 struct ClientConnection {
@@ -57,6 +58,9 @@ struct ClientShared {
     abort_pending: Cell<bool>,
     /// Hyper's connection future runs as its own task; an abort has to reach it too.
     connection: RefCell<Option<tokio::task::AbortHandle>>,
+    upgrade_wake: Notify,
+    upgrade_parts: RefCell<Option<(HostTransport, Vec<u8>)>>,
+    upgrade_error: RefCell<Option<String>>,
     header_scratch: RefCell<Vec<u8>>,
 }
 
@@ -206,6 +210,19 @@ impl ClientShared {
         self.in_flight.set(self.in_flight.get().saturating_sub(1));
     }
 
+    async fn take_upgrade_parts(&self) -> Result<(HostTransport, Vec<u8>), String> {
+        loop {
+            let notified = self.upgrade_wake.notified();
+            if let Some(parts) = self.upgrade_parts.borrow_mut().take() {
+                return Ok(parts);
+            }
+            if let Some(error) = self.upgrade_error.borrow_mut().take() {
+                return Err(error);
+            }
+            notified.await;
+        }
+    }
+
     /// Fail every request the language started that Hyper never answered, queued or in
     /// progress. Called once the connection is gone, before `Closed`.
     fn fail_outstanding(&self, message: &str) {
@@ -224,6 +241,9 @@ impl ClientShared {
 }
 
 impl HttpClientEngine {
+    pub fn take_upgrade(&mut self, resource: ResourceId) -> Option<UpgradeTransport> {
+        self.upgraded.borrow_mut().remove(&resource)
+    }
     /// Spawn the connection task for `resource` over `transport`, dispatching to `dispatch`.
     pub fn attach(
         &mut self,
@@ -244,11 +264,15 @@ impl HttpClientEngine {
             closing: Cell::new(false),
             abort_pending: Cell::new(false),
             connection: RefCell::new(None),
+            upgrade_wake: Notify::new(),
+            upgrade_parts: RefCell::new(None),
+            upgrade_error: RefCell::new(None),
             header_scratch: RefCell::new(Vec::with_capacity(512)),
         });
         trace!("{resource:?} client attach");
         let table = Rc::clone(&self.connections);
-        let task = tokio::task::spawn_local(run(transport, Rc::clone(&shared), table));
+        let upgraded = Rc::clone(&self.upgraded);
+        let task = tokio::task::spawn_local(run(transport, Rc::clone(&shared), table, upgraded));
         self.connections
             .borrow_mut()
             .insert(resource, ClientConnection { shared, task });
@@ -352,11 +376,12 @@ impl HttpClientEngine {
                 shared.shutdown.notify_one();
             }
             HttpCloseMode::Abort => {
+                if shared.abort_pending.replace(true) {
+                    return true;
+                }
                 if let Some(connection) = shared.connection.borrow_mut().take() {
                     connection.abort();
                 }
-                shared.abort_pending.set(true);
-                shared.dispatcher.set_failed(false);
                 let table = Rc::clone(&self.connections);
                 tokio::task::spawn_local(async move {
                     shared.fail_outstanding("socket hang up");
@@ -423,6 +448,7 @@ async fn run(
     transport: HostTransport,
     shared: Rc<ClientShared>,
     table: Rc<RefCell<HashMap<ResourceId, ClientConnection>>>,
+    upgraded: Rc<RefCell<HashMap<ResourceId, UpgradeTransport>>>,
 ) {
     shared.dispatcher.started();
     let dispatcher = Rc::clone(&shared.dispatcher);
@@ -435,13 +461,30 @@ async fn run(
                 message: message.as_bytes(),
                 ..HttpEvent::bare(HttpEventKind::Error, 0)
             });
-            finish(&shared, &table);
+            finish(&shared, &table, false);
             return;
         }
     };
-    let connection = tokio::task::spawn_local(connection);
+    let connection_shared = Rc::clone(&shared);
+    let connection = tokio::task::spawn_local(async move {
+        match connection.without_shutdown().await {
+            Ok(parts) => {
+                let raw = parts.io.into_inner();
+                *connection_shared.upgrade_parts.borrow_mut() =
+                    Some((HostTransport(raw), parts.read_buf.to_vec()));
+                connection_shared.upgrade_wake.notify_one();
+                Ok(())
+            }
+            Err(error) => {
+                *connection_shared.upgrade_error.borrow_mut() = Some(error.to_string());
+                connection_shared.upgrade_wake.notify_one();
+                Err(error)
+            }
+        }
+    });
     *shared.connection.borrow_mut() = Some(connection.abort_handle());
     let mut connection = Some(connection);
+    let mut transferred = false;
     loop {
         let request = tokio::select! {
             biased;
@@ -488,16 +531,20 @@ async fn run(
         };
         let outcome = tokio::select! {
             biased;
-            outcome = exchange(&shared, &mut sender, id, request) => outcome,
+            outcome = exchange(&shared, &mut sender, id, request, &upgraded) => outcome,
             _ = dispatcher.pump() => Err(Failure::Closed),
         };
         match outcome {
-            Ok(true) => {
+            Ok(ExchangeOutcome::Reusable) => {
                 if shared.closing.get() {
                     break;
                 }
             }
-            Ok(false) => break,
+            Ok(ExchangeOutcome::Retired) => break,
+            Ok(ExchangeOutcome::Transferred) => {
+                transferred = true;
+                break;
+            }
             Err(Failure::Error(message)) => {
                 shared.request_done(id);
                 let _ = dispatcher.dispatch(&HttpEvent {
@@ -515,7 +562,13 @@ async fn run(
     }
     shared.connection.borrow_mut().take();
     shared.fail_outstanding("socket hang up");
-    finish(&shared, &table);
+    finish(&shared, &table, transferred);
+}
+
+enum ExchangeOutcome {
+    Reusable,
+    Retired,
+    Transferred,
 }
 
 /// Send one request and deliver its response. `Ok(reusable)` once the response has ended.
@@ -524,7 +577,8 @@ async fn exchange(
     sender: &mut hyper::client::conn::http1::SendRequest<EngineBody>,
     id: u64,
     request: Request<EngineBody>,
-) -> Result<bool, Failure> {
+    upgraded: &Rc<RefCell<HashMap<ResourceId, UpgradeTransport>>>,
+) -> Result<ExchangeOutcome, Failure> {
     let dispatcher = &shared.dispatcher;
     if let Err(error) = sender.ready().await {
         return Err(Failure::Error(error.to_string()));
@@ -533,6 +587,45 @@ async fn exchange(
         .send_request(request)
         .await
         .map_err(|error| Failure::Error(error.to_string()))?;
+    if response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
+        let (response_parts, _body) = response.into_parts();
+        let reason = response_parts.status.canonical_reason().unwrap_or_default();
+        let (stream, head) = shared.take_upgrade_parts().await.map_err(Failure::Error)?;
+        let mut scratch = shared.header_scratch.borrow_mut();
+        flatten_header_map(&response_parts.headers, &mut scratch);
+        upgraded.borrow_mut().insert(
+            shared.dispatcher.resource,
+            UpgradeTransport {
+                transport: stream,
+                head: head.clone(),
+                pending_write: Vec::new(),
+                write_fences: Vec::new(),
+                write_completion: crate::http_engine::UpgradeWriteCompletion::completed(),
+            },
+        );
+        let event = HttpEvent {
+            status: response_parts.status.as_u16(),
+            reason: reason.as_bytes(),
+            headers: &scratch,
+            data: &head,
+            ..HttpEvent::bare(HttpEventKind::UpgradeResponse, id)
+        };
+        let dispatched = dispatcher.dispatch(&event);
+        drop(scratch);
+        if !dispatched {
+            if let Some(transfer) = upgraded.borrow_mut().remove(&shared.dispatcher.resource) {
+                transfer.write_completion.complete(Err(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "HTTP upgrade dispatch failed before transport adoption",
+                )));
+                return Err(Failure::Closed);
+            }
+            shared.request_done(id);
+            return Ok(ExchangeOutcome::Transferred);
+        }
+        shared.request_done(id);
+        return Ok(ExchangeOutcome::Transferred);
+    }
     let (parts, mut body) = response.into_parts();
     let reason = parts.status.canonical_reason().unwrap_or_default();
     {
@@ -582,14 +675,27 @@ async fn exchange(
     if !dispatcher.dispatch(&event) {
         return Err(Failure::Closed);
     }
-    Ok(reusable)
+    Ok(if reusable {
+        ExchangeOutcome::Reusable
+    } else {
+        ExchangeOutcome::Retired
+    })
 }
 
-fn finish(shared: &Rc<ClientShared>, table: &Rc<RefCell<HashMap<ResourceId, ClientConnection>>>) {
+fn finish(
+    shared: &Rc<ClientShared>,
+    table: &Rc<RefCell<HashMap<ResourceId, ClientConnection>>>,
+    transferred: bool,
+) {
     let _ = shared.dispatcher.flush_deferred();
-    let _ = shared
-        .dispatcher
-        .dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+    if !transferred {
+        // `without_shutdown` also returns the IO when an ordinary connection closes. Keep its
+        // parts only while a 101 exchange can claim them; otherwise dropping them retires IO.
+        shared.upgrade_parts.borrow_mut().take();
+        let _ = shared
+            .dispatcher
+            .dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+    }
     table.borrow_mut().remove(&shared.dispatcher.resource);
 }
 

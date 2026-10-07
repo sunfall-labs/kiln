@@ -302,7 +302,7 @@ struct Endpoint {
     queue: VecDeque<Message>,
     /// Realm completion signals for pending PortWait requests. Posting wakes the realm drive
     /// directly; it checks the endpoint state before completing the request.
-    waits: HashMap<u64, Arc<Notify>>,
+    waits: HashMap<u64, PortWait>,
     peer_closed: bool,
     group: Option<GroupName>,
     /// The parent's end of a running worker's channel: the worker closing its `parentPort`
@@ -315,11 +315,21 @@ struct Endpoint {
     /// Only this host worker may drain a bound actor inbox. Endpoint numbers are visible to
     /// JavaScript, so the realm binding alone would not prevent another realm taking a message.
     actor_reader: Option<u64>,
+    /// The worker realm holding this end (its key), 0 for a main realm or a port in transit.
+    /// A worker that ends closes every end it holds, so each peer sees `close` as in node --
+    /// including a port that arrived in a message, which no other record ties to the realm.
+    holder: u64,
+    /// While in transit, the endpoint whose queue holds the message carrying this one: closing
+    /// that endpoint drops the message, so it closes this port too -- a port sent to a worker
+    /// that dies before it reads it closes with it, as in node. 0 once a realm holds it.
+    via: u64,
 }
 
 impl Endpoint {
     fn new(peer: u64) -> Self {
         Self {
+            holder: current_key(),
+            via: 0,
             peer,
             queue: VecDeque::new(),
             waits: HashMap::new(),
@@ -331,11 +341,24 @@ impl Endpoint {
         }
     }
 
+    /// Wake every realm waiting on this port. Each is marked active *first* -- at the moment of
+    /// the send, before the target has run -- so no virtual clock can see the whole process idle
+    /// between this wake being queued and the target's next turn consuming it (ADR 0044, 0070).
     fn wake(&self) {
-        for signal in self.waits.values() {
-            signal.notify_one();
+        for wait in self.waits.values() {
+            if let Some(liveness) = &wait.liveness {
+                liveness.wake();
+            }
+            wait.signal.notify_one();
         }
     }
+}
+
+/// One realm's pending `PortWait` on an endpoint: the signal that ends its park and the
+/// liveness a wake must raise before the realm runs.
+struct PortWait {
+    signal: Arc<Notify>,
+    liveness: Option<Arc<Liveness>>,
 }
 
 /// A broadcast group's name: the program it belongs to, and the name that program gave it.
@@ -949,6 +972,7 @@ pub fn post(from: u64, message: Message) -> bool {
     };
     target.queue.push_back(message);
     target.wake();
+    carry_released(&mut ports, peer);
     true
 }
 
@@ -963,7 +987,25 @@ pub fn enqueue(port: u64, message: Message) -> bool {
     };
     target.queue.push_back(message);
     target.wake();
+    carry_released(&mut ports, port);
     true
+}
+
+thread_local! {
+    /// Ports this thread released while encoding the message it is about to post.
+    static RELEASED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The ports released for the message just queued at `target` travel in its queue.
+fn carry_released(ports: &mut Ports, target: u64) {
+    for port in RELEASED.with(|released| std::mem::take(&mut *released.borrow_mut())) {
+        if port != target
+            && let Some(endpoint) = ports.endpoints.get_mut(&port)
+            && endpoint.holder == 0
+        {
+            endpoint.via = target;
+        }
+    }
 }
 
 /// The oldest message queued for `port`.
@@ -1008,7 +1050,13 @@ pub fn subscribe(port: u64, signal: Arc<Notify>) -> Option<u64> {
         return None;
     }
     let id = ports.allocate_wait();
-    ports.endpoints.get_mut(&port)?.waits.insert(id, signal);
+    ports.endpoints.get_mut(&port)?.waits.insert(
+        id,
+        PortWait {
+            signal,
+            liveness: wake_liveness(),
+        },
+    );
     Some(id)
 }
 
@@ -1019,6 +1067,37 @@ pub fn unsubscribe(port: u64, id: u64) {
     }
 }
 
+/// This realm now holds `port`: it arrived here in a message (or was made here), and closes
+/// with this realm if the realm is a worker that ends first.
+pub fn hold(port: u64) {
+    if let Some(endpoint) = ports().endpoints.get_mut(&port) {
+        endpoint.holder = current_key();
+        endpoint.via = 0;
+    }
+}
+
+/// `port` is leaving this realm in a message: no realm holds it until one receives it, so
+/// this realm ending does not close it -- nor drop what was queued for its receiver.
+pub fn release(port: u64) {
+    if let Some(endpoint) = ports().endpoints.get_mut(&port) {
+        endpoint.holder = 0;
+        RELEASED.with(|released| released.borrow_mut().push(port));
+    }
+}
+
+/// Close every end worker `key` holds: its realm has ended.
+fn close_held(key: u64) {
+    let held: Vec<u64> = ports()
+        .endpoints
+        .iter()
+        .filter(|(_, endpoint)| endpoint.holder == key)
+        .map(|(port, _)| *port)
+        .collect();
+    for port in held {
+        close(port);
+    }
+}
+
 /// Close `port`: what was queued for it is dropped (a moved store is freed with it), and its
 /// peer learns, after the messages already queued for the peer, that this end has gone.
 pub fn close(port: u64) {
@@ -1026,6 +1105,13 @@ pub fn close(port: u64) {
     let Some(endpoint) = ports.endpoints.remove(&port) else {
         return;
     };
+    // Ports travelling in the messages dropped with this queue close with it.
+    let carried: Vec<u64> = ports
+        .endpoints
+        .iter()
+        .filter(|(_, other)| other.via == port)
+        .map(|(id, _)| *id)
+        .collect();
     if let Some(peer) = ports.endpoints.get_mut(&endpoint.peer) {
         peer.peer = 0;
         if !peer.awaits_exit {
@@ -1046,6 +1132,9 @@ pub fn close(port: u64) {
     let peer = endpoint.peer;
     drop(ports);
     drop(endpoint);
+    for port in carried {
+        close(port);
+    }
     if let Some(reservations) = ACTOR_RESERVATIONS.get() {
         lock(reservations).retain(|_, entry| {
             let affected = entry.receiver == port
@@ -1168,6 +1257,210 @@ pub struct WorkerContext {
     /// The parent's end of the worker's channel, where the runtime's own messages go.
     parent: u64,
     terminate: Arc<AtomicBool>,
+    /// Whether this worker may still produce a wake for another realm on its own.
+    liveness: Arc<Liveness>,
+}
+
+/// Whether a realm can still make progress, or cause a wake in another realm, without being
+/// woken itself (ADR 0012, ADR 0070).
+///
+/// A virtual-clock realm parked on a timer may jump its clock to the deadline only when no other
+/// realm in the process is `active`: a worker thread that has not yet run its module body, or is
+/// mid-turn, is wall-clock time away from posting the message or closing the port the parked
+/// realm would otherwise have heard first. An `idle` realm is parked with nothing runnable (it
+/// waits on a host wake, a timer, or a synchronous wait) and cannot do that until something
+/// wakes it. Two realms that are both idle do not wait on each other, so timers on both sides
+/// still run.
+#[derive(Debug)]
+pub struct Liveness {
+    /// `IDLE`, `ACTIVE` or `FINISHED`: one atomic, so a wake racing a worker's exit can never
+    /// mark a finished realm active again -- which would hold every virtual clock forever.
+    state: std::sync::atomic::AtomicU8,
+    /// A wake was sent to this realm since its last turn began. A realm about to park re-checks
+    /// it after going idle ([`Liveness::wake_pending`]), so a wake landing between "going idle"
+    /// and "parking" is never lost: the realm declines to park and runs the turn.
+    wake_pending: std::sync::atomic::AtomicBool,
+    /// Nanoseconds until the virtual timer this realm is parked on, `u64::MAX` when it waits on
+    /// no timer. Meaningful while the realm is `idle`: it is the wake this realm will cause
+    /// without anything else running first ([`Liveness::others_hold`]).
+    timer_ns: std::sync::atomic::AtomicU64,
+}
+
+/// Every realm's liveness, so a parked clock can ask whether another idle realm's timer is due
+/// before its own.
+static REGISTRY: std::sync::Mutex<Vec<std::sync::Weak<Liveness>>> =
+    std::sync::Mutex::new(Vec::new());
+
+const IDLE: u8 = 0;
+const ACTIVE: u8 = 1;
+const FINISHED: u8 = 2;
+
+static ACTIVE_REALMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl Liveness {
+    /// A realm that has work to do: it counts as active until it parks.
+    pub fn new_active() -> Arc<Self> {
+        ACTIVE_REALMS.fetch_add(1, Ordering::AcqRel);
+        let live = Arc::new(Self {
+            state: std::sync::atomic::AtomicU8::new(ACTIVE),
+            wake_pending: std::sync::atomic::AtomicBool::new(false),
+            timer_ns: std::sync::atomic::AtomicU64::new(u64::MAX),
+        });
+        let mut registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        registry.retain(|other| other.strong_count() > 0);
+        registry.push(Arc::downgrade(&live));
+        live
+    }
+
+    /// Publish the virtual timer this realm is about to park on (`None`: no timer). Call before
+    /// `set_idle`, so no moment exists when the realm is idle and its timer unpublished.
+    pub fn publish_timer(&self, delay: Option<std::time::Duration>) {
+        let ns = delay.map_or(u64::MAX, |d| {
+            u64::try_from(d.as_nanos()).unwrap_or(u64::MAX - 1)
+        });
+        self.timer_ns.store(ns, Ordering::SeqCst);
+    }
+
+    /// Whether a virtual clock about to jump `delay` ahead must hold still: another realm is
+    /// active, or is idle on a virtual timer due strictly sooner, whose firing may post a
+    /// message or close a port before this realm's timer. Two idle realms waiting on timers do
+    /// not wait on each other unless one is due first, so this cannot cycle.
+    pub fn others_hold(&self, delay: Option<std::time::Duration>) -> bool {
+        if self.others_active() {
+            return true;
+        }
+        let Some(delay) = delay else {
+            return false;
+        };
+        let mine = u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX - 1);
+        let registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        registry
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .any(|other| {
+                !std::ptr::eq(Arc::as_ptr(&other), self)
+                    && other.state.load(Ordering::SeqCst) == IDLE
+                    && other.timer_ns.load(Ordering::SeqCst) < mine
+            })
+    }
+
+    /// The realm has work: it runs, or a wake is on its way to it. A finished realm stays so.
+    pub fn set_active(&self) {
+        if self
+            .state
+            .compare_exchange(IDLE, ACTIVE, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            ACTIVE_REALMS.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// A wake is on its way to this realm (a message, a close, a notify): record it and mark the
+    /// realm active now, before it runs. A finished realm stays finished.
+    pub fn wake(&self) {
+        self.wake_pending.store(true, Ordering::SeqCst);
+        self.set_active();
+    }
+
+    /// The realm is starting a turn, which will see every wake sent so far.
+    pub fn clear_wake(&self) {
+        self.wake_pending.store(false, Ordering::SeqCst);
+    }
+
+    /// Whether a wake was sent since the realm's last turn began. Checked after `set_idle`.
+    pub fn wake_pending(&self) -> bool {
+        self.wake_pending.load(Ordering::SeqCst)
+    }
+
+    pub fn set_idle(&self) {
+        if self
+            .state
+            .compare_exchange(ACTIVE, IDLE, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            ACTIVE_REALMS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// The realm has ended: it can cause no wake, and no wake can make it active again.
+    pub fn finish(&self) {
+        if self.state.swap(FINISHED, Ordering::AcqRel) == ACTIVE {
+            ACTIVE_REALMS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.state.load(Ordering::Acquire) == ACTIVE
+    }
+
+    /// Whether any realm other than this one is active.
+    pub fn others_active(&self) -> bool {
+        let mine = usize::from(self.is_active());
+        ACTIVE_REALMS.load(Ordering::Acquire) > mine
+    }
+}
+
+impl Drop for Liveness {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// Marks the worker on this thread idle for the life of the guard: a synchronous wait cannot
+/// post anything, and another realm's timer may be what ends it.
+pub struct BlockedGuard(Option<Arc<Liveness>>);
+
+impl BlockedGuard {
+    pub fn enter() -> Self {
+        let liveness = CURRENT.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .map(|context| Arc::clone(&context.liveness))
+        });
+        let was_active = liveness.as_ref().is_some_and(|l| l.is_active());
+        if was_active && let Some(l) = &liveness {
+            l.set_idle();
+        }
+        Self(liveness.filter(|_| was_active))
+    }
+}
+
+impl Drop for BlockedGuard {
+    fn drop(&mut self) {
+        if let Some(l) = &self.0 {
+            l.set_active();
+        }
+    }
+}
+
+thread_local! {
+    /// The liveness of the top-level (main) realm on this thread, which has no `WorkerRecord`:
+    /// registered by a native realm that owns its thread, so a wake into it is marked the same
+    /// way as a wake into a worker.
+    static MAIN_LIVENESS: std::cell::RefCell<Option<Arc<Liveness>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Register (or clear) the liveness of the main realm on this thread.
+pub fn set_main_liveness(liveness: Option<Arc<Liveness>>) {
+    MAIN_LIVENESS.with(|slot| *slot.borrow_mut() = liveness);
+}
+
+/// The liveness a wake aimed at the realm on this thread must raise: its worker's, or the
+/// registered main realm's.
+fn wake_liveness() -> Option<Arc<Liveness>> {
+    current_liveness().or_else(|| MAIN_LIVENESS.with(|slot| slot.borrow().clone()))
+}
+
+/// The liveness of the worker running on this thread, if any.
+pub fn current_liveness() -> Option<Arc<Liveness>> {
+    CURRENT.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .map(|context| Arc::clone(&context.liveness))
+    })
 }
 
 impl WorkerContext {
@@ -1196,6 +1489,8 @@ struct WorkerRecord {
     terminate: Arc<AtomicBool>,
     control: u64,
     task: Option<WorkerTask>,
+    /// The worker's own liveness, which a wake aimed at it marks active ([`wake_worker`]).
+    liveness: Arc<Liveness>,
 }
 
 enum WorkerTask {
@@ -1478,6 +1773,12 @@ fn prepare_worker(spec: WorkerSpec) -> Arc<WorkerContext> {
         if let Some(endpoint) = ports.endpoints.get_mut(&parent) {
             endpoint.awaits_exit = true;
         }
+        // The worker's own ends are its realm's from the start, not the spawning realm's.
+        for port in [spec.port, spec.control] {
+            if let Some(endpoint) = ports.endpoints.get_mut(&port) {
+                endpoint.holder = key;
+            }
+        }
         parent
     };
     let context = Arc::new(WorkerContext {
@@ -1487,6 +1788,7 @@ fn prepare_worker(spec: WorkerSpec) -> Arc<WorkerContext> {
         spec,
         parent,
         terminate: Arc::clone(&terminate),
+        liveness: Liveness::new_active(),
     });
     workers().insert(
         key,
@@ -1494,6 +1796,7 @@ fn prepare_worker(spec: WorkerSpec) -> Arc<WorkerContext> {
             terminate: Arc::clone(&terminate),
             control,
             task: None,
+            liveness: Arc::clone(&context.liveness),
         },
     );
     RUNNING.fetch_add(1, Ordering::AcqRel);
@@ -1750,11 +2053,15 @@ fn complete_worker(context: &WorkerContext, code: i32) {
     };
     finish_children();
     RUNNING.fetch_sub(1, Ordering::AcqRel);
+    // The exit messages below are the last thing this worker does; once they are queued the
+    // parent's wake is pending and the worker can no longer cause one.
+    let exit_liveness = Arc::clone(&context.liveness);
     enqueue(
         context.parent,
         Message::new(kind::EXIT, value_tokens(Token::Number(f64::from(code)))),
     );
     close(context.spec.port);
+    close_held(context.key);
     {
         let mut ports = ports();
         if let Some(endpoint) = ports.endpoints.get_mut(&context.parent) {
@@ -1764,19 +2071,26 @@ fn complete_worker(context: &WorkerContext, code: i32) {
         }
     }
     close(context.spec.control);
+    exit_liveness.finish();
 }
 
 /// Ask worker `key` to stop: raise its flag, wake it where it may be waiting, and tell its
 /// realm. `false` when there is no such worker (it has already ended).
 pub fn terminate(key: u64) -> bool {
-    let (terminate, control) = {
+    let (terminate, control, liveness) = {
         let workers = workers();
         let Some(record) = workers.get(&key) else {
             return false;
         };
-        (Arc::clone(&record.terminate), record.control)
+        (
+            Arc::clone(&record.terminate),
+            record.control,
+            Arc::clone(&record.liveness),
+        )
     };
     terminate.store(true, Ordering::Release);
+    // It has work now -- ending -- before the wake below reaches it.
+    liveness.set_active();
     {
         let workers = workers();
         if let Some(WorkerTask::Scheduled { handle, .. }) =
@@ -1843,6 +2157,7 @@ pub enum WaitOutcome {
 }
 
 struct Waiter {
+    liveness: Option<Arc<Liveness>>,
     thread: u64,
     woken: Cell<bool>,
     wake: Condvar,
@@ -1852,6 +2167,7 @@ struct Waiter {
 unsafe impl Sync for Waiter {}
 
 struct AsyncWaiter {
+    liveness: Option<Arc<Liveness>>,
     ticket: u64,
     notified: Arc<Notify>,
     woken: Cell<bool>,
@@ -1896,7 +2212,9 @@ pub fn wait(
     if !still_expected() {
         return WaitOutcome::NotEqual;
     }
+    let _blocked = BlockedGuard::enter();
     let waiter = Arc::new(Waiter {
+        liveness: wake_liveness(),
         thread: current_key(),
         woken: Cell::new(false),
         wake: Condvar::new(),
@@ -1961,6 +2279,7 @@ pub fn wait_async_register(
         .checked_add(1)
         .expect("Atomics waiter ticket overflow");
     let waiter = Arc::new(AsyncWaiter {
+        liveness: wake_liveness(),
         ticket,
         notified: Arc::new(Notify::new()),
         woken: Cell::new(false),
@@ -2011,10 +2330,16 @@ pub fn notify(key: (usize, usize), count: usize) -> usize {
         match waiter {
             WaiterEntry::Sync(waiter) => {
                 waiter.woken.set(true);
+                if let Some(liveness) = &waiter.liveness {
+                    liveness.wake();
+                }
                 waiter.wake.notify_one();
             }
             WaiterEntry::Async(waiter) => {
                 waiter.woken.set(true);
+                if let Some(liveness) = &waiter.liveness {
+                    liveness.wake();
+                }
                 waiter.notified.notify_one();
             }
         }
@@ -2042,6 +2367,13 @@ fn interrupt_waits(key: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Held by every test that starts a worker or reads [`running`]: the count is the process's,
+    /// so a worker another test starts in parallel would move it under an assertion.
+    fn worker_tests() -> MutexGuard<'static, ()> {
+        static WORKER_TESTS: Mutex<()> = Mutex::new(());
+        lock(&WORKER_TESTS)
+    }
 
     #[tokio::test]
     async fn async_wait_is_notified_without_a_value_change_and_counts_in_fifo_order() {
@@ -2117,7 +2449,89 @@ mod tests {
     }
 
     #[test]
+    fn an_ending_worker_closes_the_ports_it_holds_but_not_ports_in_transit() {
+        let _workers = worker_tests();
+        let spec = |port, control| WorkerSpec {
+            entry: WorkerEntry::Eval(String::new()),
+            argv: Vec::new(),
+            info: String::new(),
+            port,
+            control,
+            pipe_stdio: true,
+        };
+        let (parent, port) = channel();
+        let (control, control_peer) = channel();
+        // `held` arrives in the worker; `sent` leaves it in a message and must outlive it with
+        // what was queued for its receiver.
+        let (held_partner, held) = channel();
+        let (sent_partner, sent) = channel();
+        release(held);
+        release(sent);
+        let (id, _) = spawn(spec(port, control), move |_| {
+            hold(held);
+            hold(sent);
+            assert!(post(
+                sent_partner,
+                Message::new(0, value_tokens(Token::Null))
+            ));
+            release(sent);
+            0
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state(held_partner) & STATE_PEER_CLOSED == 0 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_ne!(
+            state(held_partner) & STATE_PEER_CLOSED,
+            0,
+            "a held port closes with its realm"
+        );
+        assert_eq!(
+            state(sent) & STATE_QUEUED,
+            STATE_QUEUED,
+            "a port in transit keeps its queue"
+        );
+        assert_eq!(
+            state(sent_partner) & STATE_PEER_CLOSED,
+            0,
+            "and stays entangled"
+        );
+        reap(id);
+        for port in [parent, control_peer, held_partner, sent, sent_partner] {
+            close(port);
+        }
+    }
+
+    #[test]
+    fn a_port_in_a_message_closes_when_the_queue_holding_it_does() {
+        let (receiver, sender) = channel();
+        let (partner, travelling) = channel();
+        release(travelling);
+        assert!(post(sender, Message::new(0, value_tokens(Token::Null))));
+        // Never read: closing the receiver drops the message and the port inside it.
+        close(receiver);
+        assert_eq!(state(travelling), STATE_GONE);
+        assert_ne!(state(partner) & STATE_PEER_CLOSED, 0);
+        let (receiver, sender) = channel();
+        let (partner2, adopted) = channel();
+        release(adopted);
+        assert!(post(sender, Message::new(0, value_tokens(Token::Null))));
+        hold(adopted);
+        close(receiver);
+        assert_ne!(
+            state(adopted),
+            STATE_GONE,
+            "an adopted port no longer travels"
+        );
+        for port in [sender, partner, partner2, adopted] {
+            close(port);
+        }
+    }
+
+    #[test]
     fn scheduled_worker_finishes_two_turns_and_wakes_for_termination() {
+        let _workers = worker_tests();
         use super::*;
 
         let scheduler = Arc::new(crate::turn_scheduler::PinnedTurnScheduler::new(1).unwrap());
@@ -2191,6 +2605,7 @@ mod tests {
 
     #[test]
     fn terminated_scheduled_worker_does_not_park_again() {
+        let _workers = worker_tests();
         let scheduler = Arc::new(crate::turn_scheduler::PinnedTurnScheduler::new(1).unwrap());
         let (parent, port) = channel();
         let (control, control_peer) = channel();
@@ -2241,6 +2656,7 @@ mod tests {
 
     #[test]
     fn cancelled_before_factory_still_reports_exit_and_releases_running_count() {
+        let _workers = worker_tests();
         let scheduler = Arc::new(crate::turn_scheduler::PinnedTurnScheduler::new(1).unwrap());
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -2311,6 +2727,7 @@ mod tests {
             },
             parent: 0,
             terminate: Arc::clone(&terminate),
+            liveness: Liveness::new_active(),
         });
         let worker = Rc::new(RefCell::new(RealmScopeState::for_worker(
             Arc::clone(&context),
@@ -2727,6 +3144,35 @@ mod tests {
         assert!(!lock(actor_reservations()).contains_key(&plain));
     }
 
+    #[test]
+    fn a_post_marks_a_parked_waiter_active_before_it_runs_and_never_revives_a_finished_one() {
+        let _guard = worker_tests();
+        let (a, b) = channel();
+        let live = Liveness::new_active();
+        set_main_liveness(Some(Arc::clone(&live)));
+        let signal = Arc::new(Notify::new());
+        let id = subscribe(b, signal).expect("empty open port waits");
+        set_main_liveness(None);
+        // The waiter parks: idle, nothing pending.
+        live.clear_wake();
+        live.set_idle();
+        assert!(!live.is_active() && !live.wake_pending());
+        // A post marks it active at the send, before it has run.
+        assert!(post(a, Message::new(kind::USER, Vec::new())));
+        assert!(live.is_active() && live.wake_pending());
+        // A wake that landed before going idle is seen by the re-check after it.
+        live.set_idle();
+        assert!(live.wake_pending());
+        live.set_active();
+        // A finished realm is never revived.
+        live.finish();
+        live.wake();
+        assert!(!live.is_active());
+        unsubscribe(b, id);
+        close(a);
+        close(b);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_port_subscription_wakes_for_post_and_close_and_can_be_cancelled() {
         let (a, b) = channel();
@@ -2791,6 +3237,7 @@ mod tests {
 
     #[test]
     fn a_broadcast_group_is_the_programs_own() {
+        let _workers = worker_tests();
         // Two top-level realms on two threads are two programs: the same name is two groups.
         let here = broadcast_join("kiln-test-scoped");
         let there = std::thread::spawn(|| broadcast_join("kiln-test-scoped"))
@@ -2844,6 +3291,7 @@ mod tests {
 
     #[test]
     fn a_notify_wakes_a_waiter_on_another_thread() {
+        let _workers = worker_tests();
         let key = (0xfeed, 8);
         let waiter = std::thread::spawn(move || wait(key, || true, None));
         while notify(key, 1) == 0 {
@@ -2859,6 +3307,7 @@ mod tests {
 
     #[test]
     fn a_worker_reports_online_then_its_exit_code() {
+        let _workers = worker_tests();
         let (parent, port) = channel();
         let (control, _unused) = channel();
         let spec = WorkerSpec {

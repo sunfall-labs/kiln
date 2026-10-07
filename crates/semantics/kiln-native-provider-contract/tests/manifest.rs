@@ -13,6 +13,7 @@ fn sample(variant: ProviderVariant) -> ProviderManifest {
         "deployment".to_owned(),
         "libc".to_owned(),
         variant,
+        Vec::new(),
     )
 }
 
@@ -30,6 +31,14 @@ fn full_and_common_manifests_round_trip_and_match_source_identity() {
             variant.capabilities()
         );
         assert_eq!(source.archive, variant.archive());
+        assert_eq!(
+            source.exports.last().map(String::as_str)
+                == kiln_native_provider_contract::gui::GUI_EXPORTS
+                    .last()
+                    .copied(),
+            variant.capabilities().contains(ProviderCapability::Gui),
+            "{variant:?} must list the GUI bridge's exports exactly when it declares gui"
+        );
     }
 }
 
@@ -104,10 +113,10 @@ fn export_delimiters_cannot_collide_and_capabilities_are_required() {
 #[test]
 fn manifest_cli_rejects_invalid_variant_and_argument_counts() {
     let binary = env!("CARGO_BIN_EXE_kiln-native-provider-contract");
-    let valid = ["target", "rustc", "source", "archive", "", "", "full"];
+    let valid = ["target", "rustc", "source", "archive", "", "", "full", ""];
     let invalid_variant = Command::new(binary)
         .arg("manifest")
-        .args(valid.iter().take(6).chain(std::iter::once(&"maybe")))
+        .args(valid.iter().take(6).chain([&"maybe", &""]))
         .output()
         .expect("run manifest CLI");
     assert_eq!(invalid_variant.status.code(), Some(2));
@@ -118,7 +127,23 @@ fn manifest_cli_rejects_invalid_variant_and_argument_counts() {
         .output()
         .expect("run manifest CLI");
     assert_eq!(wrong_count.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&wrong_count.stderr).contains("requires 7 arguments"));
+    assert!(String::from_utf8_lossy(&wrong_count.stderr).contains("requires 8 arguments"));
+
+    let linked = Command::new(binary)
+        .arg("manifest")
+        .args(["target", "rustc", "source", "archive", "", "", "full-gui"])
+        .arg("-framework Cocoa -lobjc")
+        .output()
+        .expect("run manifest CLI");
+    assert!(linked.status.success(), "{linked:?}");
+    let manifest: ProviderManifest =
+        serde_json::from_slice(&linked.stdout).expect("full-gui manifest");
+    assert_eq!(manifest.link_arguments, ["-framework", "Cocoa", "-lobjc"]);
+    assert!(
+        manifest
+            .exports
+            .contains(&"kiln_gui_abi_version".to_owned())
+    );
 }
 
 #[test]

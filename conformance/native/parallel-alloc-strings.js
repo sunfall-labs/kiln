@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 3 (.scratch/parallel-builtins issue 08): callbacks that build strings -- `+` with a string
+// Tier 3 (docs/issues/parallel-builtins issue 08): callbacks that build strings -- `+` with a string
 // on either side, template literals, `String(x)` -- over numbers of every spelling (integers,
 // fractions, -0, NaN, Infinity, exponents), booleans, null, undefined and strings of both widths.
 // Each answer must be `map`'s, unit for unit.

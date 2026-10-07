@@ -1,4 +1,5 @@
 use super::*;
+use std::hash::{Hash, Hasher};
 
 /// `Reflect.get` does not box primitive targets. Every other public `Value` variant represents an
 /// object or callable object; `Cell` is internal and must never escape as a target.
@@ -18,7 +19,7 @@ pub(super) fn prototype_may_change(
     target: &Value,
     prototype: &Value,
 ) -> bool {
-    if same_value(&prototype_of(target), prototype) {
+    if same_value(&prototype_of_in(intrinsics, target), prototype) {
         return true;
     }
     if !is_extensible_target(intrinsics, target) {
@@ -42,9 +43,28 @@ pub(super) fn prototype_may_change(
         if matches!(link, Value::Proxy(_)) {
             return true;
         }
-        link = prototype_of(&link);
+        link = prototype_of_in(intrinsics, &link);
     }
     true
+}
+
+/// `prototype_of` plus the mutable link recorded for a native intrinsic in its realm store.
+pub(super) fn prototype_of_in(intrinsics: &Intrinsics, target: &Value) -> Value {
+    intrinsics
+        .prototype_override(target)
+        .unwrap_or_else(|| prototype_of(target))
+}
+
+pub(super) fn record_prototype_in(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    prototype: Value,
+) -> bool {
+    if intrinsic_key(target).is_some() {
+        intrinsics.record_prototype(target, prototype)
+    } else {
+        record_prototype(target, prototype)
+    }
 }
 
 /// How far the cycle check walks before it gives up and allows the write.
@@ -469,7 +489,7 @@ pub(super) fn string_exotic_key(target: &Value, key: PropertyKeyRef<'_>) -> Opti
         return None;
     };
     if key.matches_ascii("length") {
-        return Some(Value::Number(text.encode_utf16().count() as f64));
+        return Some(Value::Number(text.unit_len() as f64));
     }
     let index = array_index_key(key)?;
     text.unit_at(index)
@@ -523,17 +543,25 @@ pub(super) fn array_inherited_index_key(
     if let Some(found) = items.properties.borrow().lookup_key(key) {
         return Some(found);
     }
-    // A chain the program moved has already been walked by `lookup`; only an array still linked
-    // to `Array.prototype` reaches the realm's own store.
+    // An array's indexed lookup starts at its actual realm's Array.prototype. Continue along the
+    // links as they stand now: assuming Object.prototype is next invents inherited indices after
+    // the program has replaced Array.prototype's parent with a null-prototype object.
     if items.properties.borrow().prototype().is_some() {
         return None;
     }
-    for table in [PrototypeTable::Array, PrototypeTable::Object] {
-        if let Overridden::Held(property, _) = intrinsics.overridden_key(
-            &Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY),
-            key,
-        ) {
+    let mut current = Value::Native(Native::PrototypeOf(PrototypeTable::Array), RealmId::PRIMARY);
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        // A proxy in this chain needs the VM's observable [[Get]]/[[HasProperty]] path. Returning
+        // no stored property lets that path preserve traps and the original array receiver.
+        if matches!(current, Value::Proxy(_)) {
+            return None;
+        }
+        if let Some((property, _)) = own_property_state_key(intrinsics, &current, key) {
             return Some(property);
+        }
+        current = prototype_of_in(intrinsics, &current);
+        if matches!(current, Value::Null | Value::Undefined) {
+            return None;
         }
     }
     None
@@ -718,7 +746,7 @@ pub(super) fn wrapped_primitive(value: &Value) -> Option<Value> {
 /// number" where the specification boxes the number and copies onto the box, and
 /// `Object.prototype.hasOwnProperty.call(undefined, "x")` answered `false` where it owes a
 /// `TypeError` -- an answer a feature-detect reads as "no such property".
-pub(super) fn to_object(value: &Value) -> Option<Value> {
+pub(crate) fn to_object(value: &Value) -> Option<Value> {
     match value {
         Value::Undefined | Value::Null => None,
         Value::Boolean(_)
@@ -771,7 +799,7 @@ pub(super) fn wrap_primitive(primitive: Value) -> Value {
     let mut data = ObjectData::default();
     data.set_prototype(Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY));
     data.primitive = Some(primitive);
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// The receiver a built-in sees, with a wrapper opened.
@@ -785,17 +813,27 @@ pub(super) fn receiver_for(native: Native, receiver: &Value) -> Option<Value> {
     let boxed = wrapped_primitive(receiver)?;
     let opens = match native {
         // `Object.prototype.valueOf` is deliberately absent: it answers with the box.
-        Native::PrimitiveValueOf | Native::PrimitiveToString | Native::BigIntToString => true,
+        Native::PrimitiveToString => matches!(boxed, Value::Symbol(_)),
+        Native::SymbolValueOf => matches!(boxed, Value::Symbol(_)),
+        Native::StringValueOf | Native::StringToStringMethod => {
+            matches!(boxed, Value::String(_))
+        }
+        Native::BigIntValueOf | Native::BigIntToString => matches!(boxed, Value::BigInt(_)),
         Native::NumberToString
         | Native::NumberToFixed
         | Native::NumberToExponential
         | Native::NumberToPrecision
         | Native::NumberValueOf => true,
         Native::BooleanToString | Native::BooleanValueOf => true,
-        // Every `String.prototype` method, recognised the same way `builtin_js_name` recognises
-        // one: by the type its variant is spelled for. A list of forty-five names would be
-        // forty-five chances to leave one out, and the ones that share the prefix without taking
-        // a receiver -- `String.raw`, `String.fromCharCode` -- ignore it either way.
+        // Generic String prototype methods must see the wrapper, not its primitive payload:
+        // abstract ToString then observes an own @@toPrimitive/toString override. Only the
+        // brand-checked valueOf/toString methods above open the wrapper directly.
+        other if other.walks_a_string() => false,
+        // match/matchAll/search/replace/split first delegate through their RegExp symbol methods
+        // when present. That protocol receives the original this value, so these must not open
+        // a String wrapper before the VM has performed the protocol lookup.
+        Native::StringMatch | Native::StringMatchAll | Native::StringSearch => false,
+        // Static String methods ignore their receiver, so opening a wrapper here is harmless.
         other => format!("{other:?}").starts_with("String"),
     };
     opens.then_some(boxed)
@@ -850,7 +888,7 @@ pub(super) fn has_prototype_property(closure: &Closure) -> bool {
 /// Own-only on purpose: the presence of the name on the object *is* the brand check, so a
 /// prototype walk would hand one class's private member to another class's instance.
 pub(super) fn own_private_element(target: &Value, key: &str) -> Option<(Property, Attributes)> {
-    let store = prototype_slot(target)?;
+    let store = private_slot(target)?;
     let data = store.borrow();
     Some((
         data.get_own_property(key)?.clone(),
@@ -858,8 +896,8 @@ pub(super) fn own_private_element(target: &Value, key: &str) -> Option<(Property
     ))
 }
 
-/// A private name as the program spelled it, without the scope-numbered reservation it is keyed
-/// under: `x` from `@@private:3:x`.
+/// A private name as the program spelled it, without the module-and-scope reservation it is keyed
+/// under: `x` from `@@private:<module-scope>:x`.
 pub(super) fn private_display_name(key: &str) -> &str {
     let reserved = key.strip_prefix(PRIVATE_KEY_PREFIX).unwrap_or(key);
     reserved.split_once(':').map_or(reserved, |(_, name)| name)
@@ -1065,6 +1103,41 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
             Some(length) => length,
             None => return None,
         },
+        N::ObjectKeys => match kiln_builtin_surface::native_function_length("Object", "keys") {
+            Some(length) => length as f64,
+            None => 1.0,
+        },
+        N::QueueMicrotask | N::SetTimeout | N::SetInterval | N::ClearTimeout | N::ClearInterval
+        | N::SetImmediate | N::ClearImmediate => {
+            let member = match native {
+                N::QueueMicrotask => "queueMicrotask",
+                N::SetTimeout => "setTimeout",
+                N::SetInterval => "setInterval",
+                N::ClearTimeout => "clearTimeout",
+                N::ClearInterval => "clearInterval",
+                N::SetImmediate => "setImmediate",
+                _ => "clearImmediate",
+            };
+            kiln_builtin_surface::native_function_length("globalThis", member)
+                .expect("timer callable has a shared arity") as f64
+        }
+        N::ObjectGetOwnPropertyDescriptor => {
+            match kiln_builtin_surface::native_function_length("Object", "getOwnPropertyDescriptor") {
+                Some(length) => length as f64,
+                None => 2.0,
+            }
+        }
+        N::FunctionCall | N::FunctionApply | N::FunctionBind => {
+            let member = match native {
+                N::FunctionCall => "call",
+                N::FunctionApply => "apply",
+                _ => "bind",
+            };
+            match kiln_builtin_surface::native_function_length("Function.prototype", member) {
+                Some(length) => length as f64,
+                None => 1.0,
+            }
+        }
 
         // The zero-argument built-ins: every accessor, every `toString`, and the collection
         // constructors, which take their contents through an optional argument.
@@ -1077,6 +1150,9 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::DateNow
         | N::PerformanceNow
         | N::NumberValueOf
+        | N::StringValueOf
+        | N::SymbolValueOf
+        | N::BigIntValueOf
         | N::ObjectToLocaleString
         | N::ObjectValueOf
         | N::ObjectToStringTag
@@ -1172,7 +1248,6 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::ObjectCreate
         | N::ObjectSetPrototypeOf
         | N::ObjectDefineProperties
-        | N::ObjectGetOwnPropertyDescriptor
         | N::ObjectHasOwn
         | N::ObjectIs
         | N::ReflectGet
@@ -1205,7 +1280,6 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         | N::StringReplaceAll
         | N::ParseInt
         | N::RegExpConstructor
-        | N::FunctionApply
         | N::PromiseThen
         | N::ProxyConstructor
         | N::ProxyRevocable
@@ -1245,6 +1319,7 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
         // program feature-detects it apart from `transfer`.
         N::Uint8Text(ByteText::ToBase64 | ByteText::ToHex)
         | N::ArrayBufferTransferToImmutable => 0.0,
+        N::Uint8Text(ByteText::SetFromBase64) => 1.0,
 
         // Everything left takes exactly one required argument.
         _ => 1.0,
@@ -1260,6 +1335,94 @@ pub(super) const fn native_length(native: Native) -> Option<f64> {
 pub(super) enum IntrinsicKey {
     Native(Native, RealmId),
     Callback(CallbackMethod, RealmId),
+}
+
+impl Hash for IntrinsicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Native(native, realm) => {
+                0u8.hash(state);
+                std::mem::discriminant(native).hash(state);
+                hash_native_payload(*native, state);
+                realm.hash(state);
+            }
+            Self::Callback(method, realm) => {
+                1u8.hash(state);
+                std::mem::discriminant(method).hash(state);
+                realm.hash(state);
+            }
+        }
+    }
+}
+
+fn hash_native_payload<H: Hasher>(native: Native, state: &mut H) {
+    fn tag<T>(value: &T, state: &mut impl Hasher) {
+        std::mem::discriminant(value).hash(state);
+    }
+
+    match native {
+        Native::Temporal(op) => match op {
+            temporal::Op::Namespace | temporal::Op::Now | temporal::Op::NowTimeZoneId => {}
+            temporal::Op::NowRead(kind)
+            | temporal::Op::Constructor(kind)
+            | temporal::Op::Prototype(kind)
+            | temporal::Op::From(kind)
+            | temporal::Op::Compare(kind) => tag(&kind, state),
+            temporal::Op::FromEpoch(precision) => tag(&precision, state),
+            temporal::Op::Accessor(kind, field) => {
+                tag(&kind, state);
+                field.hash(state);
+            }
+            temporal::Op::Method(kind, method) => {
+                tag(&kind, state);
+                tag(&method, state);
+            }
+        },
+        Native::Intl(op) => match op {
+            intl::Op::Namespace | intl::Op::GetCanonicalLocales | intl::Op::SupportedValuesOf => {}
+            intl::Op::Constructor(service)
+            | intl::Op::Prototype(service)
+            | intl::Op::SupportedLocalesOf(service) => tag(&service, state),
+            intl::Op::Method(service, method) => {
+                tag(&service, state);
+                tag(&method, state);
+            }
+            intl::Op::Adapter(adapter) => tag(&adapter, state),
+        },
+        Native::HostAgent(op) => tag(&op, state),
+        Native::CollectionGetOrInsert { weak, computed } => {
+            weak.hash(state);
+            computed.hash(state);
+        }
+        Native::AtomicsOp(op) => tag(&op, state),
+        Native::AbortSignalListen { remove } => remove.hash(state),
+        Native::NodeOsFact(op) => tag(&op, state),
+        Native::NodePathPart(op) => tag(&op, state),
+        Native::Error(kind) => tag(&kind, state),
+        Native::Uint8Text(op) => tag(&op, state),
+        Native::Date(op) => tag(&op, state),
+        Native::RegExpAccessor(op) => tag(&op, state),
+        Native::SetOperation(op) => tag(&op, state),
+        Native::ArrayCopy(op) => tag(&op, state),
+        Native::BuiltinAccessor(op) => tag(&op, state),
+        Native::RegExpSymbol(op) => tag(&op, state),
+        Native::PrototypeOf(table) => tag(&table, state),
+        Native::CollectionKeys(value)
+        | Native::CollectionForEach(value)
+        | Native::CollectionEntries(value)
+        | Native::CollectionClear(value)
+        | Native::CollectionValues(value) => value.hash(state),
+        Native::TypedArrayConstructor(kind)
+        | Native::TypedArrayOf(kind)
+        | Native::TypedArrayFrom(kind)
+        | Native::DataViewGet(kind)
+        | Native::DataViewSet(kind) => tag(&kind, state),
+        Native::DataViewGetBig { signed } | Native::DataViewSetBig { signed } => signed.hash(state),
+        Native::IteratorLazy(kind) | Native::IteratorHelperNext(kind) => tag(&kind, state),
+        Native::IteratorTerminal(kind) => tag(&kind, state),
+        Native::WebStub(kind) => tag(&kind, state),
+        _ => {}
+    }
 }
 
 /// The key a built-in is stored under, or `None` for a value that is not one.
@@ -1302,10 +1465,13 @@ pub(super) fn retag_intrinsic_property(property: Property, realm: RealmId) -> Pr
 }
 
 pub(super) struct Intrinsics {
-    /// A linear scan rather than a map: this is empty for a program that leaves the built-ins
-    /// alone and holds a handful of entries for one that does not, which is well below the size
-    /// where hashing every lookup pays for itself.
+    /// Stable storage order for materialized built-ins. Reflection walks this vector to retain
+    /// ordinary insertion order within each object's own store.
     pub(super) entries: RefCell<Vec<(IntrinsicKey, ObjectData)>>,
+    /// Lookup index allocated only after enough intrinsics have been materialized to make a
+    /// linear scan expensive. The vector remains authoritative for order; indices stay stable
+    /// because records are appended or replaced in place and are cleared as a whole at teardown.
+    entry_indices: RefCell<Option<Box<std::collections::HashMap<IntrinsicKey, usize>>>>,
     /// Whether any program has defined an *accessor* on any built-in.
     ///
     /// A guard for [`inherited_intrinsic_accessor_key`], which is asked on every read that misses a
@@ -1317,6 +1483,11 @@ pub(super) struct Intrinsics {
     /// Monotonic across all realms: a numeric property on either default array prototype
     /// invalidates the strict indexed-write shortcut, even after that property is deleted.
     pub(super) indexed_array_prototype: std::cell::Cell<bool>,
+    /// Realms whose default Array.prototype -> Object.prototype chain has been customized.
+    /// This is cached because map/reduce ask once per callback, and walking every materialized
+    /// intrinsic entry there turns a dense map into quadratic work. Entries are per realm: a
+    /// change in one realm must not clear another realm's answer.
+    indexed_prototype_chain_custom: RefCell<Vec<bool>>,
     /// Each realm's nine error prototypes, indexed by realm and then by kind.
     ///
     /// Here rather than on the machine because `Error.prototype` is an own property of `Error`
@@ -1330,7 +1501,17 @@ pub(super) struct Intrinsics {
     /// Interior mutability for the same reason the entries have it: the prototype is built on
     /// first use, and first use is now a `&self` read.
     error_prototypes: RefCell<Vec<[Option<Value>; ErrorKind::ALL.len()]>>,
+    /// Shared TypeScript Error stack accessors and private brand token, owned by each realm.
+    /// Module VMs for a realm share this table, while a newly allocated realm starts empty.
+    error_stack_accessors: RefCell<Vec<Option<ErrorStackAccessors>>>,
     unscopables: RefCell<Vec<Option<Value>>>,
+}
+
+#[derive(Clone)]
+pub(super) struct ErrorStackAccessors {
+    pub(super) getter: Value,
+    pub(super) setter: Value,
+    pub(super) brand_token: Value,
 }
 
 impl Default for Intrinsics {
@@ -1338,6 +1519,7 @@ impl Default for Intrinsics {
     fn default() -> Self {
         Self {
             entries: RefCell::default(),
+            entry_indices: RefCell::new(None),
             accessors: std::cell::Cell::new(false),
             indexed_array_prototype: std::cell::Cell::new(
                 kiln_builtin_surface::PROTOTYPE_SURFACE
@@ -1351,13 +1533,135 @@ impl Default for Intrinsics {
                             .is_some()
                     }),
             ),
+            indexed_prototype_chain_custom: RefCell::new(vec![false]),
             error_prototypes: RefCell::new(vec![[const { None }; ErrorKind::ALL.len()]]),
+            error_stack_accessors: RefCell::new(vec![None]),
             unscopables: RefCell::new(vec![None]),
         }
     }
 }
 
 impl Intrinsics {
+    const INDEXED_ENTRY_THRESHOLD: usize = 8;
+
+    /// Find one materialized intrinsic by its realm-scoped identity. Common small executions
+    /// keep the existing compact-vector scan; once the vector grows, all reads and writes share
+    /// this stable-index map. `IntrinsicKey` hashes its enum discriminant and realm; payload
+    /// variants may collide, which ordinary equality resolves without changing identity.
+    pub(super) fn entry_position(
+        &self,
+        entries: &[(IntrinsicKey, ObjectData)],
+        identity: IntrinsicKey,
+    ) -> Option<usize> {
+        if entries.len() >= Self::INDEXED_ENTRY_THRESHOLD {
+            let indices = self.entry_indices.borrow();
+            if let Some(indices) = indices.as_ref() {
+                return indices.get(&identity).copied();
+            }
+        }
+        entries.iter().position(|(key, _)| *key == identity)
+    }
+
+    fn record_entry(&self, entries: &mut Vec<(IntrinsicKey, ObjectData)>, identity: IntrinsicKey) {
+        let index = entries.len();
+        entries.push((identity, ObjectData::default()));
+        self.index_appended_entry(entries, identity, index);
+    }
+
+    fn record_materialized_entry(
+        &self,
+        entries: &mut Vec<(IntrinsicKey, ObjectData)>,
+        identity: IntrinsicKey,
+        data: ObjectData,
+    ) {
+        let index = entries.len();
+        entries.push((identity, data));
+        self.index_appended_entry(entries, identity, index);
+    }
+
+    fn index_appended_entry(
+        &self,
+        entries: &[(IntrinsicKey, ObjectData)],
+        identity: IntrinsicKey,
+        index: usize,
+    ) {
+        let mut entry_indices = self.entry_indices.borrow_mut();
+        if let Some(indices) = entry_indices.as_mut() {
+            indices.insert(identity, index);
+        } else if entries.len() >= Self::INDEXED_ENTRY_THRESHOLD {
+            *entry_indices = Some(Box::new(
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (key, _))| (*key, index))
+                    .collect(),
+            ));
+        }
+    }
+
+    pub(super) fn clear_entries(&self) {
+        self.entries.borrow_mut().clear();
+        self.entry_indices.borrow_mut().take();
+    }
+
+    /// A materialized intrinsic may have an ordinary mutable [[Prototype]] link of its own.
+    pub(super) fn prototype_override(&self, target: &Value) -> Option<Value> {
+        let identity = intrinsic_key(target)?;
+        let entries = self.entries.borrow();
+        self.entry_position(&entries, identity)
+            .and_then(|index| entries.get(index))
+            .and_then(|(_, data)| data.prototype().cloned())
+    }
+
+    /// Store a changed [[Prototype]] on the same per-realm record that owns intrinsic properties.
+    pub(super) fn record_prototype(&self, target: &Value, prototype: Value) -> bool {
+        let Some(identity) = intrinsic_key(target) else {
+            return false;
+        };
+        let realm = match target {
+            Value::Native(Native::PrototypeOf(_), realm) => *realm,
+            _ => RealmId::PRIMARY,
+        };
+        self.materialize(target);
+        let mut entries = self.entries.borrow_mut();
+        self.data(&mut entries, identity).set_prototype(prototype);
+        let mut array_parent = None;
+        let mut object_parent = None;
+        for (key, data) in entries.iter() {
+            match key {
+                IntrinsicKey::Native(Native::PrototypeOf(PrototypeTable::Array), owner_realm)
+                    if *owner_realm == realm =>
+                {
+                    array_parent = data.prototype()
+                }
+                IntrinsicKey::Native(Native::PrototypeOf(PrototypeTable::Object), owner_realm)
+                    if *owner_realm == realm =>
+                {
+                    object_parent = data.prototype()
+                }
+                _ => {}
+            }
+        }
+        let default_array_parent = array_parent.is_none_or(|parent| {
+            matches!(
+                parent,
+                Value::Native(
+                    Native::PrototypeOf(PrototypeTable::Object),
+                    owner_realm
+                ) if *owner_realm == realm
+            )
+        });
+        let default_object_parent =
+            object_parent.is_none_or(|parent| matches!(parent, Value::Null));
+        let mut custom_chains = self.indexed_prototype_chain_custom.borrow_mut();
+        let index = realm.0 as usize;
+        if index >= custom_chains.len() {
+            custom_chains.resize(index + 1, false);
+        }
+        custom_chains[index] = !default_array_parent || !default_object_parent;
+        true
+    }
+
     /// `realm`'s prototype for one error kind, built on first use.
     ///
     /// Per realm rather than per execution, because `e instanceof TypeError` compares it by
@@ -1386,7 +1690,7 @@ impl Intrinsics {
             // right until built-ins can be written in JavaScript (design.md §5).
             data.set_non_enumerable("toString", Value::Native(Native::ErrorToString, realm));
         }
-        let prototype = Value::Object(Rc::new(RefCell::new(data)));
+        let prototype = Value::Object(tracked_object(data));
         if !matches!(kind, ErrorKind::Error) {
             // Recurses, so the borrow above has to be finished before this runs -- it is, and it
             // has to stay that way: building `TypeError.prototype` builds `Error.prototype`.
@@ -1404,7 +1708,38 @@ impl Intrinsics {
         self.error_prototypes
             .borrow_mut()
             .push([const { None }; ErrorKind::ALL.len()]);
+        self.indexed_prototype_chain_custom.borrow_mut().push(false);
+        self.error_stack_accessors.borrow_mut().push(None);
         self.unscopables.borrow_mut().push(None);
+    }
+
+    pub(super) fn error_stack_accessors(&self, realm: RealmId) -> Option<ErrorStackAccessors> {
+        self.error_stack_accessors
+            .borrow()
+            .get(realm.0 as usize)
+            .and_then(Clone::clone)
+    }
+
+    pub(super) fn register_error_stack_accessors(
+        &self,
+        realm: RealmId,
+        accessors: ErrorStackAccessors,
+    ) {
+        let mut realms = self.error_stack_accessors.borrow_mut();
+        if let Some(slot) = realms.get_mut(realm.0 as usize) {
+            if slot.is_none() {
+                *slot = Some(accessors);
+            }
+        }
+    }
+
+    pub(super) fn take_error_stack_accessors(&self) -> Vec<Value> {
+        self.error_stack_accessors
+            .borrow_mut()
+            .iter_mut()
+            .filter_map(Option::take)
+            .flat_map(|accessors| [accessors.getter, accessors.setter, accessors.brand_token])
+            .collect()
     }
 
     /// Every error prototype this store holds, taken out so the caller can break their cycles.
@@ -1458,7 +1793,7 @@ impl Intrinsics {
         ] {
             data.set(name, Value::Boolean(true));
         }
-        let unscopables = Value::Object(Rc::new(RefCell::new(data)));
+        let unscopables = Value::Object(tracked_object(data));
         if index < self.unscopables.borrow().len() {
             self.unscopables.borrow_mut()[index] = Some(unscopables.clone());
         }
@@ -1498,10 +1833,10 @@ impl Intrinsics {
             self.materialize(target);
         }
         let entries = self.entries.borrow();
-        let Some((_, slots)) = entries.iter().find(|(held, _)| *held == identity) else {
+        let Some(index) = self.entry_position(&entries, identity) else {
             return Overridden::Untouched;
         };
-        let data = slots;
+        let data = &entries[index].1;
         if let Some(property) = data.get_own_property_key(key) {
             return Overridden::Held(
                 property.clone(),
@@ -1534,6 +1869,19 @@ impl Intrinsics {
         self.accessors.get()
     }
 
+    /// Whether the default array-index lookup chain has been given an ordinary prototype link.
+    /// A dense-array index search can skip holes only when both built-in links still match the
+    /// chain it models: Array.prototype -> Object.prototype -> null. Direct numeric definitions
+    /// have their own monotonic flag; this catches a custom prototype whose indexed properties
+    /// live outside either intrinsic store.
+    pub(super) fn indexed_prototype_chain_is_custom(&self, realm: RealmId) -> bool {
+        self.indexed_prototype_chain_custom
+            .borrow()
+            .get(realm.0 as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
     /// Whether this built-in still accepts new properties.
     ///
     /// An unmaterialized intrinsic is extensible by default; a materialized store carries the
@@ -1542,10 +1890,9 @@ impl Intrinsics {
         let Some(identity) = intrinsic_key(target) else {
             return true;
         };
-        self.entries
-            .borrow()
-            .iter()
-            .find(|(held, _)| *held == identity)
+        let entries = self.entries.borrow();
+        self.entry_position(&entries, identity)
+            .and_then(|index| entries.get(index))
             .is_none_or(|(_, data)| data.is_extensible())
     }
 
@@ -1559,7 +1906,7 @@ impl Intrinsics {
         };
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();
-        let data = Self::data(&mut entries, identity);
+        let data = self.data(&mut entries, identity);
         if sealing {
             data.seal();
         } else {
@@ -1598,7 +1945,7 @@ impl Intrinsics {
         }
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();
-        let data = Self::data(&mut entries, identity);
+        let data = self.data(&mut entries, identity);
         data.install_key(key, property, attributes);
     }
 
@@ -1608,24 +1955,23 @@ impl Intrinsics {
         };
         self.materialize(target);
         let mut entries = self.entries.borrow_mut();
-        let data = Self::data(&mut entries, identity);
+        let data = self.data(&mut entries, identity);
         data.remove_key(key);
     }
 
     /// Complete materialized own keys in ordinary ObjectData insertion order.
     pub(super) fn is_materialized(&self, target: &Value) -> bool {
-        intrinsic_key(target).is_some_and(|identity| {
-            self.entries
-                .borrow()
-                .iter()
-                .any(|(key, _)| *key == identity)
-        })
+        let Some(identity) = intrinsic_key(target) else {
+            return false;
+        };
+        let entries = self.entries.borrow();
+        self.entry_position(&entries, identity).is_some()
     }
 
     pub(super) fn own_keys_units(&self, target: &Value) -> Option<Vec<StringUnits>> {
         let identity = intrinsic_key(target)?;
         let entries = self.entries.borrow();
-        let data = &entries.iter().find(|(key, _)| *key == identity)?.1;
+        let data = &entries.get(self.entry_position(&entries, identity)?)?.1;
         Some(data.keys().cloned().collect())
     }
 
@@ -1635,21 +1981,22 @@ impl Intrinsics {
         };
         self.materialize(target);
         let entries = self.entries.borrow();
-        let Some((_, data)) = entries.iter().find(|(held, _)| *held == identity) else {
+        let Some(index) = self.entry_position(&entries, identity) else {
             return Vec::new();
         };
+        let data = &entries[index].1;
         data.string_entries()
             .map(|(key, property)| (key.clone(), property.clone()))
             .collect()
     }
 
-    pub(super) fn data(
-        entries: &mut Vec<(IntrinsicKey, ObjectData)>,
+    pub(super) fn data<'a>(
+        &self,
+        entries: &'a mut Vec<(IntrinsicKey, ObjectData)>,
         identity: IntrinsicKey,
-    ) -> &mut ObjectData {
-        let position = entries.iter().position(|(key, _)| *key == identity);
-        let position = position.unwrap_or_else(|| {
-            entries.push((identity, ObjectData::default()));
+    ) -> &'a mut ObjectData {
+        let position = self.entry_position(entries, identity).unwrap_or_else(|| {
+            self.record_entry(entries, identity);
             entries.len() - 1
         });
         &mut entries[position].1
@@ -1659,12 +2006,7 @@ impl Intrinsics {
         let Some(identity) = intrinsic_key(target) else {
             return;
         };
-        if self
-            .entries
-            .borrow()
-            .iter()
-            .any(|(key, _)| *key == identity)
-        {
+        if self.is_materialized(target) {
             return;
         }
         let realm = value_realm(target);
@@ -1712,7 +2054,7 @@ impl Intrinsics {
                         Property::Value(Value::Native(Native::PrimitiveToString, realm))
                     }
                     kiln_builtin_surface::SemanticBinding::PrimitiveValueOf => {
-                        Property::Value(Value::Native(Native::PrimitiveValueOf, realm))
+                        Property::Value(Value::Native(Native::SymbolValueOf, realm))
                     }
                     kiln_builtin_surface::SemanticBinding::SymbolDescription => {
                         Property::Accessor {
@@ -1771,7 +2113,7 @@ impl Intrinsics {
                     ) => Property::Value(Value::Native(Native::BigIntToString, realm)),
                     kiln_builtin_surface::SemanticBinding::BigIntMethod(
                         kiln_builtin_surface::BigIntMethod::ValueOf,
-                    ) => Property::Value(Value::Native(Native::PrimitiveValueOf, realm)),
+                    ) => Property::Value(Value::Native(Native::BigIntValueOf, realm)),
                     kiln_builtin_surface::SemanticBinding::PromiseMethod(
                         kiln_builtin_surface::PromiseMethod::Then,
                     ) => Property::Value(Value::Native(Native::PromiseThen, realm)),
@@ -1848,10 +2190,10 @@ impl Intrinsics {
             }
             data.set_prototype(prototype_of(target));
             let mut entries = self.entries.borrow_mut();
-            if let Some((_, slot)) = entries.iter_mut().find(|(key, _)| *key == identity) {
-                *slot = data;
+            if let Some(index) = self.entry_position(&entries, identity) {
+                entries[index].1 = data;
             } else {
-                entries.push((identity, data));
+                self.record_materialized_entry(&mut entries, identity, data);
             }
             return;
         }
@@ -1913,10 +2255,10 @@ impl Intrinsics {
         }
         data.set_prototype(prototype_of(target));
         let mut entries = self.entries.borrow_mut();
-        if let Some((_, slot)) = entries.iter_mut().find(|(key, _)| *key == identity) {
-            *slot = data;
+        if let Some(index) = self.entry_position(&entries, identity) {
+            entries[index].1 = data;
         } else {
-            entries.push((identity, data));
+            self.record_materialized_entry(&mut entries, identity, data);
         }
     }
 }
@@ -2065,7 +2407,6 @@ pub(super) const TYPED_ARRAY_VIEW_MEMBERS: intrinsic_members::NamedMembers =
 pub(super) const ARRAY_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[
         "map",
-        "parallelMap",
         "forEach",
         "filter",
         "reduce",
@@ -2224,6 +2565,9 @@ pub(super) const ASYNC_DISPOSABLE_STACK_MEMBERS: intrinsic_members::NamedMembers
     intrinsic_members::NamedMembers::new(&["use", "adopt", "defer", "move", "disposeAsync"]);
 pub(super) const FINALIZATION_REGISTRY_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["register", "unregister"]);
+// Every name `events::prototype_property` answers: a name that reads but is missing here is
+// invisible to `in`, `hasOwnProperty` and `getOwnPropertyNames` while still callable. The order
+// is the native backend's (`kiln_c99_install_event_emitter_methods`), which enumeration exposes.
 pub(super) const EVENT_EMITTER_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[
         "on",
@@ -2231,9 +2575,12 @@ pub(super) const EVENT_EMITTER_MEMBERS: intrinsic_members::NamedMembers =
         "once",
         "emit",
         "listeners",
-        "eventNames",
+        "listenerCount",
+        "removeListener",
+        "off",
         "removeAllListeners",
         "setMaxListeners",
+        "eventNames",
     ]);
 pub(super) const WRITABLE_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[
@@ -2245,9 +2592,12 @@ pub(super) const WRITABLE_MEMBERS: intrinsic_members::NamedMembers =
         "once",
         "emit",
         "listeners",
-        "eventNames",
+        "listenerCount",
+        "removeListener",
+        "off",
         "removeAllListeners",
         "setMaxListeners",
+        "eventNames",
     ]);
 pub(super) const CONSOLE_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&[
@@ -2355,7 +2705,7 @@ pub(super) fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String,
                         Property::Value(Value::Native(Native::PrimitiveToString, RealmId::PRIMARY))
                     }
                     kiln_builtin_surface::SemanticBinding::PrimitiveValueOf => {
-                        Property::Value(Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY))
+                        Property::Value(Value::Native(Native::SymbolValueOf, RealmId::PRIMARY))
                     }
                     kiln_builtin_surface::SemanticBinding::SymbolDescription => {
                         Property::Accessor {
@@ -2405,7 +2755,7 @@ pub(super) fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String,
                     ) => Property::Value(Value::Native(Native::BigIntToString, RealmId::PRIMARY)),
                     kiln_builtin_surface::SemanticBinding::BigIntMethod(
                         kiln_builtin_surface::BigIntMethod::ValueOf,
-                    ) => Property::Value(Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY)),
+                    ) => Property::Value(Value::Native(Native::BigIntValueOf, RealmId::PRIMARY)),
                     kiln_builtin_surface::SemanticBinding::PromiseMethod(
                         kiln_builtin_surface::PromiseMethod::Then,
                     ) => Property::Value(Value::Native(Native::PromiseThen, RealmId::PRIMARY)),
@@ -2592,6 +2942,7 @@ pub(super) fn own_property_names_units(
         Value::Function(closure) => {
             let mut keys = from_store(&closure.properties.borrow());
             if has_prototype_property(closure) {
+                keys.retain(|key| *key != "prototype");
                 let statics = keys.split_off(2.min(keys.len()));
                 keys.push(StringUnits::from("prototype"));
                 keys.extend(statics);
@@ -2677,6 +3028,7 @@ pub(super) fn own_property_keys_units(intrinsics: &Intrinsics, target: &Value) -
             // After `length` and `name`, which the closure stores, and before whatever the
             // program hung on the function itself -- the order the specification lists them in.
             if has_prototype_property(closure) {
+                keys.retain(|key| *key != "prototype");
                 let statics = keys.split_off(2.min(keys.len()));
                 keys.push(StringUnits::from("prototype"));
                 keys.extend(statics);
@@ -2791,6 +3143,18 @@ pub(super) fn intrinsic_extra_property_names(target: &Value) -> Vec<String> {
 }
 
 pub(super) fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
+    match target {
+        // `from` and `of` live on `%TypedArray%` and are inherited by all concrete constructors.
+        // `Uint8Array` alone receives the two TypeScript-installed byte codecs as own statics.
+        Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8), _) => {
+            return &["BYTES_PER_ELEMENT", "fromBase64", "fromHex"];
+        }
+        Value::Native(Native::TypedArrayConstructor(_), _) => {
+            return &["BYTES_PER_ELEMENT"];
+        }
+        Value::Native(Native::TypedArrayIntrinsic, _) => return &["of", "from"],
+        _ => {}
+    }
     let tabulated = intrinsic_tabulated_property_names(target);
     if !tabulated.is_empty() {
         return tabulated;
@@ -2909,21 +3273,18 @@ pub(super) fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'
             const MEMBERS: &[&str] = kiln_builtin_surface::members("Math");
             MEMBERS
         }
+        Value::Native(Native::Performance, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("performance");
+            MEMBERS
+        }
         Value::Native(Native::TypedArrayIntrinsic, _) => {
             const MEMBERS: &[&str] = kiln_builtin_surface::members("%TypedArray%");
             MEMBERS
         }
         Value::Native(Native::TypedArrayConstructor(kind), _) => match kind {
-            // A view's elements are bytes only here, which is why these two are `Uint8Array`'s
-            // alone and not `%TypedArray%`'s.
-            TypedKind::Uint8 => {
-                const MEMBERS: &[&str] = kiln_builtin_surface::members("Uint8Array");
-                MEMBERS
-            }
-            _ => {
-                const MEMBERS: &[&str] = kiln_builtin_surface::members("%TypedArrayConstructor%");
-                MEMBERS
-            }
+            // The complete own-property list above is intentionally narrower than the surface
+            // table: from/of remain readable through `%TypedArray%`, but aren't own here.
+            _ => &[],
         },
         _ => &[],
     }
@@ -3056,15 +3417,16 @@ pub(super) fn own_symbol_keys_units(intrinsics: &Intrinsics, target: &Value) -> 
         | Value::Capability(..)
         | Value::Element(_) => intrinsic_key(target)
             .and_then(|identity| {
-                intrinsics.entries.borrow().iter().find_map(|(held, data)| {
-                    (*held == identity).then(|| {
-                        data.properties
-                            .iter()
-                            .filter(|slot| slot.symbol)
-                            .map(|slot| slot.key.clone())
-                            .collect()
-                    })
-                })
+                let entries = intrinsics.entries.borrow();
+                let index = intrinsics.entry_position(&entries, identity)?;
+                let data = &entries.get(index)?.1;
+                Some(
+                    data.properties
+                        .iter()
+                        .filter(|slot| slot.symbol)
+                        .map(|slot| slot.key.clone())
+                        .collect(),
+                )
             })
             .unwrap_or_default(),
         _ => Vec::new(),
@@ -3091,7 +3453,7 @@ pub(super) fn own_symbol_keys_units(intrinsics: &Intrinsics, target: &Value) -> 
             // absent from `getOwnPropertySymbols`.
             let published = !matches!(native.property(key), None | Some(Value::Undefined))
                 || intrinsic_accessor(target, key).is_some()
-                || machine_accessor(target, key).is_some()
+                || machine_own_accessor(target, key).is_some()
                 || (matches!(native, Native::PrototypeOf(PrototypeTable::Array))
                     && key == WellKnown::Unscopables.property_key());
             if published {
@@ -3157,7 +3519,8 @@ pub(super) fn own_attributes_key(
             .or_else(|| {
                 (key.matches_ascii("prototype") && has_prototype_property(closure)).then_some(
                     Attributes {
-                        writable: !closure.program.functions[closure.function as usize].is_class,
+                        writable: !closure.program.functions[closure.function as usize].is_class
+                            && !closure.properties.borrow().is_frozen(),
                         enumerable: false,
                         configurable: false,
                     },
@@ -3353,7 +3716,7 @@ pub(super) fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attr
     //
     // An accessor carries no `writable` at all: the flag is not part of its descriptor, so the
     // `false` is the absence of one rather than a claim about assignment.
-    if intrinsic_accessor(target, key).is_some() || machine_accessor(target, key).is_some() {
+    if intrinsic_accessor(target, key).is_some() || machine_own_accessor(target, key).is_some() {
         return Some(Attributes {
             writable: false,
             enumerable: false,
@@ -3383,6 +3746,19 @@ pub(super) fn published_attributes(
     key: &str,
     found: &Value,
 ) -> Attributes {
+    if matches!(
+        native,
+        Native::AsyncFunctionPrototype
+            | Native::GeneratorFunctionPrototype
+            | Native::AsyncGeneratorFunctionPrototype
+    ) && key == "constructor"
+    {
+        return Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        };
+    }
     // A Node builtin module's exports are *enumerable*, which is how `{ ...require("path") }`
     // and every `export * from "path"` re-export shim a bundler emits copies them.
     // `Object.keys(require("path"))` was 0 against node's 17 while every individual member read
@@ -3416,6 +3792,13 @@ pub(super) fn published_attributes(
             enumerable: false,
             configurable: false,
         };
+    }
+    // `Temporal.Now` is an object-valued built-in namespace property, not a constant. Node
+    // exposes it as writable/configurable so clock shims (including Sinon fake timers) can
+    // replace and later restore it. The generic non-function built-in rule below would lock it
+    // down because `Temporal.Now` itself is not callable.
+    if matches!(native, Native::Temporal(temporal::Op::Namespace)) && key == "Now" {
+        return Attributes::BUILT_IN;
     }
     if found.type_of() == "function" {
         return Attributes::BUILT_IN;
@@ -3513,5 +3896,56 @@ pub(super) fn own_descriptor_key(
     }
     data.set("enumerable", Value::Boolean(attributes.enumerable));
     data.set("configurable", Value::Boolean(attributes.configurable));
-    Some(Value::Object(Rc::new(RefCell::new(data))))
+    Some(Value::Object(tracked_object(data)))
+}
+
+#[cfg(test)]
+mod intrinsic_index_tests {
+    use super::*;
+
+    #[test]
+    fn materialized_intrinsic_index_handles_payload_collisions_realms_and_reset() {
+        let intrinsics = Intrinsics::default();
+        let primary = RealmId::PRIMARY;
+        let identities = [
+            IntrinsicKey::Native(Native::MathAbs, primary),
+            IntrinsicKey::Native(Native::MathMax, primary),
+            IntrinsicKey::Native(Native::Temporal(temporal::Op::Namespace), primary),
+            IntrinsicKey::Native(Native::Temporal(temporal::Op::Now), primary),
+            IntrinsicKey::Native(
+                Native::Intl(intl::Op::Constructor(intl::Service::Collator)),
+                primary,
+            ),
+            IntrinsicKey::Native(
+                Native::Intl(intl::Op::Constructor(intl::Service::NumberFormat)),
+                primary,
+            ),
+            IntrinsicKey::Callback(CallbackMethod::Map, primary),
+            IntrinsicKey::Callback(CallbackMethod::ForEach, primary),
+            IntrinsicKey::Native(Native::MathAbs, RealmId(1)),
+        ];
+
+        let mut entries = intrinsics.entries.borrow_mut();
+        for identity in identities {
+            intrinsics.record_entry(&mut entries, identity);
+        }
+        for (expected, identity) in identities.into_iter().enumerate() {
+            assert_eq!(
+                intrinsics.entry_position(&entries, identity),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            intrinsics.entry_indices.borrow().as_ref().unwrap().len(),
+            identities.len()
+        );
+        drop(entries);
+
+        intrinsics.clear_entries();
+        let mut entries = intrinsics.entries.borrow_mut();
+        intrinsics.record_entry(&mut entries, identities[8]);
+        assert_eq!(intrinsics.entry_position(&entries, identities[8]), Some(0));
+        assert_eq!(intrinsics.entry_position(&entries, identities[0]), None);
+        assert!(intrinsics.entry_indices.borrow().is_none());
+    }
 }

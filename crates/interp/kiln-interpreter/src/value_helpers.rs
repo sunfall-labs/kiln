@@ -156,24 +156,39 @@ pub(super) fn native_js_name(native: &Native) -> String {
     match native {
         Native::ProcessStartRaw => "__kilnHostProcessStart".to_owned(),
         Native::ProcessCancelRaw => "__kilnHostProcessCancel".to_owned(),
+        Native::NodeChildProcessExecFileSync => "__execFileSync".to_owned(),
+        Native::ProcessExitCodeGet => "processExitCodeGet".to_owned(),
+        Native::ProcessExitCodeSet => "processExitCodeSet".to_owned(),
+        Native::GcRequest => "gcRequest".to_owned(),
         Native::UrlParseRaw => "__kilnUrlParse".to_owned(),
+        Native::WebCryptoPrimitive => "__kilnWebCryptoPrimitive".to_owned(),
+        Native::WebCompressionPrimitive => "__kilnCompressionPrimitive".to_owned(),
         Native::UrlSetRaw => "__kilnUrlSet".to_owned(),
         Native::UrlFastRaw => "__kilnUrlFast".to_owned(),
         Native::UrlAdoptRaw => "__kilnUrlAdopt".to_owned(),
         Native::ArrayBufferDetachRaw => "__kilnArrayBufferDetach".to_owned(),
+        Native::ArrayBufferByteLengthRaw => "__kilnArrayBufferByteLength".to_owned(),
         Native::ArrayBufferResizeRaw => "__kilnArrayBufferResize".to_owned(),
         Native::TypedArrayOutOfBoundsRaw => "__kilnTypedArrayOutOfBounds".to_owned(),
+        Native::CollectionSizeRaw => "__kilnCollectionSize".to_owned(),
         Native::CloneDataRaw => "__kilnCloneData".to_owned(),
         Native::ShareRaw => "__kilnShare".to_owned(),
         Native::SharedIsRaw => "__kilnSharedIs".to_owned(),
         Native::TypedArrayCopyRaw => "__kilnTypedArrayCopy".to_owned(),
         Native::TypedArraySortRaw => "__kilnTypedArraySort".to_owned(),
+        Native::DataViewStateRaw => "__kilnDataViewState".to_owned(),
+        Native::IsConstructorRaw => "__kilnIsConstructor".to_owned(),
+        Native::IsOtherRealmArrayConstructorRaw => "__kilnIsOtherRealmArrayConstructor".to_owned(),
+        Native::ArrayNextPresentIndexRaw => "__kilnArrayNextPresentIndex".to_owned(),
         Native::JobsPendingRaw => "__kilnJobsPending".to_owned(),
         Native::QueueIoRaw => "__kilnQueueIo".to_owned(),
+        Native::TimerRefRaw => "__kilnTimerRef".to_owned(),
         Native::WorkerOpRaw => "__kilnWorkerOp".to_owned(),
         Native::PortWaitRaw => "__kilnPortWait".to_owned(),
         Native::PromiseRejectionsRaw => "__kilnPromiseRejections".to_owned(),
+        Native::RegExpLegacyCaptureRaw => "__kilnRegExpLegacyCapture".to_owned(),
         Native::NodeModuleCreateRequire => "__kilnHostModuleCreateRequire".to_owned(),
+        Native::NodeModuleLoader => "__kilnHostModuleLoader".to_owned(),
         // A symbol-keyed method is named for the symbol in brackets, which is what the
         // specification's `SetFunctionName` does with a symbol key. Derivation would spell it
         // `functionHasInstance`, the name of a Rust variant rather than of anything a program
@@ -183,6 +198,9 @@ pub(super) fn native_js_name(native: &Native) -> String {
         // An accessor is named for what it reads, prefixed with the half it is.
         Native::TypedArrayToStringTag => "get [Symbol.toStringTag]".to_owned(),
         Native::StringToStringMethod => "toString".to_owned(),
+        Native::StringValueOf | Native::SymbolValueOf | Native::BigIntValueOf => {
+            "valueOf".to_owned()
+        }
         // A `DataView` accessor is named for the member it is published under, not for the Rust
         // variant behind it. Sixteen of them share four variants, so derivation gave all eight
         // getters the name `dataViewGet` -- which test262 checks by descriptor, and which any

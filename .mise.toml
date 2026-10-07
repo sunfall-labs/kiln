@@ -74,9 +74,25 @@ run = "./scripts/native-realms.sh"
 description = "Real library bundles, both engines"
 run = "./scripts/thirdparty.sh"
 
+[tasks.pre-push]
+description = "The local blocking loop: contracts and core crate tests for what changed since origin/main (--all for everything)"
+run = "bash scripts/pre-push.sh"
+
+[tasks.hooks]
+description = "Point this checkout's git hooks at .githooks: the issue-deletion guard before every commit, the blocking loop before every push"
+run = "git config core.hooksPath .githooks && echo 'hooks installed: core.hooksPath = .githooks'"
+
 [tasks.http-close]
 description = "The Node HTTP close contract, across all four seams"
 run = "./scripts/check-http-close-contract.sh"
+
+[tasks.gui-smoke]
+description = "kiln:gui against the real window system: clicks, timers, resize, close (macOS)"
+run = "./scripts/gui-smoke.sh"
+
+[tasks.kiln-types]
+description = "Check @kiln/types matches the engine's sources; its usage test and the GUI examples type-check"
+run = "./scripts/gen-kiln-types.sh --check"
 
 [tasks.silent-undefined]
 description = "The expensive class: a native member read answering undefined (several hundred compiles)"
@@ -97,3 +113,15 @@ run = "./scripts/npm-compat.sh"
 [tools]
 rust = "nightly-2026-09-15"
 
+
+[tasks.issues-index]
+description = "Regenerate docs/issues/README.md, the per-feature open/closed index of the issue tracker"
+run = "python3 scripts/issues-index.py"
+
+[tasks.release-package]
+description = "Build and smoke-test the release archive for this host into dist/ (scripts/package-release.sh)"
+run = "scripts/package-release.sh dist"
+
+[tasks.effect-upstream]
+description = "Pinned Effect tests as direct TypeScript, Bun versus native"
+run = "./scripts/effect-upstream.py --out target/effect-upstream"

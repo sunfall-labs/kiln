@@ -35,14 +35,41 @@ static kiln_value kiln_c99_proxy_inner(kiln_value value) {
 }
 
 static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value handler) {
-    kiln_proxy *proxy = (kiln_proxy *)kiln_c99_gc_alloc(KILN_GC_PROXY, sizeof *proxy);
+    kiln_proxy *proxy;
+    kiln_c99_gc_keep_alive(&target);
+    kiln_c99_gc_keep_alive(&handler);
+    proxy = (kiln_proxy *)kiln_c99_gc_alloc(KILN_GC_PROXY, sizeof *proxy);
     if (proxy == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
+    proxy->private_elements = kiln_c99_undefined();
     kiln_c99_heap_store_value(proxy, &proxy->target, target);
     kiln_c99_heap_store_value(proxy, &proxy->handler, handler);
     proxy->revoked = 0;
     *out = kiln_c99_value(KILN_VALUE_PROXY, (uint64_t)(uintptr_t)proxy, NULL, 0);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_proxy_private_store(kiln_value proxy_value, int create,
+                                         kiln_value *out) {
+    kiln_proxy *proxy;
+    int status;
+    if (proxy_value.tag != KILN_VALUE_PROXY || out == NULL)
+        return KILN_C99_INVALID_ARGUMENT;
+    proxy = kiln_c99_proxy_of(proxy_value);
+    if (proxy->private_elements.tag == KILN_VALUE_OBJECT) {
+        *out = proxy->private_elements;
+        return KILN_C99_OK;
+    }
+    if (!create) {
+        KILN_C99_ABSENT("a Proxy with no private elements, which carries no own private slot", out);
+    }
+    kiln_c99_gc_keep_alive(&proxy_value);
+    status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(&proxy_value);
+    kiln_c99_gc_keep_alive(out);
+    kiln_c99_heap_store_value(proxy, &proxy->private_elements, *out);
     return KILN_C99_OK;
 }
 
@@ -67,6 +94,18 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
     kiln_c99_collection_register_weak(collection);
     *out = kiln_c99_value(KILN_VALUE_COLLECTION, (uint64_t)(uintptr_t)collection, NULL, 0);
     return KILN_C99_OK;
+}
+
+/* WeakMap and WeakSet keys are objects, functions, or non-registered symbols. Keep this
+ * predicate shared by mutation methods and iterable constructors: accepting a key here means
+ * the collector can later decide whether its identity is still live. Date is the one object tag
+ * omitted by `is_reference` because numeric coercion treats it specially. */
+static int kiln_c99_can_be_held_weakly(kiln_value value) {
+    if (value.tag == KILN_VALUE_SYMBOL) {
+        const kiln_symbol *symbol = kiln_c99_symbol_of(value);
+        return symbol != NULL && symbol->registry_id == 0;
+    }
+    return kiln_c99_is_reference(value) || value.tag == KILN_VALUE_DATE;
 }
 
 /* Map/Set hashes follow SameValueZero's string units. The boundary pointer names a canonical
@@ -117,7 +156,8 @@ static uint64_t kiln_c99_value_hash(kiln_value v) {
         if (sym != NULL && sym->registry_id != 0) {
             return (uint64_t)sym->registry_id * UINT64_C(0x9e3779b97f4a7c15);
         }
-        return (uint64_t)(uintptr_t)v.bits * UINT64_C(0x9e3779b97f4a7c15);
+        return (uint64_t)(uintptr_t)kiln_c99_symbol_of(v) *
+               UINT64_C(0x9e3779b97f4a7c15);
     }
     if (v.tag == KILN_VALUE_BIGINT) {
         int64_t high = 0;

@@ -172,6 +172,11 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 32);
                 word(&mut hash, u64::from(*argc));
             }
+            Instruction::CallMethodPrepared { name, argc } => {
+                byte(&mut hash, 199);
+                word(&mut hash, u64::from(*name));
+                word(&mut hash, u64::from(*argc));
+            }
             Instruction::SuperForward => byte(&mut hash, 36),
             Instruction::SetPrototype => byte(&mut hash, 34),
             Instruction::LoadPrototype => byte(&mut hash, 71),
@@ -328,8 +333,17 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 68);
                 byte(&mut hash, u8::from(*strict));
             }
+            Instruction::DefineOwnProperty(name) => {
+                byte(&mut hash, 194);
+                word(&mut hash, u64::from(*name));
+            }
+            Instruction::DefineOwnComputed => byte(&mut hash, 195),
             Instruction::LoadBuiltin(builtin) => {
                 byte(&mut hash, 25);
+                word(&mut hash, *builtin as u64);
+            }
+            Instruction::LoadIntrinsicBuiltin(builtin) => {
+                byte(&mut hash, 197);
                 word(&mut hash, *builtin as u64);
             }
             Instruction::New { argc } => {
@@ -373,6 +387,10 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 21);
                 word(&mut hash, u64::from(*value));
             }
+            Instruction::MarkCellFunctionName(value) => {
+                byte(&mut hash, 198);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::MakeFunction(value) => {
                 byte(&mut hash, 13);
                 word(&mut hash, u64::from(*value));
@@ -410,6 +428,11 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::Binary(value) => {
                 byte(&mut hash, 6);
                 word(&mut hash, u64::from(binary_code(*value)));
+            }
+            Instruction::HasPrivate { name, brand_key } => {
+                byte(&mut hash, 80);
+                word(&mut hash, u64::from(*name));
+                word(&mut hash, u64::from(*brand_key));
             }
             Instruction::Jump(value) => {
                 byte(&mut hash, 7);
@@ -459,6 +482,27 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
     for value in program.source.bytes() {
         byte(&mut hash, value);
     }
+    match &program.source_origin {
+        Some(origin) => {
+            byte(&mut hash, 0x65);
+            word(&mut hash, origin.units.len() as u64);
+            for unit in origin.units.units() {
+                word(&mut hash, u64::from(unit));
+            }
+            word(&mut hash, origin.byte_to_unit.len() as u64);
+            for offset in origin.byte_to_unit.iter() {
+                word(&mut hash, u64::from(*offset));
+            }
+        }
+        None => {}
+    }
+    if let Some(identity) = &program.static_source_identity {
+        byte(&mut hash, 0x66);
+        word(&mut hash, identity.len() as u64);
+        for value in identity.bytes() {
+            byte(&mut hash, value);
+        }
+    }
     if !program.template_sites.is_empty() {
         byte(&mut hash, 0x64);
         word(&mut hash, program.template_sites.len() as u64);
@@ -483,6 +527,25 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                     word(&mut hash, u64::from(unit));
                 }
             }
+        }
+    }
+    // Source coordinates affect emitted frame metadata even though they do not alter bytecode.
+    // Keep this as a trailing, tagged component so older persisted prefixes remain stable.
+    if !program.debug_call_sites.is_empty() {
+        byte(&mut hash, 0x66);
+        word(&mut hash, program.debug_call_sites.len() as u64);
+        for site in &program.debug_call_sites {
+            match site.function_span {
+                Some(span) => {
+                    byte(&mut hash, 1);
+                    word(&mut hash, u64::from(span.start));
+                    word(&mut hash, u64::from(span.end));
+                }
+                None => byte(&mut hash, 0),
+            }
+            word(&mut hash, u64::from(site.instruction));
+            word(&mut hash, u64::from(site.line));
+            word(&mut hash, u64::from(site.column));
         }
     }
     hash
@@ -545,11 +608,15 @@ pub(super) fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
     *hash = hash_program_with_seed(
         &Program {
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: function.code.clone(),
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             // The body's own bytes are hashed by the caller; this synthetic program exists only
             // to reach the canonical instruction encoder.
             source: Arc::from(""),
@@ -786,6 +853,28 @@ pub(super) fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
                     .unwrap_or(true),
             ),
         );
+    }
+    byte(&mut hash, 0x44);
+    word(
+        &mut hash,
+        u64::from(module.link_facts.module_instantiation_end),
+    );
+    // These facts select emitted evaluation paths and declaration elision. They are intentionally
+    // stored outside Program bytecode, so append them explicitly to the persistent module identity.
+    byte(&mut hash, 0x45);
+    byte(&mut hash, u8::from(module.link_facts.direct_eval));
+    byte(&mut hash, 0x46);
+    word(
+        &mut hash,
+        module.link_facts.removable_declarations.len() as u64,
+    );
+    for declaration in &module.link_facts.removable_declarations {
+        word(&mut hash, declaration.local_slots.len() as u64);
+        for slot in &declaration.local_slots {
+            word(&mut hash, u64::from(*slot));
+        }
+        word(&mut hash, u64::from(declaration.pc_start));
+        word(&mut hash, u64::from(declaration.pc_end));
     }
     hash
 }

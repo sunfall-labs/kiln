@@ -12,7 +12,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         argc: u16,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        self.call_with_this(closure, argc, instruction, Value::Undefined, None)
+        self.call_with_this(closure, argc, instruction, Value::Undefined, None, None)
     }
 
     /// The receiver sloppy code actually gets, which is never a primitive.
@@ -44,8 +44,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
         this_value: Value,
         constructing: Option<Value>,
+        method_name: Option<StringUnits>,
     ) -> Result<(), ExecutionError> {
-        self.call_constructing(closure, argc, instruction, this_value, constructing, None)
+        self.call_constructing(
+            closure,
+            argc,
+            instruction,
+            this_value,
+            constructing,
+            None,
+            method_name,
+        )
     }
 
     /// The same entry with `new.target` named rather than derived.
@@ -61,6 +70,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         this_value: Value,
         constructing: Option<Value>,
         new_target: Option<Value>,
+        method_name: Option<StringUnits>,
     ) -> Result<(), ExecutionError> {
         let function = closure.function;
         let Some(proto) = closure.program.functions.get(function as usize) else {
@@ -127,16 +137,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if self.stack.len() < argc + 1 {
             return Err(ExecutionError::StackUnderflow { instruction });
         }
-        let mut arguments = self.stack.split_off(self.stack.len() - argc);
+        let received = self.stack.split_off(self.stack.len() - argc);
         // The callee sits directly below its arguments; removing it here is what makes the
         // stack look, to the caller, as though the call left only its result.
         self.stack.pop();
-        let received = arguments.clone();
 
         let mut locals = vec![Value::Undefined; proto.local_count as usize];
-        arguments.truncate(proto.parameter_count as usize);
-        for (slot, argument) in arguments.into_iter().enumerate() {
-            locals[slot] = argument;
+        // Keep the full incoming vector as this frame's `arguments`. Only the formal prefix is
+        // also needed in local slots. Cloning the whole vector first duplicated every surplus
+        // actual (and allocated another Vec) on every ordinary call.
+        for (slot, argument) in received
+            .iter()
+            .take(proto.parameter_count as usize)
+            .enumerate()
+        {
+            locals[slot] = argument.clone();
         }
 
         // `new.target` is the constructor this call named, which is this closure when the call
@@ -151,7 +166,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
+            module_generation: std::mem::replace(
+                &mut self.module_generation,
+                closure.module_generation,
+            ),
+            module_generation_owner: std::mem::replace(
+                &mut self.module_generation_owner,
+                closure
+                    .module_generation_owner
+                    .borrow()
+                    .clone()
+                    .or_else(|| {
+                        self.module_map
+                            .borrow()
+                            .generation_handle(closure.realm, closure.module_generation)
+                    }),
+            ),
             function: self.function.take(),
+            method_name: std::mem::replace(&mut self.method_name, method_name),
             this_value: std::mem::replace(&mut self.this_value, entering),
             new_target: std::mem::replace(&mut self.new_target, target),
             arguments: std::mem::replace(&mut self.arguments, received),
@@ -191,13 +223,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         site: Option<&EvalSite>,
         script: bool,
     ) -> Result<(), ExecutionError> {
-        let source = self.checked_dynamic_source(source)?;
-        self.enter_eval(source.as_ref(), site, script)
+        match source.to_scalar_cow() {
+            Ok(text) => self.enter_eval(text.as_ref(), site, script),
+            Err(_) => {
+                let transport = source.to_lossy_string();
+                self.enter_eval_with_units(&transport, Some(source), site, script)
+            }
+        }
     }
 
     pub(super) fn enter_eval(
         &mut self,
         source: &str,
+        site: Option<&EvalSite>,
+        script: bool,
+    ) -> Result<(), ExecutionError> {
+        self.enter_eval_with_units(source, None, site, script)
+    }
+
+    pub(super) fn enter_eval_with_units(
+        &mut self,
+        source: &str,
+        source_units: Option<&StringUnits>,
         site: Option<&EvalSite>,
         script: bool,
     ) -> Result<(), ExecutionError> {
@@ -211,10 +258,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .map(|site| {
                 site.bindings
                     .iter()
+                    .chain(site.with_objects.iter())
                     .map(|binding| kiln_ir::EvalOuter {
                         name: binding.name.clone(),
                         declaration: binding.declaration,
                     })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let with_objects: Vec<String> = site
+            .map(|site| {
+                site.with_objects
+                    .iter()
+                    .map(|binding| binding.name.clone())
                     .collect()
             })
             .unwrap_or_default();
@@ -226,9 +282,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // carries none of the syntactic context a direct one does.
         let new_target = site.map_or(kiln_ir::EvalNewTarget::Forbidden, |site| site.new_target);
         let no_private_scopes: [kiln_ir::PrivateScope; 0] = [];
+        let eval_module_id = site.map_or_else(
+            || "<indirect-eval>".to_owned(),
+            |site| format!("{}#eval-{}", site.module_id, site.source_offset),
+        );
         let (program, program_strictness) = compile(&EvalSource {
             source,
+            source_units,
+            module_id: &eval_module_id,
             outer: &outer,
+            with_objects: &with_objects,
             strict,
             global_var_scope,
             script,
@@ -261,7 +324,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     EvalAccess::Cell(slot) => self.cell(slot as usize)?,
                     EvalAccess::Upvalue(index) => self.upvalue(index)?,
                 };
+                let readonly_kind = match binding.declaration {
+                    kiln_ir::EvalDeclaration::Const => Some(crate::vm::ReadonlyCellKind::Const),
+                    kiln_ir::EvalDeclaration::FunctionName => {
+                        Some(crate::vm::ReadonlyCellKind::FunctionName)
+                    }
+                    kiln_ir::EvalDeclaration::Var | kiln_ir::EvalDeclaration::Let => None,
+                };
+                if let Some(kind) = readonly_kind {
+                    let initializer_program =
+                        (kind == crate::vm::ReadonlyCellKind::Const).then_some(&self.program);
+                    self.readonly_cells
+                        .borrow_mut()
+                        .mark(&cell, kind, initializer_program);
+                }
                 locals[slot] = Value::Cell(cell);
+            }
+            for (offset, binding) in site.with_objects.iter().enumerate() {
+                let cell = match binding.access {
+                    EvalAccess::Cell(slot) => self.cell(slot as usize)?,
+                    EvalAccess::Upvalue(index) => self.upvalue(index)?,
+                };
+                locals[site.bindings.len() + offset] = Value::Cell(cell);
             }
         }
 
@@ -295,7 +379,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strictness: std::mem::replace(&mut self.strictness, Rc::new(program_strictness)),
             strict: std::mem::replace(&mut self.strict, program_is_strict),
             module_path: self.module_path.clone(),
+            module_generation: self.module_generation,
+            module_generation_owner: self.module_generation_owner.clone(),
             function: self.function.take(),
+            method_name: std::mem::replace(&mut self.method_name, None),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, frame_new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
@@ -332,13 +419,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         site: Option<&EvalSite>,
         script: bool,
     ) -> Result<Value, ExecutionError> {
-        let source = self.checked_dynamic_source(source)?;
-        self.drive_eval(source.as_ref(), site, script)
+        match source.to_scalar_cow() {
+            Ok(text) => self.drive_eval(text.as_ref(), site, script),
+            Err(_) => {
+                let transport = source.to_lossy_string();
+                self.drive_eval_with_units(&transport, Some(source), site, script)
+            }
+        }
     }
 
     pub(super) fn drive_eval(
         &mut self,
         source: &str,
+        site: Option<&EvalSite>,
+        script: bool,
+    ) -> Result<Value, ExecutionError> {
+        self.drive_eval_with_units(source, None, site, script)
+    }
+
+    fn drive_eval_with_units(
+        &mut self,
+        source: &str,
+        source_units: Option<&StringUnits>,
         site: Option<&EvalSite>,
         script: bool,
     ) -> Result<Value, ExecutionError> {
@@ -350,7 +452,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.native_depth += 1;
         let depth = self.frames.len();
         let outcome = self
-            .enter_eval(source, site, script)
+            .enter_eval_with_units(source, source_units, site, script)
             .and_then(|()| self.run_frames(depth).map(|result| result.value));
         self.native_depth -= 1;
         outcome
@@ -361,9 +463,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// A non-string argument comes straight back. That is not a shortcut -- the specification
     /// says an eval of anything but a string *is* that value, which is what makes
     /// `eval(someObject)` harmless.
-    pub(super) fn indirect_eval(&mut self, arguments: &[Value]) -> Result<Value, ExecutionError> {
+    pub(super) fn indirect_eval(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
         match arguments.first() {
-            Some(Value::String(source)) => self.drive_eval_units(source, None, false),
+            Some(Value::String(source)) => {
+                if !self.string_code_generation_allowed {
+                    self.throw_error(
+                        ErrorKind::Eval,
+                        "Code generation from strings disallowed for this context".into(),
+                        instruction,
+                    )?;
+                    return Ok(Value::Undefined);
+                }
+                self.drive_eval_units(source, None, false)
+            }
             Some(value) => Ok(value.clone()),
             None => Ok(Value::Undefined),
         }
@@ -410,6 +526,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             source.push_ascii("\n) {\n\n})")?;
         }
         let source = source.finish();
+        if !self.string_code_generation_allowed {
+            self.throw_error(
+                ErrorKind::Eval,
+                "Code generation from strings disallowed for this context".into(),
+                instruction,
+            )?;
+            return Ok(Value::Undefined);
+        }
         self.drive_eval_units(&source, None, false)
     }
 
@@ -430,15 +554,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: &Value,
         instruction: usize,
     ) -> Result<String, ExecutionError> {
-        if let Value::String(text) = value {
-            return Ok(text.to_lossy_string());
-        }
-        let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
-        // A symbol is the one primitive `ToString` refuses: it has a description, not a
-        // spelling, and reading one as text is the mistake `String(symbol)` exists for.
-        if matches!(primitive, Value::Symbol(_)) {
-            return Err(ExecutionError::SymbolIsNotAString);
-        }
-        Ok(primitive.to_display_string())
+        Ok(self.as_text_units(value, instruction)?.to_lossy_string())
     }
 }

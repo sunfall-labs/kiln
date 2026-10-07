@@ -498,11 +498,13 @@ fn release_debug_strip_flag(
     profile: BuildProfile,
     platform: TargetPlatform,
     compiler: CompilerKind,
+    keep_symbols: bool,
 ) -> Option<&'static str> {
     if !matches!(
         profile,
         BuildProfile::NativeRelease | BuildProfile::NativeReleaseSize
     ) || compiler == CompilerKind::Zig
+        || keep_symbols
     {
         return None;
     }
@@ -514,6 +516,14 @@ fn release_debug_strip_flag(
         TargetPlatform::Macos => Some("-Wl,-S,-x"),
         TargetPlatform::Windows | TargetPlatform::Other | TargetPlatform::Unknown => None,
     }
+}
+
+/// Whether release links should retain their local symbol table for diagnostic profiling.
+///
+/// This affects only final link stripping; generated C, compiler flags, and release optimization
+/// policy stay unchanged. The native build cache fingerprints this choice separately.
+pub fn native_release_keep_symbols() -> bool {
+    std::env::var("KILN_NATIVE_KEEP_SYMBOLS").as_deref() == Ok("1")
 }
 
 /// Options for compiling one emitted C translation unit.
@@ -664,7 +674,7 @@ pub struct CompilerProbeFailure {
 }
 
 /// Details from a compile or link process that returned a non-zero status.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProcessFailure {
     pub stage: BuildStage,
     pub command: CommandSpec,
@@ -672,6 +682,22 @@ pub struct ProcessFailure {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub elapsed: Duration,
+}
+
+// Keep process streams losslessly available as byte fields while making the derived-error
+// diagnostic useful in panic messages and logs that expect text.
+impl fmt::Debug for ProcessFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessFailure")
+            .field("stage", &self.stage)
+            .field("command", &self.command)
+            .field("status", &self.status)
+            .field("stdout", &String::from_utf8_lossy(&self.stdout))
+            .field("stderr", &String::from_utf8_lossy(&self.stderr))
+            .field("elapsed", &self.elapsed)
+            .finish()
+    }
 }
 
 /// Details retained when the compiler process could not be started or collected.
@@ -1329,6 +1355,7 @@ impl Toolchain {
             options.profile,
             self.identity.target_platform(),
             self.identity.kind,
+            native_release_keep_symbols(),
         ) {
             args.push(OsString::from(flag));
         }
@@ -2157,7 +2184,11 @@ mod tests {
             [
                 ProcessOutput::success("cc version\n", ""),
                 ProcessOutput::success("arm64-apple-darwin24.0.0\n", ""),
-                ProcessOutput::failure(Some(2), "compiler output", "syntax error"),
+                ProcessOutput::failure(
+                    Some(2),
+                    b"compiler output\xff".to_vec(),
+                    b"syntax error\xfe".to_vec(),
+                ),
             ],
             false,
         ));
@@ -2166,12 +2197,17 @@ mod tests {
         let error = toolchain
             .compile_c(&source, directory.join("bad.o"), &CompileOptions::default())
             .expect_err("compile should fail");
+        let display = error.to_string();
+        assert!(display.contains("syntax error�"));
         match error {
             ToolchainError::ProcessFailed(failure) => {
                 assert_eq!(failure.stage, BuildStage::Compile);
                 assert_eq!(failure.status.code, Some(2));
-                assert_eq!(failure.stdout, b"compiler output");
-                assert_eq!(failure.stderr, b"syntax error");
+                assert_eq!(failure.stdout, b"compiler output\xff");
+                assert_eq!(failure.stderr, b"syntax error\xfe");
+                let debug = format!("{failure:?}");
+                assert!(debug.contains("compiler output�"), "{debug}");
+                assert!(debug.contains("syntax error�"), "{debug}");
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -2622,9 +2658,20 @@ mod tests {
                 release_debug_strip_flag(
                     BuildProfile::NativeRelease,
                     platform,
-                    CompilerKind::Clang
+                    CompilerKind::Clang,
+                    false,
                 ),
                 debug_flag
+            );
+            assert_eq!(
+                release_debug_strip_flag(
+                    BuildProfile::NativeRelease,
+                    platform,
+                    CompilerKind::Clang,
+                    true,
+                ),
+                None,
+                "diagnostic symbol preservation omits only the debug-strip option"
             );
             let sections = release_section_flags(BuildProfile::NativeRelease, platform);
             if link_flag.is_some() {
@@ -2636,7 +2683,7 @@ mod tests {
                 assert!(release_section_flags(profile, platform).is_empty());
                 assert_eq!(release_dead_strip_flag(profile, platform), None);
                 assert_eq!(
-                    release_debug_strip_flag(profile, platform, CompilerKind::Clang),
+                    release_debug_strip_flag(profile, platform, CompilerKind::Clang, false),
                     None
                 );
             }
@@ -2646,6 +2693,7 @@ mod tests {
                 BuildProfile::NativeRelease,
                 TargetPlatform::Macos,
                 CompilerKind::Zig,
+                false,
             ),
             None
         );

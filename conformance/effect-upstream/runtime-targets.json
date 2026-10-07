@@ -1,0 +1,23 @@
+{
+  "require": {
+    "BigDecimal": ["node:util"],
+    "Chunk": ["node:util"],
+    "Duration": ["node:util"],
+    "MutableHashMap": ["node:util"],
+    "Option": ["node:util"],
+    "Trie": ["node:util"],
+    "JsonSchema": ["ajv", "ajv/dist/2020", "ajv-draft-04"],
+    "schema/toJsonSchemaDocument": ["ajv/dist/2020"],
+    "schema/jsonSchemaRoundTrip": ["ajv/dist/2020"],
+    "schema/representation/toJsonSchemaMultiDocument": ["ajv"]
+  },
+  "include": {
+    "schema/SchemaAOTCompiler": ["effect/schema/SchemaCompiler/runtime", "./fixtures/aot-import-guard.ts", "./fixtures/aot-runner.ts"],
+    "schema/SchemaAOTCompilerBuild": ["effect/schema/SchemaCompiler/runtime"]
+  },
+  "importActual": {
+    "Config": ["../src/ConfigProvider.ts"],
+    "rpc/RpcClient": ["../../src/rpc/RpcClientError.ts"],
+    "schema/HMR": ["../../src/Schema.ts", "../../src/SchemaAST.ts", "./fixtures/HMR-sanity-check.ts", "./fixtures/HMR-Class.ts"]
+  }
+}

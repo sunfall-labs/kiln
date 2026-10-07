@@ -5,7 +5,7 @@
 //! and CI gate to guarantee no corrupted or ill-formed graph ever reaches C emission.
 
 use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, Terminator, ValueId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Errors detected by graph verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,40 +208,7 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
     }
 
     // 2. Compute Dominator Tree (fixed-point iteration)
-    let all_blocks: HashSet<BlockId> = graph.blocks.iter().map(|b| b.id).collect();
-    let mut dominators: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
-
-    let mut entry_dom = HashSet::new();
-    entry_dom.insert(graph.entry_block);
-    dominators.insert(graph.entry_block, entry_dom);
-
-    for block in &graph.blocks {
-        if block.id != graph.entry_block {
-            dominators.insert(block.id, all_blocks.clone());
-        }
-    }
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block in &graph.blocks {
-            if block.id == graph.entry_block {
-                continue;
-            }
-            let mut new_dom = all_blocks.clone();
-            for &pred in &block.predecessors {
-                if let Some(pred_dom) = dominators.get(&pred) {
-                    new_dom = new_dom.intersection(pred_dom).copied().collect();
-                }
-            }
-            new_dom.insert(block.id);
-
-            if dominators.get(&block.id) != Some(&new_dom) {
-                dominators.insert(block.id, new_dom);
-                changed = true;
-            }
-        }
-    }
+    let dominators = crate::dominators::compute(graph, true);
 
     // 3. SSA Uniqueness and Dominance Check
     let mut def_site: HashMap<ValueId, (BlockId, usize)> = HashMap::new();
@@ -255,9 +222,7 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
     }
 
     let dominates = |def_block: BlockId, use_block: BlockId| -> bool {
-        dominators
-            .get(&use_block)
-            .is_some_and(|doms| doms.contains(&def_block))
+        dominators.contains(def_block, use_block)
     };
 
     for block in &graph.blocks {
@@ -325,7 +290,8 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                     check_operand(*object)?;
                 }
                 GraphOp::SetProperty { object, value, .. }
-                | GraphOp::SetPropertyStrict { object, value, .. } => {
+                | GraphOp::SetPropertyStrict { object, value, .. }
+                | GraphOp::DefineOwnProperty { object, value, .. } => {
                     check_operand(*object)?;
                     check_operand(*value)?;
                 }
@@ -333,6 +299,9 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                     object, key, value, ..
                 }
                 | GraphOp::SetComputedStrict {
+                    object, key, value, ..
+                }
+                | GraphOp::DefineOwnComputed {
                     object, key, value, ..
                 } => {
                     check_operand(*object)?;
@@ -345,8 +314,16 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                         check_operand(*arg)?;
                     }
                 }
-                GraphOp::CallMethod { object, args, .. } => {
+                GraphOp::CallMethod {
+                    object,
+                    args,
+                    prepared_callee,
+                    ..
+                } => {
                     check_operand(*object)?;
+                    if let Some(callee) = prepared_callee {
+                        check_operand(*callee)?;
+                    }
                     for arg in args {
                         check_operand(*arg)?;
                     }
@@ -559,6 +536,40 @@ mod tests {
             }
             other => panic!("expected DominanceViolation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn verifier_keeps_historical_dominance_for_disconnected_predecessor_free_blocks() {
+        let mut graph = FunctionGraph::new(Some("unreachable_dom".into()), 0, 0);
+        let entry_value = graph.alloc_value();
+        let entry = BlockId(0);
+        let unreachable = BlockId(1);
+        graph.blocks.push(BasicBlock {
+            id: entry,
+            operations: vec![(
+                entry_value,
+                GraphOp::Const {
+                    index: 0,
+                    constant: Constant::Number(1),
+                },
+            )],
+            terminator: Terminator::Return(Some(entry_value)),
+            predecessors: vec![],
+            successors: vec![],
+            exception_handler: None,
+        });
+        graph.blocks.push(BasicBlock {
+            id: unreachable,
+            operations: vec![],
+            terminator: Terminator::Return(Some(entry_value)),
+            predecessors: vec![],
+            successors: vec![],
+            exception_handler: None,
+        });
+
+        // The verifier's established all-block equations leave this no-predecessor block's
+        // dominator set initialized to all blocks; preserve that behavior exactly.
+        assert!(verify_function_graph(&graph).is_ok());
     }
 
     #[test]

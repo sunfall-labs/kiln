@@ -48,6 +48,7 @@ fn lowers(op: &GraphOp) -> bool {
             | GraphOp::LoadUpvalue(_)
             | GraphOp::StoreUpvalue { .. }
             | GraphOp::LoadBuiltin(_)
+            | GraphOp::LoadGlobalBuiltin(_)
             | GraphOp::ResumeValue
             | GraphOp::CaughtValue
             | GraphOp::Bridge { .. }
@@ -69,9 +70,11 @@ fn lowers(op: &GraphOp) -> bool {
             | GraphOp::GetProperty { .. }
             | GraphOp::SetProperty { .. }
             | GraphOp::SetPropertyStrict { .. }
+            | GraphOp::DefineOwnProperty { .. }
             | GraphOp::GetComputed { .. }
             | GraphOp::SetComputed { .. }
             | GraphOp::SetComputedStrict { .. }
+            | GraphOp::DefineOwnComputed { .. }
             | GraphOp::IsReturnSignal(_)
             | GraphOp::Phi { .. }
     )

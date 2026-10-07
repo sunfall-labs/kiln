@@ -7,7 +7,7 @@ use super::{NativeError, NativeProfile};
 use kiln_artifact_cache::Digest;
 use kiln_backend_c::{
     EmissionPolicy, emit_commonjs_module_with_logical_path_and_policy,
-    emit_module_with_logical_path_and_policy,
+    emit_module_with_logical_path_and_policy_and_instantiation,
 };
 use kiln_ir::ModuleProgram;
 use kiln_module_graph::ModuleSource;
@@ -15,9 +15,17 @@ use kiln_module_graph::ModuleSource;
 pub(super) const MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS: usize = 512;
 pub(super) const MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS: usize = 16;
 
+fn source_emitter_identity(adapter_source: &[u8], backend_emitter_id: &[u8]) -> Digest {
+    Digest::hash([adapter_source, backend_emitter_id].concat().as_slice())
+}
+
 /// Changes to this module can change emitted C and must invalidate cached Source/CommonJS C.
-pub(super) static SOURCE_EMITTER_ID: std::sync::LazyLock<Digest> =
-    std::sync::LazyLock::new(|| Digest::hash(include_str!("graph_source_emitter.rs").as_bytes()));
+pub(super) static SOURCE_EMITTER_ID: std::sync::LazyLock<Digest> = std::sync::LazyLock::new(|| {
+    source_emitter_identity(
+        include_str!("graph_source_emitter.rs").as_bytes(),
+        kiln_backend_c::C_MODULE_EMITTER_BUILD_ID.as_bytes(),
+    )
+});
 
 /// Whether a generic-only module still lowers its qualifying `parallelMap` sites (issue 13).
 ///
@@ -69,12 +77,14 @@ pub(super) fn emit(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
     policy: &EmissionPolicy,
+    instantiate: bool,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     match node.source {
-        ModuleSource::Source => Ok(emit_module_with_logical_path_and_policy(
+        ModuleSource::Source => Ok(emit_module_with_logical_path_and_policy_and_instantiation(
             &node.program,
             logical_path,
             policy.clone(),
+            instantiate,
         )?),
         ModuleSource::CommonJs => Ok(emit_commonjs_module_with_logical_path_and_policy(
             &node.program,
@@ -82,5 +92,24 @@ pub(super) fn emit(
             policy.clone(),
         )?),
         _ => unreachable!("cached source emitter only accepts Source and CommonJS modules"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_cache_identity_tracks_the_backend_module_emitter() {
+        let adapter = include_str!("graph_source_emitter.rs").as_bytes();
+        let backend = kiln_backend_c::C_MODULE_EMITTER_BUILD_ID.as_bytes();
+        assert_eq!(
+            *SOURCE_EMITTER_ID,
+            source_emitter_identity(adapter, backend)
+        );
+        assert_ne!(
+            *SOURCE_EMITTER_ID,
+            source_emitter_identity(adapter, b"different module emitter")
+        );
     }
 }

@@ -1,0 +1,47 @@
+{
+  "source": "f3679f414ba53c7e3e85f19970dc3d968addba6f",
+  "kiln_sha256": "f4b91e38f2c1763d79e0f1f85b18868a018900a991a8d4c696527fca0d60d168",
+  "selected": 4,
+  "results": [
+    {
+      "probe": "function-kinds.js",
+      "match": true,
+      "node_exit": 0,
+      "interpreter_exit": 0,
+      "node_stdout": "true true true true true\nobject object object true 1 [object AsyncFunction] [object GeneratorFunction] [object AsyncGeneratorFunction]\ntrue false true true false\ntrue true true true true\ntrue true\ntrue\ntrue false\ntrue true\n",
+      "interpreter_stdout": "true true true true true\nobject object object true 1 [object AsyncFunction] [object GeneratorFunction] [object AsyncGeneratorFunction]\ntrue false true true false\ntrue true true true true\ntrue true\ntrue\ntrue false\ntrue true\n",
+      "node_stderr": "",
+      "interpreter_stderr": ""
+    },
+    {
+      "probe": "function-callable-integrity.js",
+      "match": true,
+      "node_exit": 0,
+      "interpreter_exit": 0,
+      "node_stdout": "true true false false false\n",
+      "interpreter_stdout": "true true false false false\n",
+      "node_stderr": "",
+      "interpreter_stderr": ""
+    },
+    {
+      "probe": "reflect-construct-new-target.mjs",
+      "match": true,
+      "node_exit": 0,
+      "interpreter_exit": 0,
+      "node_stdout": "value true true derived\ntrue 2 2 true\ntrue undefined true\ntrue false\ntrue\n",
+      "interpreter_stdout": "value true true derived\ntrue 2 2 true\ntrue undefined true\ntrue false\ntrue\n",
+      "node_stderr": "",
+      "interpreter_stderr": ""
+    },
+    {
+      "probe": "node-net-connect-options.cjs",
+      "match": true,
+      "node_exit": 0,
+      "interpreter_exit": 0,
+      "node_stdout": "stop before connect\ninherited port\n",
+      "interpreter_stdout": "stop before connect\ninherited port\n",
+      "node_stderr": "",
+      "interpreter_stderr": ""
+    }
+  ]
+}

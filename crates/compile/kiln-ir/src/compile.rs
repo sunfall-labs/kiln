@@ -97,6 +97,8 @@ pub struct EvalOptions {
     /// The calling frame's visible bindings, innermost first. Empty for an indirect eval, which
     /// sees global scope and nothing else.
     pub outer: Vec<EvalOuter>,
+    /// Names among `outer` whose cells hold active `with` object environments, outermost first.
+    pub with_objects: Vec<String>,
     /// Strict either because the caller is, or because the eval'd source says so itself.
     pub strict: bool,
     /// Whether the variable environment this eval's declarations belong to is the global one.
@@ -159,6 +161,23 @@ pub fn compile_eval_with_strictness(
     // eval that is the caller's module, holding entirely unrelated slots. Boxing every top-level
     // binding means every such read is a capture instead, and `LoadGlobal` is never emitted.
     compiler.cell_everything = true;
+    for statement in &module.body {
+        match &statement.kind {
+            StatementKind::Variable { kind, declarations } if *kind != VariableKind::Var => {
+                for declaration in declarations {
+                    let mut names = Vec::new();
+                    analysis::pattern_names_in_order(&declaration.pattern, &mut names);
+                    compiler.eval_lexical_names.extend(names);
+                }
+            }
+            StatementKind::Class(class) => {
+                if let Some(name) = &class.name {
+                    compiler.eval_lexical_names.insert(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
     // Strict eval code gets a variable environment of its own, so nothing it declares can
     // collide with an environment it is nested in and the whole rule is silent there.
     if !compiler.strict {
@@ -175,15 +194,31 @@ pub fn compile_eval_with_strictness(
                 kind: match outer.declaration {
                     EvalDeclaration::Var => VariableKind::Var,
                     EvalDeclaration::Let => VariableKind::Let,
-                    EvalDeclaration::Const => VariableKind::Const,
+                    // Keep a borrowed immutable binding syntactically assignable in the eval
+                    // compiler so the captured-cell guard can produce the runtime TypeError.
+                    // Treating it as a source `const` would reject an eval-created function at
+                    // compile time, before the write can run. Its original declaration remains
+                    // in `eval_declaration` for nested eval sites and backend metadata.
+                    EvalDeclaration::Const => VariableKind::Let,
+                    EvalDeclaration::FunctionName => VariableKind::Let,
                 },
                 imported: false,
                 initialized: true,
                 // The caller's cell is installed in the slot before the body runs, so there is
                 // nothing for a prologue to box and every access goes straight through it.
                 celled: true,
+                eval_declaration: Some(outer.declaration),
             },
         );
+    }
+    for name in &options.with_objects {
+        compiler.with_scopes.push(WithScope {
+            name: name.clone(),
+            functions: 0,
+            // Eval source declarations occupy scope zero too; the compiler separately marks
+            // its own lexical names so they shadow these enclosing object environments.
+            scopes: 1,
+        });
     }
     // The enclosing classes' private names, so `eval("this.#m")` resolves `#m` to the element
     // the class actually declared rather than to a key of its own. The identities come with them
@@ -192,6 +227,7 @@ pub fn compile_eval_with_strictness(
     // its brand check would accept the caller's instances.
     for scope in &options.private_scopes {
         compiler.private_scopes.push(scope.scope);
+        compiler.private_scope_modules.push(scope.module_id.clone());
         compiler
             .private_declarations
             .push(scope.names.iter().cloned().collect());
@@ -209,7 +245,7 @@ pub fn compile_eval_with_strictness(
 /// Compile one module while preserving the scalar linkage needed by a graph linker.
 ///
 /// Named and default value imports are supported. Namespace imports, star/namespace re-exports,
-/// indirect re-exports, default expression exports, and cycles remain explicit unsupported forms.
+/// indirect re-exports and default expression exports remain explicit unsupported forms.
 pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagnostic>> {
     let mut compiler = Compiler::new(module);
     // A module is strict whatever its text says, so nothing has to pass it in.
@@ -289,17 +325,21 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         });
     }
 
-    // An exported binding that can *change* is boxed, so the importer holds this module's cell
-    // rather than a copy of the value it had when the module finished. One that cannot change --
-    // a `const`, a function declaration, a class -- is left as a plain slot: a snapshot and a
-    // live view of it are indistinguishable, and boxing it would cost the native backend, which
-    // has no cells, a module it can otherwise compile.
-    let mutable = mutable_module_bindings(&module.body);
+    // Every ESM import is a live binding. A native graph may need to expose this module's
+    // binding while the module is still in its instantiation phase, before its body initializes
+    // a const or function declaration. Exported locals therefore use the same cell representation
+    // as mutable exports, so importers retain a live view through cyclic evaluation.
     for export in &module.exports {
-        if let ExportOrigin::Local { local } = &export.origin
-            && mutable.contains(local)
-        {
-            compiler.captured.insert(local.clone());
+        match &export.origin {
+            ExportOrigin::Local { local } => {
+                compiler.captured.insert(local.clone());
+            }
+            ExportOrigin::DefaultExpression => {
+                compiler
+                    .captured
+                    .insert(kiln_hir::DEFAULT_EXPORT_LOCAL.to_owned());
+            }
+            _ => {}
         }
     }
     compiler.compile_body(module);
@@ -370,6 +410,7 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         new_function: body_contains_new_function(&module.body),
         dynamic_imports: collect_dynamic_imports(&module.body),
         removable_declarations: compiler.removable_declarations.clone(),
+        module_instantiation_end: compiler.module_instantiation_end,
     };
 
     compiler
@@ -483,6 +524,7 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
                 imported: false,
                 initialized: true,
                 celled: true,
+                eval_declaration: None,
             },
         );
         imports.push(ImportBinding {
@@ -500,6 +542,7 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
         new_function: body_contains_new_function(&module.body),
         dynamic_imports: collect_dynamic_imports(&module.body),
         removable_declarations: Vec::new(),
+        module_instantiation_end: 0,
     };
     compiler
         .finish_with_strictness()
@@ -577,8 +620,9 @@ enum BreakableKind {
 #[derive(Default)]
 struct LoopContext {
     kind: BreakableKind,
-    /// The label written on this construct, if any. `break outer` names one of these.
-    label: Option<String>,
+    /// Every stacked label written on this construct. `break outer` or `continue outer` can
+    /// name any label in this list when the labels share a single loop/switch target.
+    labels: Vec<String>,
     breaks: Vec<usize>,
     continues: Vec<usize>,
     /// How many cleanups were pending when the loop began, so a `break` runs only those entered
@@ -608,6 +652,10 @@ struct Local {
     /// name. Reads and writes go through `LoadCell`/`StoreCell` so every closure sharing the
     /// binding sees the same mutations.
     celled: bool,
+    /// The eval binding category when this is an outer binding imported into an eval compiler,
+    /// or the private name of a named function expression. It preserves distinctions that
+    /// `VariableKind` alone cannot express.
+    eval_declaration: Option<EvalDeclaration>,
 }
 
 /// The per-function half of [`Compiler`], saved and restored around a nested function body.
@@ -625,6 +673,7 @@ struct FunctionState {
     captured: HashSet<String>,
     /// Whether every binding of this function is boxed, because a direct `eval` can see them.
     cell_everything: bool,
+    active_function_span: Option<kiln_hir::Span>,
 }
 
 /// Where a name lives, which decides how it is read and whether it can be read at all.
@@ -717,11 +766,18 @@ struct Compiler {
     /// The text being compiled, handed to the [`Program`] so a function can answer with its own
     /// definition. Shared, never copied: see [`Program::source`].
     source: Arc<str>,
+    /// Original-source mapping for statically transformed TypeScript. Function spans still index
+    /// `source`; this sidecar is used only for source-facing diagnostics and call-site locations.
+    source_provenance: Option<Arc<kiln_hir::StaticSourceProvenance>>,
+    /// Lossless source units and parser-byte mapping when this source used a transport encoding.
+    source_origin: Option<Arc<kiln_hir::SourceOrigin>>,
     constants: Vec<Constant>,
     /// Lookup only: insertion order in `constants` remains the bytecode's stable index order.
     constant_indices: rustc_hash::FxHashMap<Constant, u32>,
     functions: Vec<FunctionProto>,
     template_sites: Vec<TemplateSite>,
+    debug_call_sites: Vec<(Option<kiln_hir::Span>, u32, kiln_hir::Span)>,
+    active_function_span: Option<kiln_hir::Span>,
     /// Whether `functions[i]` was compiled as strict code, in the same order.
     ///
     /// Beside the protos rather than on them, because a proto is bytecode the C backend reads
@@ -729,6 +785,7 @@ struct Compiler {
     /// or is discarded. See [`Strictness`].
     strict_functions: Vec<bool>,
     removable_declarations: Vec<RemovableDeclaration>,
+    module_instantiation_end: u32,
     /// Enclosing function states, module body first. Empty while compiling the module body.
     enclosing: Vec<FunctionState>,
     upvalues: Vec<Upvalue>,
@@ -789,7 +846,7 @@ struct Compiler {
     /// tell a borrowed binding from one of its own: a sloppy `var` takes the caller's over, and
     /// everything else shadows it.
     outer_names: HashSet<String>,
-    /// Names of the block-level function declarations Annex B B.3.2.1/B.3.3.2 gives a var-scoped
+    /// Source spans of the block-level declarations Annex B B.3.2.1/B.3.3.2 gives a var-scoped
     /// binding in the body being compiled.
     ///
     /// `{ function f() {} }` is two bindings, not one: a block-scoped one, which is all the main
@@ -797,8 +854,9 @@ struct Compiler {
     /// script, which the declaration writes to as it is evaluated. Legacy, and load-bearing:
     /// bundled JavaScript still relies on it. Names that are blocked -- by a lexical declaration
     /// between here and the block, by a formal parameter, or by being `arguments` -- are never in
-    /// this set, so the write is emitted only where the specification asks for it.
-    annexb_var_functions: HashSet<String>,
+    /// this set. Declaration identity matters: an eligible sibling with the same name must not
+    /// authorize writes from a blocked declaration.
+    annexb_var_functions: HashSet<Span>,
     /// Names this program declared on the global object rather than in a slot.
     ///
     /// Non-empty only for *global* code: a script and an `eval` whose variable environment is the
@@ -856,6 +914,8 @@ struct Compiler {
     /// it, and only code lexically inside a `with` pays for that: the resolution everywhere else
     /// is the static one it has always been.
     with_scopes: Vec<WithScope>,
+    /// Eval program top-level lexical names, which shadow inherited object environments.
+    eval_lexical_names: HashSet<String>,
     /// `finally` blocks enclosing the code being compiled, innermost last. A non-local exit has
     /// to run each of them on its way out, so it needs their bodies rather than their addresses.
     finalizers: Vec<Cleanup>,
@@ -864,6 +924,12 @@ struct Compiler {
     /// A stack because a class can be declared inside another's method, and each has its own
     /// private names.
     private_scopes: Vec<u32>,
+    /// The source module that owns each scope, parallel to `private_scopes`. Class ordinals are
+    /// local to one compiler; these identities keep their reserved property keys disjoint when
+    /// a graph compiles each module independently.
+    private_scope_modules: Vec<String>,
+    /// Stable identity of the module currently being compiled, used for classes declared here.
+    private_module_id: String,
     /// The hidden binding holding each open class's *brand*: the identity that tells one
     /// evaluation of a class from another. `private_scopes` distinguishes one class body from
     /// another and is fixed at compile time; two evaluations of one body share it, which is why
@@ -880,10 +946,10 @@ struct Compiler {
     private_declarations: Vec<HashSet<String>>,
     /// Scratch used while re-emitting cleanups, so the stack is restored afterwards.
     pending_finalizers: Vec<Cleanup>,
-    /// A label written immediately before the statement now being compiled, waiting for that
-    /// statement to claim it. A loop takes it into its own context; anything else gets a
-    /// labelled block around it.
-    pending_label: Option<String>,
+    /// Labels written immediately before the statement now being compiled, waiting for that
+    /// statement to claim them. A loop/switch takes the stack into its context; anything else
+    /// gets a labelled block around each label.
+    pending_labels: Vec<String>,
     /// Short-circuit jumps of the optional chains being compiled, innermost last.
     ///
     /// A stack rather than a field because a chain can appear inside another chain's arguments,

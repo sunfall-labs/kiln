@@ -15,7 +15,7 @@ use kiln_host_abi::HostOps;
 
 use crate::{
     ArrayData, ExecutionError, Native, NodeObject, ObjectData, RealmId, TypedKind, Value, Vm,
-    is_callable, node_body_bytes, node_bytes_value,
+    is_callable, node_body_bytes, node_bytes_value, tracked_object,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -87,7 +87,7 @@ pub(crate) fn node_hash(arguments: &[Value]) -> Result<Value, ExecutionError> {
         "digest",
         Value::Native(Native::NodeHashDigest, RealmId::PRIMARY),
     );
-    Ok(Value::Object(Rc::new(RefCell::new(data))))
+    Ok(Value::Object(tracked_object(data)))
 }
 
 pub(crate) fn node_hmac(arguments: &[Value]) -> Result<Value, ExecutionError> {
@@ -140,7 +140,7 @@ pub(crate) fn node_hmac(arguments: &[Value]) -> Result<Value, ExecutionError> {
         "digest",
         Value::Native(Native::NodeHashDigest, RealmId::PRIMARY),
     );
-    Ok(Value::Object(Rc::new(RefCell::new(data))))
+    Ok(Value::Object(tracked_object(data)))
 }
 
 pub(crate) fn node_hash_state(receiver: &Value) -> Result<Rc<RefCell<HashState>>, ExecutionError> {
@@ -239,6 +239,13 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeCryptoCreateHash => Some("createHash"),
         Native::NodeCryptoCreateHmac => Some("createHmac"),
         Native::NodeCryptoTimingSafeEqual => Some("timingSafeEqual"),
+        Native::NodeCryptoKeyImport => Some("__kilnCryptoKeyImport"),
+        Native::NodeCryptoKeyPublic => Some("__kilnCryptoKeyPublic"),
+        Native::NodeCryptoKeyInfo => Some("__kilnCryptoKeyInfo"),
+        Native::NodeCryptoKeyExport => Some("__kilnCryptoKeyExport"),
+        Native::NodeCryptoKeyFree => Some("__kilnCryptoKeyFree"),
+        Native::WebCryptoPrimitive => Some("__kilnWebCryptoPrimitive"),
+        Native::WebCompressionPrimitive => Some("__kilnCompressionPrimitive"),
         Native::NodeHashUpdate => Some("update"),
         Native::NodeHashDigest => Some("digest"),
         _ => None,
@@ -483,6 +490,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::NodeCryptoCreateHash => node_hash(arguments),
             Native::NodeCryptoCreateHmac => node_hmac(arguments),
+            Native::NodeCryptoKeyImport => node_crypto_key_import(arguments),
+            Native::NodeCryptoKeyPublic => node_crypto_key_public(arguments),
+            Native::NodeCryptoKeyInfo => node_crypto_key_info(arguments),
+            Native::NodeCryptoKeyExport => node_crypto_key_export(arguments),
+            Native::NodeCryptoKeyFree => node_crypto_key_free(arguments),
+            Native::WebCryptoPrimitive => webcrypto_primitive(arguments),
+            Native::WebCompressionPrimitive => crate::compression::primitive(arguments),
             Native::NodeHashUpdate => {
                 let state = node_hash_state(receiver)?;
                 let mut state = state.borrow_mut();
@@ -528,4 +542,218 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }),
         }
     }
+}
+
+fn node_crypto_key_import(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let Some(input) = arguments.first() else {
+        return Err(crypto_key_type_error(
+            "The \"key\" argument must contain RSA key material",
+        ));
+    };
+    let bytes = node_body_bytes(Some(input))?;
+    let encoding = match arguments.get(1).map(Value::to_display_string).as_deref() {
+        Some("der") => kiln_key_core::KeyEncoding::Der,
+        Some("jwk") => {
+            let key = kiln_key_core::import_rsa_jwk_json(&bytes).map_err(key_import_error)?;
+            if arguments
+                .get(2)
+                .is_some_and(|kind| kind.to_display_string() == "private")
+                && key.key_type() != kiln_key_core::KeyType::Private
+            {
+                return Err(crypto_key_type_error(
+                    "The JWK does not contain a private key",
+                ));
+            }
+            return Ok(crypto_key_value(key));
+        }
+        _ => kiln_key_core::KeyEncoding::Pem,
+    };
+    let expected = match arguments.get(2).map(Value::to_display_string).as_deref() {
+        Some("private") => Some(kiln_key_core::KeyType::Private),
+        Some("public") => Some(kiln_key_core::KeyType::Public),
+        _ => None,
+    };
+    let key = match encoding {
+        kiln_key_core::KeyEncoding::Der => {
+            let kind = expected.ok_or_else(|| {
+                crypto_key_type_error("A DER key import requires an explicit key type")
+            })?;
+            let format = match arguments.get(3).map(Value::to_display_string).as_deref() {
+                Some("pkcs1") => kiln_key_core::KeyFormat::Pkcs1,
+                Some("pkcs8") => kiln_key_core::KeyFormat::Pkcs8,
+                Some("spki") => kiln_key_core::KeyFormat::Spki,
+                _ => {
+                    return Err(crypto_key_type_error(
+                        "A DER key import requires a supported key type",
+                    ));
+                }
+            };
+            kiln_key_core::import_rsa_der(&bytes, kind, format)
+        }
+        kiln_key_core::KeyEncoding::Pem => match expected {
+            Some(kind) => kiln_key_core::import_rsa(&bytes, encoding, kind),
+            None => kiln_key_core::import_rsa_any(&bytes, encoding),
+        },
+        kiln_key_core::KeyEncoding::Json => {
+            return Err(ExecutionError::CryptoUnsupported {
+                message: "JSON key material import is not supported through this bridge".into(),
+            });
+        }
+    }
+    .map_err(key_import_error)?;
+    Ok(crypto_key_value(key))
+}
+
+fn node_crypto_key_public(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let key = crypto_key_argument(arguments.first())?;
+    Ok(crypto_key_value(key.public_key()))
+}
+
+fn node_crypto_key_info(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let key = crypto_key_argument(arguments.first())?;
+    let mut details = ObjectData::default();
+    details.set("modulusLength", Value::Number(key.modulus_bits() as f64));
+    let mut info = ObjectData::default();
+    info.set(
+        "type",
+        Value::String(match key.key_type() {
+            kiln_key_core::KeyType::Public => "public".into(),
+            kiln_key_core::KeyType::Private => "private".into(),
+        }),
+    );
+    info.set("asymmetricKeyType", Value::String("rsa".into()));
+    info.set(
+        "asymmetricKeyDetails",
+        Value::Object(tracked_object(details)),
+    );
+    Ok(Value::Object(tracked_object(info)))
+}
+
+fn node_crypto_key_export(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let key = crypto_key_argument(arguments.first())?;
+    if arguments
+        .get(1)
+        .is_some_and(|format| format.to_display_string() == "jwk")
+    {
+        return Err(ExecutionError::CryptoUnsupported {
+            message: "RSA JWK export is not implemented by this runtime".into(),
+        });
+    }
+    let format = match arguments.get(1).map(Value::to_display_string).as_deref() {
+        Some("pkcs1") => kiln_key_core::KeyFormat::Pkcs1,
+        Some("pkcs8") => kiln_key_core::KeyFormat::Pkcs8,
+        _ => kiln_key_core::KeyFormat::Spki,
+    };
+    let encoding = match arguments.get(2).map(Value::to_display_string).as_deref() {
+        Some("pem") => kiln_key_core::KeyEncoding::Pem,
+        _ => kiln_key_core::KeyEncoding::Der,
+    };
+    let bytes = key.export(format, encoding).map_err(key_export_error)?;
+    Ok(node_bytes_value(bytes))
+}
+
+fn node_crypto_key_free(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    // The interpreter stores the validated key directly in the KeyObject's Rc-backed payload.
+    // FinalizationRegistry holdings keep that opaque payload alive until cleanup, then releasing
+    // the callback argument drops it without a process- or realm-global handle table.
+    let _key = crypto_key_argument(arguments.first())?;
+    Ok(Value::Undefined)
+}
+
+fn crypto_key_value(key: kiln_key_core::ImportedKey) -> Value {
+    let data = ObjectData {
+        node_object: Some(NodeObject::CryptoKey(Rc::new(key))),
+        ..Default::default()
+    };
+    Value::Object(tracked_object(data))
+}
+
+fn crypto_key_argument(
+    value: Option<&Value>,
+) -> Result<Rc<kiln_key_core::ImportedKey>, ExecutionError> {
+    match value {
+        Some(Value::Object(object)) => match object.borrow().node_object.as_ref() {
+            Some(NodeObject::CryptoKey(key)) => Ok(Rc::clone(key)),
+            _ => Err(crypto_key_type_error(
+                "The key argument must be a KeyObject",
+            )),
+        },
+        _ => Err(crypto_key_type_error(
+            "The key argument must be a KeyObject",
+        )),
+    }
+}
+
+fn key_import_error(error: kiln_key_core::KeyError) -> ExecutionError {
+    match error {
+        kiln_key_core::KeyError::InvalidKey => ExecutionError::ErrorMessage {
+            message: "Invalid RSA key material".into(),
+        },
+        kiln_key_core::KeyError::WrongKeyType => crypto_key_type_error("Invalid RSA key type"),
+        kiln_key_core::KeyError::UnsupportedKeyType => ExecutionError::CryptoUnsupported {
+            message: "Unsupported asymmetric key type".into(),
+        },
+        kiln_key_core::KeyError::UnsupportedKeySize => ExecutionError::CryptoUnsupported {
+            message: "RSA public keys larger than 8192 bits are not supported".into(),
+        },
+        kiln_key_core::KeyError::UnsupportedEncoding => ExecutionError::CryptoUnsupported {
+            message: "Unsupported asymmetric key encoding".into(),
+        },
+    }
+}
+
+fn key_export_error(error: kiln_key_core::KeyError) -> ExecutionError {
+    let message = match error {
+        kiln_key_core::KeyError::InvalidKey | kiln_key_core::KeyError::WrongKeyType => {
+            "Invalid RSA key material"
+        }
+        kiln_key_core::KeyError::UnsupportedKeyType => "Unsupported asymmetric key type",
+        kiln_key_core::KeyError::UnsupportedKeySize => "Unsupported RSA public key size",
+        kiln_key_core::KeyError::UnsupportedEncoding => "Unsupported asymmetric key format",
+    };
+    crypto_key_type_error(message)
+}
+
+fn crypto_key_type_error(message: &str) -> ExecutionError {
+    ExecutionError::TypeErrorMessage {
+        message: message.into(),
+    }
+}
+
+fn webcrypto_primitive(arguments: &[Value]) -> Result<Value, ExecutionError> {
+    let operation = arguments.first().map_or(f64::NAN, Value::as_number);
+    if !operation.is_finite() || operation.fract() != 0.0 || !(1.0..=12.0).contains(&operation) {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "Invalid internal WebCrypto operation".into(),
+        });
+    }
+    let bytes_at = |index: usize| -> Result<Vec<u8>, ExecutionError> {
+        match arguments.get(index) {
+            None | Some(Value::Undefined) => Ok(Vec::new()),
+            Some(value) => view_or_buffer_bytes(value),
+        }
+    };
+    let key = bytes_at(1)?;
+    let data = bytes_at(2)?;
+    let iv = bytes_at(3)?;
+    let additional_data = bytes_at(4)?;
+    let length = arguments.get(5).map_or(0.0, Value::as_number);
+    let maximum = if operation == 12.0 { 65_536.0 } else { 8_160.0 };
+    if !length.is_finite() || length < 0.0 || length.fract() != 0.0 || length > maximum {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "Invalid internal WebCrypto output length".into(),
+        });
+    }
+    let result = kiln_webcrypto::execute(
+        operation as u32,
+        &key,
+        &data,
+        &iv,
+        &additional_data,
+        length as usize,
+    )
+    .map_err(|_| ExecutionError::TypeErrorMessage {
+        message: "WebCrypto primitive rejected its input".into(),
+    })?;
+    Ok(crate::buffer::plain_bytes_value(result))
 }

@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release
 //
-// Tier 4 (.scratch/parallel-builtins issue 09) for `mise run native-stress`: small, no
+// Tier 4 (docs/issues/parallel-builtins issue 09) for `mise run native-stress`: small, no
 // thread-count directive, and checking its answers without allocating. The pure built-ins build
 // strings and arrays in the workers' arenas -- `trim`, `split`, `map(Number)`, `slice`,
 // `padStart`, `toFixed`, `JSON.stringify`, and a helper's `map` over a closure -- so under

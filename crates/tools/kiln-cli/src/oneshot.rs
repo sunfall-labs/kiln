@@ -42,6 +42,40 @@ impl Backend for OneShot {
             .map_err(|source| Error::io("cannot reach the in-process engine", source))?;
         interpret(response)
     }
+
+    fn request_streaming(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+    ) -> Result<Response> {
+        let response = self
+            .client
+            .request_streaming(request, on_output)
+            .map_err(|source| Error::io("cannot reach the in-process engine", source))?;
+        interpret(response)
+    }
+
+    fn request_native_streaming(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+    ) -> Result<Response> {
+        if matches!(
+            request,
+            Request::NativeRun {
+                stream_output: true,
+                ..
+            }
+        ) {
+            let response = self
+                .client
+                .request_native_inheriting(request)
+                .map_err(|source| Error::io("cannot reach the in-process engine", source))?;
+            interpret(response)
+        } else {
+            self.request_streaming(request, on_output)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -74,6 +108,58 @@ mod tests {
 
     #[cfg(not(unix))]
     fn share_native_semantic_cache(_fixture: &std::path::Path) {}
+
+    #[test]
+    fn process_exit_code_is_applied_after_deferred_work_in_both_engines() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-process-exit-code-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create exit-code fixture");
+        let source = fixture.join("exit-code.mjs");
+        std::fs::write(
+            &source,
+            "process.exitCode = \"3\";\nsetTimeout(() => { process.exitCode = 7; }, 0);\n",
+        )
+        .expect("write exit-code fixture");
+        share_native_semantic_cache(&fixture);
+
+        let interpreted = {
+            let mut session = OneShot::start().expect("start interpreted engine");
+            commands::run(
+                &mut session,
+                &source,
+                &[],
+                &fixture,
+                true,
+                StepBudget::Unmetered,
+                false,
+            )
+            .expect("run interpreted exit-code fixture")
+        };
+        assert_eq!(interpreted.exit_code, 7);
+
+        let native = {
+            let mut session = OneShot::start().expect("start native engine");
+            commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                true,
+                false,
+                false,
+                None,
+                None,
+                false,
+            )
+            .expect("run native exit-code fixture")
+        };
+        assert_eq!(native.exit_code, 7);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
 
     #[test]
     fn concurrent_one_shot_sessions_have_private_engines() {
@@ -163,6 +249,7 @@ mod tests {
                 &fixture,
                 false,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("run package graph");
             std::fs::write(package.join("index.js"), "export const answer = 43;\n")
@@ -174,6 +261,7 @@ mod tests {
                 &fixture,
                 false,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("rerun updated package graph");
             (output, updated)
@@ -208,6 +296,7 @@ mod tests {
                 &fixture,
                 true,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("run Node graph")
         };
@@ -249,8 +338,10 @@ server.listen(0, "127.0.0.1", () => {
                 kiln_proto::NativeProfile::Dev,
                 true,
                 false,
+                false,
                 None,
                 None,
+                false,
             )
             .expect("run native Node graph")
         };
@@ -283,8 +374,10 @@ server.listen(0, "127.0.0.1", () => {
                 kiln_proto::NativeProfile::Dev,
                 true,
                 false,
+                false,
                 None,
                 None,
+                false,
             )
             .expect("run canonical native Node server roundtrip")
         };
@@ -324,6 +417,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                &[],
             )
             .expect("build standalone native Node server")
         };
@@ -367,8 +461,10 @@ server.listen(0, "127.0.0.1", () => {
                 kiln_proto::NativeProfile::Dev,
                 true,
                 false,
+                false,
                 None,
                 None,
+                false,
             )
             .expect("run canonical native Node request-body roundtrip")
         };
@@ -415,6 +511,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                &[],
             )
             .expect("build standalone native request-body server")
         };
@@ -484,6 +581,7 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 true,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("run interpreted Node request identity fixture")
         };
@@ -500,8 +598,10 @@ server.listen(0, "127.0.0.1", () => {
                 kiln_proto::NativeProfile::Dev,
                 true,
                 false,
+                false,
                 None,
                 None,
+                false,
             )
             .expect("run native Node request identity fixture")
         };
@@ -536,6 +636,7 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 true,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("run interpreted HTTP half-close fixture")
         };
@@ -552,8 +653,10 @@ server.listen(0, "127.0.0.1", () => {
                 kiln_proto::NativeProfile::Dev,
                 true,
                 false,
+                false,
                 None,
                 None,
+                false,
             )
             .expect("run native HTTP half-close fixture")
         };
@@ -605,6 +708,7 @@ server.listen(0, "127.0.0.1", () => {
                 &fixture,
                 true,
                 StepBudget::Unmetered,
+                false,
             )
             .expect("run dual package graph")
         };
@@ -702,6 +806,7 @@ server.listen(0, "127.0.0.1", () => {
                 true,
                 StepBudget::Unmetered,
                 view,
+                false,
             )
             .expect("run pinned graph")
         else {
@@ -750,6 +855,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                &[],
             )
             .expect("build without kiln extensions")
         };
@@ -766,6 +872,101 @@ server.listen(0, "127.0.0.1", () => {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "false false\nfalse undefined\ntrue\n"
+        );
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn one_shot_native_indirect_eval_returns_eval_error_for_unsupported_statements() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-indirect-eval-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create indirect-eval fixture");
+        let source = fixture.join("main.js");
+        let artifact = fixture.join("main");
+        std::fs::write(
+            &source,
+            "const indirectEval = eval;\n\
+             globalThis.mutation = 0;\n\
+             let caught = false;\n\
+             try { indirectEval('mutation = 1; 3'); } catch (error) { caught = error instanceof EvalError; }\n\
+             console.log(caught, mutation);\n\
+             let syntax = false;\n\
+             try { indirectEval('mutation = 2 )'); } catch (error) { syntax = error instanceof SyntaxError; }\n\
+             console.log(syntax, mutation);\n\
+             let grammar = false;\n\
+             try { indirectEval('mutation = 3 + * 4'); } catch (error) { grammar = error instanceof SyntaxError; }\n\
+             console.log(grammar, mutation);\n\
+             globalThis.bump = () => { mutation++; return 1; };\n\
+             Object.defineProperty(globalThis, 'watched', { get() { mutation++; return 1; } });\n\
+             Object.defineProperty(Object.prototype, 'parseOnlySetter', { set(value) { mutation++; } });\n\
+             let callGrammar = false;\n\
+             try { indirectEval('bump() + globalThis.watched + ({ parseOnlySetter: 1 }) + * 4'); } catch (error) { callGrammar = error instanceof SyntaxError; }\n\
+             console.log(callGrammar, mutation);\n\
+             let computedKey = false;\n\
+             try { indirectEval('({})[bump()] + * 4'); } catch (error) { computedKey = error instanceof SyntaxError; }\n\
+             console.log(computedKey, mutation);\n\
+             let skipped = false;\n\
+             try { indirectEval('true || mutation++ + * 2'); } catch (error) { skipped = error instanceof SyntaxError; }\n\
+             console.log(skipped, mutation);\n\
+             let conditional = false;\n\
+             try { indirectEval('true ? 1 : mutation++ + * 2'); } catch (error) { conditional = error instanceof SyntaxError; }\n\
+             console.log(conditional, mutation);\n\
+             let functionBody = false;\n\
+             try { indirectEval('(function(){ mutation = 7; return 1 + * 2; })'); } catch (error) { functionBody = error instanceof SyntaxError; }\n\
+             console.log(functionBody, mutation);\n\
+             let arrowBody = false;\n\
+             try { indirectEval('() => { mutation = 8; return 1 + * 2; }'); } catch (error) { arrowBody = error instanceof SyntaxError; }\n\
+             console.log(arrowBody, mutation);\n\
+             let arrowExpression = false;\n\
+             try { indirectEval('() => (mutation = 9) + * 2'); } catch (error) { arrowExpression = error instanceof SyntaxError; }\n\
+             console.log(arrowExpression, mutation);\n\
+             let controlBodies = false;\n\
+             try { indirectEval('(function(){ do { mutation++; } while (false); let malformed = ; })'); } catch (error) { controlBodies = error instanceof SyntaxError; }\n\
+             console.log(controlBodies, mutation);\n\
+             let parameterGrammar = false;\n\
+             try { indirectEval('(function(a,,b){ mutation++; })'); } catch (error) { parameterGrammar = error instanceof SyntaxError; }\n\
+             console.log(parameterGrammar, mutation);\n\
+             const validControl = indirectEval('(function(){ let n = 0; function bump() { n++; } while (n < 1) { n++; } do { n++; } while (false); for (let i = 0; i < 1; i++) { n++; } bump(); switch (n) { case 4: n++; break; default: n = 99; } try { throw 1; } catch (error) { n += error; } finally { n++; } return n; })');\n\
+             console.log(validControl());\n",
+        )
+        .expect("write source");
+        share_native_semantic_cache(&fixture);
+
+        let built = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            commands::build(
+                &mut session,
+                &source,
+                &fixture,
+                Some(&artifact),
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                false,
+                None,
+                false,
+                None,
+                None,
+                &[],
+            )
+            .expect("build unsupported indirect eval fixture")
+        };
+        assert_eq!(built.exit_code, 0);
+        let output = std::process::Command::new(&artifact)
+            .output()
+            .expect("run the native indirect-eval binary");
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "true 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\ntrue 0\n7\n"
         );
         let _ = std::fs::remove_dir_all(&fixture);
     }
@@ -801,6 +1002,7 @@ server.listen(0, "127.0.0.1", () => {
                 false,
                 None,
                 None,
+                &[],
             )
             .expect("build with explain")
         };
@@ -816,6 +1018,136 @@ server.listen(0, "127.0.0.1", () => {
         assert!(built.text.contains("greeting"), "{}", built.text);
         assert!(built.text.contains("Function add"), "{}", built.text);
         assert!(built.text.contains("Sites:"), "{}", built.text);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    /// A server's output has to reach the client while the server runs. `kiln run` used to hold
+    /// every line until the program exited, which for a server is never: `listen`'s callback ran
+    /// and printed "listening", and nothing was shown until the process was killed.
+    ///
+    /// The server closes itself only after it has answered a request, and the request is sent
+    /// from the client's output callback the moment "listening" arrives. A client that is only
+    /// shown output at exit therefore never sends it; the watchdog sends it after a delay, so
+    /// that failure is an assertion rather than a hung test.
+    #[test]
+    fn a_servers_listening_line_reaches_the_client_before_the_server_exits() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Spy {
+            inner: OneShot,
+            seen: Vec<(kiln_proto::OutputStream, String)>,
+            request_sent_by: Arc<std::sync::Mutex<Option<&'static str>>>,
+            sent: Arc<AtomicBool>,
+            port: u16,
+        }
+
+        fn get(port: u16) {
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+                .expect("send request");
+            let mut answer = String::new();
+            let _ = stream.read_to_string(&mut answer);
+        }
+
+        impl Backend for Spy {
+            fn request(&mut self, request: Request) -> Result<Response> {
+                self.inner.request(request)
+            }
+
+            fn request_streaming(
+                &mut self,
+                request: Request,
+                _on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+            ) -> Result<Response> {
+                let Spy {
+                    inner,
+                    seen,
+                    request_sent_by,
+                    sent,
+                    port,
+                } = self;
+                inner.request_streaming(request, &mut |stream, text| {
+                    seen.push((stream, text.to_owned()));
+                    if text.contains("listening") && !sent.swap(true, Ordering::SeqCst) {
+                        *request_sent_by.lock().unwrap() = Some("output");
+                        get(*port);
+                    }
+                })
+            }
+        }
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("find a free port")
+            .local_addr()
+            .expect("local address")
+            .port();
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-streamed-listen-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create streamed listen fixture");
+        let source = fixture.join("server.mjs");
+        std::fs::write(
+            &source,
+            format!(
+                "import http from 'node:http';\n\
+                 const server = http.createServer((req, res) => {{\n\
+                   console.log('request');\n\
+                   res.end('ok');\n\
+                   server.close();\n\
+                 }});\n\
+                 server.listen({port}, '127.0.0.1', () => console.log('listening'));\n"
+            ),
+        )
+        .expect("write server");
+
+        let sent = Arc::new(AtomicBool::new(false));
+        let request_sent_by = Arc::new(std::sync::Mutex::new(None));
+        {
+            let sent = Arc::clone(&sent);
+            let by = Arc::clone(&request_sent_by);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                if !sent.swap(true, Ordering::SeqCst) {
+                    *by.lock().unwrap() = Some("watchdog");
+                    get(port);
+                }
+            });
+        }
+        let mut spy = Spy {
+            inner: OneShot::start().expect("start an in-process engine"),
+            seen: Vec::new(),
+            request_sent_by: Arc::clone(&request_sent_by),
+            sent,
+            port,
+        };
+        let output = commands::run(
+            &mut spy,
+            &source,
+            &[],
+            &fixture,
+            true,
+            StepBudget::Unmetered,
+            true,
+        )
+        .expect("run the server");
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(
+            *request_sent_by.lock().unwrap(),
+            Some("output"),
+            "the client was not shown 'listening' while the server was still running"
+        );
+        let streamed: Vec<&str> = spy.seen.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(streamed.concat(), "listening\nrequest\n", "{streamed:?}");
+        assert_eq!(
+            output.text, "",
+            "streamed output is not repeated in the summary"
+        );
         let _ = std::fs::remove_dir_all(&fixture);
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
 // A short, fixed admission limit keeps the process-wide cache small even when
@@ -223,7 +223,7 @@ pub(super) fn string_property(name: &str) -> Value {
         // and `String.prototype.toLocaleString` is neither: it is inherited from
         // `Object.prototype`, so publishing one here made it an own property that is not one.
         "toString" => Value::Native(Native::StringToStringMethod, RealmId::PRIMARY),
-        "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
+        "valueOf" => Value::Native(Native::StringValueOf, RealmId::PRIMARY),
         "match" => Value::Native(Native::StringMatch, RealmId::PRIMARY),
         "matchAll" => Value::Native(Native::StringMatchAll, RealmId::PRIMARY),
         "search" => Value::Native(Native::StringSearch, RealmId::PRIMARY),
@@ -256,12 +256,22 @@ pub(super) fn build_raw_json(text: &StringUnits) -> Result<Value, ExecutionError
         return Err(ExecutionError::InvalidJson);
     }
     let mut object = ObjectData::default();
-    object.set(RAW_JSON_TEXT, Value::String(text.clone()));
-    object.set_non_enumerable(RAW_JSON_MARK, Value::Boolean(true));
+    object.define_value(
+        RAW_JSON_TEXT,
+        Value::String(text.clone()),
+        Attributes {
+            writable: false,
+            enumerable: true,
+            configurable: false,
+        },
+    );
+    object.raw_json_text = Some(text.clone());
     // A null prototype, so the object cannot answer to `toJSON`, `toString` or anything else a
     // program might have put on `Object.prototype` -- it is a carrier, not a participant.
     object.set_prototype(Value::Null);
-    Ok(Value::Object(Rc::new(RefCell::new(object))))
+    object.frozen = true;
+    object.extensible = false;
+    Ok(Value::Object(tracked_object(object)))
 }
 
 /// What a `WeakRef` inherits from `WeakRef.prototype`.
@@ -275,7 +285,6 @@ pub(super) fn build_raw_json(text: &StringUnits) -> Result<Value, ExecutionError
 /// Reserved, so it never enumerates -- and it is also the only mark that separates a real error
 /// from an object shaped like one, which is what `Error.isError` answers from.
 pub(super) const ERROR_TRACE: &str = "@@trace";
-pub(super) const CALL_SITE_NAME: &str = "@@call-site-name";
 
 /// The reserved slots a `DisposableStack` carries.
 pub(super) const DISPOSE_ENTRIES: &str = "@@disposeEntries";
@@ -356,7 +365,7 @@ pub(super) fn new_disposable_stack(flavour: Disposal) -> Value {
         }),
         RealmId::PRIMARY,
     ));
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 pub(super) fn disposable_stack_method(name: &str) -> Value {
@@ -440,13 +449,8 @@ pub(super) fn finalization_registry_method(name: &str) -> Value {
     }
 }
 
-/// The slot that marks a raw JSON object, and the property that carries its text.
-///
-/// Two, because the text is a property a program reads -- `JSON.rawJSON(1).rawJSON` is `"1"` --
-/// while the mark is not: the object is required to have exactly one own property, so the thing
-/// that says "this is raw JSON" has to be invisible to `Object.getOwnPropertyNames`. The
-/// reserved prefix is what makes it so.
-pub(super) const RAW_JSON_MARK: &str = "@@raw-json";
+/// The public carrier slot. Authenticity lives in `ObjectData.raw_json_text`, not in a
+/// user-visible property, so a lookalike object cannot forge the raw JSON brand.
 pub(super) const RAW_JSON_TEXT: &str = "rawJSON";
 
 /// The slot a `WeakRef` keeps its target in, and the two a registry keeps its state in.
@@ -624,7 +628,7 @@ pub(super) fn new_set(values: Vec<Value>) -> Value {
         RealmId::PRIMARY,
     ));
     data.set(COLLECTION_SIZE, Value::Number(size));
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// Whether this value is one of the two weak collections.
@@ -716,7 +720,7 @@ pub(super) fn array_iterator_over(native: Native, iterated: &Value) -> Value {
         WellKnown::Iterator.property_key(),
         Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(iterator)))
+    Value::Object(tracked_object(iterator))
 }
 
 pub(super) fn iterator_state(receiver: &Value) -> Result<Value, ExecutionError> {
@@ -848,7 +852,6 @@ pub(super) fn array_method_value(
         ArrayMethod::Keys => Value::Native(Native::ArrayKeys, realm),
         ArrayMethod::LastIndexOf => Value::Native(Native::ArrayLastIndexOf, realm),
         ArrayMethod::Map => Value::Callback(CallbackMethod::Map, realm),
-        ArrayMethod::ParallelMap => Value::Callback(CallbackMethod::ParallelMap, realm),
         ArrayMethod::Pop => Value::Native(Native::ArrayPop, realm),
         ArrayMethod::Push => Value::Native(Native::ArrayPush, realm),
         ArrayMethod::Reduce => Value::Callback(CallbackMethod::Reduce, realm),
@@ -889,11 +892,6 @@ pub enum CallbackMethod {
     /// `throw` on an async generator: raises at the suspension point, promising the next step.
     AsyncGeneratorThrow,
     Map,
-    /// `parallelMap`: `map` by another name on this engine. The compiled backend may run the
-    /// walk on a pool (ADR 0058, application 2); the answer is the same array either way, and
-    /// a name that reads `undefined` here while the other engine has a value is the failure
-    /// CLAUDE.md calls the expensive one.
-    ParallelMap,
     ForEach,
     Filter,
     /// `reduce`: the only one whose callback takes the accumulator, so it does not fit the
@@ -1015,7 +1013,7 @@ pub(super) fn array_index_key(key: PropertyKeyRef<'_>) -> Option<usize> {
 /// language uses to separate an element from a property that merely looks like one.
 pub(super) fn canonical_index(name: &str) -> Option<usize> {
     let index: usize = name.parse().ok()?;
-    (index.to_string() == name).then_some(index)
+    (index <= u32::MAX as usize - 1 && index.to_string() == name).then_some(index)
 }
 
 /// The same array-index test over the language's UTF-16 key units. This avoids constructing a
@@ -1206,6 +1204,15 @@ pub(super) fn parse_json_text(text: &StringUnits) -> Result<Value, ExecutionErro
     kiln_json::parse_units(text, json_value_from_tape).map_err(|_| ExecutionError::InvalidJson)?
 }
 
+pub(super) type JsonSourceMap = HashMap<(usize, StringUnits), (Value, StringUnits)>;
+
+pub(super) fn parse_json_text_with_sources(
+    text: &StringUnits,
+) -> Result<(Value, JsonSourceMap, Option<StringUnits>), ExecutionError> {
+    kiln_json::parse_units_with_source_spans(text, json_value_and_sources_from_tape)
+        .map_err(|_| ExecutionError::InvalidJson)?
+}
+
 pub(super) fn is_json_whitespace(unit: u16) -> bool {
     matches!(unit, 0x20 | 0x09 | 0x0a | 0x0d)
 }
@@ -1262,6 +1269,21 @@ pub(super) fn delete_property_key(
             closure.properties.borrow_mut().remove_key(key);
             true
         }
+        // Bound functions carry ordinary user-defined own properties in their own store too.
+        // In particular, deleting a configurable override must expose the current prototype
+        // chain (or no property after [[Prototype]] is set to null).
+        Value::Bound(bound) => {
+            let removable = bound
+                .properties
+                .borrow()
+                .get_own_attributes_key(key)
+                .is_none_or(|attributes| attributes.configurable);
+            if !removable {
+                return false;
+            }
+            bound.properties.borrow_mut().remove_key(key);
+            true
+        }
         // Removing an element leaves a *hole* rather than shortening the array: the slot reads
         // as undefined and `length` is unchanged, but `1 in a` is false and a console shows
         // `<1 empty item>`. The comment said hole and the code wrote undefined, which is the
@@ -1269,9 +1291,6 @@ pub(super) fn delete_property_key(
         Value::Array(items) => {
             // `length` is non-configurable, so `delete a.length` is false and the array keeps it.
             if key.matches_ascii("length") {
-                return false;
-            }
-            if items.properties.borrow().is_frozen() {
                 return false;
             }
             let Some(index) = array_index_key(key) else {
@@ -1282,10 +1301,11 @@ pub(super) fn delete_property_key(
                 // property and restores it and had been restoring one that never left.
                 return remove_exotic_property_key(&items.properties, key);
             };
+            let frozen = items.properties.borrow().is_frozen();
             // An element a program locked down will not go, and `delete` reports that
             // rather than leaving `length` describing an array that no longer matches it.
             if let Some(entry) = array_exotic_element(items, index) {
-                if !entry.attributes.configurable {
+                if frozen || !entry.attributes.configurable {
                     return false;
                 }
                 items
@@ -1294,6 +1314,12 @@ pub(super) fn delete_property_key(
                     .retain(|other| other.index != index);
             }
             if let Some(slot) = items.borrow_mut().get_mut(index) {
+                // A frozen dense element is present even though it has no per-element entry in
+                // the exotic-property list. Check presence before the frozen state so deleting a
+                // hole in a frozen array still correctly reports success.
+                if frozen && !matches!(slot, Value::Native(Native::Hole, _)) {
+                    return false;
+                }
                 items.sparse.set(true);
                 *slot = Value::Native(Native::Hole, RealmId::PRIMARY);
             }
@@ -1374,15 +1400,21 @@ pub(super) fn own_properties_units(
             .entries()
             .map(|(key, property)| (key.clone(), property.clone()))
             .collect(),
-        Value::Object(object) => string_wrapper_entries_units(value)
-            .into_iter()
-            .chain(
+        Value::Object(object) => {
+            let object = object.borrow();
+            let entries = if object.namespace_bindings.is_some() {
+                object.resolved_entries()
+            } else {
                 object
-                    .borrow()
                     .entries()
-                    .map(|(key, property)| (key.clone(), property.clone())),
-            )
-            .collect(),
+                    .map(|(key, property)| (key.clone(), property.clone()))
+                    .collect()
+            };
+            string_wrapper_entries_units(value)
+                .into_iter()
+                .chain(entries)
+                .collect()
+        }
         // The indices first and then whatever the program hung on the array by name, which is
         // the order `OrdinaryOwnPropertyKeys` gives and the order `Object.keys` already used
         // here. Stopping at the indices made this function disagree with the own-key walk beside
@@ -1464,9 +1496,13 @@ pub(super) fn own_string_properties_units(
     value: &Value,
 ) -> Vec<(StringUnits, Property)> {
     let stored = |data: &ObjectData| {
-        data.string_entries()
-            .map(|(key, property)| (key.clone(), property.clone()))
-            .collect::<Vec<_>>()
+        if data.namespace_bindings.is_some() {
+            data.resolved_string_entries()
+        } else {
+            data.string_entries()
+                .map(|(key, property)| (key.clone(), property.clone()))
+                .collect::<Vec<_>>()
+        }
     };
     match value {
         Value::Object(object) => string_wrapper_entries_units(value)
@@ -1896,20 +1932,30 @@ pub(super) fn relative_index(argument: Option<&Value>, length: usize, default: u
 pub(super) fn json_value_from_tape(
     document: &kiln_json::Tape<'_>,
 ) -> Result<Value, ExecutionError> {
+    json_value_and_sources_from_tape(document).map(|(value, _, _)| value)
+}
+
+pub(super) fn json_value_and_sources_from_tape(
+    document: &kiln_json::Tape<'_>,
+) -> Result<(Value, JsonSourceMap, Option<StringUnits>), ExecutionError> {
     enum Frame {
         Array {
             items: Vec<Value>,
             remaining: usize,
+            sources: HashMap<StringUnits, (Value, StringUnits)>,
         },
         Object {
             data: ObjectData,
             remaining: usize,
             key: Option<StringUnits>,
+            sources: HashMap<StringUnits, (Value, StringUnits)>,
         },
     }
     let mut stack: Vec<Frame> = Vec::new();
     let mut root = None;
-    for node in document.nodes() {
+    let mut entries = HashMap::new();
+    let mut root_source = None;
+    for (node_index, node) in document.nodes().iter().enumerate() {
         if root.is_some() {
             return Err(ExecutionError::InvalidJson);
         }
@@ -1929,6 +1975,7 @@ pub(super) fn json_value_from_tape(
                     stack.push(Frame::Array {
                         items: Vec::with_capacity(count),
                         remaining: count,
+                        sources: HashMap::new(),
                     });
                     continue;
                 }
@@ -1940,13 +1987,27 @@ pub(super) fn json_value_from_tape(
                         data: ObjectData::default(),
                         remaining: count,
                         key: None,
+                        sources: HashMap::new(),
                     });
                     continue;
                 }
-                Value::Object(Rc::new(RefCell::new(ObjectData::default())))
+                Value::Object(tracked_object(ObjectData::default()))
             }
             _ => return Err(ExecutionError::InvalidJson),
         };
+        let mut source = matches!(
+            node.tag,
+            kiln_json::TAG_NULL
+                | kiln_json::TAG_FALSE
+                | kiln_json::TAG_TRUE
+                | kiln_json::TAG_NUMBER
+                | kiln_json::TAG_STRING
+        )
+        .then(|| document.source_units(node_index))
+        .flatten();
+        if node_index == 0 && stack.is_empty() {
+            root_source = source.clone();
+        }
         // Deliver the value to the container it belongs to, and every container that completes
         // with it to the one above.
         loop {
@@ -1955,7 +2016,17 @@ pub(super) fn json_value_from_tape(
                 break;
             };
             match frame {
-                Frame::Array { items, remaining } => {
+                Frame::Array {
+                    items,
+                    remaining,
+                    sources,
+                } => {
+                    if let Some(raw) = source.clone() {
+                        sources.insert(
+                            StringUnits::from(items.len().to_string()),
+                            (value.clone(), raw),
+                        );
+                    }
                     items.push(value);
                     *remaining -= 1;
                     if *remaining != 0 {
@@ -1966,6 +2037,7 @@ pub(super) fn json_value_from_tape(
                     data,
                     remaining,
                     key,
+                    sources,
                 } => match key.take() {
                     None => {
                         let Value::String(name) = value else {
@@ -1975,6 +2047,15 @@ pub(super) fn json_value_from_tape(
                         break;
                     }
                     Some(name) => {
+                        if let Some(raw) = source.clone() {
+                            sources.insert(name.clone(), (value.clone(), raw));
+                        } else {
+                            // A repeated object-valued key replaces any earlier primitive
+                            // token source. The final value has no primitive source, and keeping
+                            // the old entry would incorrectly expose that token because the
+                            // holder and value identities still match after parsing.
+                            sources.remove(&name);
+                        }
                         data.set_units(&name, value);
                         *remaining -= 1;
                         if *remaining != 0 {
@@ -1984,13 +2065,41 @@ pub(super) fn json_value_from_tape(
                 },
             }
             value = match stack.pop() {
-                Some(Frame::Array { items, .. }) => Value::Array(ArrayData::new(items)),
-                Some(Frame::Object { data, .. }) => Value::Object(Rc::new(RefCell::new(data))),
+                Some(Frame::Array { items, sources, .. }) => {
+                    let array = ArrayData::new(items);
+                    let identity = Rc::as_ptr(&array) as usize;
+                    entries.extend(
+                        sources
+                            .into_iter()
+                            .map(|(key, (value, raw))| ((identity, key), (value, raw))),
+                    );
+                    Value::Array(array)
+                }
+                Some(Frame::Object { data, sources, .. }) => {
+                    let object = tracked_object(data);
+                    let identity = Rc::as_ptr(&object) as usize;
+                    entries.extend(
+                        sources
+                            .into_iter()
+                            .map(|(key, (value, raw))| ((identity, key), (value, raw))),
+                    );
+                    Value::Object(object)
+                }
                 None => return Err(ExecutionError::InvalidJson),
             };
+            // A completed array or object has no lexical primitive source of its own. `source`
+            // still describes the last tape node consumed while assembling this container;
+            // allowing it to flow to the parent would incorrectly expose that child's token as the
+            // container property's `context.source` (for example `[]` receiving its last
+            // element's `null`).
+            source = None;
         }
     }
-    root.ok_or(ExecutionError::InvalidJson)
+    Ok((
+        root.ok_or(ExecutionError::InvalidJson)?,
+        entries,
+        root_source,
+    ))
 }
 
 /// Render a value the way a console does.
@@ -2001,14 +2110,13 @@ pub(super) fn json_value_from_tape(
 /// are not, for the same reason -- `console.log("hi")` prints hi, but `{ a: "hi" }` has to show
 /// that `a` holds a string rather than a bare word.
 ///
-/// Follows node's `util.inspect` closely enough for `scripts/differential.sh` to diff against it,
-/// with two documented limits: output is always one line, where node wraps past about 72
-/// characters, and a cycle is marked `[Circular *1]` without node's matching `<ref *1>` prefix.
+/// Follows node's `util.inspect` closely enough for `scripts/differential.sh` to diff against it.
+/// A cycle is marked `[Circular *1]` without node's matching `<ref *1>` prefix.
 pub(crate) fn inspect(value: &Value) -> String {
     match value {
         // A top-level string prints as itself; only a nested one is quoted.
         Value::String(text) => text.to_lossy_string(),
-        other => inspect_nested(other, 0, &mut Vec::new()),
+        other => inspect_nested_at(other, 0, &mut Vec::new(), 0),
     }
 }
 
@@ -2016,6 +2124,10 @@ pub(crate) fn inspect(value: &Value) -> String {
 pub(super) const INSPECT_DEPTH: usize = 2;
 
 pub(super) fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String {
+    inspect_nested_at(value, depth, seen, 0)
+}
+
+fn inspect_nested_at(value: &Value, depth: usize, seen: &mut Vec<usize>, column: usize) -> String {
     match value {
         Value::String(text) => quote_for_console(&text.to_lossy_string()),
         Value::Undefined | Value::Null | Value::Boolean(_) | Value::Number(_) => {
@@ -2029,10 +2141,14 @@ pub(super) fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>)
             }
         }
         Value::Symbol(symbol) => format!("Symbol({})", symbol.description()),
-        Value::Function(closure) => match &closure.name {
-            Some(name) => format!("[Function: {name}]"),
-            None => "[Function (anonymous)]".to_owned(),
-        },
+        Value::Function(closure) => {
+            let name = closure.display_name_units();
+            if name.is_empty() {
+                "[Function (anonymous)]".to_owned()
+            } else {
+                format!("[Function: {}]", name.to_lossy_string())
+            }
+        }
         Value::Native(native, _) => match namespace_name(native) {
             Some(name) => format!("Object [{name}] {{}}"),
             None => format!("[Function: {}]", native_js_name(native)),
@@ -2053,7 +2169,10 @@ pub(super) fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>)
         Value::CommonJsResolve(_) => "[Function: resolve]".to_owned(),
         // Node shows what the traps produce; this shows the target, and says so, rather than
         // running a program's code because something was printed.
-        Value::Proxy(proxy) => format!("Proxy [ {} ]", inspect_nested(&proxy.target, depth, seen)),
+        Value::Proxy(proxy) => format!(
+            "Proxy [ {} ]",
+            inspect_nested_at(&proxy.target, depth, seen, column + 8)
+        ),
         Value::TypedArray(view) => {
             let items = view
                 .items()
@@ -2159,7 +2278,7 @@ pub(super) fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>)
             if depth > INSPECT_DEPTH {
                 return "[Object]".to_owned();
             }
-            inspect_object(&object.borrow(), depth, guard.seen)
+            inspect_object_at(&object.borrow(), depth, guard.seen, column)
         }
         Value::Shared(facade) => format!(
             "Shared {{ graph: {}, node: {} }}",
@@ -2170,7 +2289,14 @@ pub(super) fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>)
     }
 }
 
-pub(super) fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> String {
+fn inspect_object_at(
+    object: &ObjectData,
+    depth: usize,
+    seen: &mut Vec<usize>,
+    column: usize,
+) -> String {
+    // Match Node's default `breakLength`: compact objects stay on the current line while
+    // multiline descendants or the current column would push the row beyond 80 characters.
     // A Set or Map is an object carrying reserved state, and a console shows what it holds
     // rather than the bookkeeping that makes it work.
     if let Some(Value::Array(entries)) = object.get_own("@@entries") {
@@ -2213,24 +2339,19 @@ pub(super) fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<u
         return format!("{label}({}) {{ {} }}", live.len(), parts.join(", "));
     }
 
-    let parts = object
-        .entries()
+    let entries: Vec<(StringUnits, Property)> = if object.namespace_bindings.is_some() {
+        object.resolved_entries()
+    } else {
+        object
+            .entries()
+            .map(|(key, property)| (key.clone(), property.clone()))
+            .collect()
+    };
+    let entries = entries
+        .into_iter()
         // Reserved keys are the VM's own and symbol-keyed properties; node shows the latter as
         // `[Symbol(x)]: v`, which needs a key-to-symbol map this VM does not keep.
         .filter(|(key, _)| !symbol::is_reserved(&key.to_lossy_string()))
-        .map(|(key, property)| {
-            let shown = match property {
-                Property::Value(value) => inspect_nested(value, depth + 1, seen),
-                // Node names the accessor rather than calling it: showing a value here would run
-                // the program's code just because something was printed.
-                Property::Accessor { get, set } => match (get.is_some(), set.is_some()) {
-                    (true, true) => "[Getter/Setter]".to_owned(),
-                    (true, false) => "[Getter]".to_owned(),
-                    _ => "[Setter]".to_owned(),
-                },
-            };
-            format!("{}: {}", inspect_key(&key.to_lossy_string()), shown)
-        })
         .collect::<Vec<_>>();
     // Node names the class an instance came from, so a printed object says what it is. A plain
     // object's prototype is `Object.prototype`, which this realm does not have as an object, so
@@ -2239,10 +2360,50 @@ pub(super) fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<u
         Some(name) => format!("{name} "),
         None => String::new(),
     };
-    if parts.is_empty() {
+    if entries.is_empty() {
         return format!("{label}{{}}");
     }
-    format!("{label}{{ {} }}", parts.join(", "))
+    let mut parts = Vec::with_capacity(entries.len());
+    let mut body_len = 0usize;
+    let mut has_newline = false;
+    for (key, property) in entries {
+        let key = inspect_key(&key.to_lossy_string());
+        let shown = match property {
+            Property::Value(value) => inspect_nested_at(
+                &value,
+                depth + 1,
+                seen,
+                column
+                    .saturating_add(label.len())
+                    .saturating_add(2)
+                    .saturating_add(body_len)
+                    .saturating_add(key.len())
+                    .saturating_add(2),
+            ),
+            // Node names the accessor rather than calling it: showing a value here would run
+            // the program's code just because something was printed.
+            Property::Accessor { get, set } => match (get.is_some(), set.is_some()) {
+                (true, true) => "[Getter/Setter]".to_owned(),
+                (true, false) => "[Getter]".to_owned(),
+                _ => "[Setter]".to_owned(),
+            },
+        };
+        let part = format!("{key}: {shown}");
+        has_newline |= part.contains('\n');
+        body_len = body_len.saturating_add(part.len() + usize::from(!parts.is_empty()) * 2);
+        parts.push(part);
+    }
+    let flat_len = label.len().saturating_add(4).saturating_add(body_len);
+    if !has_newline && column.saturating_add(flat_len) <= 80 {
+        format!("{label}{{ {} }}", parts.join(", "))
+    } else {
+        let indent = "  ".repeat(depth + 1);
+        let close = "  ".repeat(depth);
+        format!(
+            "{label}{{\n{indent}{}\n{close}}}",
+            parts.join(&format!(",\n{indent}"))
+        )
+    }
 }
 
 /// The name a console puts in front of an object's contents, if it has one.
@@ -2297,8 +2458,8 @@ pub(super) fn build_regexp(pattern: &StringUnits, flags: &str) -> Option<Value> 
                 index += 1;
             }
         }
-        let compiled =
-            Arc::new(regress::Regex::from_unicode(codepoints.iter().copied(), flags).ok()?);
+        let normalized = kiln_regexp::normalize_pattern_for_flags(codepoints, flags)?;
+        let compiled = Arc::new(regress::Regex::from_unicode(normalized.into_iter(), flags).ok()?);
         if cacheable {
             compiled_regexp_cache()
                 .lock()
@@ -2405,22 +2566,17 @@ pub(super) fn bounded_string(bytes: usize) -> Result<(), ExecutionError> {
     Ok(())
 }
 
-/// Append one character, refusing past [`MAX_STRING_STORAGE_BYTES`].
-///
-/// A replacement template is expanded character by character, and `$1` against a megabyte-long
-/// match appends a megabyte every time it appears -- so the refusal has to be checked as the
-/// string grows. Checked once at the end, the allocation has already happened: this is what took
-/// `staging/sm/String/replace-math.js` to 3.9 GB.
-pub(super) fn push_bounded_char(out: &mut String, character: char) -> Result<(), ExecutionError> {
-    bounded_string(out.len().saturating_add(character.len_utf8()))?;
-    out.push(character);
-    Ok(())
-}
-
 /// Append text without growing past [`MAX_STRING_STORAGE_BYTES`].
 pub(super) fn push_bounded(out: &mut String, text: &str) -> Result<(), ExecutionError> {
     bounded_string(out.len().saturating_add(text.len()))?;
     out.push_str(text);
+    Ok(())
+}
+
+/// Append UTF-16 units without normalizing lone surrogates through Rust `String`.
+pub(super) fn push_bounded_units(out: &mut Vec<u16>, units: &[u16]) -> Result<(), ExecutionError> {
+    bounded_string(out.len().saturating_add(units.len().saturating_mul(2)))?;
+    out.extend_from_slice(units);
     Ok(())
 }
 

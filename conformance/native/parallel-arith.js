@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// The parallel/sequential differential harness (.scratch/parallel-builtins issue 02), tier 0:
+// The parallel/sequential differential harness (docs/issues/parallel-builtins issue 02), tier 0:
 // arithmetic callbacks that qualify for the pool. Each runs through `parallelMap` and `map`,
 // and the answers must be the same values element for element (`Object.is`, so `-0` and `NaN`
 // count). The probe throws on a difference, so the interpreter fails it outright;

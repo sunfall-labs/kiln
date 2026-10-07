@@ -11,7 +11,9 @@ use std::time::Instant;
 
 use kiln_frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
-use kiln_interpreter::{ExecutionLimits, execute_node_with_strictness, execute_with_strictness};
+use kiln_interpreter::{
+    ExecutionLimits, execute_node_with_clock_and_strictness, execute_with_strictness,
+};
 use kiln_module_eval::ModuleGraphExecution;
 use kiln_module_graph::ModuleGraph;
 use kiln_module_resolver::{
@@ -78,12 +80,27 @@ pub fn run_node_against_expectation(
     expected: Expectation<'_>,
     mode: RunMode,
 ) -> VariantResult {
+    run_node_against_expectation_with_clock(
+        path,
+        expected,
+        mode,
+        kiln_runtime::ClockCapability::Virtual,
+    )
+}
+
+/// [`run_node_against_expectation`] with a manifest-selected Node clock policy.
+pub fn run_node_against_expectation_with_clock(
+    path: &Path,
+    expected: Expectation<'_>,
+    mode: RunMode,
+    clock: kiln_runtime::ClockCapability,
+) -> VariantResult {
     VariantResult {
         variant: Variant::Sloppy,
         result: if is_javascript_source(path) {
-            run_node_module(path, expected, mode)
+            run_node_module(path, expected, mode, clock)
         } else {
-            run_with_executor(path, expected, mode, true, None)
+            run_with_executor_with_clock(path, expected, mode, true, None, clock)
         },
     }
 }
@@ -91,7 +108,12 @@ pub fn run_node_against_expectation(
 /// Run a Node module through the production resolver, graph, linker, shared realm session, and
 /// Tokio-owned Adapter. Keeping this path in the corpus prevents a single-file test executor from
 /// becoming a second, easier-to-pass Node runtime that real programs never use.
-fn run_node_module(path: &Path, expected: Expectation<'_>, mode: RunMode) -> CaseResult {
+fn run_node_module(
+    path: &Path,
+    expected: Expectation<'_>,
+    mode: RunMode,
+    clock: kiln_runtime::ClockCapability,
+) -> CaseResult {
     let started = Instant::now();
     if let Some(reason) = uninstalled_packages_requirement(path) {
         return skipped(&reason, started);
@@ -177,10 +199,11 @@ fn run_node_module(path: &Path, expected: Expectation<'_>, mode: RunMode) -> Cas
     let _hosted = kiln_runtime::signals::host_program();
     let mut host = CaptureHost::new();
     let outcome = graph
-        .execute_node(
+        .execute_node_with_clock(
             &mut host,
             ExecutionLimits::default(),
             crate::source_compiler::capabilities(path.parent()),
+            clock,
         )
         .map(|_| ())
         .map_err(|error| error.to_string());
@@ -193,6 +216,24 @@ fn run_with_executor(
     mode: RunMode,
     node: bool,
     worker: Option<&mut InterpreterWorker>,
+) -> CaseResult {
+    run_with_executor_with_clock(
+        path,
+        expected,
+        mode,
+        node,
+        worker,
+        kiln_runtime::ClockCapability::Virtual,
+    )
+}
+
+fn run_with_executor_with_clock(
+    path: &Path,
+    expected: Expectation<'_>,
+    mode: RunMode,
+    node: bool,
+    worker: Option<&mut InterpreterWorker>,
+    clock: kiln_runtime::ClockCapability,
 ) -> CaseResult {
     let started = Instant::now();
     if let Some(reason) = out_of_process_build_requirement(path) {
@@ -279,13 +320,14 @@ fn run_with_executor(
     let program = std::rc::Rc::new(program);
     let strictness = std::rc::Rc::new(strictness);
     let result = if node {
-        execute_node_with_strictness(
+        execute_node_with_clock_and_strictness(
             program,
             strictness,
             &mut host,
             ExecutionLimits::default(),
             crate::source_compiler::capabilities(path.parent())
                 .with_realm_bootstrap(kiln_module_eval::realm_bootstrap(true)),
+            clock,
         )
         .map(|_| ())
     } else if let Some(worker) = worker {

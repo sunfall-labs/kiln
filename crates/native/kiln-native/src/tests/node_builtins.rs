@@ -12,6 +12,9 @@ fn typed_node_querystring_has_a_native_materializer() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(1_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -22,6 +25,7 @@ fn typed_node_querystring_has_a_native_materializer() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["node:querystring".to_owned()],
         imports: Vec::new(),
@@ -170,10 +174,10 @@ console.log(path.dirname === staticallyLoadedPath.dirname, path.basename("/tmp/f
 fn native_create_require_escaped_relative_cjs_and_demand_only_path() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
-    let root = TestDirectory::new("kiln-native-create-require-escaped");
+    let root = TestDirectory::new("kiln-native-create-require #%? ü 😀");
     fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
         .expect("write package metadata");
-    let entry = root.path.join("entry with space.mjs");
+    let entry = root.path.join("entry with #%? ü 😀.mjs");
     fs::write(
         &entry,
         r#"import { createRequire } from "node:module";
@@ -182,6 +186,8 @@ function factory() {
   return { load: () => require('./dep.cjs'), require };
 }
 const { load, require } = factory();
+console.log(import.meta.url);
+console.log(((process, globalThis) => import.meta.url)(null, null) === import.meta.url);
 console.log(`before:${globalThis.__loads || 0}`);
 const first = load();
 const second = load();
@@ -193,12 +199,39 @@ const path = createRequire(import.meta.url)('node:path');
 console.log(typeof path.basename);"#,
     )
     .expect("write escaped createRequire entry");
+    let identity_module = root.path.join("identity #%? ü 😀.mjs");
+    fs::write(
+        &identity_module,
+        r#"import { createRequire } from "node:module";
+const fromUrl = createRequire(new URL(import.meta.url));
+const fromFilename = createRequire(import.meta.filename);
+export function importIdentity() {
+  return [import.meta.url, fromUrl('./dep-url.cjs').loads, fromFilename('./dep-filename.cjs').loads].join('|');
+}"#,
+    )
+    .expect("write special-character importer");
+    let entry_source = fs::read_to_string(&entry).expect("read entry source");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ importIdentity }} from './identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.mjs';\n{entry_source}\nconsole.log(importIdentity());\n"
+        ),
+    )
+    .expect("import special-character module");
     fs::write(
         root.path.join("dep.cjs"),
         r#"globalThis.__loads = (globalThis.__loads || 0) + 1;
 module.exports = { loads: globalThis.__loads };"#,
     )
     .expect("write escaped createRequire dependency");
+    for name in ["dep-url.cjs", "dep-filename.cjs"] {
+        fs::write(
+            root.path.join(name),
+            r#"globalThis.__loads = (globalThis.__loads || 0) + 1;
+module.exports = { loads: globalThis.__loads };"#,
+        )
+        .expect("write URL and filename createRequire dependencies");
+    }
     let graph = ModuleGraph::build_node(
         &entry,
         NodeRuntimeResolver::new(&root.path).expect("node resolver"),
@@ -206,6 +239,18 @@ module.exports = { loads: globalThis.__loads };"#,
         OxcFrontend,
     )
     .expect("build escaped createRequire graph");
+    let identity_path = fs::canonicalize(&identity_module).expect("canonical identity importer");
+    for specifier in ["./dep-url.cjs", "./dep-filename.cjs"] {
+        assert!(
+            graph
+                .modules()
+                .flat_map(|node| &node.runtime_dependencies)
+                .any(|dependency| {
+                    dependency.importer == identity_path && dependency.specifier == specifier
+                }),
+            "graph must capture {specifier} relative to import.meta.url/filename"
+        );
+    }
     assert!(
         graph
             .modules()
@@ -216,22 +261,76 @@ module.exports = { loads: globalThis.__loads };"#,
         eprintln!("skipping escaped createRequire integration: no C compiler found");
         return;
     };
-    let run = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
-        .run_graph(
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let dev_output = root.path.join("program-dev");
+    let dev = builder
+        .build_graph(
             &graph,
             &NativeBuildOptions {
-                output: root.path.join("program"),
+                output: dev_output.clone(),
                 profile: NativeProfile::Dev,
                 realm: NativeRealmPolicy::default(),
                 march_native: false,
                 ..NativeBuildOptions::default()
             },
         )
-        .expect("native escaped createRequire graph builds and runs");
+        .expect("native escaped createRequire graph builds");
+    let run = Command::new(&dev.output)
+        .output_when_launchable()
+        .expect("run native escaped createRequire development graph");
+    assert!(
+        run.status.success(),
+        "dev status={} stdout={} stderr={}",
+        run.status,
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let expected_url = url::Url::from_file_path(&entry)
+        .expect("special-character source entry becomes a file URL")
+        .to_string();
+    let expected_identity_url = url::Url::from_file_path(&identity_module)
+        .expect("special-character importer becomes a file URL")
+        .to_string();
+    let expected_tail =
+        format!("true\nbefore:0\ntrue:1:1\nfunction\nfunction\n{expected_identity_url}|2|3\n");
+    let expected_stdout = format!("{expected_url}\n{expected_tail}");
     assert_eq!(
-        run.stdout, b"before:0\ntrue:1:1\nfunction\nfunction\n",
-        "stderr={:?}",
-        run.stderr
+        String::from_utf8(run.stdout).expect("dev stdout is UTF-8"),
+        expected_stdout,
+        "stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let release_output = root.path.join("program-release");
+    let release = builder
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: release_output.clone(),
+                profile: NativeProfile::Release,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native release createRequire graph builds");
+    let release_run = Command::new(&release.output)
+        .output_when_launchable()
+        .expect("run native escaped createRequire release graph");
+    assert!(
+        release_run.status.success(),
+        "release status={} stdout={} stderr={}",
+        release_run.status,
+        String::from_utf8_lossy(&release_run.stdout),
+        String::from_utf8_lossy(&release_run.stderr)
+    );
+    // The native entry's `import.meta` keeps the source identity used for graph planning in both
+    // profiles; it does not change to the executable path after linking.
+    let expected_release_stdout = format!("{expected_url}\n{expected_tail}");
+    assert_eq!(
+        String::from_utf8(release_run.stdout).expect("release stdout is UTF-8"),
+        expected_release_stdout,
+        "release stderr={}",
+        String::from_utf8_lossy(&release_run.stderr)
     );
 }
 
@@ -571,11 +670,9 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     return KILN_C99_OK;
 }}
 int main(void) {{
-    kiln_host host = {{ host_call, NULL }};
+    kiln_host host = {{ host_call, NULL, NULL }};
     kiln_value result;
-    int status = {symbol}(&host, &result);
-    fprintf(stderr, "status=%d tag=%u len=%u\\n", status, result.tag, result.len);
-    return status == KILN_C99_OK ? 0 : 1;
+    return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
 }}
 "#,
             symbol = library.module_symbol,
@@ -602,7 +699,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run shared createRequire host");
+    let output = command
+        .output_when_launchable()
+        .expect("run shared createRequire host");
     assert!(
         output.status.success(),
         "shared createRequire host failed with {:?}: {}",

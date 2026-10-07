@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "source_commit": "066b0cd3",
+  "kiln_sha256": "363f27d52bbdcfe978a93622f8e38d56735e3b42c631696a7b180ff8fdfd2d16",
+  "log": "target/npm-compat-evidence/bootstrap-native-thirty-first.log",
+  "selected": 15,
+  "matched": 0,
+  "refused": 0,
+  "diverged": 0,
+  "invalid": 15,
+  "invalid_causes": {
+    "native_compile_error": 13,
+    "interpreter_probe_error": 2
+  },
+  "cause": "Global accessor read used boxed helper before declaration; corrected to established get_key reader in aa1ee259. Two probes corrected for available adapter behavior. No npm batch run on this binary."
+}

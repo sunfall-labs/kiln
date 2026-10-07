@@ -348,10 +348,47 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // which is how a base constructor can name the subclass it is being built for.
                 // `call_with_this` computes one from `constructing`, so it is put back after.
                 let inherited = self.new_target.clone();
-                self.call_with_this(closure, argc as u16, current, this_value, None)?;
+                self.call_with_this(closure, argc as u16, current, this_value, None, None)?;
                 self.new_target = inherited;
                 if let Some(frame) = self.frames.last_mut() {
                     frame.super_call = true;
+                }
+            }
+            // A Proxy is a valid class heritage expression when its target is constructable.
+            // Its [[Construct]] trap must receive the derived constructor as newTarget, just as
+            // a native or ordinary base constructor does. Treating it as a nonconstructable
+            // object made `class D extends new Proxy(Error, {}) {}` fail before the proxy could
+            // forward construction.
+            Value::Proxy(proxy) => {
+                let inherited = self.new_target.clone();
+                let depth = self.frames.len();
+                self.construct_as(Value::Proxy(proxy), arguments, inherited, current)?;
+                if self.frames.len() > depth {
+                    // A transparent Proxy forwards to the target constructor. For a compiled
+                    // constructor, [[Construct]] schedules the target's frame on the VM stack;
+                    // let the ordinary return path complete `super()` and adopt its result.
+                    // Proxy traps are already driven synchronously by construct_as/call_value,
+                    // so the pending frame here is the forwarded constructor.
+                    let Some(frame) = self.frames.last_mut() else {
+                        return Err(ExecutionError::InvalidInstructionPointer {
+                            instruction: current,
+                        });
+                    };
+                    if frame.constructing.is_none() {
+                        return Err(ExecutionError::InvalidInstructionPointer {
+                            instruction: current,
+                        });
+                    }
+                    frame.super_call = true;
+                    return Ok(());
+                }
+                let built = self.pop(current)?;
+                // A Proxy construct trap may return an object with its own prototype. Preserve
+                // that object exactly, and leave it as the value of the `super()` expression.
+                self.stack.push(built.clone());
+                self.this_value = built.clone();
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.constructing = Some(built);
                 }
             }
             // A native parent builds its own object, and `this` *becomes* that object rather

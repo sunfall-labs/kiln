@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 2 (.scratch/parallel-builtins issue 07): `parallelSort` under a key comparator, `(a, b)
+// Tier 2 (docs/issues/parallel-builtins issue 07): `parallelSort` under a key comparator, `(a, b)
 // => K(a) - K(b)` or its reverse, where `K` reads one element. Over keys that are numbers and
 // not NaN such a comparator is consistent, so a stable sort by key -- which the pool computes
 // without calling the comparator -- is `sort`'s one answer: equal keys keep their order, and

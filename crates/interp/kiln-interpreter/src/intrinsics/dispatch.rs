@@ -5,6 +5,21 @@ fn is_frozen_array(value: &Value) -> bool {
         || matches!(value, Value::Shared(facade) if facade.is_array())
 }
 
+/// The code unit at an already-integral position, or `None` when it is outside the string.
+///
+/// Reads the stored representation in place, so it is O(1) for Latin1 and UTF-16 strings alike.
+/// The position-taking string methods used to copy every unit into a fresh vector first, which
+/// made `for (i < s.length) s.charCodeAt(i)` quadratic in the string's length.
+fn unit_in_range(text: &StringUnits, index: f64) -> Option<u16> {
+    if index >= 0.0 && index < text.unit_len() as f64 {
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let at = index as usize;
+        text.unit_at(at)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn call_native(
     intrinsics: &Intrinsics,
     native: Native,
@@ -151,39 +166,16 @@ pub(crate) fn call_native(
                 message: "Cannot convert undefined or null to object".to_owned(),
             });
         }
-        Native::ObjectHasOwnProperty => Value::Boolean(match receiver {
-            // A function has an own property store of its own -- a class's static members live
-            // in it -- plus the `name`, `length` and `prototype` every callable owns. A built-in
-            // has the properties its tables answer for, which for a method table is the methods
-            // it holds, plus whatever the realm's store has added to or removed from them.
-            // `own_attributes` knows about all of that, and answering from it is what stops
-            // `hasOwnProperty` and `getOwnPropertyDescriptor` from disagreeing.
-            Value::Object(_)
-            | Value::Function(_)
-            | Value::Native(_, _)
-            | Value::Callback(_, _)
-            | Value::Bound(_)
-            | Value::Wrapped(_)
-            // The anonymous built-ins the specification hands a program: a combinator's element
-            // functions, a capability's `resolve`/`reject` pair, and the executor that captures
-            // them. Each owns a `name` and a `length` and nothing else. They were absent here
-            // and present in `own_attributes`, so `getOwnPropertyDescriptor` reported an own
-            // `length` that `hasOwnProperty` denied -- and test262 asks both.
-            | Value::Element(_)
-            | Value::Settler(..)
-            | Value::Capability(..)
-            // An array's elements, its `length` and its property store are all own properties,
-            // and `has_property` is the wrong question for any of them: it follows the chain,
-            // and `Array.prototype[1] = 2` would make every array claim an own `1`.
-            | Value::Array(_)
-            | Value::TypedArray(_) => {
-                let value = arguments.first().unwrap_or(&Value::Undefined);
-                let key = value.property_key_units_checked()?;
+        Native::ObjectHasOwnProperty => {
+            // All receivers use the same own-descriptor authority as Object.hasOwn. Falling
+            // back to HasProperty for an exotic receiver incorrectly includes its prototype.
+            let value = arguments.first().unwrap_or(&Value::Undefined);
+            let key = value.property_key_units_checked()?;
+            Value::Boolean(
                 own_attributes_key(intrinsics, receiver, PropertyKeyRef::from_value(value, &key))
-                    .is_some()
-            }
-            other => has_property_checked(intrinsics, other, arguments.first().unwrap_or(&Value::Undefined))?,
-        }),
+                    .is_some(),
+            )
+        }
         // Walked with [`prototype_of`], the same function `Object.getPrototypeOf` and
         // `instanceof` use. Reading the stored link directly is not the chain: an intrinsic kind
         // -- a date, an array, a typed array -- has no stored link and still has a prototype, so
@@ -319,7 +311,7 @@ pub(crate) fn call_native(
                     }
                 },
             };
-            Value::String(symbol.to_display_string().into())
+            Value::String(symbol.to_string_units_checked()?)
         }
         // `Function.prototype.toString` is one of the few built-ins that checks what it was
         // called on: the specification throws for a receiver that is not callable rather than
@@ -334,13 +326,17 @@ pub(crate) fn call_native(
                     ),
                 });
             }
-            Value::String(receiver.to_display_string().into())
+            match receiver {
+                Value::Function(closure) => Value::String(closure.source_units()),
+                _ => Value::String(receiver.to_display_string().into()),
+            }
         }
         // Both build a program from source, which needs the machine: a compilation has to be
         // entered as a frame and run. `Vm::dispatch_native` intercepts them before this, and
         // every call of a built-in goes through it -- so reaching here means a caller found a
         // route around the machine, and refusing says so rather than answering `undefined`.
         Native::FunctionConstructor
+        | Native::AsyncFunctionConstructor
         | Native::GeneratorFunctionConstructor
         | Native::AsyncGeneratorFunctionConstructor
         | Native::Eval => {
@@ -360,11 +356,14 @@ pub(crate) fn call_native(
                         .to_owned(),
                 });
             }
-            let proxy = Value::Proxy(Rc::new(ProxyData {
+            let proxy_data = Rc::new(ProxyData {
                 target,
                 handler,
+                private_elements: RefCell::new(ObjectData::default()),
                 revoked: std::cell::Cell::new(false),
-            }));
+            });
+            crate::gc_census::register_proxy(&proxy_data);
+            let proxy = Value::Proxy(proxy_data);
             let mut pair = ObjectData::default();
             // The revoke function carries the proxy as its receiver, which is what a bound
             // native is for: there is no other way to give a built-in a captured value.
@@ -378,7 +377,7 @@ pub(crate) fn call_native(
                 })),
             );
             pair.set("proxy", proxy);
-            Value::Object(Rc::new(RefCell::new(pair)))
+            Value::Object(tracked_object(pair))
         }
         Native::ProxyRevoke => {
             if let Value::Proxy(proxy) = receiver {
@@ -518,7 +517,7 @@ pub(crate) fn call_native(
                 Some(Value::Undefined) | None => {}
                 Some(prototype) => data.set_prototype(prototype.clone()),
             }
-            Value::Object(Rc::new(RefCell::new(data)))
+            Value::Object(tracked_object(data))
         }
         // `Object.seal` is the shared bootstrap's (`kiln-builtins/src/object_reflect.ts`), over
         // this and `defineProperty`.
@@ -571,30 +570,36 @@ pub(crate) fn call_native(
             unreachable!("`AsyncLocalStorage` is dispatched by the interpreter")
         }
         Native::ObjectGetOwnPropertyDescriptor => {
-            let target = arguments.first().unwrap_or(&Value::Undefined);
+            let target = to_object(arguments.first().unwrap_or(&Value::Undefined))
+                .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: "Cannot convert undefined or null to object".to_owned(),
+                })?;
             let value = arguments.get(1).unwrap_or(&Value::Undefined);
             let key = value.property_key_units_checked()?;
-            own_descriptor_key(intrinsics, target, PropertyKeyRef::from_value(value, &key))
+            own_descriptor_key(intrinsics, &target, PropertyKeyRef::from_value(value, &key))
                 .unwrap_or(Value::Undefined)
         }
         Native::ObjectGetOwnPropertyDescriptors => {
-            let target = arguments.first().unwrap_or(&Value::Undefined);
+            let target = to_object(arguments.first().unwrap_or(&Value::Undefined))
+                .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: "Cannot convert undefined or null to object".to_owned(),
+                })?;
             let mut data = ObjectData::default();
-            for key in own_property_keys_units(intrinsics, target) {
+            for key in own_property_keys_units(intrinsics, &target) {
                 if let Some(descriptor) =
-                    own_descriptor_key(intrinsics, target, PropertyKeyRef::Units(&key))
+                    own_descriptor_key(intrinsics, &target, PropertyKeyRef::Units(&key))
                 {
                     data.set_units(&key, descriptor);
                 }
             }
-            for key in own_symbol_keys_units(intrinsics, target) {
+            for key in own_symbol_keys_units(intrinsics, &target) {
                 if let Some(descriptor) =
-                    own_descriptor_key(intrinsics, target, PropertyKeyRef::SymbolUnits(&key))
+                    own_descriptor_key(intrinsics, &target, PropertyKeyRef::SymbolUnits(&key))
                 {
                     data.set_key(PropertyKeyRef::SymbolUnits(&key), descriptor);
                 }
             }
-            Value::Object(Rc::new(RefCell::new(data)))
+            Value::Object(tracked_object(data))
         }
         Native::Reflect => Value::Undefined,
         Native::ObjectOwnNames => {
@@ -662,19 +667,13 @@ pub(crate) fn call_native(
                 // `length` is not among them, because it is not enumerable. Stopping at the
                 // elements made `Object.keys` disagree with the `for-in` beside it about the
                 // same array.
-                Some(Value::Array(items)) => items
-                    .borrow()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
-                    .map(|(index, _)| Value::String(index.to_string().into()))
-                    .chain(
-                        items
-                            .properties
-                            .borrow()
-                            .string_entries()
-                            .map(|(key, _)| Value::String(key.clone())),
-                    )
+                Some(target @ Value::Array(_)) => own_property_keys_units(intrinsics, target)
+                    .into_iter()
+                    .filter(|key| {
+                        own_attributes_key(intrinsics, target, PropertyKeyRef::Units(key))
+                            .is_some_and(|attributes| attributes.enumerable)
+                    })
+                    .map(Value::String)
                     .collect(),
                 Some(target @ Value::Shared(_)) => own_properties_units(intrinsics, target)
                     .into_iter()
@@ -787,6 +786,71 @@ pub(crate) fn call_native(
             Some(Value::TypedArray(view)) => Value::Boolean(view.out_of_bounds()),
             _ => Value::Boolean(false),
         },
+        Native::IsConstructorRaw => Value::Boolean(arguments.first().is_some_and(is_constructor)),
+        Native::IsOtherRealmArrayConstructorRaw => {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "GetFunctionRealm reached the machine-free dispatch path".to_owned(),
+            });
+        }
+        Native::ArrayNextPresentIndexRaw => {
+            let object = arguments.first().unwrap_or(&Value::Undefined);
+            let cursor = match arguments.get(1) {
+                Some(Value::Number(value)) => *value,
+                _ => f64::NAN,
+            };
+            let limit = match arguments.get(2) {
+                Some(Value::Number(value)) => *value,
+                _ => f64::NAN,
+            };
+            let reverse = matches!(arguments.get(3), Some(Value::Boolean(true)));
+            if !cursor.is_finite() || !limit.is_finite() || cursor < 0.0 {
+                Value::Boolean(false)
+            } else {
+                let cursor = cursor as usize;
+                let limit = if reverse {
+                    if limit < 0.0 { 0 } else { limit as usize }
+                } else if limit < 0.0 {
+                    0
+                } else {
+                    limit as usize
+                };
+                match next_array_present_index(intrinsics, object, cursor, limit, reverse) {
+                    None => Value::Boolean(false),
+                    Some(None) => Value::Null,
+                Some(Some(index)) => Value::Number(index as f64),
+            }
+            }
+        }
+        Native::DataViewStateRaw => Value::Number(match arguments.first() {
+            Some(Value::DataView(view)) if view.buffer.immutable => 2.0,
+            Some(Value::DataView(_)) => 1.0,
+            _ => 0.0,
+        }),
+        Native::CollectionSizeRaw => {
+            let Some(receiver) = arguments.first() else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "get size: receiver does not have the required internal slot".to_owned(),
+                });
+            };
+            let expected_map = match arguments.get(1) {
+                Some(Value::Boolean(kind)) => Some(*kind),
+                _ => None,
+            };
+            if is_weak_collection(receiver) || !collection_state(receiver)
+                .is_some_and(|(_, is_map)| Some(is_map) == expected_map) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "get size: receiver does not have the required internal slot".to_owned(),
+                });
+            }
+            let Value::Object(object) = receiver else {
+                unreachable!("collection state is stored on an object");
+            };
+            object
+                .borrow()
+                .get_own(COLLECTION_SIZE)
+                .cloned()
+                .unwrap_or(Value::Number(0.0))
+        }
         // `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)` and
         // `__kilnTypedArraySort(view)` (ADR 0065, representation): the shared TypeScript has
         // computed every index; anything else answers `false`, "run the loop".
@@ -865,6 +929,16 @@ pub(crate) fn call_native(
                 immutable: false,
                 properties: RefCell::new(ObjectData::default()),
             }))
+        }
+        Native::ArrayBufferByteLengthRaw => {
+            let Some(Value::ArrayBuffer(buffer)) = arguments.first() else {
+                return Err(ExecutionError::NotABuffer);
+            };
+            let shared = arguments.get(1).is_some_and(Value::is_truthy);
+            if buffer.shared != shared {
+                return Err(ExecutionError::NotABuffer);
+            }
+            Value::Number(buffer.byte_length() as f64)
         }
         // `ArrayBufferCopyAndDetach(O, newLength, ~immutable~)`: the same copy `transfer`
         // performs, into a buffer nothing can write to afterwards. A ceiling is never carried
@@ -1029,7 +1103,10 @@ pub(crate) fn call_native(
         Native::EncodeUri | Native::EncodeUriComponent => {
             let text = arguments
                 .first()
-                .map_or_else(String::new, Value::to_display_string);
+                .unwrap_or(&Value::Undefined)
+                .to_string_units_checked()?
+                .to_scalar_string()
+                .map_err(|_| ExecutionError::MalformedUri)?;
             let whole = matches!(native, Native::EncodeUri);
             let mut out = String::with_capacity(text.len());
             for character in text.chars() {
@@ -1142,7 +1219,7 @@ pub(crate) fn call_native(
                 // Into the store `prototype_of` already looks in, so the two agree. A function
                 // is an object here too: setting its prototype is how a program gives a
                 // constructor inherited statics without `extends`.
-                record_prototype(&target, prototype.clone());
+                record_prototype_in(intrinsics, &target, prototype.clone());
             }
             target
         }
@@ -1156,7 +1233,7 @@ pub(crate) fn call_native(
                     message: "Cannot convert undefined or null to object".to_owned(),
                 });
             };
-            prototype_of(&object)
+            prototype_of_in(intrinsics, &object)
         }
         // Both read the clock, which lives on the machine and is virtual -- see ADR 0015.
         Native::SymbolFor | Native::SymbolKeyFor => {
@@ -1259,7 +1336,7 @@ pub(crate) fn call_native(
                     message: "Cannot convert undefined or null to object".to_owned(),
                 });
             }
-            prototype_of(receiver)
+            prototype_of_in(intrinsics, receiver)
         }
         Native::ProtoSetter => {
             if matches!(receiver, Value::Undefined | Value::Null) {
@@ -1272,7 +1349,12 @@ pub(crate) fn call_native(
             // is what keeps `x.__proto__ = 1` from being an error in ordinary code.
             if matches!(
                 prototype,
-                Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::Null
+                Value::Object(_)
+                    | Value::Function(_)
+                    | Value::Array(_)
+                    | Value::Native(_, _)
+                    | Value::Callback(_, _)
+                    | Value::Null
             ) {
                 // A change the object cannot take is a `TypeError`, exactly as it is through
                 // `Object.setPrototypeOf`: this accessor is Annex B's spelling of that
@@ -1280,7 +1362,7 @@ pub(crate) fn call_native(
                 if !prototype_may_change(intrinsics, receiver, &prototype) {
                     return Err(prototype_change_refused());
                 }
-                record_prototype(receiver, prototype);
+                record_prototype_in(intrinsics, receiver, prototype);
             }
             Value::Undefined
         }
@@ -1292,7 +1374,7 @@ pub(crate) fn call_native(
             result.set("promise", Value::Promise(Rc::clone(&promise)));
             result.set("resolve", Value::Settler(Rc::clone(&promise), false));
             result.set("reject", Value::Settler(promise, true));
-            Value::Object(Rc::new(RefCell::new(result)))
+            Value::Object(tracked_object(result))
         }
         // Namespaces and constructors, none of which is a plain call.
         Native::Performance
@@ -1303,6 +1385,7 @@ pub(crate) fn call_native(
         Native::RegExpConstructor
         | Native::RegExpTest
         | Native::RegExpExec
+        | Native::RegExpLegacyCaptureRaw
         | Native::StringMatch
         | Native::StringMatchAll
         | Native::StringSearch => {
@@ -1703,7 +1786,31 @@ pub(crate) fn call_native(
         Native::MathLog10 => Value::Number(argument_number(arguments)?.log10()),
         Native::MathExp => Value::Number(argument_number(arguments)?.exp()),
         // `Number(x)` converts; `Number()` with no argument is 0, not NaN.
-        Native::PrimitiveValueOf | Native::StringToStringMethod => receiver.clone(),
+        Native::PrimitiveValueOf => receiver.clone(),
+        Native::StringValueOf | Native::StringToStringMethod => match receiver {
+            Value::String(_) => receiver.clone(),
+            _ => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "String.prototype method called on incompatible receiver".to_owned(),
+                });
+            }
+        },
+        Native::SymbolValueOf => match receiver {
+            Value::Symbol(_) => receiver.clone(),
+            _ => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Symbol.prototype.valueOf called on incompatible receiver".to_owned(),
+                });
+            }
+        },
+        Native::BigIntValueOf => match receiver {
+            Value::BigInt(_) => receiver.clone(),
+            _ => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "BigInt.prototype.valueOf called on incompatible receiver".to_owned(),
+                });
+            }
+        },
         // Every hint answers the same thing, which is the point: a symbol does not become a
         // number or a string, so the reduction ends here and the caller refuses it.
         Native::SymbolToPrimitive => match receiver {
@@ -1845,23 +1952,7 @@ pub(crate) fn call_native(
             };
             parse_json_text(&text)?
         }
-        // Present so `typeof` reports "function", which is what the corpus checks. Calling it
-        // returns undefined rather than inventing a stack this VM does not record.
         Native::ErrorCaptureStackTrace => Value::Undefined,
-        Native::CallSiteGetFileName => Value::String("<kiln>".to_owned().into()),
-        Native::CallSiteGetLineNumber | Native::CallSiteGetColumnNumber => Value::Number(0.0),
-        Native::CallSiteGetFunctionName | Native::CallSiteGetMethodName => {
-            own_data_property(receiver, CALL_SITE_NAME).unwrap_or(Value::Null)
-        }
-        Native::CallSiteGetTypeName => Value::String("Function".to_owned().into()),
-        Native::CallSiteGetThis => Value::Undefined,
-        Native::CallSiteGetEvalOrigin => Value::Undefined,
-        Native::CallSiteIsEval => Value::Boolean(false),
-        Native::CallSiteToString => {
-            let name = own_data_property(receiver, CALL_SITE_NAME)
-                .map_or_else(|| "<anonymous>".to_owned(), |value| value.to_display_string());
-            Value::String(format!("{name} (<kiln>:0:0)").into())
-        }
         // Array and typed-array iterators retain their receiver rather than snapshotting it.
         // State lives in reserved properties on the iterator itself, so `next` can observe a
         // write that happened after iterator creation, as the language requires.
@@ -1938,8 +2029,12 @@ pub(crate) fn call_native(
                 // reports, so a position inside an astral character lands where the language
                 // says it does rather than where Rust's byte offsets would.
                 Native::StringIncludes | Native::StringStartsWith | Native::StringEndsWith => {
-                    let haystack: Vec<u16> = text.encode_utf16().collect();
-                    let needle: Vec<u16> = argument(0).encode_utf16().collect();
+                    let haystack: Vec<u16> = text.units().collect();
+                    let needle: Vec<u16> = match arguments.first() {
+                        None => StringUnits::from("undefined").units().collect(),
+                        Some(Value::String(value)) => value.encode_utf16().collect(),
+                        Some(value) => value.to_string_units_checked()?.encode_utf16().collect(),
+                    };
                     let clamp = |raw: f64| -> usize {
                         if raw.is_nan() || raw <= 0.0 {
                             0
@@ -1981,7 +2076,7 @@ pub(crate) fn call_native(
                     // strings by bytes made the optional start unusable and would split astral
                     // characters; searching encoded units keeps all three quantities in the
                     // unit JavaScript specifies.
-                    let haystack: Vec<u16> = text.encode_utf16().collect();
+                    let haystack: Vec<u16> = text.units().collect();
                     let needle: Vec<u16> = argument(0).encode_utf16().collect();
                     let raw_start = arguments.get(1).map_or(0.0, Value::as_number);
                     let start = if raw_start.is_nan() || raw_start <= 0.0 {
@@ -2077,50 +2172,58 @@ pub(crate) fn call_native(
                     // Code units, like `charAt` and `[i]` and `length`: three spellings of "the
                     // character there" that differ only at the edges, and a fourth unit would
                     // make them differ in the middle as well.
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    //
+                    // Read in place: copying the units out made every call O(length), and a
+                    // loop over the string quadratic (NOTES.md, 2026-09-18).
+                    let length = text.unit_len();
                     let index = to_integer_or_infinity(
                         arguments.first().map_or(0.0, Value::as_number),
                     );
                     let index = if index < 0.0 {
-                        units.len() as f64 + index
+                        length as f64 + index
                     } else {
                         index
                     };
-                    if index < 0.0 || index >= units.len() as f64 {
-                        Value::Undefined
-                    } else {
-                        let index = index as usize;
-                        Value::String(StringUnits::from_units(&units[index..index + 1]))
+                    match unit_in_range(text, index) {
+                        Some(unit) => Value::String(StringUnits::from_units(&[unit])),
+                        None => Value::Undefined,
                     }
                 }
                 Native::StringCharAt => {
                     // Code units, not characters: `charAt` counts what `length` counts, so half
                     // of a surrogate pair is a position and reads as that half.
-                    let units: Vec<u16> = text.encode_utf16().collect();
                     let index = to_integer_or_infinity(
                         arguments.first().map_or(0.0, Value::as_number),
                     );
                     // Out of range is the empty string, not undefined.
-                    if index < 0.0 || index >= units.len() as f64 {
-                        Value::String(String::new().into())
-                    } else {
-                        Value::String(StringUnits::from_units(&units[index as usize..=index as usize]))
+                    match unit_in_range(text, index) {
+                        Some(unit) => Value::String(StringUnits::from_units(&[unit])),
+                        None => Value::String(String::new().into()),
                     }
                 }
                 Native::StringCharCodeAt => {
-                    let units: Vec<u16> = text.encode_utf16().collect();
                     let index = to_integer_or_infinity(
                         arguments.first().map_or(0.0, Value::as_number),
                     );
                     // UTF-16 code units, so an astral character has two and this reads one.
-                    if index < 0.0 || index >= units.len() as f64 {
-                        Value::Number(f64::NAN)
-                    } else {
-                        Value::Number(f64::from(units[index as usize]))
+                    match unit_in_range(text, index) {
+                        Some(unit) => Value::Number(f64::from(unit)),
+                        None => Value::Number(f64::NAN),
                     }
                 }
                 Native::StringPadStart | Native::StringPadEnd => {
                     let target = arguments.first().map_or(0.0, Value::as_number);
+                    let current = text.unit_len();
+                    let target = if target.is_finite() && target > 0.0 {
+                        target as usize
+                    } else if target.is_infinite() && target.is_sign_positive() {
+                        usize::MAX
+                    } else {
+                        0
+                    };
+                    if target <= current {
+                        return Ok(Value::String(text.clone().into()));
+                    }
                     let padding: Vec<u16> = match arguments.get(1) {
                         None | Some(Value::Undefined) => vec![u16::from(b' ')],
                         Some(Value::String(value)) => value.units().collect(),
@@ -2129,18 +2232,12 @@ pub(crate) fn call_native(
                             .units()
                             .collect(),
                     };
-                    let current = text.encode_utf16().count();
-                    let target = if target.is_finite() && target > 0.0 {
-                        target as usize
-                    } else {
-                        0
-                    };
-                    bounded_string(target)?;
                     // Padding with the empty string cannot make progress, so it is left alone
                     // rather than looping forever.
-                    if target <= current || padding.is_empty() {
+                    if padding.is_empty() {
                         Value::String(text.clone().into())
                     } else {
+                        bounded_string(target)?;
                         let mut filler = Vec::new();
                         while filler.len() < target - current {
                             filler.extend_from_slice(&padding);
@@ -2162,12 +2259,12 @@ pub(crate) fn call_native(
                 // String patterns only. A regular expression is a different search and a
                 // different replacement grammar, and neither exists yet.
                 Native::StringReplace | Native::StringReplaceAll => {
-                    let pattern = arguments
-                        .first()
-                        .map_or_else(String::new, Value::to_display_string);
-                    let replacement = arguments
-                        .get(1)
-                        .map_or_else(String::new, Value::to_display_string);
+                    let pattern = value_to_string_units(
+                        arguments.first().unwrap_or(&Value::Undefined),
+                    )?;
+                    let replacement = value_to_string_units(
+                        arguments.get(1).unwrap_or(&Value::Undefined),
+                    )?;
                     // The replacement is a *template*, not literal text, even when the pattern
                     // is a plain string: `$&` is what matched, `` $` `` and `$'` are what came
                     // before and after, and `$$` is one dollar. Treating it literally is the
@@ -2177,9 +2274,9 @@ pub(crate) fn call_native(
                     // before and after it, and `$$` is one dollar. The same expander the regexp
                     // path uses does it, so the two cannot disagree.
                     let all = matches!(native, Native::StringReplaceAll);
-                    let subject: Vec<u16> = text.encode_utf16().collect();
-                    let needle: Vec<u16> = pattern.encode_utf16().collect();
-                    let mut out = String::with_capacity(text.len());
+                    let subject: Vec<u16> = text.units().collect();
+                    let needle = pattern;
+                    let mut out = Vec::with_capacity(subject.len());
                     let mut at = 0;
                     loop {
                         // An empty pattern matches at every position including the end, which is
@@ -2196,17 +2293,15 @@ pub(crate) fn call_native(
                                 .map(|offset| at + offset)
                         };
                         let Some(start) = found else { break };
-                        push_bounded(&mut out, &utf16_slice(&subject, at..start))?;
-                        push_bounded(
-                            &mut out,
-                            &expand_replacement(
-                                &replacement,
-                                &subject,
-                                &(start..start + needle.len()),
-                                &[],
-                                &[],
-                            )?,
+                        push_bounded_units(&mut out, &subject[at..start])?;
+                        let expanded = expand_replacement(
+                            &replacement,
+                            &subject,
+                            &(start..start + needle.len()),
+                            &[],
+                            &[],
                         )?;
+                        push_bounded_units(&mut out, &expanded)?;
                         at = start + needle.len();
                         if !all {
                             break;
@@ -2214,7 +2309,7 @@ pub(crate) fn call_native(
                         if needle.is_empty() {
                             if start < subject.len() {
                                 // Carry across the unit the empty match stepped over.
-                                out.push_str(&utf16_slice(&subject, start..start + 1));
+                                push_bounded_units(&mut out, &subject[start..start + 1])?;
                                 at = start + 1;
                             } else {
                                 at = subject.len() + 1;
@@ -2223,9 +2318,9 @@ pub(crate) fn call_native(
                         }
                     }
                     if at <= subject.len() {
-                        push_bounded(&mut out, &utf16_slice(&subject, at..subject.len()))?;
+                        push_bounded_units(&mut out, &subject[at..subject.len()])?;
                     }
-                    Value::String(out.into())
+                    Value::String(StringUnits::from_units(&out))
                 }
                 Native::StringLastIndexOf => {
                     let needle = arguments
@@ -2237,7 +2332,7 @@ pub(crate) fn call_native(
                     // them, and that argument was being dropped: `"abcabc".lastIndexOf("c", 1)`
                     // answered 5, which is not a later match than the caller allowed but the
                     // last one in the string, found by a search that never looked at the bound.
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let needle_units: Vec<u16> = needle.encode_utf16().collect();
                     // The one position argument in the language where NaN means the *end* of
                     // the string rather than the start: the specification names it as
@@ -2263,7 +2358,7 @@ pub(crate) fn call_native(
                 // way round, where `slice` counts a negative from the end and yields nothing
                 // when they cross. The two look alike and agree on almost no edge case.
                 Native::StringSubstring => {
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let clamp = |value: f64| -> usize {
                         if value.is_nan() || value < 0.0 {
                             0
@@ -2280,7 +2375,7 @@ pub(crate) fn call_native(
                     Value::String(StringUnits::from_units(&units[start..end]))
                 }
                 Native::StringSubstr => {
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let start = arguments.first().map_or(0.0, Value::as_number);
                     // A negative start counts from the end, which is the one thing `substr`
                     // does that `substring` does not.
@@ -2304,26 +2399,24 @@ pub(crate) fn call_native(
                 }
                 Native::StringCodePointAt => {
                     let index = arguments.first().map_or(0.0, Value::as_number);
-                    let units: Vec<u16> = text.encode_utf16().collect();
-                    if index < 0.0 || index >= units.len() as f64 {
+                    if index < 0.0 || index >= text.unit_len() as f64 {
                         Value::Undefined
                     } else {
                         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         let at = index as usize;
-                        let lead = units.get(at).copied().unwrap_or(0);
+                        let lead = text.unit_at(at).unwrap_or(0);
                         // A surrogate *pair* reads as the whole code point, which is the entire
                         // difference from `charCodeAt`. A lone surrogate reads as itself: the
                         // answer is a number, so there is no string here to be unable to hold one
                         // (ADR 0022). Decoding through a `String` answered U+FFFD instead, which
                         // is what the trailing half of an emoji became.
                         let paired = if (0xD800..=0xDBFF).contains(&lead) {
-                            units
-                                .get(at + 1)
-                                .filter(|low| (0xDC00..=0xDFFF).contains(*low))
+                            text.unit_at(at + 1)
+                                .filter(|low| (0xDC00..=0xDFFF).contains(low))
                                 .map(|low| {
                                     0x10000
                                         + ((u32::from(lead) - 0xD800) << 10)
-                                        + (u32::from(*low) - 0xDC00)
+                                        + (u32::from(low) - 0xDC00)
                                 })
                         } else {
                             None
@@ -2335,7 +2428,7 @@ pub(crate) fn call_native(
                     let other = arguments
                         .first()
                         .map_or_else(String::new, Value::to_display_string);
-                    Value::Number(match text.encode_utf16().cmp(other.encode_utf16()) {
+                    Value::Number(match text.units().cmp(other.encode_utf16()) {
                         std::cmp::Ordering::Less => -1.0,
                         std::cmp::Ordering::Equal => 0.0,
                         std::cmp::Ordering::Greater => 1.0,
@@ -2387,7 +2480,7 @@ pub(crate) fn call_native(
                     // made `s.slice(0, s.length)` shorter than `s` for any string holding an
                     // astral character, and made `slice` disagree with `[i]` about where a
                     // position is -- silently, in both cases.
-                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let units: Vec<u16> = text.units().collect();
                     let resolve = |value: f64| -> usize {
                         if value < 0.0 {
                             (units.len() as f64 + value).max(0.0) as usize
@@ -2422,7 +2515,7 @@ pub(crate) fn call_native(
             ));
             iterator.set("@@iterated", Value::Array(ArrayData::new(characters)));
             iterator.set("@@index", Value::Number(0.0));
-            Value::Object(Rc::new(RefCell::new(iterator)))
+            Value::Object(tracked_object(iterator))
         }
         // The state shape is the array iterator's, so the same stepper serves both.
         Native::StringIteratorNext => {
@@ -2435,7 +2528,72 @@ pub(crate) fn call_native(
             arguments.first(),
             Some(Value::Object(object)) if object.borrow().error_brand
         )),
-        Native::SetAdd | Native::MapSet | Native::WeakSetAdd | Native::WeakMapSet => {
+        Native::WeakSetAdd | Native::WeakMapSet => {
+            let is_map = native == Native::WeakMapSet;
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+            let Value::Object(object) = receiver else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            };
+            let mut object = object.borrow_mut();
+            let actual_map = matches!(object.get_own("@@map"), Some(&Value::Boolean(true)));
+            let Some(entries) = object.weak_collection_entries.as_mut() else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            };
+            if actual_map != is_map {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            }
+            let weak_key = WeakCollectionKey::new(&key).ok_or_else(|| {
+                ExecutionError::TypeErrorMessage {
+                    message: "value cannot be held weakly".to_owned(),
+                }
+            })?;
+            entries.insert(
+                weak_key,
+                if is_map { value } else { Value::Undefined },
+            );
+            receiver.clone()
+        }
+        Native::WeakSetHas | Native::WeakMapHas | Native::WeakMapGet | Native::WeakSetDelete | Native::WeakMapDelete => {
+            let is_map = matches!(native, Native::WeakMapHas | Native::WeakMapGet | Native::WeakMapDelete);
+            let deleting = matches!(native, Native::WeakSetDelete | Native::WeakMapDelete);
+            let getting = native == Native::WeakMapGet;
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let Value::Object(object) = receiver else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            };
+            let mut object = object.borrow_mut();
+            let actual_map = matches!(object.get_own("@@map"), Some(&Value::Boolean(true)));
+            let Some(entries) = object.weak_collection_entries.as_mut() else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            };
+            if actual_map != is_map {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "incompatible weak collection receiver".to_owned(),
+                });
+            }
+            let identity = WeakCollectionKey::new(&key);
+            if deleting {
+                Value::Boolean(identity.is_some_and(|identity| entries.remove(&identity).is_some()))
+            } else if getting {
+                identity
+                    .and_then(|identity| entries.get(&identity).cloned())
+                    .unwrap_or(Value::Undefined)
+            } else {
+                Value::Boolean(identity.is_some_and(|identity| entries.contains_key(&identity)))
+            }
+        }
+        Native::SetAdd | Native::MapSet => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -2462,13 +2620,13 @@ pub(crate) fn call_native(
             }
             receiver.clone()
         }
-        Native::SetHas | Native::MapHas | Native::WeakSetHas | Native::WeakMapHas => {
+        Native::SetHas | Native::MapHas => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let found = find_collection_entry(&entries, &key, is_map).is_some();
             Value::Boolean(found)
         }
-        Native::MapGet | Native::WeakMapGet => {
+        Native::MapGet => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             match find_collection_entry(&entries, &key, is_map) {
@@ -2494,7 +2652,7 @@ pub(crate) fn call_native(
             set_size(receiver, 0.0);
             Value::Undefined
         }
-        Native::SetDelete | Native::MapDelete | Native::WeakSetDelete | Native::WeakMapDelete => {
+        Native::SetDelete | Native::MapDelete => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let index = find_collection_entry(&entries, &key, is_map);
@@ -2542,7 +2700,7 @@ pub(crate) fn call_native(
                 WellKnown::Iterator.property_key(),
                 Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
             );
-            Value::Object(Rc::new(RefCell::new(iterator)))
+            Value::Object(tracked_object(iterator))
         }
         Native::CollectionIteratorNext => {
             let iterated = iterator_state(receiver)?;
@@ -2682,7 +2840,7 @@ pub(crate) fn call_native(
                 | Value::BigInt(_)),
             ) => wrap_primitive(primitive.clone()),
             // `Object()`, `Object(null)` and `Object(undefined)` all ask for a fresh object.
-            _ => Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            _ => Value::Object(tracked_object(ObjectData::default())),
         },
         Native::NodeEventEmitter => node_event_emitter(),
         Native::NodeStringDecoderConstructor => string_decoder::node_string_decoder(),
@@ -2740,6 +2898,13 @@ pub(crate) fn call_native(
         | Native::NodeCryptoCreateHash
         | Native::NodeCryptoCreateHmac
         | Native::NodeCryptoTimingSafeEqual
+        | Native::NodeCryptoKeyImport
+        | Native::NodeCryptoKeyPublic
+        | Native::NodeCryptoKeyInfo
+        | Native::NodeCryptoKeyExport
+        | Native::NodeCryptoKeyFree
+        | Native::WebCryptoPrimitive
+        | Native::WebCompressionPrimitive
         | Native::NodeHashUpdate
         | Native::NodeHashDigest
         | Native::NodeStringDecoder
@@ -2775,6 +2940,7 @@ pub(crate) fn call_native(
         | Native::NodeHttp2CreateSecureServer
         | Native::NodeModule
         | Native::NodeModuleCreateRequire
+        | Native::NodeModuleLoader
         | Native::NodePath
         | Native::NodePathJoin
         | Native::NodePathResolve
@@ -2798,6 +2964,8 @@ pub(crate) fn call_native(
         | Native::NodeSocketWrite
         | Native::NodeSocketEnd
         | Native::NodeSocketDestroy
+        | Native::NodeSocketCork
+        | Native::NodeSocketUncork
         | Native::NodeReadablePush
         | Native::NodeReadableRead
         | Native::NodeReadableDestroy
@@ -2817,8 +2985,10 @@ pub(crate) fn call_native(
         | Native::NodeHttpGet
         | Native::NodeHttpCreateFetchServer
         | Native::NodeHttpFetchRespond
+        | Native::NodeHttpCancelRequest
         | Native::NodeClientRequestWrite
         | Native::NodeClientRequestEnd
+        | Native::NodeClientRequestAssignSocket
         | Native::NodeBuffer
         | Native::NodeBufferGlobal
         | Native::NodeBufferFrom
@@ -2832,14 +3002,19 @@ pub(crate) fn call_native(
         | Native::ProcessCwd
         | Native::ProcessKill
         | Native::ProcessExit
+        | Native::ProcessExitCodeGet
+        | Native::ProcessExitCodeSet
+        | Native::GcRequest
         | Native::ProcessStartRaw
         | Native::ProcessCancelRaw
+        | Native::NodeChildProcessExecFileSync
         | Native::UrlParseRaw
         | Native::UrlSetRaw
         | Native::UrlFastRaw
         | Native::UrlAdoptRaw
         | Native::JobsPendingRaw
         | Native::QueueIoRaw
+        | Native::TimerRefRaw
         | Native::WorkerOpRaw
         | Native::PortWaitRaw
         | Native::PromiseRejectionsRaw
@@ -2855,6 +3030,7 @@ pub(crate) fn call_native(
         | Native::NodeServerListen
         | Native::NodeServerClose
         | Native::NodeServerAddress
+        | Native::NodeServerIsListening
         | Native::NodeServerSetTimeout
         | Native::NodeResponseSetHeader
         | Native::NodeResponseGetHeader
@@ -2941,6 +3117,7 @@ pub(crate) fn call_native(
         // here means something called it.
         | Native::Math
         | Native::Json
+        | Native::AsyncFunctionPrototype
         | Native::GeneratorFunctionPrototype
         | Native::AsyncGeneratorFunctionPrototype
         | Native::WebStub(_) => Value::Undefined,

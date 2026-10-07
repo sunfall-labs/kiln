@@ -134,7 +134,7 @@ fn source_check_uses_nearest_uploaded_config_and_isolates_external_ambient_types
         Arc::<[u8]>::from(br#"{"compilerOptions":{"strict":true,"skipLibCheck":true}}"#.as_slice()),
     );
     let nearest = (
-        "project/src/tsconfig.json".into(),
+        "project/src/tsconfig.jsonc".into(),
         Arc::<[u8]>::from(
             br#"{"compilerOptions":{"strict":false,"skipLibCheck":true}}"#.as_slice(),
         ),
@@ -256,6 +256,7 @@ impl Client {
                 Request::SetSource { .. }
                     | Request::Check { .. }
                     | Request::Run { .. }
+                    | Request::NodeRun { .. }
                     | Request::NativeBuild { .. }
                     | Request::NativeBuildAtRevision { .. }
                     | Request::NativeSharedBuild { .. }
@@ -670,7 +671,9 @@ fn stale_source_operations_are_rejected_after_a_competing_commit() {
     let response = stale
         .request_at_view(
             &Request::Run {
+                stream_output: false,
                 node: false,
+                wall_clock: false,
                 steps: StepBudget::Unmetered,
                 source_view: old_view,
                 path: "source.js".into(),
@@ -921,7 +924,9 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
         client.handshake().expect("run handshake");
         client
             .request(&Request::Run {
+                stream_output: false,
                 node: false,
+                wall_clock: false,
                 steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
                 path: run_path,
@@ -976,7 +981,9 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
     // already-prepared run above stays on the old bytecode.
     let Response::Ran(second) = editor
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path,
@@ -1044,7 +1051,9 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
         client.handshake().expect("run handshake");
         client
             .request(&Request::Run {
+                stream_output: false,
                 node: false,
+                wall_clock: false,
                 steps: StepBudget::Unmetered,
                 source_view: initial_view,
                 path: old_entry,
@@ -1066,7 +1075,9 @@ fn in_flight_graph_run_keeps_old_snapshot_while_a_later_run_patches_it() {
         .expect("edit dependency while old graph is in flight");
     let Response::Ran(new) = setup
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: setup.source_view(),
             path: "./snapshot-entry.js".into(),
@@ -1157,7 +1168,9 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
         client.source_view = initial_view;
         client.handshake().expect("run handshake");
         client.raw_request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: initial_view,
             path: run_path,
@@ -1205,7 +1218,9 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
     let updated_view = updater.source_view();
     let Response::Ran(fresh) = updater
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: updated_view,
             path: entry_path,
@@ -1234,7 +1249,9 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
     let updated_view = updater.source_view();
     let Response::Ran(fresh) = updater
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: updated_view,
             path: std::fs::canonicalize(fixture.dir.join("gated-entry.js"))
@@ -1279,7 +1296,8 @@ fn prepared_single_file_run_keeps_its_program_and_revision_after_an_edit() {
     .expect("prepare unsaved buffer");
 
     engine.set_source(file, "console.log('new');\n".into());
-    let Response::Ran(summary) = execute_prepared_run(prepared, false, StepBudget::Unmetered)
+    let Response::Ran(summary) =
+        execute_prepared_run(prepared, false, false, StepBudget::Unmetered)
     else {
         panic!("expected run summary");
     };
@@ -1376,11 +1394,13 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
         .expect("upload native source");
 
     let request = Request::NativeRun {
+        stream_output: false,
         source_view: SourceView(0),
         path,
         project_root,
         profile: NativeProfile::Dev,
         node: false,
+        wall_clock: false,
         static_link: false,
         pgo_generate: None,
         pgo_use: None,
@@ -1443,7 +1463,9 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
         .expect("upload first source");
     let Response::Ran(first) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
@@ -1464,7 +1486,9 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
         .expect("upload second source");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
@@ -2444,11 +2468,13 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
         .expect("set Node source");
     let response = client
         .request(&Request::Run {
+            stream_output: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
             node: true,
+            wall_clock: false,
             args: Vec::new(),
         })
         .expect("run Node module");
@@ -2460,6 +2486,350 @@ fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[test]
+fn production_wall_clock_reads_system_time_across_immediate_turns() {
+    let fixture = Fixture::empty();
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let epoch_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current epoch")
+            .as_secs_f64()
+            * 1000.0
+    };
+    for (path, prefix) in [
+        ("clock.cjs", ""),
+        ("clock-module.mjs", "import 'node:timers';\n"),
+    ] {
+        let text = format!(
+            "{prefix}console.log(Date.now());\n\
+            let count = 0; function next() {{\n\
+                if (++count < 250) setImmediate(next); else console.log(Date.now());\n\
+            }} setImmediate(next);\n"
+        );
+        std::fs::write(fixture.dir.join(path), &text).expect("write clock source");
+        client
+            .request(&Request::SetSource {
+                source_view: client.source_view(),
+                path: path.to_owned(),
+                text,
+            })
+            .expect("set clock source");
+        for wall_clock in [true, false] {
+            let before = epoch_ms().floor();
+            let response = client
+                .request(&Request::Run {
+                    stream_output: false,
+                    steps: StepBudget::Unmetered,
+                    source_view: client.source_view(),
+                    path: path.to_owned(),
+                    project_root: fixture.dir.to_string_lossy().into_owned(),
+                    node: true,
+                    wall_clock,
+                    args: Vec::new(),
+                })
+                .expect("run clock source");
+            let after = epoch_ms().ceil();
+            let Response::Ran(summary) = response else {
+                panic!("expected run response, got {response:?}");
+            };
+            assert!(summary.succeeded, "{:?}", summary.diagnostics);
+            let readings: Vec<f64> = summary
+                .stdout
+                .lines()
+                .map(|line| line.parse().expect("numeric epoch time"))
+                .collect();
+            assert_eq!(readings.len(), 2);
+            if wall_clock {
+                for reading in readings {
+                    assert_eq!(reading.fract(), 0.0, "Date.now has integral milliseconds");
+                    assert!(
+                        reading >= before && reading <= after,
+                        "{path}: epoch {reading} outside {before}..={after}"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    readings,
+                    [0.0, 0.0],
+                    "immediates do not advance virtual time"
+                );
+            }
+        }
+    }
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[cfg(unix)]
+#[test]
+fn node_launch_evaluates_preloads_and_runtime_created_esm_in_one_module_realm() {
+    let fixture = Fixture::empty();
+    let entry = fixture.dir.join("entry.mjs");
+    let preload = fixture.dir.join("preload.mjs");
+    let generated = fixture.dir.join("generated.mjs");
+    let entry_source = "import { execFileSync } from 'node:child_process';\n\
+        globalThis.__startup.push('entry');\n\
+        const target = './generated.mjs';\n\
+        const generated = await import(target);\n\
+        let codegen = 'allowed';\n\
+        try { new Function('return 1')(); } catch { codegen = 'blocked'; }\n\
+        const child = execFileSync('/bin/sh', ['-c', 'printf child'], { encoding: 'utf8' });\n\
+        console.log(globalThis.__startup.join(','), generated.value, codegen, child, process.execArgv.join(','));\n";
+    let preload_source = "globalThis.__startup = ['preload'];\n";
+    std::fs::write(&entry, entry_source).expect("write entry");
+    std::fs::write(&preload, preload_source).expect("write preload");
+    // This is deliberately absent from the synchronized source snapshot. The runtime loader must
+    // resolve it from the dynamic import's referrer and load it into the existing realm.
+    std::fs::write(&generated, "export const value = 42;\n").expect("write runtime module");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+    for (path, text) in [(&entry, entry_source), (&preload, preload_source)] {
+        let path = std::fs::canonicalize(path).expect("canonical source path");
+        client
+            .request(&Request::SetSource {
+                source_view: client.source_view(),
+                path: path.to_string_lossy().into_owned(),
+                text: text.to_owned(),
+            })
+            .expect("synchronize launch source");
+    }
+    let response = client
+        .request(&Request::NodeRun {
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            project_root: root,
+            args: Vec::new(),
+            preloads: vec!["./preload.mjs".to_owned()],
+            exec_argv: vec![
+                "--disallow-code-generation-from-strings".to_owned(),
+                "--import".to_owned(),
+                "./preload.mjs".to_owned(),
+            ],
+            disallow_string_code_generation: true,
+            wall_clock: false,
+            steps: StepBudget::Unmetered,
+            source_view: client.source_view(),
+            stream_output: false,
+        })
+        .expect("execute Node-style launch");
+    let Response::Ran(summary) = response else {
+        panic!("expected run response, got {response:?}");
+    };
+    assert!(summary.succeeded, "{:?}", summary.diagnostics);
+    assert_eq!(
+        summary.stdout,
+        "preload,entry 42 blocked child --disallow-code-generation-from-strings,--import,./preload.mjs\n"
+    );
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_file_url_queries_keep_distinct_source_graphs_after_a_file_changes() {
+    let fixture = Fixture::empty();
+    let entry = fixture.dir.join("entry.mjs");
+    let generated = fixture.dir.join("generated.mjs");
+    let entry_source = "import { unlinkSync, writeFileSync } from 'node:fs';\n\
+        import { fileURLToPath } from 'node:url';\n\
+        const url = new URL('./generated.mjs', import.meta.url).href;\n\
+        const first = await import(url + '?one');\n\
+        writeFileSync(fileURLToPath(url), \"export const value = 'two';\\n\");\n\
+        const second = await import(url + '?two');\n\
+        unlinkSync(fileURLToPath(url));\n\
+        const firstAgain = await import(url + '?one');\n\
+        console.log(first.value, second.value, firstAgain.value, firstAgain === first);\n";
+    std::fs::write(&entry, entry_source).expect("write runtime-query entry");
+    std::fs::write(&generated, "export const value = 'one';\n")
+        .expect("write runtime-query target");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+    let path = std::fs::canonicalize(&entry).expect("canonical entry");
+    client
+        .request(&Request::SetSource {
+            source_view: client.source_view(),
+            path: path.to_string_lossy().into_owned(),
+            text: entry_source.to_owned(),
+        })
+        .expect("synchronize runtime-query entry");
+    let response = client
+        .request(&Request::NodeRun {
+            path: path.to_string_lossy().into_owned(),
+            project_root: root,
+            args: Vec::new(),
+            preloads: Vec::new(),
+            exec_argv: Vec::new(),
+            disallow_string_code_generation: false,
+            wall_clock: false,
+            steps: StepBudget::Unmetered,
+            source_view: client.source_view(),
+            stream_output: false,
+        })
+        .expect("execute runtime-query imports");
+    let Response::Ran(summary) = response else {
+        panic!("expected run response, got {response:?}");
+    };
+    assert!(summary.succeeded, "{:?}", summary.diagnostics);
+    assert_eq!(summary.stdout, "one two one true\n");
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[cfg(unix)]
+#[test]
+fn node_run_graph_cache_tracks_ordered_preloads_and_their_dependencies() {
+    fn run(client: &mut Client, path: &str, root: &str, preloads: Vec<String>) -> String {
+        let response = client
+            .request(&Request::NodeRun {
+                path: path.to_owned(),
+                project_root: root.to_owned(),
+                args: Vec::new(),
+                preloads,
+                exec_argv: Vec::new(),
+                disallow_string_code_generation: false,
+                wall_clock: false,
+                steps: StepBudget::Unmetered,
+                source_view: client.source_view(),
+                stream_output: false,
+            })
+            .expect("run with startup preloads");
+        let Response::Ran(summary) = response else {
+            panic!("expected run response, got {response:?}");
+        };
+        assert!(summary.succeeded, "{:?}", summary.diagnostics);
+        summary.stdout
+    }
+
+    let fixture = Fixture::empty();
+    let entry = fixture.dir.join("entry.mjs");
+    let first = fixture.dir.join("preload-first.mjs");
+    let second = fixture.dir.join("preload-second.mjs");
+    let dependency = fixture.dir.join("shared.mjs");
+    let entry_source = "console.log(globalThis.order.join(','));\n";
+    let first_source = "globalThis.order ??= []; import { version } from './shared.mjs'; globalThis.order.push('first:' + version);\n";
+    let second_source = "globalThis.order ??= []; import { version } from './shared.mjs'; globalThis.order.push('second:' + version);\n";
+    std::fs::write(&entry, entry_source).expect("write entry");
+    std::fs::write(&first, first_source).expect("write first preload");
+    std::fs::write(&second, second_source).expect("write second preload");
+    std::fs::write(&dependency, "export const version = 'one';\n")
+        .expect("write preload dependency");
+
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let root = std::fs::canonicalize(&fixture.dir)
+        .expect("canonical root")
+        .to_string_lossy()
+        .into_owned();
+    let entry_path = std::fs::canonicalize(entry).expect("canonical entry");
+    for (path, text) in [
+        (entry_path.clone(), entry_source),
+        (
+            std::fs::canonicalize(first).expect("canonical first preload"),
+            first_source,
+        ),
+        (
+            std::fs::canonicalize(second).expect("canonical second preload"),
+            second_source,
+        ),
+        (
+            std::fs::canonicalize(&dependency).expect("canonical preload dependency"),
+            "export const version = 'one';\n",
+        ),
+    ] {
+        client
+            .request(&Request::SetSource {
+                source_view: client.source_view(),
+                path: path.to_string_lossy().into_owned(),
+                text: text.to_owned(),
+            })
+            .expect("synchronize startup graph source");
+    }
+    let entry_path = entry_path.to_string_lossy().into_owned();
+    let ordered = vec![
+        "./preload-first.mjs".to_owned(),
+        "./preload-second.mjs".to_owned(),
+    ];
+    assert_eq!(
+        run(&mut client, &entry_path, &root, ordered.clone()),
+        "first:one,second:one\n"
+    );
+    assert_eq!(
+        run(&mut client, &entry_path, &root, ordered.clone()),
+        "first:one,second:one\n"
+    );
+    let Response::Stats(after_hit) = client.request(&Request::Stats).expect("cache hit stats")
+    else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_hit.graph_cache_hits, 1);
+
+    client
+        .request(&Request::SetSource {
+            source_view: client.source_view(),
+            path: std::fs::canonicalize(&dependency)
+                .expect("canonical preload dependency")
+                .to_string_lossy()
+                .into_owned(),
+            text: "export const version = 'two';\n".to_owned(),
+        })
+        .expect("edit preload dependency");
+    assert_eq!(
+        run(&mut client, &entry_path, &root, ordered.clone()),
+        "first:two,second:two\n"
+    );
+    let Response::Stats(after_edit) = client.request(&Request::Stats).expect("edit stats") else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_edit.graph_cache_hits, 2);
+    assert_eq!(after_edit.graph_cache_partial_hits, 1);
+
+    let reversed = vec![
+        "./preload-second.mjs".to_owned(),
+        "./preload-first.mjs".to_owned(),
+    ];
+    assert_eq!(
+        run(&mut client, &entry_path, &root, reversed),
+        "second:two,first:two\n"
+    );
+    let Response::Stats(after_reversal) = client.request(&Request::Stats).expect("order stats")
+    else {
+        panic!("expected stats response");
+    };
+    assert_eq!(after_reversal.graph_cache_hits, 2);
+    assert_eq!(after_reversal.graph_cache_entries, 2);
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
 }
 
 #[test]
@@ -2483,11 +2853,13 @@ fn production_daemon_forwards_run_arguments_to_process_argv() {
         .expect("set source");
     let response = client
         .request(&Request::Run {
+            stream_output: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
             node: false,
+            wall_clock: false,
             args: vec!["--foo".into(), "bar".into()],
         })
         .expect("run module");
@@ -2541,7 +2913,9 @@ fn production_daemon_does_not_evaluate_an_unused_side_effect_free_module() {
 
     let Response::Ran(summary) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path: entry.to_string_lossy().into_owned(),
@@ -2579,7 +2953,9 @@ fn production_daemon_compiles_direct_eval_at_runtime() {
         .expect("set source");
     let Response::Ran(summary) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
@@ -2617,7 +2993,9 @@ fn production_daemon_compiles_function_constructor_at_runtime() {
         .expect("set source");
     let Response::Ran(summary) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: client.source_view(),
             path,
@@ -2675,7 +3053,9 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("set source");
     let Response::Ran(first) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
@@ -2699,7 +3079,9 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("reset counters");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: path.clone(),
@@ -2733,7 +3115,9 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("set unsupported source");
     let Response::Ran(failed) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path,
@@ -2820,7 +3204,9 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
 
     let response = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2856,7 +3242,9 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .expect("set body-only edit");
     let Response::Ran(updated) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2894,7 +3282,9 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .expect("set invalid body edit");
     let Response::Ran(failed) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2933,7 +3323,9 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .expect("restore valid body edit");
     let Response::Ran(restored) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2953,7 +3345,9 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     client.request(&Request::ResetStats).expect("reset stats");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -2996,7 +3390,9 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .expect("set cycle");
     let Response::Ran(cycle) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
@@ -3080,7 +3476,9 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
         .into_owned();
     let Response::Ran(first) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: entry_path.clone(),
@@ -3117,7 +3515,9 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
 
     let Response::Ran(second) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: entry_path,
@@ -3179,7 +3579,9 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
             .expect("set relative overlay");
         let Response::Ran(result) = client
             .request(&Request::Run {
+                stream_output: false,
                 node: false,
+                wall_clock: false,
                 steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
                 path: canonical_entry.clone(),
@@ -3214,7 +3616,9 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
 
         let Response::Ran(repeated) = client
             .request(&Request::Run {
+                stream_output: false,
                 node: false,
+                wall_clock: false,
                 steps: StepBudget::Unmetered,
                 source_view: SourceView(0),
                 path: "overlay.js".into(),
@@ -3241,7 +3645,9 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         .expect("set unresolved lexical overlay");
     let Response::Ran(lexical) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: canonical_entry.clone(),
@@ -3279,7 +3685,9 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         .expect("set newer canonical overlay");
     let Response::Ran(newest) = client
         .request(&Request::Run {
+            stream_output: false,
             node: false,
+            wall_clock: false,
             steps: StepBudget::Unmetered,
             source_view: SourceView(0),
             path: "overlay.js".into(),
@@ -3448,11 +3856,13 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
             .expect("set source");
     }
     let request = Request::NativeRun {
+        stream_output: false,
         source_view: SourceView(0),
         path: canonical_entry.to_string_lossy().into_owned(),
         project_root: root,
         profile: NativeProfile::Dev,
         node: false,
+        wall_clock: false,
         static_link: false,
         pgo_generate: None,
         pgo_use: None,
@@ -3515,9 +3925,10 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
     };
     assert_eq!(cyclic.stdout, "42\n");
 
-    // A cycle whose back edge *does* carry a binding is the one the launcher cannot express, and
-    // it is refused by name rather than compiled into a read of an export array that has not
-    // been filled in yet.
+    // A cycle whose back edge *does* carry a binding now runs with the ordinary live-binding
+    // semantics: the dependency reads `seed` before the entry reaches its initializer, so the
+    // program reports the runtime TDZ ReferenceError. It must not be rejected as an unsupported
+    // cycle during graph construction.
     client
         .request(&Request::SetSource {
             source_view: SourceView(0),
@@ -3541,12 +3952,16 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
         })
         .expect("set forward cycle");
     let response = client.request(&request).expect("forward cycle response");
-    let Response::Error { message } = response else {
-        panic!("expected a native refusal, got {response:?}");
+    let Response::NativeRan(forward_cycle) = response else {
+        panic!("expected the native graph to execute the forward cycle, got {response:?}");
     };
+    assert_eq!(forward_cycle.exit_code, Some(1));
+    assert_eq!(forward_cycle.stdout, "");
     assert!(
-        message.contains("across a module cycle"),
-        "the refusal has to name what it refused: {message}"
+        forward_cycle.stderr.contains("ReferenceError")
+            && forward_cycle.stderr.contains("before its declaration"),
+        "the runtime error must report the uninitialized live binding: {}",
+        forward_cycle.stderr
     );
 
     stop.shutdown();

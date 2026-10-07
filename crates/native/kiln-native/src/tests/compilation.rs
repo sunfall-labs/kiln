@@ -1,5 +1,118 @@
 use super::*;
 
+#[test]
+fn diagnostic_symbol_retention_changes_only_the_release_link_identity() {
+    let options = NativeBuildOptions::default();
+    assert_ne!(
+        executable_link_options_digest_with_symbols(NativeProfile::Release, &options, false, &[]),
+        executable_link_options_digest_with_symbols(NativeProfile::Release, &options, true, &[]),
+        "release links with and without local symbols must never share a cache artifact"
+    );
+    assert_ne!(
+        executable_link_options_digest_with_symbols(
+            NativeProfile::ReleaseSize,
+            &options,
+            false,
+            &[]
+        ),
+        executable_link_options_digest_with_symbols(
+            NativeProfile::ReleaseSize,
+            &options,
+            true,
+            &[]
+        ),
+        "size-release links also omit stripping only when explicitly requested"
+    );
+    assert_eq!(
+        executable_link_options_digest_with_symbols(NativeProfile::Dev, &options, false, &[]),
+        executable_link_options_digest_with_symbols(NativeProfile::Dev, &options, true, &[]),
+        "non-release profiles never strip this symbol table"
+    );
+    assert_eq!(
+        executable_link_options_digest_with_symbols(NativeProfile::Profile, &options, false, &[]),
+        executable_link_options_digest_with_symbols(NativeProfile::Profile, &options, true, &[]),
+        "the gprof profile already retains symbols"
+    );
+}
+
+#[test]
+fn provider_link_arguments_change_executable_cache_identity() {
+    let options = NativeBuildOptions::default();
+    let app_object = Digest::hash(b"same retained application object");
+    let provider_archive = Digest::hash(b"same provider archive");
+    let key = |arguments: &[String]| {
+        NativeArtifactFamily::ExecutableLink.key(
+            "clang-22",
+            "x86_64-unknown-linux-gnu",
+            NativeProfile::Release.cache(),
+            executable_link_options_digest_with_symbols(
+                NativeProfile::Release,
+                &options,
+                false,
+                arguments,
+            ),
+            [app_object, provider_archive],
+        )
+    };
+
+    let first = vec!["-lgtk-4".to_owned(), "-lwayland-client".to_owned()];
+    let reordered = vec!["-lwayland-client".to_owned(), "-lgtk-4".to_owned()];
+    let concatenated = vec!["-lgtk-4-lwayland-client".to_owned()];
+    assert_ne!(key(&first), key(&reordered), "argument order is observable");
+    assert_ne!(
+        key(&first),
+        key(&concatenated),
+        "argument boundaries matter"
+    );
+}
+
+#[test]
+fn native_http_facade_demand_accounts_for_dynamic_global_access() {
+    let mut members = kiln_graph::DemandedMembers::default();
+    members.globals.insert("console".into());
+    members.names.insert("log".into());
+    assert!(
+        !needs_native_http_facade(&members),
+        "ordinary hello stays lean"
+    );
+
+    members.globals.insert("fetch".into());
+    assert!(
+        needs_native_http_facade(&members),
+        "direct global fetch is retained"
+    );
+
+    let mut members = kiln_graph::DemandedMembers::default();
+    members.globals.insert("globalThis".into());
+    members.names.insert("fetch".into());
+    assert!(
+        needs_native_http_facade(&members),
+        "static globalThis.fetch is retained"
+    );
+
+    members.names.clear();
+    members.has_computed_access = true;
+    assert!(
+        needs_native_http_facade(&members),
+        "computed global access is open"
+    );
+
+    members.has_computed_access = false;
+    members.globals.insert("Reflect".into());
+    members.names.insert("get".into());
+    assert!(
+        needs_native_http_facade(&members),
+        "reflective global access is retained"
+    );
+
+    let mut members = kiln_graph::DemandedMembers::default();
+    members.has_open_world = true;
+    assert!(
+        needs_native_http_facade(&members),
+        "direct eval/open-world code is retained"
+    );
+}
+
 fn object_single_flight_key(builder: &NativeBuilder, source: &[u8]) -> ArtifactKey {
     let tool = builder.toolchain().identity();
     NativeArtifactFamily::ModuleObject.key(
@@ -190,7 +303,7 @@ fn failed_native_object_compile_releases_its_bucket_for_retry() {
 #[test]
 fn release_large_modules_preserve_throughput_policy() {
     let mut options = CompileOptions::default();
-    configure_release_module_compile(&mut options, true);
+    configure_release_module_compile(&mut options, true, false);
     let arguments = options
         .extra_args
         .iter()
@@ -206,9 +319,87 @@ fn release_large_modules_preserve_throughput_policy() {
         ]
     );
     assert_eq!(
-        release_module_compile_identity(true),
+        release_module_compile_identity(true, false),
         "generic-o0-nosan-nosections"
     );
+}
+
+#[test]
+fn release_generic_mixed_tier_uses_a_distinct_optimization_identity() {
+    let mut options = CompileOptions::default();
+    configure_release_module_compile(&mut options, true, true);
+    let arguments = options
+        .extra_args
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        arguments,
+        [
+            "-O1",
+            "-DKILN_GENERIC_MIXED_TIER=1",
+            "-fno-sanitize=undefined",
+            "-fno-function-sections",
+            "-fno-data-sections"
+        ]
+    );
+    assert_eq!(
+        release_module_compile_identity(true, true),
+        "generic-mixed-o1-nosan-nosections"
+    );
+}
+
+#[test]
+fn instantiation_units_keep_their_mixed_tier_in_executable_and_shared_unit_metadata() {
+    let unit = CModuleUnit {
+        symbol: "fixture_instantiate".into(),
+        prepare_symbol: "fixture_prepare".into(),
+        source: "/* selected generic body */".into(),
+        generic_mixed_optimization: true,
+    };
+    let mut symbols = Vec::new();
+    let mut sources = Vec::new();
+    let mut generic_only = Vec::new();
+    let mut generic_mixed = Vec::new();
+    append_instantiation_unit(
+        &unit,
+        true,
+        false,
+        &mut symbols,
+        &mut sources,
+        &mut generic_only,
+        &mut generic_mixed,
+    );
+
+    assert_eq!(symbols, ["fixture_instantiate"]);
+    assert_eq!(sources[0].0, b"/* selected generic body */");
+    assert!(!sources[0].2, "this fixture starts with a generated-C miss");
+    assert_eq!(generic_only, [true]);
+    assert_eq!(generic_mixed, [true]);
+    let mut mixed_options = CompileOptions::default();
+    configure_release_module_compile(&mut mixed_options, generic_only[0], generic_mixed[0]);
+    let mixed_arguments = mixed_options
+        .extra_args
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(mixed_arguments.contains(&"-O1".to_owned()));
+    assert!(mixed_arguments.contains(&"-DKILN_GENERIC_MIXED_TIER=1".to_owned()));
+    assert_eq!(
+        release_module_compile_identity(generic_only[0], generic_mixed[0]),
+        "generic-mixed-o1-nosan-nosections"
+    );
+
+    let mut cold_options = CompileOptions::default();
+    configure_release_module_compile(&mut cold_options, true, false);
+    let cold_arguments = cold_options
+        .extra_args
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(cold_arguments.contains(&"-O0".to_owned()));
+    assert!(!cold_arguments.contains(&"-DKILN_GENERIC_MIXED_TIER=1".to_owned()));
+    assert_eq!(release_module_compile_identity(true, false), "generic-o0-nosan-nosections");
 }
 
 #[test]
@@ -216,11 +407,15 @@ fn release_module_specialization_budget_counts_all_instructions() {
     let mut program = Program {
         source: String::new().into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return; MAX_RELEASE_SPECIALIZED_MODULE_INSTRUCTIONS],
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     assert!(!release_module_uses_generic_bodies(
         &budget_module(program.clone()),
@@ -239,11 +434,15 @@ fn release_module_specialization_budget_counts_functions() {
     let mut program = Program {
         source: String::new().into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![empty_function(); MAX_RELEASE_SPECIALIZED_MODULE_FUNCTIONS],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     assert!(!release_module_uses_generic_bodies(
         &budget_module(program.clone()),
@@ -344,7 +543,9 @@ fn release_pruning_preserves_superclass_tdz() {
             &NativeBuildOptions::new(project.path.join("tdz"), NativeProfile::Release),
         )
         .unwrap();
-    let result = Command::new(report.output).output().unwrap();
+    let result = Command::new(report.output)
+        .output_when_launchable()
+        .unwrap();
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
     assert!(
@@ -548,9 +749,26 @@ fn retained_method_groups_drops_node_groups_without_demand() {
         );
     }
     assert_eq!(
-        http_mask & groups::NODE_PATH,
+        http_mask & PRUNABLE_METHOD_GROUPS,
+        PRUNABLE_METHOD_GROUPS,
+        "node:http's built-in global-object/computed-access path retains the conservative full table"
+    );
+    let path_mask = mask_for(
+        "main.mjs",
+        &[(
+            "main.mjs",
+            "import path from 'node:path';\nconsole.log(typeof path.join);\n",
+        )],
+    );
+    assert_ne!(
+        path_mask & groups::NODE_PATH,
         0,
-        "unrelated groups still drop"
+        "node:path retains the dispatch group for its methods"
+    );
+    assert_eq!(
+        path_mask & groups::NODE_HTTP,
+        0,
+        "node:path alone keeps no HTTP groups"
     );
     let buffer_mask = mask_for(
         "main.mjs",
@@ -581,11 +799,38 @@ fn retained_method_groups_drops_node_groups_without_demand() {
         | groups::NODE_UTIL
         | groups::NODE_DIAGNOSTICS
         | groups::NODE_STREAM
-        | groups::NODE_PATH;
+        | groups::NODE_PATH
+        | groups::NODE_CRYPTO;
     assert_eq!(
         fs_mask & node_groups,
         groups::NODE_STREAM | groups::NODE_EVENT | groups::BUFFER,
         "node:fs keeps stream/event and the Buffer methods its reads can return: {fs_mask:#x}"
+    );
+    let crypto_mask = mask_for(
+        "main.mjs",
+        &[(
+            "main.mjs",
+            "import { createHash } from 'node:crypto';\nconsole.log(typeof createHash);\n",
+        )],
+    );
+    assert_ne!(
+        crypto_mask & groups::NODE_CRYPTO,
+        0,
+        "node:crypto keeps its private raw bridge capability"
+    );
+    assert_eq!(
+        CORE_METHOD_GROUPS & groups::NODE_CRYPTO,
+        0,
+        "crypto bridge is not part of the always-retained core"
+    );
+    let global_crypto_mask = mask_for(
+        "main.mjs",
+        &[("main.mjs", "console.log(typeof crypto.subtle.digest);\n")],
+    );
+    assert_ne!(
+        global_crypto_mask & groups::NODE_CRYPTO,
+        0,
+        "the global WebCrypto/JOSE path keeps its crypto capability"
     );
     let dynamic_mask = mask_for(
         "main.mjs",
@@ -686,7 +931,7 @@ fn compact_function_context_is_omitted_only_when_unused() {
         )
         .expect("build compact context fixture");
     let result = Command::new(&report.output)
-        .output()
+        .output_when_launchable()
         .expect("run context fixture");
     assert!(
         result.status.success(),
@@ -729,7 +974,7 @@ fn dead_phi_pruning_preserves_effects_parallel_copies_and_suspension() {
         )
         .expect("build dead phi fixture");
     let result = Command::new(&report.output)
-        .output()
+        .output_when_launchable()
         .expect("run dead phi fixture");
     assert!(
         result.status.success(),
@@ -872,32 +1117,23 @@ fn live_cache_identity_catalogue_covers_every_stage_and_profile_family() {
         identities.len(),
         non_provider_count + provider_identities.len()
     );
-    let full_provider_identity = provider_identities
-        .iter()
-        .find(|(variant, _)| matches!(variant, ProviderVariant::Full))
-        .map(|(_, identity)| identity.clone())
-        .expect("full provider identity");
     for family in NativeArtifactFamily::SOURCES {
+        // Providers are checked below against every configured variant. An explicit
+        // manifest may select only FullGui or a capability-minimal variant.
+        if matches!(family, NativeArtifactFamily::NumberProvider) {
+            continue;
+        }
         let (backend, abi) = family.backend_abi(
             &module_abi_identity(),
             &runtime_abi_identity(),
             &shared_embedding_abi_identity(),
         );
-        let compiler_version = if matches!(family, NativeArtifactFamily::NumberProvider) {
-            full_provider_identity.clone()
-        } else {
-            family.compiler_version()
-        };
         assert!(identities.contains(&cache_identity(
-            compiler_version,
+            family.compiler_version(),
             backend,
             &abi,
             &target,
-            if matches!(family, NativeArtifactFamily::NumberProvider) {
-                CacheProfile::Release
-            } else {
-                CacheProfile::Debug
-            },
+            CacheProfile::Debug,
         )));
     }
     for (_variant, provider_identity) in provider_identities {
@@ -1820,14 +2056,15 @@ fn provider_capability_demand_is_typed_and_conservative() {
         ProviderCapabilities::REALM,
         "an unreachable function in a live module does not enlarge provider requirements"
     );
-    assert!(
+    assert_eq!(
         selection(
             "main.mjs",
             &[(
                 "main.mjs",
                 "import http from 'node:http';\nconsole.log(typeof http.createServer);\n",
             )]
-        ) == ProviderCapabilities::REALM.with(ProviderCapability::Http),
+        ),
+        ProviderCapabilities::REALM.with(ProviderCapability::Http),
         "node:http declares HTTP demand"
     );
     assert!(
@@ -1882,6 +2119,33 @@ fn provider_capability_demand_is_typed_and_conservative() {
             &[("main.mjs", "console.log(JSON.parse('1'));\n")]
         ) == ProviderCapabilities::REALM.with(ProviderCapability::Json),
         "JSON is independently demandable"
+    );
+    // The host GUI bridge is demanded by importing `kiln:gui`, and only then: `full` stops short
+    // of it, so the conservative CommonJS answer has to add it back when the graph imports it
+    // (ADR 0074).
+    let gui = selection(
+        "main.mjs",
+        &[(
+            "main.mjs",
+            "import { currentHost } from 'kiln:gui';\nconsole.log(typeof currentHost);\n",
+        )],
+    );
+    assert!(gui.contains(ProviderCapability::Gui), "{:?}", gui.names());
+    assert_eq!(
+        ProviderVariant::smallest_covering(gui),
+        Some(ProviderVariant::FullGui),
+        "a GUI program's engines are covered by the full-gui package"
+    );
+    assert_eq!(
+        selection(
+            "main.cjs",
+            &[(
+                "main.cjs",
+                "const gui = require('kiln:gui');\nconsole.log(typeof gui);\n",
+            )],
+        ),
+        ProviderCapabilities::FULL.with(ProviderCapability::Gui),
+        "a CommonJS GUI program conservatively demands every capability, the bridge included"
     );
     for (source, capability) in [
         ("console.log(/a/.test('a'));\n", ProviderCapability::RegExp),

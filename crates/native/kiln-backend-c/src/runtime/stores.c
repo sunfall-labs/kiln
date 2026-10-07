@@ -23,7 +23,8 @@ static double kiln_c99_array_index(kiln_value key) {
         if ((size_t)length != key_len || memcmp(buffer, bytes, key_len) != 0) {
             return -1.0;
         }
-        return number;
+        /* Both string and numeric keys share the array-index range. The canonical spelling
+         * alone is insufficient: 2^32-1 names an ordinary property and must not grow storage. */
     } else {
         return -1.0;
     }
@@ -57,14 +58,23 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
         if (status != KILN_C99_OK) {
             return status;
         }
-        /* Defined rather than assigned: `constructor` is a real property and is never
-         * enumerated, so `for (const k in new C())` visits what the constructor assigned and not
-         * the link back to the class. */
-        status = kiln_c99_define_method(*slot, "constructor", 11, function);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
+        /* Ordinary constructor prototypes have a non-enumerable link back to the function.
+         * Generator prototypes inherit that link from the shared TypeScript-owned intrinsic
+         * prototype installed below. */
         prototype = *slot;
+        if (closure->async_generator || (closure->generator && !closure->asynchronous)) {
+            size_t kind = closure->async_generator ? 1 : 0;
+            kiln_value shared = kiln_c99_realm()->generator_object_prototypes[kind];
+            if (shared.tag == KILN_VALUE_OBJECT) {
+                status = kiln_c99_set_prototype(prototype, shared);
+                if (status != KILN_C99_OK) return status;
+            }
+        } else {
+            status = kiln_c99_define_method(*slot, "constructor", 11, function);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
     }
     *out = prototype;
     return KILN_C99_OK;
@@ -406,6 +416,18 @@ static int kiln_c99_callable_store_lookup(kiln_value callable, kiln_value *out, 
         *out = bound->properties;
         return KILN_C99_OK;
     }
+    if (callable.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        kiln_commonjs_require *require = (kiln_commonjs_require *)(uintptr_t)callable.bits;
+        if (require->properties.tag != KILN_VALUE_OBJECT) {
+            if (!create) {
+                KILN_C99_ABSENT("a CommonJS require with no own-property store", out);
+            }
+            if (kiln_c99_new_object_for_owner(&require->properties, require) != KILN_C99_OK)
+                return KILN_C99_OUT_OF_MEMORY;
+        }
+        *out = require->properties;
+        return KILN_C99_OK;
+    }
     if (callable.tag != KILN_VALUE_METHOD && callable.tag != KILN_VALUE_BUILTIN &&
         callable.tag != KILN_VALUE_SETTLER)
         KILN_C99_REFUSE("own properties are not modelled on this callable");
@@ -623,6 +645,40 @@ kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, si
     return kiln_c99_realm_member_answer(builtin, member, len);
 }
 
+/* Cached builtin-method sites carry the exact property spelling because several exposed names
+ * can lower to one native method id. Bootstrap clears program-write authority, but its
+ * `modified_builtins` bits and own stores remain; check this member only for affected builtins. */
+static __attribute__((noinline)) KILN_C99_RARE_CALL int
+kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *member, size_t len) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    size_t at;
+    int modified;
+    int untouched;
+    if (heap == NULL || member == NULL || len >= sizeof heap->member_answers[0].cached_member) return 0;
+    if (builtin < 64u * KILN_C99_MODIFIED_BUILTIN_WORDS) {
+        modified = (int)((heap->modified_builtins[builtin >> 6] >> (builtin & 63u)) & 1u);
+    } else {
+        modified = heap->modified_builtin_beyond != 0;
+    }
+    if (!modified) return 1;
+    at = kiln_c99_member_answer_at(builtin, member);
+    if (heap->member_answers[at].member == member &&
+        heap->member_answers[at].cached_member_len == len &&
+        memcmp(heap->member_answers[at].cached_member, member, len) == 0 &&
+        heap->member_answers[at].builtin == builtin &&
+        heap->member_answers[at].serial == heap->builtin_store_serial) {
+        return heap->member_answers[at].untouched;
+    }
+    untouched = !kiln_c99_builtin_store_has_own(builtin, member, len);
+    heap->member_answers[at].member = member;
+    heap->member_answers[at].builtin = builtin;
+    heap->member_answers[at].serial = heap->builtin_store_serial;
+    heap->member_answers[at].untouched = (uint8_t)untouched;
+    memcpy(heap->member_answers[at].cached_member, member, len);
+    heap->member_answers[at].cached_member_len = (uint8_t)len;
+    return untouched;
+}
+
 /* Issue 30: the prototypes whose members a receiver *kind* answers from a method table (a string's
  * `trim`, an array's `join`, a map's `get`, a regexp's `test`), and so the ones an emitted method
  * fast path -- which answers by name for whichever of these kinds the receiver turns out to be --
@@ -640,7 +696,7 @@ static const uint32_t kiln_c99_kind_prototypes[] = {
     KILN_C99_BUILTIN_UINT16_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_INT32_ARRAY_PROTOTYPE,
     KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE,
     KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE,
-    KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE,
+    KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE,
 };
 /* Stands for "every kind prototype" in `member_answers`; no built-in has this number. */
 #define KILN_C99_ANY_KIND_PROTOTYPE UINT32_C(0xfffffffe)
@@ -733,6 +789,7 @@ static int kiln_c99_realm_tag_prototypes_pristine(const kiln_gc_heap *heap, uint
         KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE);
         KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE);
         KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE);
+        KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE);
         KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE);
         KILN_C99_TAG_PROTO(KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE);
         break;
@@ -799,35 +856,46 @@ static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
     size_t steps;
     if (found == NULL || out == NULL || key == NULL) return KILN_C99_INVALID_ARGUMENT;
     *found = 0;
-    if (slot == NULL) return KILN_C99_OK;
-    current = *slot;
+    if (target.tag == KILN_VALUE_BUILTIN || target.tag == KILN_VALUE_METHOD ||
+        target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_BOUND ||
+        target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        /* Definitions on callable values live in their callable store. They are not exotic
+         * instance stores: skipping this projection hid bootstrap facades such as JSON.parse
+         * and Error.captureStackTrace behind their original native method-table answers. */
+        int status = kiln_c99_callable_store(target, &current, 0);
+        if (status != KILN_C99_OK) return status;
+    } else {
+        if (slot == NULL) return KILN_C99_OK;
+        current = *slot;
+    }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         kiln_object *object;
-        size_t index;
+        kiln_property property;
         if (current.tag == KILN_VALUE_FUNCTION) {
             current = kiln_c99_closure_store(kiln_c99_closure_of(current));
         }
         if (current.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
         object = kiln_c99_object_of(current);
-        if (object->shape != NULL) kiln_c99_ensure_dictionary(object);
-        index = kiln_c99_own_index_key(object, canonical, key);
-        if (index != object->count) {
+        /* Callable stores may use a sealed layout after bootstrap. Read through the shared
+         * own-property projection so shaped, dictionary, and sealed slots have one authority.
+         * Otherwise a missing sealed-store hit can fall through to a synthetic method-table
+         * answer and shadow an installed TypeScript facade. */
+        if (kiln_c99_property_read_own_value(current, key, canonical, &property)) {
             *found = 1;
-            if (object->properties[index].refused) {
+            if (property.refused) {
                 return kiln_c99_refuse_named_key(
                     "a member this backend declares and has not implemented", key);
             }
-            if (!object->properties[index].accessor) {
-                *out = object->properties[index].value;
+            if (!property.accessor) {
+                *out = property.value;
                 return KILN_C99_OK;
             }
-            if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+            if (property.getter.tag == KILN_VALUE_UNDEFINED) {
                 KILN_C99_ABSENT("an accessor with no getter, whose read is undefined by "
                                 "definition",
                                 out);
             }
-            return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
-                                 depth, thrown);
+            return kiln_c99_call(host, out, property.getter, target, NULL, 0, depth, thrown);
         }
         current = object->prototype;
     }

@@ -1671,6 +1671,7 @@ expected_stdout = "bundle\n"
             "server/s06-response-framing",
             "server/s07-vite-dev-server",
             "server/s08-binary-http-chunks",
+            "server/s09-listen-callback",
         ]
         .into_iter()
         .map(TestId::new)
@@ -2070,8 +2071,8 @@ expected_stdout = "bundle\n"
     fn typescript_programs_run_from_a_bundle_or_skip_with_a_reason() {
         let summary = run_corpus("conformance/effect");
 
-        assert_eq!(summary.discovered, 15);
-        assert_eq!(summary.skipped + summary.passed, 15);
+        assert_eq!(summary.discovered, 12);
+        assert_eq!(summary.skipped + summary.passed, 12);
         assert_eq!(
             summary.failed, 0,
             "either kiln ran the bundle and agreed, or it was never asked"

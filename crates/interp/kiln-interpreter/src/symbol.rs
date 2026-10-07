@@ -49,6 +49,16 @@ impl Symbol {
             .map_or_else(String::new, |description| description.to_lossy_string())
     }
 
+    /// SymbolDescriptiveString for language conversions, preserving UTF-16 code units.
+    pub(crate) fn descriptive_string_units(&self) -> StringUnits {
+        let description = self.description_units().unwrap_or_default();
+        let mut units = Vec::with_capacity(description.unit_len() + 8);
+        units.extend("Symbol(".encode_utf16());
+        units.extend(description.units());
+        units.push(u16::from(b')'));
+        StringUnits::from_units(&units)
+    }
+
     /// The serial in a unique symbol's reserved key, or `None` for any other key.
     ///
     /// The inverse of the `@@symbol:{serial}` half of [`Self::property_key`]. The serial alone
@@ -87,8 +97,9 @@ pub(crate) const RESERVED_KEY_PREFIX: &str = "@@";
 ///
 /// `every_internal_slot_is_reserved` in `tests.rs` scans this crate for `"@@..."` literals and
 /// fails if one is missing from here, so a new slot cannot quietly start enumerating.
-const INTERNAL_SLOTS: [&str; 39] = [
+const INTERNAL_SLOTS: [&str; 40] = [
     "@@abort-listeners",
+    "@@abort-dispatch",
     "@@asyncDisposeDone",
     "@@asyncDisposeEntries",
     "@@call-site-name",
@@ -140,10 +151,23 @@ pub(crate) fn is_reserved(key: &str) -> bool {
     if !key.starts_with(RESERVED_KEY_PREFIX) {
         return false;
     }
-    WellKnown::from_property_key(key).is_some()
-        || INTERNAL_PREFIXES
-            .iter()
-            .any(|prefix| key.starts_with(prefix))
+    WellKnown::from_property_key(key).is_some() || is_internal_key(key)
+}
+
+/// Whether this is a VM-owned reserved spelling rather than a well-known symbol key.
+///
+/// Kept separate from `is_reserved` so a property lookup that has already classified whether
+/// the key is a symbol does not scan `WellKnown::ALL` a second time.
+pub(crate) fn is_internal_key(key: &str) -> bool {
+    // Every exact slot and generated internal family is under `@@`. Most property names have no
+    // reserved prefix, so skip both tables instead of comparing an ordinary key against all 40
+    // exact slots on every property lookup.
+    if !key.starts_with(RESERVED_KEY_PREFIX) {
+        return false;
+    }
+    INTERNAL_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
         || INTERNAL_SLOTS.contains(&key)
 }
 
@@ -159,3 +183,13 @@ const _: () = {
         index += 1;
     }
 };
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn all_internal_slots_satisfy_the_reserved_prefix_guard() {
+        for key in super::INTERNAL_SLOTS {
+            assert!(super::is_internal_key(key), "{key} is an internal slot");
+        }
+    }
+}

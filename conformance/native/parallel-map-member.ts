@@ -6,7 +6,7 @@
 // the member existing rather than about that. Two more things it deliberately does not compare:
 // `[].map === Array.prototype.map` (false here, true on the interpreter: the prototype read hands
 // out the generic code, a divergence older than this probe), and `Array.prototype[Symbol.unscopables]`
-// (absent here; `.scratch/array-unscopables` holds the plan). `parallelMap` sits in neither list
+// (absent here; `docs/issues/array-unscopables` holds the plan). `parallelMap` sits in neither list
 // on the interpreter, so there is nothing for this member to agree on there yet.
 const arr = [1, 2, 3];
 console.log(typeof [].parallelMap, typeof Array.prototype.parallelMap, typeof [].map);

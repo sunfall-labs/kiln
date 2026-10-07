@@ -92,6 +92,7 @@ struct FileState {
     parse: Option<Memo<Parsed>>,
     ir: Option<Memo<Compiled>>,
     module_ir: Option<Memo<CompiledModule>>,
+    module_ir_by_identity: AHashMap<String, (Revision, Option<Epoch>, CompiledModule)>,
     summaries: Option<Memo<Vec<FunctionSummary>>>,
     source_check: Option<Memo<SourceCheck>>,
     interface: Option<Memo<Interface>>,
@@ -365,16 +366,20 @@ impl MemoEngine {
         (result, deps)
     }
 
-    fn compile_inputs(&mut self, file: FileId) -> (Parsed, Option<SourceCheck>, Vec<QueryKey>) {
+    fn compile_inputs(
+        &mut self,
+        file: FileId,
+    ) -> (Parsed, Option<SourceCheck>, Option<Epoch>, Vec<QueryKey>) {
         let parse_dep = QueryKey::Parse(file);
         self.force(parse_dep);
         let parsed = self.file(file).parse.as_ref().expect(FORCED).value.clone();
         let mut deps = vec![parse_dep];
-        let checked = if self.source_check_query.is_some()
-            && matches!(
-                parsed.module.source_kind,
-                kiln_hir::SourceKind::TypeScript | kiln_hir::SourceKind::Tsx
-            ) {
+        let (checked, checked_epoch) = if self.source_check_query.is_some()
+            && (parsed.module.type_syntax.original_module.is_some()
+                || matches!(
+                    parsed.module.source_kind,
+                    kiln_hir::SourceKind::TypeScript | kiln_hir::SourceKind::Tsx
+                )) {
             // A root check also resolves its imported modules. Reuse those current facts
             // for compilation, while keeping diagnostic queries rooted at their own entry.
             // Depending on the supplying check preserves its complete source dependency set.
@@ -393,21 +398,15 @@ impl MemoEngine {
                 .unwrap_or(file);
             self.force(QueryKey::SourceCheck(supplier));
             deps.push(QueryKey::SourceCheck(supplier));
-            Some(
-                self.file(supplier)
-                    .source_check
-                    .as_ref()
-                    .expect(FORCED)
-                    .value
-                    .clone(),
-            )
+            let memo = self.file(supplier).source_check.as_ref().expect(FORCED);
+            (Some(memo.value.clone()), Some(memo.meta.changed_at))
         } else {
-            None
+            (None, None)
         };
-        (parsed, checked, deps)
+        (parsed, checked, checked_epoch, deps)
     }
     fn compute_ir(&mut self, file: FileId) -> (Compiled, Vec<QueryKey>) {
-        let (parsed, checked, deps) = self.compile_inputs(file);
+        let (parsed, checked, _, deps) = self.compile_inputs(file);
         let mut result = kiln_ir::compile(&parsed.module);
         if let (Ok(program), Some(checked)) = (&mut result, checked) {
             kiln_ir::apply_source_types(
@@ -421,7 +420,7 @@ impl MemoEngine {
         (result, deps)
     }
     fn compute_module_ir(&mut self, file: FileId) -> (CompiledModule, Vec<QueryKey>) {
-        let (parsed, checked, deps) = self.compile_inputs(file);
+        let (parsed, checked, _, deps) = self.compile_inputs(file);
         let mut result = kiln_ir::compile_module(&parsed.module);
         if let (Ok(program), Some(checked)) = (&mut result, checked) {
             kiln_ir::apply_source_types(
@@ -672,6 +671,7 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
 
     Module {
         type_syntax: kiln_hir::TypeSyntax::default(),
+        module_id: "".into(),
         // No source, deliberately. This frontend synthesizes a fixed shape and never reads
         // `text`, so its spans index into nothing and its bytecode is the same whatever the file
         // says. Handing it the text would imply a relationship that does not exist -- and would
@@ -680,6 +680,8 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
         // comment-only edit now does produce a different `Program`: the bytecode is unchanged but
         // the text `Function.prototype.toString` answers with is not.
         source: "".into(),
+        static_source_provenance: None,
+        source_origin: None,
         source_kind: SourceKind::JavaScript,
         source_goal: kiln_hir::SourceGoal::Module,
         strict: false,
@@ -750,6 +752,7 @@ impl QueryEngine for MemoEngine {
             parse: None,
             ir: None,
             module_ir: None,
+            module_ir_by_identity: AHashMap::new(),
             summaries: None,
             source_check: None,
             interface: None,
@@ -862,6 +865,38 @@ impl QueryEngine for MemoEngine {
             .expect(FORCED)
             .value
             .clone()
+    }
+
+    fn module_ir_with_identity(&mut self, file: FileId, identity: &str) -> CompiledModule {
+        let (parsed, checked, checked_epoch, _) = self.compile_inputs(file);
+        let revision = self.file(file).source_revision;
+        if let Some((cached_revision, cached_check_epoch, program)) =
+            self.file(file).module_ir_by_identity.get(identity)
+            && *cached_revision == revision
+            && *cached_check_epoch == checked_epoch
+        {
+            let program = program.clone();
+            self.stats.validated += 1;
+            return program;
+        }
+        let mut module = parsed.module.as_ref().clone();
+        module.module_id = identity.into();
+        let mut program = kiln_ir::compile_module(&module);
+        if let (Ok(program), Some(checked)) = (&mut program, checked) {
+            kiln_ir::apply_source_types(
+                &self.file(file).path,
+                &module,
+                &checked,
+                &checked.checker_identity,
+                &mut program.program,
+            );
+        }
+        self.stats.ir_computed += 1;
+        self.file_mut(file).module_ir_by_identity.insert(
+            identity.to_owned(),
+            (revision, checked_epoch, program.clone()),
+        );
+        program
     }
 
     fn function_summaries(&mut self, file: FileId) -> Vec<FunctionSummary> {
@@ -1745,6 +1780,147 @@ mod tests {
             2,
             "config remains auxiliary after edits"
         );
+    }
+
+    #[test]
+    fn identity_module_compile_rechecks_and_attaches_project_contracts() {
+        use kiln_hir::source_types::{SourceType, TypeClass, TypeRole};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn checker(
+            entry: &str,
+            modules: &[(String, std::sync::Arc<Module>)],
+            _auxiliary: &[(String, std::sync::Arc<[u8]>)],
+        ) -> SourceCheck {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            let target = modules
+                .iter()
+                .find(|(path, _)| path == entry)
+                .unwrap()
+                .1
+                .as_ref();
+            let signature = target
+                .type_syntax
+                .signatures
+                .iter()
+                .find(|site| site.has_body)
+                .unwrap();
+            let parameter = signature.signature.parameters.first().unwrap();
+            let is_string = modules
+                .iter()
+                .any(|(_, module)| module.source.contains("type Scalar = string"));
+            SourceCheck {
+                checker_identity: "identity-contract-v1".into(),
+                complete: true,
+                types: vec![SourceType {
+                    path: entry.into(),
+                    span: parameter.span,
+                    role: TypeRole::Parameter,
+                    display: if is_string { "string" } else { "number" }.into(),
+                    class: if is_string {
+                        TypeClass::String
+                    } else {
+                        TypeClass::Number
+                    },
+                }],
+                diagnostics: Vec::new(),
+            }
+        }
+
+        fn contract_frontend(path: &str, text: &str) -> Module {
+            let mut module = fixture_frontend(path, text);
+            module.source = text.into();
+            if path.ends_with("main.ts") {
+                let param_span = Span::new(32, 37);
+                let function_span = Span::new(0, 65);
+                let parameter = kiln_hir::TypeSignatureParameter {
+                    name: Some("value".into()),
+                    pattern: Some(Box::new(kiln_hir::Pattern::Identifier("value".into()))),
+                    pattern_span: param_span,
+                    span: param_span,
+                    ty: None,
+                    optional: false,
+                    rest: false,
+                    has_default: false,
+                };
+                let function = kiln_hir::Function {
+                    name: Some("echo".into()),
+                    inferred_name: None,
+                    binds_own_name: true,
+                    arrow: false,
+                    generator: false,
+                    asynchronous: false,
+                    parameters: vec![kiln_hir::Parameter {
+                        pattern: kiln_hir::Pattern::Identifier("value".into()),
+                        type_annotation: None,
+                        span: param_span,
+                    }],
+                    rest: None,
+                    return_type: None,
+                    body: vec![kiln_hir::Statement {
+                        kind: kiln_hir::StatementKind::Return(Some(kiln_hir::Expression {
+                            kind: kiln_hir::ExpressionKind::Identifier("value".into()),
+                            span: param_span,
+                        })),
+                        span: param_span,
+                    }],
+                    strict: false,
+                    span: function_span,
+                };
+                module.body = vec![kiln_hir::Statement {
+                    kind: kiln_hir::StatementKind::Function(Box::new(function)),
+                    span: function_span,
+                }];
+                module.type_syntax.signatures = vec![kiln_hir::FunctionSignatureSite {
+                    owner_span: function_span,
+                    signature: kiln_hir::TypeSignature {
+                        span: function_span,
+                        type_parameters: Vec::new(),
+                        this_parameter: None,
+                        parameters: vec![parameter],
+                        rest: false,
+                        return_type: None,
+                    },
+                    has_body: true,
+                }];
+            }
+            module
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        let mut db = MemoEngine::new(contract_frontend).with_source_check_query(checker);
+        let entry = db.intern("/identity/main.ts");
+        let alias = db.intern("/identity/alias.ts");
+        db.set_source(
+            entry,
+            "import type { Scalar } from './alias'; export function echo(value: Scalar) { return value; }".into(),
+        );
+        db.set_source(alias, "export type Scalar = number;".into());
+
+        let first = db.module_ir_with_identity(entry, "/logical/identity-main");
+        let first = first.expect("compile initial module");
+        assert_eq!(
+            first.program.functions[0].parameter_type(0),
+            Some(kiln_ir::TypeAnnotation::Number)
+        );
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        let warm = db.module_ir_with_identity(entry, "/logical/identity-main");
+        assert_eq!(warm, Ok(first.clone()));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+
+        db.set_source(alias, "export type Scalar = string;".into());
+        let updated = db
+            .module_ir_with_identity(entry, "/logical/identity-main")
+            .expect("compile changed alias");
+        assert_eq!(
+            updated.program.functions[0].parameter_type(0),
+            Some(kiln_ir::TypeAnnotation::String)
+        );
+        assert_eq!(
+            first.program.functions[0].parameter_type(0),
+            Some(kiln_ir::TypeAnnotation::Number)
+        );
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
     }
 
     #[test]

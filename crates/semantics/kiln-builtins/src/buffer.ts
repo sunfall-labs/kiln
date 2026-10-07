@@ -20,6 +20,9 @@
   const G = globalThis as any;
   const B = G.Buffer;
   const rawToString: (this: Uint8Array, encoding?: string) => string = G.__kilnBufferToString;
+  const rawTypedArrayCopy: ((target: any, targetIndex: number, source: any, sourceIndex: number, count: number) => boolean) | undefined =
+    G.__kilnBufferTypedArrayCopy;
+  delete G.__kilnBufferTypedArrayCopy;
   if (typeof B !== "function" || typeof rawToString !== "function") return;
   // Captured, not called: this bootstrap runs in every Node-mode program, and a call into
   // Buffer here would be a call into a group the program may not have retained.
@@ -686,15 +689,13 @@
     define(`writeBigUint64${order}`, proto[`writeBigUInt64${order}`]);
   }
 
-  // `%TypedArray%.prototype.map` and `filter` answer through the species constructor, which
-  // for a Buffer is `Buffer`: the result is a Buffer too.
+  // `%TypedArray%.prototype.map` and `filter` answer through the species constructor, which is
+  // `FastBuffer` for a Buffer. FastBuffer brands the result and gives it Buffer.prototype.
   define("map", function map(this: Uint8Array, callback: any, thisArg?: any): Uint8Array {
-    const out: Uint8Array = U8.prototype.map.call(this, callback, thisArg);
-    return wrap(out.buffer, out.byteOffset, out.length);
+    return U8.prototype.map.call(this, callback, thisArg);
   });
   define("filter", function filter(this: Uint8Array, callback: any, thisArg?: any): Uint8Array {
-    const out: Uint8Array = U8.prototype.filter.call(this, callback, thisArg);
-    return wrap(out.buffer, out.byteOffset, out.length);
+    return U8.prototype.filter.call(this, callback, thisArg);
   });
 
   define("inspect", function inspect(this: Uint8Array): string {
@@ -780,6 +781,16 @@
     for (let i = 0; i < list.length && at < total; i++) {
       const item = list[i];
       const count = item.length < total - at ? item.length : total - at;
+      // Both the destination and ordinary Buffer/Uint8Array inputs have the same Uint8 element
+      // representation. Reuse the typed-array bootstrap's validated raw copy so large buffers
+      // move as bytes instead of crossing the generic property-access path for every element.
+      // The helper returns false for spoofed tags, proxies, detached or otherwise incompatible
+      // views; keep the old observable element loop for those cases.
+      if (count > 0 && rawTypedArrayCopy !== undefined &&
+          rawTypedArrayCopy(out, at, item, 0, count)) {
+        at += count;
+        continue;
+      }
       for (let j = 0; j < count; j++) out[at + j] = item[j];
       at += count;
     }
@@ -802,6 +813,44 @@
   };
 
   B.poolSize = 8192;
+
+  // Node's Buffer[Symbol.species] is FastBuffer: it is a Uint8Array subclass whose prototype
+  // is Buffer.prototype, and whose constructor returns a branded Buffer view. Typed-array
+  // methods pass a length; Buffer.prototype.subarray passes (ArrayBuffer, offset, length).
+  // Preserve both forms so generic typed-array species operations and Node's internal Buffer
+  // consumers use the same allocation authority.
+  function FastBuffer(this: any, source: any, byteOffset?: any, length?: any): Uint8Array {
+    if (new.target === undefined) throw new TypeError("Class constructor FastBuffer cannot be invoked without 'new'");
+    // Delegate argument conversion and overload selection to Uint8Array. In particular, its
+    // length form applies ToIndex, and its array-like/typed-array forms copy elements instead
+    // of treating the input as an ArrayBuffer. Rewrap the resulting byte span only to add the
+    // Buffer brand while preserving a shared ArrayBuffer view when that overload was selected.
+    const view = new U8(source as any, byteOffset as any, length as any);
+    const result = rawFrom(view.buffer, view.byteOffset, view.byteLength);
+    // A subclass supplies the observable prototype for the returned typed array, as it does
+    // when the built-in FastBuffer constructor is subclassed.
+    if (new.target !== FastBuffer) {
+      const candidate = new.target.prototype;
+      Object.setPrototypeOf(
+        result,
+        candidate !== null && (typeof candidate === "object" || typeof candidate === "function")
+          ? candidate
+          : proto,
+      );
+    }
+    return result;
+  }
+  Object.defineProperty(FastBuffer, "name", { value: "FastBuffer", configurable: true });
+  Object.defineProperty(FastBuffer, "length", { value: 0, configurable: true });
+  Object.defineProperty(FastBuffer, "prototype", { value: proto, writable: false });
+  Object.setPrototypeOf(FastBuffer, U8);
+  Object.defineProperty(B, Symbol.species, {
+    configurable: true,
+    enumerable: false,
+    get: function species(): typeof FastBuffer {
+      return FastBuffer;
+    },
+  });
 
   B.prototype = proto;
 })();

@@ -51,8 +51,8 @@ cast never makes a value shared. There is no `#[]` or `#{}` syntax, `SharedStruc
 `kiln:shared` is unavailable when `KILN_EXTENSIONS=0` or a binary is built with
 `--no-kiln-extensions`. An import then produces the same named extension-unavailable error as
 other kiln extension modules. Merely installing it changes no Node built-in, global or program
-that uses only Node's surface. `@kiln/concurrency` may re-export these functions, but the engine
-module is the single definition.
+that uses only Node's surface. The engine module is the single definition; `@kiln/types`
+declares it (2026-10-02: `@kiln/concurrency`, which re-exported it, is removed).
 
 ### Accepted graph and snapshot
 
@@ -164,7 +164,7 @@ it must never leave a half-published graph.
 
 ### Node adapter and standardization
 
-`@kiln/concurrency` may expose an explicitly documented Node adapter for the same source-level
+A separate, explicitly documented Node adapter package could offer the same source-level
 `share` call. On Node it makes an ordinary deeply frozen snapshot and supports `isShared` locally
 with a `WeakSet`. A JavaScript-only adapter cannot reliably identify a `Proxy` without invoking
 its traps, so it cannot promise kiln's exact validation or side-effect-free rejection. Node's

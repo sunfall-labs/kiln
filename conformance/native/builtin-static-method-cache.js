@@ -22,3 +22,42 @@ async function main() {
   console.log(seen.join(","));
 }
 main();
+
+// Bootstrap definitions on callable namespaces must be visible before any site is warm.
+console.log(JSON.stringify({ a: 2 }, (_key, value) => typeof value === "number" ? value + 1 : value));
+const captureTarget = {};
+Error.captureStackTrace(captureTarget);
+console.log(typeof captureTarget.stack);
+
+// Reflection must inspect the same callable store that definitions and reads use.
+const ownSymbol = Symbol("own builtin key");
+Object.defineProperty(Math, "customOwn", { value: 7, configurable: true });
+Object.defineProperty(Math, ownSymbol, { value: 8, configurable: true });
+console.log(Object.hasOwn(Math, "customOwn"), Object.prototype.hasOwnProperty.call(Math, ownSymbol));
+delete Math.customOwn;
+delete Math[ownSymbol];
+Object.defineProperty(Buffer, "compatOwnEnumerable", {
+  value: 9,
+  enumerable: true,
+  configurable: true,
+});
+const bufferOwnDescriptor = Object.getOwnPropertyDescriptor(Buffer, "compatOwnEnumerable");
+const originalBufferFrom = Object.getOwnPropertyDescriptor(Buffer, "from");
+const replacementBufferFrom = function replacementBufferFrom() {};
+Object.defineProperty(Buffer, "from", {
+  value: replacementBufferFrom,
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
+const bufferFromDescriptor = Object.getOwnPropertyDescriptor(Buffer, "from");
+console.log(
+  Object.keys(Buffer).includes("compatOwnEnumerable"),
+  bufferOwnDescriptor.value,
+  bufferOwnDescriptor.enumerable,
+  bufferFromDescriptor.value === replacementBufferFrom,
+  bufferFromDescriptor.writable,
+  Object.keys(Buffer).includes("from"),
+);
+Object.defineProperty(Buffer, "from", originalBufferFrom);
+delete Buffer.compatOwnEnumerable;

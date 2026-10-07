@@ -7,11 +7,20 @@ name: CI
 # design.md ranks iteration speed second only to correctness, and CI is one of the loops that
 # gets iterated on. The jobs below are independent on purpose so that a formatting slip is
 # reported in well under a minute instead of behind a full workspace build.
+#
+# Not run on push. main receives a commit every few minutes from several sessions, and with
+# `cancel-in-progress` every run was cancelled by the next before it finished -- twelve in a row
+# on 2026-10-02, none to completion, and the last one that did complete (2026-09-29) was red. A
+# check that never reports is noise with a bill attached. The blocking loop is local:
+# `scripts/pre-push.sh` runs the contracts and the core crate tests against what actually changed,
+# and `mise run gate` is the full assembly. This workflow stays runnable by hand and on a release
+# tag, like conformance.yml and perf.yml.
 
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -59,6 +68,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: clippy
+      # kiln-host-gui's Linux widget backend links GTK 4 (ADR 0074), and the workspace builds it.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
@@ -70,6 +81,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test
+      # kiln-host-gui's Linux widget backend links GTK 4 (ADR 0074), and the workspace builds it.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev
       # Invoked through bash rather than by its executable bit, so a checkout that lost the
       # mode still runs.
       - run: bash scripts/ci-test.sh

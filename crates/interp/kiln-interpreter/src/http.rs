@@ -8,6 +8,7 @@ use std::rc::{Rc, Weak};
 use crate::net::{NetSocketState, NodeServerState};
 use crate::{
     ExecutionError, Native, NodeObject, ObjectData, Property, RealmId, Value, is_callable,
+    tracked_object,
 };
 
 #[derive(Debug)]
@@ -18,11 +19,14 @@ pub(crate) struct HttpClientRequestState {
     pub(crate) path: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Vec<u8>,
-    pub(crate) callback: Value,
     pub(crate) socket: Option<Rc<RefCell<NetSocketState>>>,
     pub(crate) object: Option<Rc<RefCell<ObjectData>>>,
     pub(crate) ended: bool,
     pub(crate) started: bool,
+    /// The ended body has been handed to the host request slot. Socket/read events may
+    /// revisit `flush_http_client_request`; `ended` alone is not an instruction to end twice.
+    pub(crate) end_sent: bool,
+    pub(crate) cancelled: bool,
     pub(crate) request_id: u64,
 }
 
@@ -34,6 +38,7 @@ pub(crate) struct HttpResponseState {
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) streaming: bool,
     pub(crate) ended: bool,
+    pub(crate) disconnected: bool,
     pub(crate) object: Option<Weak<RefCell<ObjectData>>>,
 }
 
@@ -41,37 +46,6 @@ pub(crate) struct HttpResponseState {
 pub(crate) struct HttpIncomingState {
     pub(crate) stream: kiln_host_abi::ResourceId,
     pub(crate) readable: Rc<RefCell<crate::ReadableState>>,
-}
-
-pub(crate) fn node_http_socket_facade() -> Value {
-    let mut data = ObjectData {
-        node_events: Some(Vec::new()),
-        ..Default::default()
-    };
-    data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
-    data.set(
-        "once",
-        Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
-    );
-    data.set(
-        "emit",
-        Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
-    );
-    data.set(
-        "removeListener",
-        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
-    );
-    data.set(
-        "off",
-        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
-    );
-    data.set(
-        "removeAllListeners",
-        Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
-    );
-    data.set("destroyed", Value::Boolean(false));
-    data.set("encrypted", Value::Boolean(false));
-    Value::Object(Rc::new(RefCell::new(data)))
 }
 
 pub(crate) fn node_http_server(
@@ -154,6 +128,8 @@ pub(crate) fn node_http_client_request_object(
         "end",
         Value::Native(Native::NodeClientRequestEnd, RealmId::PRIMARY),
     );
+    data.set("socket", Value::Null);
+    data.set("connection", Value::Null);
     data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
     data.set(
         "once",
@@ -163,7 +139,39 @@ pub(crate) fn node_http_client_request_object(
         "emit",
         Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
     );
-    let object = Rc::new(RefCell::new(data));
+    data.set(
+        "addListener",
+        Value::Native(Native::NodeEventOn, RealmId::PRIMARY),
+    );
+    data.set(
+        "removeListener",
+        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+    );
+    data.set(
+        "off",
+        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+    );
+    data.set(
+        "removeAllListeners",
+        Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
+    );
+    data.set(
+        "listeners",
+        Value::Native(Native::NodeEventListeners, RealmId::PRIMARY),
+    );
+    data.set(
+        "listenerCount",
+        Value::Native(Native::NodeEventListenerCount, RealmId::PRIMARY),
+    );
+    data.set(
+        "eventNames",
+        Value::Native(Native::NodeEventNames, RealmId::PRIMARY),
+    );
+    data.set(
+        "setMaxListeners",
+        Value::Native(Native::NodeEventSetMaxListeners, RealmId::PRIMARY),
+    );
+    let object = tracked_object(data);
     state.borrow_mut().object = Some(Rc::clone(&object));
     Value::Object(object)
 }
@@ -212,7 +220,11 @@ pub(crate) fn node_http_request_arguments(
             });
         }
     };
-    let own = |name: &str| options.as_ref().and_then(|options| options.get_own(name));
+    let own = |name: &str| {
+        options
+            .as_ref()
+            .and_then(|options| options.get_own_value(name))
+    };
     let (url_host, url_port, url_path) = from_url
         .clone()
         .unwrap_or_else(|| ("localhost".into(), 80.0, "/".into()));
@@ -268,6 +280,23 @@ pub(crate) fn node_body_bytes(value: Option<&Value>) -> Result<Vec<u8>, Executio
     }
 }
 
+/// Reduce Node's `ServerResponse.end([chunk[, encoding]][, callback])` overloads to their body
+/// bytes and completion callback. A callback passed as the only argument is not a body chunk.
+pub(crate) fn node_response_end_arguments(
+    arguments: &[Value],
+) -> Result<(Vec<u8>, Option<Value>), ExecutionError> {
+    let callback = arguments
+        .iter()
+        .rev()
+        .find(|value| is_callable(value))
+        .cloned();
+    let chunk = arguments
+        .first()
+        .filter(|value| !is_callable(value) && !matches!(value, Value::Undefined));
+    let bytes = node_body_bytes(chunk)?;
+    Ok((bytes, callback))
+}
+
 pub(crate) fn readable_chunk_length(value: &Value) -> usize {
     match value {
         Value::String(value) => value.len(),
@@ -301,6 +330,34 @@ pub(crate) fn property(prop: &str) -> Option<Value> {
         "default" => Some(Value::Native(Native::NodeHttp, RealmId::PRIMARY)),
         _ => None,
     }
+}
+
+/// Host capabilities captured by the TypeScript HTTP and web facades. Keep them separate from
+/// the public namespace: its complete materialized export store excludes these private hooks.
+pub(crate) fn native_capabilities() -> Value {
+    let mut module = ObjectData::default();
+    for name in [
+        "createServer",
+        "Server",
+        "IncomingMessage",
+        "request",
+        "get",
+        "ServerResponse",
+    ] {
+        if let Some(value) = property(name) {
+            module.set(name, value);
+        }
+    }
+    for name in ["createFetchServer", "fetchRespond"] {
+        if let Some(value) = property(name) {
+            module.set_non_enumerable(name, value);
+        }
+    }
+    module.set_non_enumerable(
+        "__cancelRequest",
+        Value::Native(Native::NodeHttpCancelRequest, RealmId::PRIMARY),
+    );
+    Value::Object(tracked_object(module))
 }
 
 pub(crate) fn https_property(prop: &str) -> Option<Value> {
@@ -338,6 +395,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeHttpGet => Some("get"),
         Native::NodeHttpCreateFetchServer => Some("createFetchServer"),
         Native::NodeHttpFetchRespond => Some("fetchRespond"),
+        Native::NodeHttpCancelRequest => Some("__cancelRequest"),
         Native::NodeHttpServerResponse => Some("ServerResponse"),
         Native::NodeHttps => Some("https"),
         Native::NodeHttpsCreateServer => Some("createServer"),
@@ -354,6 +412,7 @@ pub(crate) const fn js_name(native: Native) -> Option<&'static str> {
         Native::NodeResponseEnd => Some("end"),
         Native::NodeClientRequestWrite => Some("write"),
         Native::NodeClientRequestEnd => Some("end"),
+        Native::NodeClientRequestAssignSocket => Some("assignSocket"),
         _ => None,
     }
 }

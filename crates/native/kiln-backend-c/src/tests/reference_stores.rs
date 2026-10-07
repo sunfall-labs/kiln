@@ -413,7 +413,7 @@ fn weak_resource_producers(source: &str) -> Vec<String> {
         if words[index].0 != "kiln_c99_gc_weak_resource_register" || words[index + 1].0 != "(" {
             continue;
         }
-        // Definitions/prototypes start with the heap type, whereas producer calls pass a value.
+        // Definitions/prototypes start with the heap type, whereas calls pass a value.
         if words[index + 2].0 == "kiln_gc_heap" {
             continue;
         }
@@ -445,14 +445,21 @@ fn native_weak_resource_payload_producers_are_audited() {
             producers.push((path.to_owned(), producer));
         }
     }
-    // The private prepared arena is closed and owns its graph storage. A new native resource
-    // requires an explicit hidden-reference/lifetime inventory before it can be registered.
+    // The managed-registration wrapper delegates once to the primitive registration routine;
+    // the prepared graph is the only direct payload producer. Keep both sites explicit so a
+    // new raw registration call still requires a hidden-reference/lifetime inventory.
     assert_eq!(
         producers,
-        vec![(
-            "runtime/spread.c".to_owned(),
-            "heap,handle,arena,kiln_c99_prepared_graph_drop".to_owned()
-        )]
+        vec![
+            (
+                "runtime/spread.c".to_owned(),
+                "heap,handle,arena,kiln_c99_prepared_graph_drop".to_owned()
+            ),
+            (
+                "runtime/heap.c".to_owned(),
+                "heap,handle,payload,dispose".to_owned()
+            )
+        ]
     );
 }
 

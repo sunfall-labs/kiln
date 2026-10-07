@@ -233,7 +233,7 @@ impl InterpreterInspector {
         if object.error_brand
             || object.arguments_brand
             || object.module_namespace
-            || !object.namespace_cells.is_empty()
+            || object.namespace_bindings.is_some()
             || object.primitive.is_some()
             || object.node_events.is_some()
             || object.node_object.is_some()
@@ -241,6 +241,11 @@ impl InterpreterInspector {
             || object.shadow_realm.is_some()
             || object.weak_shared_target.is_some()
             || !object.finalization_cells.is_empty()
+            // A Map, Set or weak collection keeps its entries in this internal slot (a class
+            // instance has internal slots too, and is refused for its prototype instead).
+            || object.properties.iter().any(|slot| {
+                slot.internal && slot.key == kiln_string::StringUnits::from("@@entries")
+            })
         {
             return Err(UnsupportedKind::InternalSlots);
         }

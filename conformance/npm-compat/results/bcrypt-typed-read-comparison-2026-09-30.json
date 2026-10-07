@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "timing_kind": "native process phase wall time including launch and module setup; not workload throughput",
+  "probe_sha256": "ee84704ad1e58440d050ef900fc71ef2832e6ac9929deb60df4337e3447d3778",
+  "node_checksum_sha256": "1c3dd0f9c6582e00bda2f3a83c12dee8f6305460ac93dbfcbb6b0dceec02f018",
+  "candidate_source": "a22260163c59733002fa947e4c53cde3e74d482b",
+  "control_source": "8ba71937e12c2ef5a9ef3799d20ad1081e27d5ee",
+  "binaries": {
+    "candidate": {
+      "path": "/var/tmp/kiln/kiln-managed-build-cache/targets/v1/1c8a3dd0be6fc31c411f856c5331bcdb08a85abe2fd90109c45ba1bd07cc2aa5/npm-compat-evidence/bcrypt-typed-read-candidate37.bin",
+      "sha256": "04da765a6008c48c36c819556310576d7b88c05273f38766e0a18713bc32b8bc"
+    },
+    "control": {
+      "path": "/var/tmp/kiln/kiln-managed-build-cache/targets/v1/906b6c464fe2dace8414cfbff024b0fc64d301b5ea9c836fc6d501a45600e9a9/npm-compat-evidence/bcrypt-typed-read-control.bin",
+      "sha256": "972d2586024782283cfc9873e226714ed4ee600a9a948841d4783093d13ee87b"
+    }
+  },
+  "samples": [
+    {
+      "pair": 0,
+      "name": "candidate",
+      "seconds": 7.16271817300003
+    },
+    {
+      "pair": 0,
+      "name": "control",
+      "seconds": 9.36123978701653
+    },
+    {
+      "pair": 1,
+      "name": "control",
+      "seconds": 9.35324231494451
+    },
+    {
+      "pair": 1,
+      "name": "candidate",
+      "seconds": 6.045357926981524
+    },
+    {
+      "pair": 2,
+      "name": "candidate",
+      "seconds": 6.01458234799793
+    },
+    {
+      "pair": 2,
+      "name": "control",
+      "seconds": 9.330491207016166
+    },
+    {
+      "pair": 3,
+      "name": "control",
+      "seconds": 9.391771695984062
+    },
+    {
+      "pair": 3,
+      "name": "candidate",
+      "seconds": 5.966147461964283
+    },
+    {
+      "pair": 4,
+      "name": "candidate",
+      "seconds": 6.0881111189955845
+    },
+    {
+      "pair": 4,
+      "name": "control",
+      "seconds": 9.423758008982986
+    }
+  ],
+  "medians_seconds": {
+    "candidate": 6.045357926981524,
+    "control": 9.36123978701653
+  },
+  "control_over_candidate": 1.5485005023830973,
+  "warmup_runs_per_binary": 1,
+  "measured_pairs": 5,
+  "control_change": "Disable only the guarded numeric typed-array read branch; all other source identical to candidate."
+}

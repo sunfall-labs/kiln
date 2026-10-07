@@ -93,7 +93,14 @@ impl Host for SnapshotHost<'_> {
         self.snapshot
             .modules
             .get(path)
-            .map(|m| Cow::Owned(m.source.as_bytes().to_vec()))
+            .map(|module| {
+                let source = module
+                    .type_syntax
+                    .original_module
+                    .as_deref()
+                    .unwrap_or(module);
+                Cow::Owned(source.source.as_bytes().to_vec())
+            })
             .or_else(|| {
                 self.snapshot
                     .auxiliary_files
@@ -157,22 +164,24 @@ impl Host for SnapshotHost<'_> {
             return crate::support::json::parse_source_file(arena, atoms.session(), atoms, text);
         }
         if let Some(module) = self.snapshot.modules.get(&name) {
+            let source_module = module
+                .type_syntax
+                .original_module
+                .as_deref()
+                .unwrap_or(module);
             // Owned parser diagnostics remain authoritative. Checking a recovered AST
             // must neither erase them nor publish specialization facts as complete.
-            if module.panicked || !module.diagnostics.is_empty() {
+            if source_module.panicked || !source_module.diagnostics.is_empty() {
                 let mut errors = self.unsupported.lock().unwrap();
-                errors.extend(
-                    module
-                        .diagnostics
-                        .iter()
-                        .map(|diagnostic| SourceDiagnostic {
-                            path: Some(name.clone()),
-                            span: diagnostic.span,
-                            code: None,
-                            message: diagnostic.message.clone(),
-                        }),
-                );
-                if module.panicked && module.diagnostics.is_empty() {
+                errors.extend(source_module.diagnostics.iter().map(|diagnostic| {
+                    SourceDiagnostic {
+                        path: Some(name.clone()),
+                        span: diagnostic.span,
+                        code: None,
+                        message: diagnostic.message.clone(),
+                    }
+                }));
+                if source_module.panicked && source_module.diagnostics.is_empty() {
                     errors.push(SourceDiagnostic {
                         path: Some(name.clone()),
                         span: None,
@@ -182,7 +191,8 @@ impl Host for SnapshotHost<'_> {
                 }
             }
             // The loader's arena belongs to this session. Its lifetime is narrowed to the parse call.
-            let (mut file, unsupported) = Lower::new(module, atoms).finish(arena, atoms.session());
+            let (mut file, unsupported) =
+                Lower::new(source_module, atoms).finish(arena, atoms.session());
             if name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts") {
                 file.kind = hir::FileKind::Declaration;
             }

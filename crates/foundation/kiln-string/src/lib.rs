@@ -106,6 +106,18 @@ impl StringUnits {
         }
     }
 
+    /// Copy a range of UTF-16 code units without widening or traversing the prefix.
+    pub fn slice_units(&self, start: usize, end: usize) -> Option<Self> {
+        match &self.0 {
+            Repr::Latin1(bytes) => bytes
+                .get(start..end)
+                .map(|slice| Self(Repr::Latin1(Arc::from(slice)))),
+            Repr::Utf16(units) => units
+                .get(start..end)
+                .map(|slice| Self(Repr::Utf16(Arc::from(slice)))),
+        }
+    }
+
     pub fn units(&self) -> UnitIter<'_> {
         match &self.0 {
             Repr::Latin1(bytes) => UnitIter::Latin1(bytes.iter()),
@@ -150,7 +162,11 @@ pub enum StringView<'a> {
 
 impl PartialEq for StringView<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.units().eq(other.units())
+        match (self, other) {
+            (Self::Latin1(left), Self::Latin1(right)) => left == right,
+            (Self::Utf16(left), Self::Utf16(right)) => left == right,
+            _ => self.units().eq(other.units()),
+        }
     }
 }
 impl Eq for StringView<'_> {}
@@ -256,13 +272,16 @@ impl Default for StringUnits {
 }
 impl PartialEq for StringUnits {
     fn eq(&self, other: &Self) -> bool {
-        self.units().eq(other.units())
+        self.as_view() == other.as_view()
     }
 }
 impl Eq for StringUnits {}
 impl PartialEq<str> for StringUnits {
     fn eq(&self, other: &str) -> bool {
-        self.units().eq(other.encode_utf16())
+        match &self.0 {
+            Repr::Latin1(bytes) if other.is_ascii() => bytes.as_ref() == other.as_bytes(),
+            _ => self.units().eq(other.encode_utf16()),
+        }
     }
 }
 impl PartialEq<&str> for StringUnits {
@@ -344,6 +363,29 @@ mod tests {
         assert_eq!(wide.as_view().unit_at(1), Some(0xd800));
         assert!(wide.as_view().latin1_slice(0, 2).is_none());
         assert_ne!(StringView::Utf16(&[0xd800]), StringView::Utf16(&[0xfffd]));
+    }
+
+    #[test]
+    fn equality_fast_paths_preserve_utf16_code_unit_semantics() {
+        let latin = StringUnits::from("caf\u{e9}");
+        let same_units_wide = StringUnits::from_view(StringView::Utf16(&[0x63, 0x61, 0x66, 0xe9]));
+        assert_eq!(latin, same_units_wide);
+        assert_eq!(
+            StringView::Latin1(&[0x63, 0x61, 0x66, 0xe9]),
+            StringView::Utf16(&[0x63, 0x61, 0x66, 0xe9])
+        );
+
+        let lone_surrogate = StringUnits::from_view(StringView::Utf16(&[0xd800]));
+        assert_eq!(
+            lone_surrogate,
+            StringUnits::from_view(StringView::Utf16(&[0xd800]))
+        );
+        assert_ne!(lone_surrogate, StringUnits::from("\u{fffd}"));
+        assert_ne!(StringView::Latin1(&[0xff]), StringView::Utf16(&[0x100]));
+        assert_ne!(StringView::Utf16(&[0x61]), StringView::Utf16(&[0x61, 0]));
+        assert_eq!(StringUnits::from("property"), "property");
+        assert_eq!(StringUnits::from("caf\u{e9}"), "caf\u{e9}");
+        assert_ne!(lone_surrogate, "\u{fffd}");
     }
 
     #[test]

@@ -134,6 +134,42 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         // Neither of these carries handlers: the bookkeeping *is* the reaction.
         match &reaction.sink {
+            Sink::ImportRetry(retry) => {
+                let retry = Rc::clone(retry);
+                if let Settled::Rejected(reason) = outcome {
+                    self.settle(&retry.promise, &Settled::Rejected(reason));
+                    return Ok(());
+                }
+                let realm = retry.generation_owner.borrow().realm;
+                let imported = self.entering(realm, |vm| {
+                    let previous = std::mem::replace(&mut vm.module_path, retry.importer.clone());
+                    let imported = vm.import_module_in_generation(
+                        &retry.specifier,
+                        retry.options.as_ref(),
+                        retry.generation,
+                    );
+                    vm.module_path = previous;
+                    imported
+                })?;
+                match imported {
+                    Ok(Value::Promise(completion)) => self.react(
+                        &completion,
+                        Value::Undefined,
+                        Value::Undefined,
+                        Sink::ImportRetry(retry),
+                        false,
+                    ),
+                    Ok(namespace) => {
+                        self.settle(&retry.promise, &Settled::Fulfilled(namespace));
+                    }
+                    Err(thrown) => self.settle(&retry.promise, &Settled::Rejected(thrown)),
+                }
+                return Ok(());
+            }
+            Sink::ModulePlanWake(waiter) => {
+                self.resolve_promise(waiter, Value::Undefined);
+                return Ok(());
+            }
             Sink::AsyncDisposal(state) => {
                 let state = Rc::clone(state);
                 self.async_disposal_resume(&state, outcome, self.instruction);
@@ -736,13 +772,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut data = ObjectData::default();
                 data.set("status", Value::String("fulfilled".to_owned().into()));
                 data.set("value", argument);
-                Value::Object(Rc::new(RefCell::new(data)))
+                Value::Object(tracked_object(data))
             }
             (Native::PromiseAllSettled, true) => {
                 let mut data = ObjectData::default();
                 data.set("status", Value::String("rejected".to_owned().into()));
                 data.set("reason", argument);
-                Value::Object(Rc::new(RefCell::new(data)))
+                Value::Object(tracked_object(data))
             }
             _ => argument,
         };
@@ -888,25 +924,84 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         )
     }
 
-    /// Run every queued job, moving the virtual clock forward to reach each timer.
+    /// Run every queued job, using this realm's clock policy for timer deadlines.
     ///
     /// This is the event loop. Microtasks drain completely before any timer runs and again after
     /// each one, which is the ordering the language specifies and the reason a promise settles
     /// before a `setTimeout(f, 0)` queued earlier.
     ///
-    /// Time only moves when a timer is due, so a program that schedules an hour out finishes
-    /// instantly and always in the same order. Nothing here reads the host clock.
+    /// Virtual realms advance to each timer deterministically. Host-clock realms refresh
+    /// elapsed time at each turn and wait for future deadlines on the wall-clock executor.
     pub(crate) fn run_event_loop(
         &mut self,
         runtime: &mut RealmRuntime,
     ) -> Result<(), ExecutionError> {
+        let result = self.run_event_loop_turns(runtime);
+        // The run is over: a partial line `stdout.write` left pending is written as it is.
+        self.flush_stdio();
+        result
+    }
+
+    fn run_event_loop_turns(&mut self, runtime: &mut RealmRuntime) -> Result<(), ExecutionError> {
         loop {
+            self.advance_host_scheduler_clock(self.instruction)?;
             self.drain_microtasks(runtime)?;
+            // WeakRef targets survive their creating job through its microtask checkpoint.
+            // Release that realm-wide job keepalive before the next host turn, which may run
+            // timers or I/O callbacks in another VM sharing this module realm.
+            self.gc_module_map().borrow_mut().weak_ref_keepalive.clear();
             // Before asking for a timer, because settling a wait queues reactions and those are
             // microtasks: going straight on to the timer -- or worse, to the return below --
             // would leave a resolved promise with its `then` unrun.
             if self.settle_async_waits()? {
                 continue;
+            }
+            // Pump the runtime's I/O completions (e.g., fetch responses). The HTTP transport
+            // is part of the RealmRuntime in both modes; only Node.js API surface remains
+            // gated. If there's no referenced I/O, this returns None and we fall through to
+            // timers, preserving deterministic behavior for pure-computation programs.
+            if let Some(turn) = self.with_realm_mut(|realm| runtime.next_referenced_turn(realm)) {
+                match turn {
+                    RuntimeTurn::Completion(completion) => {
+                        runtime.enter(|| self.settle_host_completion(completion))?;
+                        while let Some(next) = runtime.take_next_ready_completion() {
+                            runtime.enter(|| self.settle_host_completion(next))?;
+                        }
+                        continue;
+                    }
+                    RuntimeTurn::Protocol => {
+                        // The HTTP engines queued events; they'll be delivered as completions.
+                        continue;
+                    }
+                    RuntimeTurn::Failure(failure) => {
+                        return Err(ExecutionError::Host {
+                            instruction: self.instruction,
+                            message: failure.to_string(),
+                        });
+                    }
+                    RuntimeTurn::Timer(work_item) => {
+                        match work_item {
+                            WorkItem::Timer { work: timer, .. } => {
+                                // The Realm Runtime has already rearmed an interval under the same id,
+                                // so clearing it inside this callback cancels the next occurrence.
+                                if let Some((callback, arguments, _)) = timer.into_call() {
+                                    runtime.enter(|| {
+                                        self.call_value(
+                                            &callback,
+                                            Value::Undefined,
+                                            arguments,
+                                            self.instruction,
+                                        )
+                                    })?;
+                                }
+                            }
+                            WorkItem::Microtask(_) => {
+                                // Microtasks are drained at the top of the loop.
+                            }
+                        }
+                        continue;
+                    }
+                }
             }
             let Some(WorkItem::Timer { work: timer, .. }) =
                 self.with_realm_mut(|realm| runtime.next_timer(realm))
@@ -929,13 +1024,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
             // The Realm Runtime has already rearmed an interval under the same id, so clearing
             // it inside this callback cancels the next occurrence.
+            let Some((callback, arguments, _)) = timer.into_call() else {
+                continue;
+            };
             runtime.enter(|| {
-                self.call_value(
-                    &timer.callback,
-                    Value::Undefined,
-                    timer.arguments,
-                    self.instruction,
-                )
+                self.call_value(&callback, Value::Undefined, arguments, self.instruction)
             })?;
         }
     }
@@ -1072,11 +1165,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 Ok(())
             }
-            Job::Import(promise, specifier, options, module_path) => {
-                let previous = std::mem::replace(&mut self.module_path, module_path);
-                let imported = self.import_module(&specifier, options.as_ref());
-                self.module_path = previous;
+            Job::Import(promise, specifier, options, module_path, generation, generation_owner) => {
+                let realm = generation_owner.borrow().realm;
+                let imported = self.entering(realm, |vm| {
+                    let previous = std::mem::replace(&mut vm.module_path, module_path.clone());
+                    let imported =
+                        vm.import_module_in_generation(&specifier, options.as_ref(), generation);
+                    vm.module_path = previous;
+                    imported
+                });
                 match imported? {
+                    Ok(Value::Promise(completion)) => {
+                        let retry = Rc::new(ImportRetry {
+                            promise,
+                            specifier,
+                            options,
+                            importer: module_path,
+                            generation,
+                            generation_owner,
+                        });
+                        self.react(
+                            &completion,
+                            Value::Undefined,
+                            Value::Undefined,
+                            Sink::ImportRetry(retry),
+                            false,
+                        )
+                    }
                     Ok(namespace) => self.settle(&promise, &Settled::Fulfilled(namespace)),
                     Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
                 }

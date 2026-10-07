@@ -86,7 +86,89 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
     kiln_value built;
     uint64_t code;
     int status;
-    if (kiln_c99_has_surface(builtin)) {
+    double callable_length;
+    int is_callable_builtin = 0;
+    int has_prototype = 0;
+    if (!kiln_c99_is_namespace(builtin) &&
+        kiln_c99_builtin_length(builtin, &callable_length)) {
+        /* Callable constructors share the same own-key prefix even when they have no static
+         * rows in the surface table (Boolean and BigInt are examples). Use the immutable arity
+         * metadata that also answers `fn.length`, rather than observing the mutable `length`
+         * property, so redefining that property cannot change the object's kind. */
+        kiln_value prototype;
+        is_callable_builtin = 1;
+        has_prototype = kiln_c99_get(NULL, kiln_c99_builtin(builtin), "prototype", 9,
+                                     &prototype, 0, NULL) == KILN_C99_OK &&
+                        prototype.tag == KILN_VALUE_BUILTIN;
+    }
+    if (builtin == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) {
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
+    if (builtin == KILN_C99_BUILTIN_TYPED_ARRAY) {
+        /* `%TypedArray%` is the abstract constructor inherited by each concrete view
+         * constructor. Its standard callable own keys precede the public statics installed by
+         * the shared TypeScript bootstrap (`of`, `from`, then `@@species`). */
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+        if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
+    if (builtin == KILN_C99_BUILTIN_ARRAY_BUFFER ||
+        builtin == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER) {
+        /* These constructors have an intrinsic own-key shape even though their host-backed
+         * operations are not all ordinary method-table rows. Keep the standard callable keys
+         * and species symbol together with any properties installed by the TS bootstrap. */
+        kiln_value species;
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+        if (status == KILN_C99_OK && builtin == KILN_C99_BUILTIN_ARRAY_BUFFER)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("isView", 6));
+        if (status == KILN_C99_OK && kiln_c99_symbol_of_key("@@species", 9, &species))
+            status = kiln_c99_array_push(built, species);
+        if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
+    {
+        kiln_typed_kind kind;
+        if (kiln_c99_builtin_typed_kind(builtin, &kind)) {
+            /* Concrete constructors own their width constant. `from` and `of` are readable
+             * through the common surface table but live on the abstract parent; only the byte
+             * constructor appends the codec methods that typedarray.ts installed in its store. */
+            status = kiln_c99_new_array(&built);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("BYTES_PER_ELEMENT", 17));
+            if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+            if (status == KILN_C99_OK) *out = built;
+            return status;
+        }
+    }
+    if (kiln_c99_has_surface(builtin) || is_callable_builtin) {
         /* A table-driven built-in can describe itself, which is the one thing the hand-written
          * chains could never do: the names it answers to *are* its rows. Refusing here is what
          * kept the native side from enumerating its own surface, so the two engines could only be
@@ -95,6 +177,14 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
         status = kiln_c99_new_array(&built);
         if (status != KILN_C99_OK) {
             return status;
+        }
+        if (is_callable_builtin) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+            if (status == KILN_C99_OK && has_prototype)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+            if (status != KILN_C99_OK) return status;
         }
         for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT && status == KILN_C99_OK; ++index) {
             const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
@@ -115,34 +205,133 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
             }
             status = kiln_c99_array_push(built, kiln_c99_copy_text(member->name, len));
         }
-        if (status == KILN_C99_OK && !kiln_c99_is_namespace(builtin)) {
-            /* A constructor is a function, and these two are answered by the read path rather
-             * than held as slots. `length` is deliberately not listed: reading it refuses, and a
-             * name in this list that a read cannot answer is the same lie in the other
-             * direction. */
-            kiln_value prototype;
-            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
-            if (status == KILN_C99_OK &&
-                kiln_c99_get(NULL, kiln_c99_builtin(builtin), "prototype", 9, &prototype, 0,
-                             NULL) == KILN_C99_OK &&
-                prototype.tag == KILN_VALUE_BUILTIN) {
-                status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
-            }
-        }
         if (status == KILN_C99_OK) {
             status = kiln_c99_builtin_store_keys(builtin, built);
         }
         *out = built;
         return status;
     }
+    if (builtin == KILN_C99_BUILTIN_FUNCTION) {
+        /* Function is a callable constructor rather than a table-driven namespace. Its complete
+         * own-key list is fixed by the language; the own-property store appends program-defined
+         * additions in insertion order. This is used by get-intrinsic when it checks whether an
+         * intrinsic constructor owns `prototype`. */
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+        if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
+    if (builtin == KILN_C99_BUILTIN_WEAK_MAP ||
+        builtin == KILN_C99_BUILTIN_WEAK_SET ||
+        builtin == KILN_C99_BUILTIN_WEAK_REF ||
+        builtin == KILN_C99_BUILTIN_FINALIZATION_REGISTRY) {
+        /* Weak collection/reference constructors have no computed static methods. Their own
+         * keys are the ordinary callable slots; enumerate those explicitly so intrinsic
+         * inspectors can test for `prototype` without treating this constructor family as an
+         * unmodeled computed-static surface. */
+        status = kiln_c99_new_array(&built);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+        if (status == KILN_C99_OK) status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
+    if (builtin >= KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE &&
+        builtin <= KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME) {
+        static const char *const names[] = {"length", "name", "prototype", "from", "compare"};
+        size_t index;
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text(names[index], strlen(names[index])));
+            if (status != KILN_C99_OK) return status;
+        }
+        if (builtin == KILN_C99_BUILTIN_TEMPORAL_INSTANT) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("fromEpochMilliseconds", 21));
+            if (status == KILN_C99_OK)
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("fromEpochNanoseconds", 20));
+            if (status != KILN_C99_OK) return status;
+        }
+        status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
+    if (builtin == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE) {
+        /* The shared iterator prototype is an intrinsic rather than a table-driven namespace.
+         * Its methods are dispatched by `kiln_c99_iterator_prototype_method`, and the symbol
+         * members are installed by the bootstrap; listing both lets feature detection ask about
+         * `Symbol.iterator` without a false refusal. */
+        static const char *const names[] = {
+            "constructor", "reduce", "toArray", "forEach", "some", "every", "find", "map",
+            "filter", "take", "drop", "flatMap"};
+        static const char *const symbols[] = {
+            "@@iterator", "@@toStringTag", "@@dispose"};
+        size_t index;
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text(names[index], strlen(names[index])));
+            if (status != KILN_C99_OK) return status;
+        }
+        for (index = 0; index < sizeof symbols / sizeof symbols[0]; ++index) {
+            kiln_value symbol;
+            size_t len = strlen(symbols[index]);
+            if (kiln_c99_symbol_of_key(symbols[index], len, &symbol)) {
+                status = kiln_c99_array_push(built, symbol);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+        status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
+    if (builtin == KILN_C99_BUILTIN_REGEXP_PROTOTYPE) {
+        /* RegExp.prototype has several accessors that are not ordinary methods, so deriving its
+         * keys from the dispatch table omitted `unicode` and made hasOwnProperty refuse. Keep
+         * Node's complete built-in own-key list here; method reads still route through the
+         * existing RegExp dispatch, while accessors use their receiver checks. */
+        static const char *const names[] = {
+            "constructor", "exec", "dotAll", "flags", "global", "hasIndices", "ignoreCase",
+            "multiline", "source", "sticky", "unicode", "unicodeSets", "compile", "toString",
+            "test"};
+        static const char *const symbols[] = {
+            "@@match", "@@matchAll", "@@replace", "@@search", "@@split"};
+        size_t index;
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text(names[index], strlen(names[index])));
+            if (status != KILN_C99_OK) return status;
+        }
+        for (index = 0; index < sizeof symbols / sizeof symbols[0]; ++index) {
+            kiln_value symbol;
+            size_t len = strlen(symbols[index]);
+            if (kiln_c99_symbol_of_key(symbols[index], len, &symbol)) {
+                status = kiln_c99_array_push(built, symbol);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+        status = kiln_c99_builtin_store_keys(builtin, built);
+        if (status == KILN_C99_OK) *out = built;
+        return status;
+    }
     if (!kiln_c99_is_namespace(builtin)) {
-        /* A constructor whose statics are not table-driven -- the typed-array constructors and
-         * `Temporal`'s eight types -- still cannot list itself, because its members are computed
-         * from the kind rather than declared. A short list a caller could not tell from a
-         * complete one is worse than a refusal, so it stays a refusal and lands in the drift
-         * test's backlog by name. */
-        KILN_C99_REFUSE("own keys of a built-in whose statics are computed from its kind rather "
-                        "than declared");
+        /* A constructor with a genuinely unmodeled kind-specific static surface cannot claim a
+         * complete own-key list. Keep the refusal until its reads and descriptors have an
+         * equally authoritative owner. */
+        const char *owner = kiln_c99_builtin_name(builtin);
+        KILN_C99_REFUSE_NAMED("own keys of a built-in whose statics are computed from its kind "
+                              "rather than declared", owner, strlen(owner));
     }
     status = kiln_c99_new_array(&built);
     if (status != KILN_C99_OK) {
@@ -223,6 +412,13 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
             }
         }
     }
+    if (builtin == KILN_C99_BUILTIN_REGEXP_PROTOTYPE) {
+        kiln_value symbol;
+        if (kiln_c99_symbol_of_key("@@toStringTag", 13, &symbol)) {
+            status = kiln_c99_array_push(built, symbol);
+            if (status != KILN_C99_OK) return status;
+        }
+    }
     status = kiln_c99_builtin_store_keys(builtin, built);
     if (status != KILN_C99_OK) return status;
     *out = built;
@@ -242,7 +438,9 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_all_keys(host, target, out, depth, thrown);
     }
-    if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_BOUND) {
+    if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_BOUND ||
+        target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_SETTLER ||
+        target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
         kiln_value store, extra;
         kiln_closure *closure = target.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(target) : NULL;
         int owns_prototype = closure != NULL && !closure->arrow &&
@@ -270,10 +468,16 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         }
         *out = built;
         return KILN_C99_OK;
+    } else if (target.tag == KILN_VALUE_DATE) {
+        target = ((kiln_date *)(uintptr_t)target.bits)->properties;
     } else if (target.tag == KILN_VALUE_COLLECTION) {
         target = kiln_c99_collection_of(target)->properties;
+    } else if (target.tag == KILN_VALUE_GENERATOR) {
+        target = kiln_c99_generator_of(target)->properties;
     } else if (target.tag == KILN_VALUE_PROMISE) {
         target = kiln_c99_promise_of(target)->properties;
+    } else if (target.tag == KILN_VALUE_TIMER) {
+        target = kiln_c99_timer_of(target)->properties;
     }
     status = kiln_c99_new_array(&built);
     if (status != KILN_C99_OK) {
@@ -296,12 +500,86 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         if (status == KILN_C99_OK) *out = built;
         return status;
     }
+    if (target.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(target);
+        kiln_value extra;
+        for (index = 0; index < array->count && status == KILN_C99_OK; ++index) {
+            int descriptor = 0;
+            if (array->has_index_descriptors && array->properties.tag == KILN_VALUE_OBJECT &&
+                array->elements[index] == KILN_VAL_HOLE) {
+                kiln_value key = kiln_c99_text(kiln_c99_number((double)index));
+                descriptor = kiln_c99_store_has(array->properties,
+                    (const kiln_string *)key.ptr, NULL);
+            }
+            if (array->elements[index] != KILN_VAL_HOLE || descriptor)
+                status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
+        }
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("length", 6));
+        if (status != KILN_C99_OK) return status;
+        if (array->properties.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_all_own_keys(host, array->properties, &extra, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            for (index = 0; index < kiln_c99_array_of(extra)->count; ++index) {
+                kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(extra)->elements[index]);
+                /* Indexed descriptors were merged into the ascending element walk above. */
+                if (key.tag == KILN_VALUE_STRING &&
+                    kiln_c99_key_index_key((const kiln_string *)key.ptr) >= 0.0)
+                    continue;
+                status = kiln_c99_array_push(built, key);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+        *out = built;
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
         for (index = 0; index < view->length && status == KILN_C99_OK; ++index) {
             status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
         }
+        if (status == KILN_C99_OK && view->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_value extra;
+            status = kiln_c99_all_own_keys(host, view->properties, &extra, depth, thrown);
+            if (status == KILN_C99_OK) {
+                kiln_array *listed = kiln_c99_array_of(extra);
+                for (index = 0; index < listed->count && status == KILN_C99_OK; ++index)
+                    status = kiln_c99_array_push(built,
+                        kiln_val_to_boundary(listed->elements[index]));
+            }
+        }
         *out = built;
+        return status;
+    }
+    if (target.tag == KILN_VALUE_REGEXP) {
+        /* RegExp instances have one own property, `lastIndex`. It is non-enumerable, but
+         * Reflect.ownKeys and Object.getOwnPropertyNames must still report it. */
+        kiln_value store = kiln_c99_regexp_of(target)->properties;
+        kiln_value extra = kiln_c99_undefined();
+        kiln_array *listed = NULL;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_all_own_keys(host, store, &extra, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            listed = kiln_c99_array_of(extra);
+            /* OrdinaryOwnPropertyKeys places integer-index names before all other strings. */
+            for (index = 0; index < listed->count && status == KILN_C99_OK; ++index) {
+                kiln_value key = kiln_val_to_boundary(listed->elements[index]);
+                if (key.tag == KILN_VALUE_STRING &&
+                    kiln_c99_key_index_key((const kiln_string *)key.ptr) >= 0.0)
+                    status = kiln_c99_array_push(built, key);
+            }
+        }
+        if (status == KILN_C99_OK)
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("lastIndex", 9));
+        if (status == KILN_C99_OK && store.tag == KILN_VALUE_OBJECT) {
+            for (index = 0; index < listed->count && status == KILN_C99_OK; ++index) {
+                kiln_value key = kiln_val_to_boundary(listed->elements[index]);
+                if (key.tag == KILN_VALUE_STRING &&
+                    kiln_c99_key_index_key((const kiln_string *)key.ptr) >= 0.0) continue;
+                status = kiln_c99_array_push(built, key);
+            }
+        }
+        if (status == KILN_C99_OK) *out = built;
         return status;
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
@@ -351,6 +629,11 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
  * the same question, so the two kinds answer it in one place rather than each spelling out where
  * it keeps its store. */
 static kiln_value *kiln_c99_exotic_store(kiln_value target) {
+    if (target.tag == KILN_VALUE_TYPED_ARRAY)
+        return &kiln_c99_typed_array_of(target)->properties;
+    if (target.tag == KILN_VALUE_DATE)
+        return &((kiln_date *)(uintptr_t)target.bits)->properties;
+    if (target.tag == KILN_VALUE_GENERATOR) return &kiln_c99_generator_of(target)->properties;
     if (target.tag == KILN_VALUE_BOUND) return &((kiln_bound *)(uintptr_t)target.bits)->properties;
     if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *arr = kiln_c99_array_of(target);
@@ -364,6 +647,12 @@ static kiln_value *kiln_c99_exotic_store(kiln_value target) {
     }
     if (target.tag == KILN_VALUE_PROMISE) {
         return &kiln_c99_promise_of(target)->properties;
+    }
+    if (target.tag == KILN_VALUE_TIMER) {
+        return &kiln_c99_timer_of(target)->properties;
+    }
+    if (target.tag == KILN_VALUE_REGEXP) {
+        return &kiln_c99_regexp_of(target)->properties;
     }
     return NULL;
 }

@@ -48,6 +48,10 @@ pub(crate) struct GraphCacheKey {
     /// Resolution capability: Node mode admits typed builtin identities; deterministic mode does
     /// not. The same source and package snapshot can therefore never reuse the other mode's graph.
     pub(crate) node: bool,
+    /// Ordered startup roots affect evaluation order and may share dependencies. Preserve their
+    /// identity independently of the entry so Node-style launch graphs cannot alias ordinary
+    /// runs or launches with a different preload order.
+    pub(crate) startup_roots: Vec<PathBuf>,
     pub(crate) format: u16,
 }
 
@@ -58,12 +62,23 @@ impl GraphCacheKey {
         resolutions: Option<&ResolutionMap>,
         node: bool,
     ) -> Self {
+        Self::new_with_startup_roots(project_root, entry, resolutions, node, Vec::new())
+    }
+
+    pub(crate) fn new_with_startup_roots(
+        project_root: PathBuf,
+        entry: PathBuf,
+        resolutions: Option<&ResolutionMap>,
+        node: bool,
+        startup_roots: Vec<PathBuf>,
+    ) -> Self {
         Self {
             project_root,
             entry,
             resolution_identity: resolutions.map(ResolutionMap::identity),
             source_check_identity: None,
             node,
+            startup_roots,
             format: GRAPH_CACHE_FORMAT,
         }
     }
@@ -385,6 +400,59 @@ mod tests {
         let deterministic = GraphCacheKey::new(root.clone(), first.clone(), None, false);
         let node = GraphCacheKey::new(root, first, None, true);
         assert_ne!(deterministic, node);
+    }
+
+    #[test]
+    fn ordered_startup_roots_separate_cache_entries_and_track_preload_edits() {
+        let (root, entry, _second, graph) = graph_fixture();
+        let first_preload = root.join("first-preload.js");
+        let second_preload = root.join("second-preload.js");
+        std::fs::write(&first_preload, "import './first.js';\n").unwrap();
+        std::fs::write(&second_preload, "import './second.js';\n").unwrap();
+        let first_preload = std::fs::canonicalize(first_preload).unwrap();
+        let second_preload = std::fs::canonicalize(second_preload).unwrap();
+        let plain = GraphCacheKey::new(root.clone(), entry.clone(), None, true);
+        let ordered = GraphCacheKey::new_with_startup_roots(
+            root.clone(),
+            entry.clone(),
+            None,
+            true,
+            vec![first_preload.clone(), second_preload.clone()],
+        );
+        let reversed = GraphCacheKey::new_with_startup_roots(
+            root.clone(),
+            entry.clone(),
+            None,
+            true,
+            vec![second_preload, first_preload],
+        );
+        assert_ne!(plain, ordered);
+        assert_ne!(ordered, reversed);
+
+        let preload_file = FileId(1);
+        let preload_sources = vec![GraphSourceRevision {
+            file: preload_file,
+            revision: Revision(1),
+        }];
+        let mut cache = GraphCache::default();
+        cache.insert(ordered.clone(), preload_sources, graph.clone());
+        assert!(matches!(
+            cache.lookup(&ordered, |file| (file == preload_file)
+                .then_some(Revision(1))),
+            GraphCacheLookup::Hit(_)
+        ));
+        assert!(matches!(
+            cache.lookup(&ordered, |file| (file == preload_file).then_some(Revision(2))),
+            GraphCacheLookup::Stale { changed, .. }
+                if changed == vec![GraphSourceRevision { file: preload_file, revision: Revision(1) }]
+        ));
+        assert!(matches!(
+            cache.lookup(&reversed, |file| (file == preload_file)
+                .then_some(Revision(1))),
+            GraphCacheLookup::Miss
+        ));
+        assert_eq!(cache.stats().hits, 1);
+        assert_eq!(cache.stats().misses, 1);
     }
 
     #[test]

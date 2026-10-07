@@ -39,6 +39,7 @@ pub fn stack_effect(
         | Instruction::LoadCell(_)
         | Instruction::LoadUpvalue(_)
         | Instruction::LoadBuiltin(_)
+        | Instruction::LoadIntrinsicBuiltin(_)
         | Instruction::LoadGlobal(_)
         | Instruction::RestArguments(_)
         | Instruction::PushHole
@@ -88,14 +89,18 @@ pub fn stack_effect(
             }
         }
         // A write leaves the value it wrote, which is what makes `a = b.c = d` work.
-        Instruction::SetProperty(_) | Instruction::SetPropertyStrict { .. } => {
+        Instruction::SetProperty(_)
+        | Instruction::SetPropertyStrict { .. }
+        | Instruction::DefineOwnProperty(_) => {
             if height < 2 {
                 Err(underflow(2))
             } else {
                 Ok((height - 1, false))
             }
         }
-        Instruction::SetComputed | Instruction::SetComputedStrict { .. } => {
+        Instruction::SetComputed
+        | Instruction::SetComputedStrict { .. }
+        | Instruction::DefineOwnComputed => {
             if height < 3 {
                 Err(underflow(3))
             } else {
@@ -261,6 +266,15 @@ pub fn stack_effect(
                 Ok((height - needed + 1, false))
             }
         }
+        // The resolved method is saved beside its receiver before argument evaluation.
+        Instruction::CallMethodPrepared { argc, .. } => {
+            let needed = usize::from(*argc) + 2;
+            if height < needed {
+                Err(underflow(needed))
+            } else {
+                Ok((height - needed + 1, false))
+            }
+        }
         // The callee sits under its arguments, and the result replaces both.
         Instruction::Call { argc } => {
             let needed = usize::from(*argc) + 1;
@@ -270,13 +284,14 @@ pub fn stack_effect(
                 Ok((height - needed + 1, false))
             }
         }
-        // Refused by `validate_supported_instruction`, so nothing is ever emitted for it. The
-        // arithmetic is still written out rather than waved away: `stack_effect` is what proves
-        // the height claims of a program consistent, and a lie here would be a lie about a
-        // program the interpreter runs happily. `argc` is `None` when a spread put the arguments
-        // in one array, which leaves exactly one value to consume.
+        // The graph bridge and native tail emitter consume the same call shape. `argc` is `None`
+        // when a spread put the arguments in one array, which leaves one argument value below
+        // the callee.
         Instruction::DirectEval(site) => {
-            let needed = usize::from(site.argc.unwrap_or(1));
+            // The source reference to `eval` is read before its arguments, so accessors and
+            // mutations run in ordinary call-expression order. The callee remains below the
+            // fixed arguments, or below the materialized spread list.
+            let needed = usize::from(site.argc.unwrap_or(1)) + 1;
             if height < needed {
                 Err(underflow(needed))
             } else {
@@ -301,7 +316,9 @@ pub fn stack_effect(
             }
         }
         // Both write a slot in place and touch no stack.
-        Instruction::NewCell(_) | Instruction::MarkUninitialized(_) => Ok((height, false)),
+        Instruction::NewCell(_)
+        | Instruction::MarkCellFunctionName(_)
+        | Instruction::MarkUninitialized(_) => Ok((height, false)),
         // Registering and retiring a handler leave the stack alone; the *target* is reached with
         // one more value on it, which the dataflow walk below accounts for.
         Instruction::PushHandler(_) | Instruction::PopHandler => Ok((height, false)),
@@ -358,9 +375,9 @@ pub fn stack_effect(
                 Ok((height + 2, false))
             }
         }
-        // The receiver, the key and the arguments are all consumed and the result replaces them.
+        // The receiver, key, resolved method and arguments are consumed; result replaces them.
         Instruction::CallComputed { argc } => {
-            let needed = usize::from(*argc).saturating_add(2);
+            let needed = usize::from(*argc).saturating_add(3);
             if height < needed {
                 Err(underflow(needed))
             } else {
@@ -379,6 +396,13 @@ pub fn stack_effect(
         // The brand rides on top of the receiver and is consumed with it: the value replaces
         // both, so the height falls by one.
         Instruction::GetPrivate(_) => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
+        Instruction::HasPrivate { .. } => {
             if height < 2 {
                 Err(underflow(2))
             } else {

@@ -1,4 +1,7 @@
 
+struct kiln_gc_heap;
+void kiln_c99_gc_mark_symbol_key(struct kiln_gc_heap *heap, const kiln_string *key);
+
 static inline int kiln_c99_key_is_reserved(const kiln_string *key) {
     return key != NULL &&
            (key->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) != 0;
@@ -488,6 +491,59 @@ static inline int kiln_c99_guard_should_exit(uint32_t *counter) {
     return kiln_c99_guard_should_exit_in(kiln_c99_speculate_exit_active(), counter);
 }
 
+/* IEEE 754 binary16 conversions shared by emitted reads and the generic view accessors. */
+static inline double kiln_c99_half_to_double(uint16_t bits) {
+    unsigned sign = bits >> 15;
+    unsigned exponent = (bits >> 10) & 31u;
+    unsigned fraction = bits & 1023u;
+    double value;
+    if (exponent == 31u) {
+        if (fraction != 0) return NAN;
+        return sign ? -INFINITY : INFINITY;
+    }
+    if (exponent == 0) value = ldexp((double)fraction, -24);
+    else value = ldexp((double)(1024u + fraction), (int)exponent - 25);
+    return sign ? -value : value;
+}
+
+static inline uint16_t kiln_c99_double_to_half(double value) {
+    uint64_t bits, significand, remainder, halfway;
+    unsigned sign, exponent_bits;
+    int exponent, shift;
+    uint64_t rounded;
+    memcpy(&bits, &value, sizeof bits);
+    sign = (unsigned)(bits >> 63);
+    exponent_bits = (unsigned)((bits >> 52) & 0x7ffu);
+    significand = bits & UINT64_C(0x000fffffffffffff);
+    if (exponent_bits == 0x7ffu) {
+        if (significand == 0) return (uint16_t)((sign << 15) | 0x7c00u);
+        return (uint16_t)((sign << 15) | 0x7e00u);
+    }
+    if (exponent_bits == 0) return (uint16_t)(sign << 15); /* All binary64 subnormals underflow. */
+    exponent = (int)exponent_bits - 1023;
+    significand |= UINT64_C(1) << 52;
+    if (exponent > 15) return (uint16_t)((sign << 15) | 0x7c00u);
+    if (exponent >= -14) {
+        rounded = significand >> 42;
+        remainder = significand & ((UINT64_C(1) << 42) - 1);
+        halfway = UINT64_C(1) << 41;
+        if (remainder > halfway || (remainder == halfway && (rounded & 1u))) ++rounded;
+        if (rounded == 2048u) {
+            rounded = 1024u;
+            if (++exponent > 15) return (uint16_t)((sign << 15) | 0x7c00u);
+        }
+        return (uint16_t)((sign << 15) | ((unsigned)(exponent + 15) << 10) |
+                          ((unsigned)rounded & 1023u));
+    }
+    shift = 28 - exponent;
+    if (shift > 63) return (uint16_t)(sign << 15);
+    rounded = significand >> shift;
+    remainder = significand & ((UINT64_C(1) << shift) - 1);
+    halfway = UINT64_C(1) << (shift - 1);
+    if (remainder > halfway || (remainder == halfway && (rounded & 1u))) ++rounded;
+    return (uint16_t)((sign << 15) | (unsigned)rounded);
+}
+
 typedef enum kiln_typed_kind {
     KILN_TYPED_INT8,
     KILN_TYPED_UINT8,
@@ -496,6 +552,7 @@ typedef enum kiln_typed_kind {
     KILN_TYPED_UINT16,
     KILN_TYPED_INT32,
     KILN_TYPED_UINT32,
+    KILN_TYPED_FLOAT16,
     KILN_TYPED_FLOAT32,
     KILN_TYPED_FLOAT64,
     KILN_TYPED_BIG_INT64,
@@ -534,6 +591,9 @@ typedef int32_t (*kiln_ffi_dispatch_fn)(void *context, const kiln_ffi_value *arg
 
 typedef struct kiln_typed_array {
     kiln_typed_buffer *buffer;
+    /* Named own properties live beside the indexed element storage. Most views never allocate
+     * this store; it is created only when a program writes a non-index key. */
+    kiln_value properties;
     size_t byte_offset;
     size_t length;
     kiln_typed_kind kind;
@@ -565,6 +625,9 @@ static inline double kiln_typed_load(const kiln_typed_array *view, size_t index)
     case KILN_TYPED_INT16:
         bytes += index * 2;
         return (double)(int16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
+    case KILN_TYPED_FLOAT16:
+        bytes += index * 2;
+        return kiln_c99_half_to_double((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
     case KILN_TYPED_UINT16:
         bytes += index * 2;
         return (double)(uint16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
@@ -612,15 +675,29 @@ typedef struct kiln_data_view {
  * interpretation of operation numbers and may replace *result. */
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
                                  const kiln_value *arguments, kiln_value *result);
+typedef struct kiln_c99_unit kiln_c99_unit;
+typedef kiln_val *(*kiln_host_unit_values_fn)(void *module_context,
+                                              const kiln_c99_unit *unit);
 typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
+    /* Non-null only when this host explicitly carries generated module-instance provenance. */
+    void *module_context;
+    /* GC-managed owner for module-context storage, null for ordinary embedding hosts. */
+    void *module_owner;
+    /* Optional per-module-instance state resolver; absent on ordinary hosts. */
+    kiln_host_unit_values_fn module_unit_values;
+    uint64_t module_instance_id;
 } kiln_host;
 
 typedef void (*kiln_drop_opaque_fn)(void *pointer);
 extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
                                      kiln_drop_opaque_fn drop_candidate, void **out_store);
 extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
+#define KILN_C99_REALM_SLOT_PROCESS_EXIT_CODE UINT32_C(16)
+#define KILN_C99_REALM_SLOT_ERROR_STACK_GETTER UINT32_C(17)
+#define KILN_C99_REALM_SLOT_ERROR_STACK_SETTER UINT32_C(18)
+#define KILN_C99_REALM_SLOT_ERROR_BRAND_TOKEN UINT32_C(19)
 extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 /* The collector's seam with the runtime archive (ADR 0041). The prelude owns the heap and the
  * tracer; the archive owns the turn boundary and the roots it holds. */
@@ -761,6 +838,7 @@ typedef int (*kiln_shared_source_unit_fn)(void *context, uint64_t string, uint64
 extern int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn inspect,
                                    kiln_shared_source_unit_fn unit, void *context,
                                    kiln_shared_build_result *out);
+extern int kiln_shared_graph_refusal(uint32_t kind, const char **text);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -770,10 +848,12 @@ extern int kiln_realm_gc_mark_roots(void *heap);
 typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_t kind);
 #define KILN_GC_VISIT_BLOCK 1u
 #define KILN_GC_VISIT_VALUE 2u
+#define KILN_GC_VISIT_COMPACT 3u
 extern int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit,
                                               void *context);
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit,
                                       void *visit_context);
+typedef void (*kiln_gc_release_external_context_fn)(void *context);
 extern int kiln_realm_gc_has_root_visitor(void *heap, kiln_gc_visit_roots_fn visit_roots,
                                          void *context);
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
@@ -807,6 +887,9 @@ enum kiln_c99_function_kind {
 
 typedef struct kiln_closure {
     kiln_body_fn body;
+    /* Generated module closures stay bound to their graph instance across later resets. */
+    kiln_host *module_host;
+    void *external_owner;
     /* An arrow captures `new.target` where it was written, for the same reason it captures
      * `this`: it has none of its own. */
     int arrow;
@@ -891,6 +974,31 @@ typedef struct kiln_closure {
     kiln_val *upvalues;
 } kiln_closure;
 
+/* Reuse realm host services while routing generated module code through its captured graph. */
+static inline kiln_host *kiln_c99_closure_host(kiln_host *host,
+                                                const kiln_closure *closure,
+                                                kiln_host *storage) {
+    (void)storage;
+    return closure != NULL && closure->module_host != NULL ? closure->module_host : host;
+}
+
+static inline kiln_host *kiln_c99_module_host(kiln_host *host) {
+    return host != NULL && host->module_context != NULL ? host : NULL;
+}
+
+/* A JavaScript activation retained for Error.captureStackTrace. This is an explicit language
+ * frame, not a C unwind frame: generated C records the module and IR instruction at each call
+ * operation, and the common closure entry links the function's canonical name to it. */
+typedef struct kiln_js_frame {
+    struct kiln_js_frame *previous;
+    const kiln_closure *closure;
+    const kiln_string *method_name;
+    const char *instruction_source;
+    size_t instruction;
+    size_t line;
+    size_t column;
+} kiln_js_frame;
+
 /* Properties attached to runtime-provided callables. Method identity is its append-only numeric
  * code, so one realm-owned store per code gives `Stream.Readable`, `Buffer.constants`, and future
  * native constructor statics ordinary property behavior without changing the scalar value ABI or
@@ -924,14 +1032,16 @@ typedef struct kiln_native_constructor {
  * the unit and marks, and frees with its heap. `id` names the unit's row in every realm's table;
  * it is assigned once per process, the first time any realm asks. The cache is per thread and
  * trusted only under the realm generation it was filled in, exactly like `kiln_c99_gc_heap`'s. */
-typedef struct kiln_c99_unit {
+struct kiln_c99_unit {
     uint32_t id;
     uint32_t val_count;
-} kiln_c99_unit;
+};
 
 typedef struct kiln_c99_unit_cache {
     const uint64_t *generation_slot;
     uint64_t generation;
+    const void *module_context;
+    uint64_t module_instance_id;
     kiln_val *vals;
 } kiln_c99_unit_cache;
 
@@ -1138,6 +1248,23 @@ typedef struct kiln_sealed_values {
  * their layout or the shape's slot numbering. See realms issue 08's same-binary RSS comparison. */
 #define KILN_C99_INLINE_SLOTS 8
 
+enum {
+    KILN_C99_WRAPPER_NONE = 0,
+    KILN_C99_WRAPPER_STRING = 1,
+    KILN_C99_WRAPPER_NUMBER = 2,
+    KILN_C99_WRAPPER_BOOLEAN = 3,
+    KILN_C99_WRAPPER_SYMBOL = 4,
+    KILN_C99_WRAPPER_BIGINT = 5
+};
+
+/* A realm-private lookup accelerator. Buckets contain ordered-vector ordinals only;
+ * keys and values remain owned and traced exclusively through the property records. */
+typedef struct kiln_dictionary_index {
+    size_t capacity;
+    size_t count;
+    size_t buckets[];
+} kiln_dictionary_index;
+
 typedef struct kiln_object {
     kiln_property *properties;
     size_t count;
@@ -1155,12 +1282,18 @@ typedef struct kiln_object {
      * data properties report writable=true. This is deliberately separate from `frozen`: a
      * namespace is not an ordinary frozen object, and reflection must preserve that distinction. */
     int module_namespace;
+    void *external_owner;
     /* The `arguments` object of a call. An internal slot rather than a `Symbol.toStringTag`
      * property, because the tag is not a property: neither `getOwnPropertyNames` nor
      * `getOwnPropertySymbols` may report it, and a program must not be able to delete it. */
     int arguments_brand;
     /* An error, by the same rule as `arguments_brand`: the brand is not a property. */
     int error_brand;
+    /* `%JSON.rawJSON%`'s unforgeable raw-text carrier brand. The source text itself is the
+     * immutable enumerable `rawJSON` property, so the collector already traces it with slots. */
+    int raw_json_brand;
+    /* Error stack activation records are engine metadata, not own properties. */
+    kiln_value error_stack_frames;
     /* How many of `properties` currently have `accessor` set. `kiln_c99_put_mode`'s chain walk
      * exists to find an inherited setter; when a prototype level's count is zero, it has none,
      * and the level costs one pointer follow instead of a scan of its whole property list.
@@ -1218,6 +1351,12 @@ typedef struct kiln_object {
     uint32_t candidate_slots;
     /* Provenance for a shaped object's separately allocated numeric elements. */
     uint32_t candidate_elements;
+    /* Boxed primitive for String/Number/Boolean/Symbol/BigInt wrapper objects. The wrapper is
+     * still an ordinary object for identity, properties and `typeof`; only the matching
+     * prototype methods and ToPrimitive inspect this slot. */
+    uint8_t primitive_wrapper_kind;
+    kiln_value boxed_primitive;
+    kiln_dictionary_index *dictionary_index;
 } kiln_object;
 
 typedef struct kiln_c99_candidate_object_properties {
@@ -1262,7 +1401,13 @@ static inline int kiln_c99_object_properties_in_block(const kiln_object *object)
     return object->properties == (const kiln_property *)(object + 1);
 }
 
+static inline void kiln_c99_dictionary_index_reset(kiln_object *object) {
+    free(object->dictionary_index);
+    object->dictionary_index = NULL;
+}
+
 static inline void kiln_c99_object_properties_free(kiln_object *object) {
+    kiln_c99_dictionary_index_reset(object);
     if (!kiln_c99_object_properties_in_block(object))
         free(object->candidate_properties ? (void *)kiln_c99_object_candidate_header(object)
                                           : (void *)object->properties);
@@ -1371,11 +1516,15 @@ extern int kiln_c99_realm_builtins_untouched(uint64_t mask0, uint64_t mask1, int
     __attribute__((pure)) KILN_C99_RARE_CALL;
 extern int kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, size_t len)
     __attribute__((pure)) KILN_C99_RARE_CALL;
+extern int kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *member,
+                                                          size_t len) KILN_C99_RARE_CALL;
 #else
 static int kiln_c99_realm_builtins_untouched(uint64_t mask0, uint64_t mask1, int beyond)
     __attribute__((pure)) KILN_C99_RARE_CALL;
 static int kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, size_t len)
     __attribute__((pure)) KILN_C99_RARE_CALL;
+static int kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *member,
+                                                          size_t len) KILN_C99_RARE_CALL;
 #endif
 /* Bit `id` of the bitmap's word `word`: a compile-time constant for a named built-in. */
 #define KILN_C99_BIT_OF_BUILTIN(id, word) \
@@ -1409,6 +1558,12 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_builtins_unmodified_mask(uint64_t 
 #define kiln_c99_builtin_member_unmodified(id, member)                                             \
     (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||                                              \
      kiln_c99_realm_builtin_member_untouched((uint32_t)(id), (member), sizeof(member) - 1))
+static KILN_ALWAYS_INLINE inline int kiln_c99_builtin_member_unmodified_n(uint32_t id,
+                                                                           const char *member,
+                                                                           size_t length) {
+    return KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||
+           kiln_c99_realm_builtin_member_untouched(id, member, length);
+}
 
 #ifdef KILN_SEPARATE_PRELUDE
 extern int kiln_c99_realm_builtin_modified(uint32_t builtin);
@@ -1651,6 +1806,10 @@ typedef struct kiln_c99_site {
     uint8_t cached_tag;
     uint8_t has_cached_method;
     uint64_t cached_method;
+    /* Exact ASCII property key for cached builtin-method answers. Native method ids can have
+     * aliases, so bootstrap facade checks must be tied to the spelling this site read. */
+    uint8_t cached_member_len;
+    char cached_member[32];
     /* A builtin receiver's method is cached by which builtin it was, and nothing else: it holds
      * while the current realm has not modified that built-in (`kiln_c99_realm_builtin_modified`),
      * a record every realm keeps for itself. */
@@ -1714,9 +1873,8 @@ static inline void kiln_c99_site_set_dictionary(kiln_c99_site *site, uint32_t ow
 
 /* A site's cached method -- a method-call or property-read site whose receiver is a built-in
  * kind -- is three words behind `has_cached_method`, a one-byte slot: 0 none, 2 being written, 1
- * published with release. A published answer stays true for its receiver kind, so it is replaced
- * (a site that sees strings, then arrays) only when no other thread can be reading it; otherwise
- * the site keeps the first answer and the other kind takes the slow path. */
+ * published with release. A published answer and its property-key bytes remain immutable;
+ * another receiver kind or key takes the slow path. */
 #define KILN_C99_SITE_METHOD_WRITING 2u
 
 static KILN_ALWAYS_INLINE inline int kiln_c99_site_has_method(const kiln_c99_site *site) {
@@ -1726,23 +1884,44 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_site_has_method(const kiln_c99_sit
 static __attribute__((noinline, unused)) void kiln_c99_site_cache_method(kiln_c99_site *site,
                                                                           uint8_t tag,
                                                                           uint64_t method,
-                                                                          uint32_t builtin) {
+                                                                          uint32_t builtin,
+                                                                          const char *member,
+                                                                          size_t member_len) {
     uint8_t seen = __atomic_load_n(&site->has_cached_method, __ATOMIC_ACQUIRE);
     if (seen == 1u && site->cached_tag == tag && site->cached_method == method &&
-        site->cached_builtin == builtin)
+        site->cached_builtin == builtin && site->cached_member_len == member_len &&
+        (member_len == 0 || (member_len < sizeof site->cached_member &&
+                             memcmp(site->cached_member, member, member_len) == 0)))
         return;
+    /* Published sites are immutable. A call site can be shared by realm threads; replacing its
+     * key buffer after publication would race readers and invalidate realm member-answer caches. */
+    if (seen == 1u) return;
     if (seen == KILN_C99_SITE_METHOD_WRITING ||
         !__atomic_compare_exchange_n(&site->has_cached_method, &seen,
                                      (uint8_t)KILN_C99_SITE_METHOD_WRITING, 0, __ATOMIC_SEQ_CST,
                                      __ATOMIC_RELAXED))
         return;
-    if (seen == 1u && kiln_realm_retire_tag() != 0) {
-        __atomic_store_n(&site->has_cached_method, (uint8_t)1u, __ATOMIC_RELEASE);
-        return;
-    }
     site->cached_tag = tag;
     site->cached_method = method;
     site->cached_builtin = builtin;
+    if (tag == KILN_VALUE_BUILTIN) {
+        size_t index;
+        if (member == NULL || member_len >= sizeof site->cached_member) {
+            site->cached_member_len = UINT8_MAX;
+        } else {
+            for (index = 0; index < member_len; ++index) {
+                if ((unsigned char)member[index] >= 0x80u) break;
+            }
+            if (index != member_len) {
+                site->cached_member_len = UINT8_MAX;
+            } else {
+                memcpy(site->cached_member, member, member_len);
+                site->cached_member_len = (uint8_t)member_len;
+            }
+        }
+    } else {
+        site->cached_member_len = 0;
+    }
     __atomic_store_n(&site->has_cached_method, (uint8_t)1u, __ATOMIC_RELEASE);
 }
 
@@ -1933,6 +2112,9 @@ static __attribute__((noinline, unused)) int kiln_c99_pic_list_holder(const kiln
                                                                      const kiln_object *level,
                                                                      kiln_val *out) {
     const kiln_property *record;
+    /* A namespace's descriptor payload is an export cell, not the result of Get. Leave it to
+     * the throwing generic reader, which also performs the TDZ check. */
+    if (KILN_UNLIKELY(level->module_namespace)) return 0;
     if (KILN_UNLIKELY(entry->proto_slot >= level->count)) return 0;
     record = &level->properties[entry->proto_slot];
     if (KILN_UNLIKELY(record->key != entry->key || record->accessor)) return 0;
@@ -1948,6 +2130,7 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_e
     if (KILN_LIKELY(entry->one_step)) {
         if (KILN_UNLIKELY(obj->prototype.tag != KILN_VALUE_OBJECT)) return 0;
         level = (const kiln_object *)(uintptr_t)obj->prototype.bits;
+        if (KILN_UNLIKELY(level->module_namespace)) return 0;
         if (KILN_UNLIKELY(level->shape != entry->level_shape[0])) return 0;
         *out = level->slots[entry->proto_slot];
         return 1;
@@ -1955,6 +2138,9 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_pic_inherited(const kiln_c99_pic_e
     if (entry->depth == 0 && !entry->absent) return 0;
     level = kiln_c99_pic_path(entry, obj);
     if (level == NULL) return 0;
+    /* Prototype PIC entries retain descriptor slots, which for a module namespace are live
+     * cells. Only generic [[Get]] can resolve that cell and preserve ReferenceError in the TDZ. */
+    if (KILN_UNLIKELY(level->module_namespace)) return 0;
 #ifdef KILN_IC_CHECK
     kiln_c99_pic_oracle(entry, obj);
 #endif
@@ -2105,6 +2291,8 @@ static inline uint32_t kiln_c99_site_decode_dictionary_index(uint32_t encoded) {
 typedef struct kiln_proxy {
     kiln_value target;
     kiln_value handler;
+    /* Class private elements belong to the Proxy identity and bypass its public traps. */
+    kiln_value private_elements;
     /* `Proxy.revocable`'s second half was called. A revoked proxy is not an empty one: every
      * operation on it is a TypeError, which is the entire point -- the capability it stood for
      * has been withdrawn, and a program holding a stale reference has to find out rather than
@@ -2148,8 +2336,30 @@ typedef enum kiln_gc_kind {
     KILN_GC_NODE_PROCESS_COMPLETION,
     KILN_GC_NEXT_TICK,
     KILN_GC_TIMER,
+    /* GC owner for external native state. Never cloned into shared heaps. */
+    KILN_GC_EXTERNAL_OWNER,
     KILN_GC_KIND_COUNT
 } kiln_gc_kind;
+
+typedef struct kiln_gc_external_owner {
+    void *context;
+    kiln_gc_visit_roots_fn visit_roots;
+    kiln_gc_release_external_context_fn release_context;
+} kiln_gc_external_owner;
+
+typedef struct kiln_gc_cell {
+    /* First member preserves existing generated `kiln_val *` cell access. */
+    kiln_val value;
+    void *external_owner;
+} kiln_gc_cell;
+
+extern void *kiln_c99_external_owner_create(void *context,
+                                          kiln_gc_visit_roots_fn visit_roots,
+                                          kiln_gc_release_external_context_fn release_context);
+extern void kiln_c99_external_owner_detach(void *owner);
+extern int kiln_c99_object_set_external_owner(kiln_value object_value, void *owner);
+extern void kiln_c99_closure_set_external_owner(kiln_closure *closure, void *owner);
+extern int kiln_c99_val_make_cell_owned(kiln_val *slot, void *owner);
 
 /* The kind of a heap payload, read from the block header in front of it. The header is exactly
  * one `kiln_gc_block` (`heap.c`) before the payload whatever its origin -- nursery, slab or
@@ -2291,6 +2501,10 @@ typedef struct kiln_array {
     int frozen;
     /* `Object.preventExtensions`. An existing index still takes a write; a new one does not. */
     int not_extensible;
+    /* Index descriptors that cannot live in the dense element vector are stored in the array's
+     * ordinary property store. This bit keeps dense readers on their fast path unless an index
+     * has an accessor or non-default attributes. */
+    int has_index_descriptors;
     int64_t match_index;
     kiln_value match_input;
     /* The `groups` object of a match with named captures, built when the match is; undefined
@@ -2827,6 +3041,9 @@ static KILN_ALWAYS_INLINE inline int kiln_c99_par_add(kiln_c99_par_arena *arena,
  * sequence of labels with `goto` between them: the shape a bytecode interpreter has, and the
  * shape that makes resuming possible at all. */
 typedef struct kiln_generator {
+    kiln_value properties;
+    /* The GetPrototypeFromConstructor result fixed when this iterator is created. */
+    kiln_value prototype;
     kiln_value function;
     kiln_value receiver;
     /* An async function is compiled as a generator -- `await` suspends exactly as `yield` does --
@@ -2884,6 +3101,13 @@ typedef struct kiln_generator {
 
 /* The parts a civil date is made of. The realm has one zone and it is UTC (ADR 0015), so there
  * is no local variant of any of these to keep in step. */
+/* Timestamp stays first so existing Date arithmetic keeps its scalar load. Named/private
+ * properties and subclass prototypes are ordinary object state owned by the Date allocation. */
+typedef struct kiln_date {
+    double time;
+    kiln_value properties;
+} kiln_date;
+
 typedef struct kiln_date_parts {
     int64_t year;
     int month;
@@ -2930,6 +3154,65 @@ typedef struct kiln_collection {
      * ordinary Map costs nothing for it. */
     kiln_value properties;
 } kiln_collection;
+
+/* A collection's tagged backing store is not enough to answer a method call. A subclass keeps
+ * its ordinary prototype (and any own properties) in `properties`, and a program can replace a
+ * member on Map.prototype or Set.prototype. Emitted collection fast paths may use the backing
+ * table only while lookup is still the untouched built-in method. */
+static inline int kiln_c99_collection_intrinsic_method_allowed(const kiln_collection *collection,
+                                                               const char *member,
+                                                               size_t member_len) {
+    uint32_t prototype;
+    if (collection == NULL || member == NULL || collection->is_weak ||
+        collection->properties.tag != KILN_VALUE_UNDEFINED) return 0;
+    if ((strcmp(member, "get") == 0 || strcmp(member, "set") == 0) && !collection->is_map)
+        return 0;
+    if (strcmp(member, "add") == 0 && collection->is_map) return 0;
+    prototype = collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE
+                                   : KILN_C99_BUILTIN_SET_PROTOTYPE;
+    return kiln_c99_builtin_member_unmodified_n(prototype, member, member_len);
+}
+
+static inline int kiln_c99_collection_key_matches_method(const kiln_string *key,
+                                                         const char *method) {
+    size_t length;
+    if (key == NULL || method == NULL) return 0;
+    length = strlen(method);
+    if (key->unit_len != length ||
+        (key->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) !=
+            (kiln_c99_fixed_key_flags(method, length) &
+             (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY))) return 0;
+    for (size_t index = 0; index < length; ++index) {
+        if (kiln_string_unit_at(key, (uint32_t)index) != (unsigned char)method[index]) return 0;
+    }
+    return 1;
+}
+
+static inline int kiln_c99_collection_cached_method_allowed(const kiln_collection *collection,
+                                                            const kiln_string *key,
+                                                            uint64_t method_code,
+                                                            const char *method) {
+    if (collection == NULL || collection->properties.tag != KILN_VALUE_UNDEFINED ||
+        !kiln_c99_collection_key_matches_method(key, method)) return 0;
+    switch (method_code) {
+    case KILN_C99_METHOD_COLLECTION_GET:
+    case KILN_C99_METHOD_COLLECTION_SET:
+    case KILN_C99_METHOD_COLLECTION_ADD:
+    case KILN_C99_METHOD_COLLECTION_HAS:
+    case KILN_C99_METHOD_COLLECTION_DELETE:
+    case KILN_C99_METHOD_COLLECTION_CLEAR:
+    case KILN_C99_METHOD_COLLECTION_FOR_EACH:
+    case KILN_C99_METHOD_COLLECTION_KEYS:
+    case KILN_C99_METHOD_COLLECTION_VALUES:
+    case KILN_C99_METHOD_COLLECTION_ENTRIES:
+    case KILN_C99_METHOD_COLLECTION_SELF:
+        return kiln_c99_collection_intrinsic_method_allowed(collection, method, strlen(method));
+    default:
+        /* Object.prototype methods are cacheable only while the collection has no own or
+         * subclass overlay. Their prototype mutations are covered by the tag-pristine guard. */
+        return 1;
+    }
+}
 
 /* A promise: a value that arrives once, later, and everything waiting for it.
  *
@@ -3002,6 +3285,7 @@ typedef struct kiln_regexp {
     int global;
     int sticky;
     double last_index;
+    int last_index_writable;
     const char *cached_subject_ptr;
     size_t cached_subject_len;
     int cached_is_ascii;
@@ -3011,6 +3295,8 @@ typedef struct kiln_regexp {
     int named_groups;
     int64_t cached_ranges[64];
     kiln_val cached_elements[32];
+    /* User-defined own properties (apart from the intrinsic, non-configurable lastIndex). */
+    kiln_value properties;
 } kiln_regexp;
 
 /* A symbol: a property key with an identity of its own.
@@ -3050,9 +3336,14 @@ typedef struct kiln_bound {
 
 typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
                                         kiln_value *result, kiln_value *thrown);
+typedef int (*kiln_commonjs_resolve_fn)(void *context, kiln_host *host, kiln_value specifier,
+                                        kiln_value *result, kiln_value *thrown);
 typedef struct kiln_commonjs_require {
     kiln_commonjs_require_fn call;
+    kiln_commonjs_resolve_fn resolve;
     void *context;
+    /* CommonJS require is a function object with a module-local own-property store. */
+    kiln_value properties;
     /* The launcher's registered module-root inventory, with its stable realm-owned anchor.
      * Opaque contexts without this authority remain unproven for graph transfer. */
     kiln_gc_visit_roots_fn visit_context;
@@ -3089,7 +3380,28 @@ typedef struct kiln_timer {
     kiln_value callback;
     kiln_value *args;
     size_t argc;
+    /* The handle's own properties, an ordinary object whose prototype is `Timeout.prototype`:
+     * undefined until a program touches the handle (`kiln_c99_timer_materialize`). */
+    kiln_value properties;
+    /* The delay it was armed with, in milliseconds as the program gave it, which is what a
+     * `refresh()` of a timeout that already ran arms again. */
+    double delay;
+    /* The realm's identity for it; the same one for the life of the record, a refresh included. */
+    uint64_t id;
+    /* How many entries in the realm's queue name this record: one, and two for the moment a
+     * timeout re-arms itself from inside its own callback. */
+    uint32_t owners;
+    uint8_t kind;
+    /* The timeout or immediate ran and has not been armed since. */
+    uint8_t ran;
+    /* `unref()`, which survives the timer's end because `hasRef` still answers. */
+    uint8_t unreferenced;
+    /* Cleared: its callback and arguments are dropped and `refresh()` does nothing. */
+    uint8_t cleared;
 } kiln_timer;
+enum { KILN_C99_TIMER_TIMEOUT = 0, KILN_C99_TIMER_INTERVAL = 1, KILN_C99_TIMER_IMMEDIATE = 2,
+       KILN_C99_TIMER_INTERNAL = 3 };
+#define kiln_c99_timer_of(value) ((kiln_timer *)(uintptr_t)(value).bits)
 typedef struct kiln_node_server kiln_node_server;
 typedef struct kiln_node_socket kiln_node_socket;
 
@@ -3105,6 +3417,9 @@ struct kiln_node_server {
     uint32_t port;
     uint64_t timeout_milliseconds;
     int protocol_http;
+    /* Raw net servers default to half-close disabled; HTTP sockets expose true independently
+     * of the HTTP parser's `httpAllowHalfOpen` option. */
+    int allow_half_open;
     /* A fetch-style (`serve`) server: requests arrive whole and reach the listener as strings
      * and bytes, with no IncomingMessage or ServerResponse built (`kiln_c99_node_fetch_request`). */
     int fetch_mode;
@@ -3116,21 +3431,60 @@ struct kiln_node_server {
 struct kiln_node_socket {
     kiln_host *host;
     kiln_value object;
+    kiln_value readable_state;
     kiln_node_socket *next;
     uint64_t resource;
     uint64_t connect_request;
     uint64_t read_request;
     uint64_t write_request;
+    size_t active_write_len;
     uint64_t shutdown_request;
     uint64_t close_request;
+    uint64_t upgrade_request_id;
+    uint64_t shutdown_after_upgrade_fence;
+    char *pending_write_bytes;
+    size_t pending_write_offset;
+    size_t pending_write_len;
+    size_t pending_write_capacity;
+    /* Writes made between cork/uncork are retained as one ordered byte sequence. */
+    char *corked_write_bytes;
+    size_t corked_write_len;
+    size_t corked_write_capacity;
+    unsigned int cork_depth;
+    /* FIFO of [byte length, callback batch] entries for writes not yet submitted. */
+    kiln_value write_queue;
+    size_t write_queue_head;
+    /* The currently submitted batch remains rooted here until its host result arrives. */
+    kiln_value active_write_callbacks;
+    kiln_value write_callbacks;
+    kiln_value end_callbacks;
+    /* Upgrade callback batches are keyed by HTTP engine append-completion fences. */
+    kiln_value upgrade_write_callbacks;
+    int http_upgrade_pending;
+    int http_upgraded;
+    int http_client_owned;
+    int connecting;
+    int pending_http_attach;
+    int pending_read_after_write;
+    int read_paused;
+    size_t read_demand;
+    int read_demand_active;
+    int paused_read_eof;
+    int read_end_scheduled;
+    uint8_t *paused_read_bytes;
+    size_t paused_read_len;
+    size_t paused_read_capacity;
     kiln_node_server *server;
     struct kiln_node_client_request *client_requests;
     uint64_t next_client_request_id;
     struct kiln_node_response *responses;
     int close_after_write;
     int close_after_responses;
+    int destroy_after_write;
     int shutdown_after_write;
     int utf8;
+    int read_closed;
+    int write_closed;
     int closing;
     int closed;
 };
@@ -3138,7 +3492,6 @@ struct kiln_node_socket {
 typedef struct kiln_node_client_request {
     kiln_host *host;
     kiln_value object;
-    kiln_value callback;
     kiln_value response;
     kiln_node_socket *socket;
     char *host_name;
@@ -3156,15 +3509,21 @@ typedef struct kiln_node_client_request {
     uint64_t connect_request;
     uint64_t request_id;
     int ended;
+    int cancelled;
     int sent;
     int response_started;
     int response_ended;
+    int response_released;
+    int response_reusable;
+    int socket_published;
     int utf8;
     struct kiln_node_client_request *next;
 } kiln_node_client_request;
 
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request);
 static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown);
+static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
+                                            const char *state, size_t state_len);
 
 static kiln_node_client_request *kiln_c99_node_client_for_id(kiln_node_socket *socket,
                                                               uint64_t id) {
@@ -3190,9 +3549,11 @@ typedef struct kiln_node_response {
     char *request_headers;
     size_t request_headers_len;
     int request_headers_owned;
+    int request_utf8;
     uint16_t status;
     int started;
     int ended;
+    int disconnected;
     struct kiln_node_response *next;
     /* The response head the program is building, already in the private ABI's flattened form
      * (`name NUL value NUL`, UTF-8, names as the program spelt them): `setHeader`, `writeHead`
@@ -3305,6 +3666,7 @@ typedef struct kiln_node_completion {
     kiln_node_server *server;
     kiln_node_socket *socket;
     kiln_node_client_request *client_request;
+    kiln_value write_callbacks;
 } kiln_node_completion;
 
 /* One Node fs/promises request. The Promise and conversion mode stay in generated C; the Realm
@@ -3362,6 +3724,8 @@ static int kiln_c99_text_append_grow(kiln_text *text, const char *bytes, size_t 
  * belongs to the caller. */
 static int kiln_c99_string_to_utf8_lossy(kiln_value value, uint8_t **out, size_t *out_len);
 static int kiln_c99_text_append_string(kiln_text *text, kiln_value value);
+static int kiln_c99_text_append_js_string(kiln_text *text, kiln_value value);
+static kiln_value kiln_c99_text_preserving_surrogates_value(kiln_text *text);
 
 /* Append `len` bytes. A piece that fits is copied here, with a byte loop for the short ones a
  * JSON writer appends by the thousand -- a quote, a comma, a key -- where a `memmove` call cost
@@ -3394,6 +3758,34 @@ double kiln_string_to_number(const char *bytes, size_t len);
 int32_t kiln_typed_array_sort(uint8_t *data, size_t count, int32_t kind);
 int kiln_intl_segment(const uint8_t *bytes, size_t len, uint32_t granularity,
                       const uint32_t **out_records, size_t *out_count);
+int kiln_intl_string_case(const uint16_t *units, uint64_t count, const uint8_t *locale,
+                          uint64_t locale_len, uint32_t uppercase, uint16_t *out,
+                          uint64_t capacity, uint64_t *out_len);
+int kiln_intl_datetime_format(const uint8_t *spec, uint64_t spec_len, double epoch_milliseconds,
+                              uint32_t operation, const uint8_t **out, uint64_t *out_len);
+int kiln_crypto_key_import(const uint8_t *data, size_t length, uint32_t kind,
+                           uint64_t *out_handle);
+int kiln_crypto_key_public(uint64_t handle, uint64_t *out_handle);
+int kiln_crypto_key_info(uint64_t handle, uint32_t *out_type, uint32_t *out_bits);
+int kiln_crypto_key_export(uint64_t handle, uint32_t format, uint32_t encoding,
+                           uint8_t *output, size_t capacity, size_t *out_length);
+int kiln_crypto_key_free(uint64_t handle);
+int kiln_webcrypto_execute(uint32_t op, const uint8_t *key, size_t key_length,
+                           const uint8_t *data, size_t data_length,
+                           const uint8_t *iv, size_t iv_length,
+                           const uint8_t *additional_data, size_t additional_data_length,
+                           size_t output_length, uint8_t *output, size_t output_capacity,
+                           size_t *required);
+void *kiln_compression_state_create(uint32_t format, uint32_t direction);
+void kiln_compression_state_free(void *state);
+int kiln_compression_state_push(void *state, const uint8_t *input, size_t input_length,
+                                uint32_t finish, uint8_t **output, size_t *output_length);
+void kiln_compression_output_free(uint8_t *output, size_t length);
+int kiln_c99_compression_primitive(kiln_value *out, const kiln_value *args, size_t argc,
+                                   kiln_value *thrown);
+int kiln_c99_webcrypto_output_array(kiln_value *out, size_t length);
+int kiln_c99_webcrypto_primitive(kiln_value *out, const kiln_value *args, size_t argc,
+                                 kiln_value *thrown);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 /* The promise job lane the prelude owns (Phase 6.3). Promise reactions and await resumptions
@@ -3541,6 +3933,7 @@ typedef struct kiln_realm_http_event {
     uint64_t headers_len;
     const uint8_t *data;
     uint64_t data_len;
+    uint64_t write_fence;
 } kiln_realm_http_event;
 typedef struct kiln_realm_http_request {
     const uint8_t *method;

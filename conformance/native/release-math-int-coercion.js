@@ -3,7 +3,7 @@
 // `Math.clz32` and `Math.imul` take `ToUint32`/`ToInt32` of their arguments. The release
 // intrinsics converted a non-number with the pure runtime conversion (an object's `valueOf` was
 // never called) and cast a double to `int64_t` directly, which is undefined for NaN and the
-// infinities (.scratch/parallel-builtins issue 18).
+// infinities (docs/issues/parallel-builtins issue 18).
 let calls = 0;
 const three = { valueOf() { calls++; return 3; } };
 function f(a, b) { return [Math.clz32(a), Math.imul(a, b)]; }

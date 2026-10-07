@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// The parallel/sequential differential harness (.scratch/parallel-builtins issue 02), tier 0:
+// The parallel/sequential differential harness (docs/issues/parallel-builtins issue 02), tier 0:
 // the listed `Math` functions, which the parallel clone lowers to bare libm calls, against the
 // same calls in `map`; and the smallest arrays, which the pool runs inline.
 //

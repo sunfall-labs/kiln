@@ -282,6 +282,48 @@ macro_rules! assert_root_provider_export {
     (root, kiln_string_to_number, string_to_number) => {
         const _: unsafe extern "C" fn(*const u8, usize) -> f64 = kiln_string_to_number;
     };
+    (date, kiln_date_parse, date_parse) => {
+        const _: unsafe extern "C" fn(*const KilnString) -> f64 = kiln_date_parse;
+    };
+    (crypto, kiln_crypto_key_import, crypto_key_import) => {
+        const _: unsafe extern "C" fn(*const u8, usize, u32, *mut u64) -> i32 = kiln_crypto_key_import;
+    };
+    (crypto, kiln_crypto_key_public, crypto_key_public) => {
+        const _: unsafe extern "C" fn(u64, *mut u64) -> i32 = kiln_crypto_key_public;
+    };
+    (crypto, kiln_crypto_key_info, crypto_key_info) => {
+        const _: unsafe extern "C" fn(u64, *mut u32, *mut u32) -> i32 = kiln_crypto_key_info;
+    };
+    (crypto, kiln_crypto_key_export, crypto_key_export) => {
+        const _: unsafe extern "C" fn(u64, u32, u32, *mut u8, usize, *mut usize) -> i32 = kiln_crypto_key_export;
+    };
+    (crypto, kiln_crypto_key_free, crypto_key_free) => {
+        const _: extern "C" fn(u64) -> i32 = kiln_crypto_key_free;
+    };
+    (crypto, kiln_webcrypto_execute, webcrypto_execute) => {
+        const _: unsafe extern "C" fn(u32, *const u8, usize, *const u8, usize, *const u8, usize, *const u8, usize, usize, *mut u8, usize, *mut usize) -> i32 = kiln_webcrypto_execute;
+    };
+    (compression, kiln_compression_state_create, compression_state_create) => {
+        const _: unsafe extern "C" fn(u32, u32) -> *mut kiln_compression::Codec = kiln_compression_state_create;
+    };
+    (compression, kiln_compression_state_free, compression_state_free) => {
+        const _: unsafe extern "C" fn(*mut kiln_compression::Codec) = kiln_compression_state_free;
+    };
+    (compression, kiln_compression_state_push, compression_state_push) => {
+        const _: unsafe extern "C" fn(*mut kiln_compression::Codec, *const u8, usize, u32, *mut *mut u8, *mut usize) -> i32 = kiln_compression_state_push;
+    };
+    (realm, kiln_process_exec_file_sync, process_exec_file_sync) => {
+        const _: unsafe extern "C" fn(*const KilnString, *const KilnString, usize, *mut *mut core::ffi::c_void) -> i32 = process::kiln_process_exec_file_sync;
+    };
+    (realm, kiln_process_output_view, process_output_view) => {
+        const _: unsafe extern "C" fn(*const core::ffi::c_void, *mut *const u8, *mut usize, *mut *const u8, *mut usize, *mut i32, *mut u32, *mut *const u8, *mut usize, *mut *const u8, *mut usize) -> i32 = process::kiln_process_output_view;
+    };
+    (realm, kiln_process_output_free, process_output_free) => {
+        const _: unsafe extern "C" fn(*mut core::ffi::c_void) = process::kiln_process_output_free;
+    };
+    (compression, kiln_compression_output_free, compression_output_free) => {
+        const _: unsafe extern "C" fn(*mut u8, usize) = kiln_compression_output_free;
+    };
     (root, kiln_typed_array_sort, typed_array_sort) => {
         const _: unsafe extern "C" fn(*mut u8, usize, i32) -> i32 = kiln_typed_array_sort;
     };
@@ -289,6 +331,35 @@ macro_rules! assert_root_provider_export {
 }
 
 kiln_native_provider_contract::provider_abi_registry!(assert_root_provider_export);
+
+#[path = "provider/date.rs"]
+mod date;
+use date::kiln_date_parse;
+
+#[cfg(feature = "realm")]
+#[path = "provider/keys.rs"]
+mod keys;
+#[cfg(not(feature = "realm"))]
+#[path = "provider/key_stubs.rs"]
+mod keys;
+use keys::{
+    kiln_crypto_key_export, kiln_crypto_key_free, kiln_crypto_key_import, kiln_crypto_key_info,
+    kiln_crypto_key_public,
+};
+
+#[path = "provider/webcrypto.rs"]
+mod webcrypto;
+use webcrypto::kiln_webcrypto_execute;
+
+#[path = "provider/compression.rs"]
+mod compression;
+use compression::{
+    kiln_compression_output_free, kiln_compression_state_create, kiln_compression_state_free,
+    kiln_compression_state_push,
+};
+
+#[path = "provider/process.rs"]
+mod process;
 
 // Keep every optional provider variant link-compatible with the one private ABI. Generated C is
 // deliberately program-independent in several places, so even a path removed by the linker can
@@ -343,6 +414,24 @@ pub unsafe extern "C" fn kiln_string_normalize(
 ///
 /// This disabled feature stub does not dereference its arguments.
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_intl_string_case(
+    _units: *const u16,
+    _count: u64,
+    _locale: *const u8,
+    _locale_len: u64,
+    _uppercase: u32,
+    _out: *mut u16,
+    _capacity: u64,
+    _out_len: *mut u64,
+) -> i32 {
+    INVALID_ARGUMENT
+}
+
+#[cfg(not(feature = "intl"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn kiln_intl_collate(
     _left: *const u16,
     _left_len: u64,
@@ -366,6 +455,22 @@ pub unsafe extern "C" fn kiln_intl_segment(
     _granularity: u32,
     _out_records: *mut *const u32,
     _out_count: *mut usize,
+) -> i32 {
+    INVALID_ARGUMENT
+}
+
+#[cfg(not(feature = "intl"))]
+/// # Safety
+///
+/// This disabled feature stub does not dereference its arguments.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_intl_datetime_format(
+    _spec: *const u8,
+    _spec_len: u64,
+    _epoch_milliseconds: f64,
+    _operation: u32,
+    _out: *mut *const u8,
+    _out_len: *mut u64,
 ) -> i32 {
     INVALID_ARGUMENT
 }

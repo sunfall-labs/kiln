@@ -1,0 +1,375 @@
+diff --git i/crates/interp/kiln-interpreter/src/object_model.rs w/crates/interp/kiln-interpreter/src/object_model.rs
+index 0b0bbed1..a05a6f90 100644
+--- i/crates/interp/kiln-interpreter/src/object_model.rs
++++ w/crates/interp/kiln-interpreter/src/object_model.rs
+@@ -151,13 +151,40 @@ impl<'a> PropertyKeyRef<'a> {
+         }
+     }
+ 
+-    pub(super) fn is_internal(self) -> bool {
+-        matches!(self, Self::Utf8(key) if symbol::is_reserved(key) && !is_symbol_key(key))
++    /// Classification used by a slot walk. Keep the relatively expensive symbol/reserved-name
++    /// checks outside the per-slot predicate: UTF-8 names otherwise re-scan the well-known
++    /// symbol and internal-slot tables for every property in the object and every prototype.
++    pub(super) fn classification(self) -> PropertyKeyClassification {
++        match self {
++            Self::Utf8(key) => {
++                let symbol = is_symbol_key(key);
++                PropertyKeyClassification {
++                    symbol,
++                    internal: !symbol && symbol::is_internal_key(key),
++                }
++            }
++            Self::Units(_) => PropertyKeyClassification {
++                symbol: false,
++                internal: false,
++            },
++            Self::SymbolUnits(_) => PropertyKeyClassification {
++                symbol: true,
++                internal: false,
++            },
++        }
+     }
+ 
+     pub(super) fn matches_slot(self, slot: &Slot) -> bool {
+-        self.is_symbol() == slot.symbol
+-            && self.is_internal() == slot.internal
++        self.matches_classified_slot(slot, self.classification())
++    }
++
++    pub(super) fn matches_classified_slot(
++        self,
++        slot: &Slot,
++        classification: PropertyKeyClassification,
++    ) -> bool {
++        classification.symbol == slot.symbol
++            && classification.internal == slot.internal
+             && self.matches(&slot.key)
+     }
+ 
+@@ -170,6 +197,12 @@ impl<'a> PropertyKeyRef<'a> {
+     }
+ }
+ 
++#[derive(Clone, Copy, Debug)]
++pub(super) struct PropertyKeyClassification {
++    pub(super) symbol: bool,
++    pub(super) internal: bool,
++}
++
+ #[derive(Clone, Debug)]
+ pub(super) struct WeakCellValue(WeakCollectionKey);
+ 
+diff --git i/crates/interp/kiln-interpreter/src/object_storage.rs w/crates/interp/kiln-interpreter/src/object_storage.rs
+index 69b6eedf..da882069 100644
+--- i/crates/interp/kiln-interpreter/src/object_storage.rs
++++ w/crates/interp/kiln-interpreter/src/object_storage.rs
+@@ -28,9 +28,10 @@ impl ObjectData {
+     }
+ 
+     pub(super) fn get_own_property_key(&self, key: PropertyKeyRef<'_>) -> Option<&Property> {
++        let classification = key.classification();
+         self.properties
+             .iter()
+-            .find(|slot| key.matches_slot(slot))
++            .find(|slot| key.matches_classified_slot(slot, classification))
+             .map(|slot| &slot.property)
+     }
+ 
+@@ -44,9 +45,10 @@ impl ObjectData {
+     }
+ 
+     pub(super) fn get_own_attributes_key(&self, key: PropertyKeyRef<'_>) -> Option<Attributes> {
++        let classification = key.classification();
+         self.properties
+             .iter()
+-            .find(|slot| key.matches_slot(slot))
++            .find(|slot| key.matches_classified_slot(slot, classification))
+             .map(|slot| slot.attributes)
+     }
+ 
+@@ -75,10 +77,11 @@ impl ObjectData {
+     }
+ 
+     fn get_own_value_key(&self, key: PropertyKeyRef<'_>) -> Option<Value> {
++        let classification = key.classification();
+         self.properties
+             .iter()
+             .enumerate()
+-            .find(|(_, slot)| key.matches_slot(slot))
++            .find(|(_, slot)| key.matches_classified_slot(slot, classification))
+             .and_then(|(index, slot)| match self.property_at_slot(index, slot) {
+                 Property::Value(value) => Some(value),
+                 Property::Accessor { .. } => None,
+@@ -138,11 +141,13 @@ impl ObjectData {
+     }
+ 
+     pub(super) fn lookup_key(&self, key: PropertyKeyRef<'_>) -> Option<Property> {
++        // Reuse one classification across every slot and prototype in this lookup.
++        let classification = key.classification();
+         if let Some((index, own)) = self
+             .properties
+             .iter()
+             .enumerate()
+-            .find(|(_, slot)| key.matches_slot(slot))
++            .find(|(_, slot)| key.matches_classified_slot(slot, classification))
+         {
+             return Some(self.property_at_slot(index, own));
+         }
+@@ -159,7 +164,7 @@ impl ObjectData {
+                     store
+                         .properties
+                         .iter()
+-                        .find(|slot| key.matches_slot(slot))
++                        .find(|slot| key.matches_classified_slot(slot, classification))
+                         .map(|slot| slot.property.clone())
+                         .ok_or_else(|| store.prototype.clone())
+                 }
+@@ -169,7 +174,7 @@ impl ObjectData {
+                         .properties
+                         .iter()
+                         .enumerate()
+-                        .find(|(_, slot)| key.matches_slot(slot))
++                        .find(|(_, slot)| key.matches_classified_slot(slot, classification))
+                         .map(|(index, slot)| parent.property_at_slot(index, slot))
+                         .ok_or_else(|| parent.prototype.clone())
+                 }
+@@ -178,7 +183,7 @@ impl ObjectData {
+                     parent
+                         .properties
+                         .iter()
+-                        .find(|slot| key.matches_slot(slot))
++                        .find(|slot| key.matches_classified_slot(slot, classification))
+                         .map(|slot| slot.property.clone())
+                         .ok_or_else(|| parent.prototype.clone())
+                 }
+@@ -212,10 +217,11 @@ impl ObjectData {
+         value: Value,
+         attributes: Attributes,
+     ) {
++        let classification = key.classification();
+         if let Some(slot) = self
+             .properties
+             .iter_mut()
+-            .find(|slot| key.matches_slot(slot))
++            .find(|slot| key.matches_classified_slot(slot, classification))
+         {
+             if !redefinable(slot, attributes, true) {
+                 return;
+@@ -276,6 +282,7 @@ impl ObjectData {
+         setter: Option<Value>,
+         attributes: Attributes,
+     ) {
++        let classification = key.classification();
+         let existing = match self.get_own_property_key(key) {
+             Some(Property::Accessor { get, set }) => (get.clone(), set.clone()),
+             _ => (None, None),
+@@ -287,7 +294,7 @@ impl ObjectData {
+         if let Some(slot) = self
+             .properties
+             .iter_mut()
+-            .find(|slot| key.matches_slot(slot))
++            .find(|slot| key.matches_classified_slot(slot, classification))
+         {
+             if !redefinable(slot, attributes, false) {
+                 return;
+@@ -298,8 +305,8 @@ impl ObjectData {
+         }
+         self.properties.push(Slot {
+             key: key.owned(),
+-            symbol: key.is_symbol(),
+-            internal: key.is_internal(),
++            symbol: classification.symbol,
++            internal: classification.internal,
+             property,
+             attributes,
+         });
+@@ -311,10 +318,11 @@ impl ObjectData {
+         property: Property,
+         attributes: Attributes,
+     ) {
++        let classification = key.classification();
+         if let Some(slot) = self
+             .properties
+             .iter_mut()
+-            .find(|slot| key.matches_slot(slot))
++            .find(|slot| key.matches_classified_slot(slot, classification))
+         {
+             slot.property = property;
+             slot.attributes = attributes;
+@@ -388,10 +396,11 @@ impl ObjectData {
+             return;
+         }
+ 
++        let classification = key.classification();
+         if let Some(slot) = self
+             .properties
+             .iter_mut()
+-            .find(|slot| key.matches_slot(slot))
++            .find(|slot| key.matches_classified_slot(slot, classification))
+         {
+             // Only a data property can refuse a write. An accessor's setter has already had its
+             // chance -- `inherited_setter_key` runs ahead of every store -- so a store that reaches
+@@ -414,10 +423,11 @@ impl ObjectData {
+         property: Property,
+         attributes: Attributes,
+     ) {
++        let classification = key.classification();
+         let slot = Slot {
+             key: key.owned(),
+-            symbol: key.is_symbol(),
+-            internal: key.is_internal(),
++            symbol: classification.symbol,
++            internal: classification.internal,
+             property,
+             attributes,
+         };
+@@ -591,16 +601,18 @@ impl ObjectData {
+     }
+ 
+     pub(super) fn remove_key(&mut self, key: PropertyKeyRef<'_>) -> bool {
++        let classification = key.classification();
+         if self
+             .properties
+             .iter()
+-            .find(|slot| key.matches_slot(slot))
++            .find(|slot| key.matches_classified_slot(slot, classification))
+             .is_some_and(|slot| !slot.attributes.configurable)
+         {
+             return false;
+         }
+-        self.properties
+-            .retain(|slot| !key.matches_slot(slot) || !slot.attributes.configurable);
++        self.properties.retain(|slot| {
++            !key.matches_classified_slot(slot, classification) || !slot.attributes.configurable
++        });
+ 
+         true
+     }
+@@ -872,6 +884,7 @@ pub(super) fn own_property_state_key(
+     target: &Value,
+     key: PropertyKeyRef<'_>,
+ ) -> Option<(Property, Attributes)> {
++    let classification = key.classification();
+     // A namespace export's slot carries the ordinary property shape, while its value lives in
+     // the exporting module's cell. Resolve just this slot here so [[GetOwnProperty]], proxy
+     // invariants, descriptors and the ordinary Get walk all observe the same current binding.
+@@ -881,7 +894,7 @@ pub(super) fn own_property_state_key(
+             .properties
+             .iter()
+             .enumerate()
+-            .find(|(_, slot)| key.matches_slot(slot))
++            .find(|(_, slot)| key.matches_classified_slot(slot, classification))
+         {
+             return Some((data.property_at_slot(index, slot), slot.attributes));
+         }
+diff --git i/crates/interp/kiln-interpreter/src/symbol.rs w/crates/interp/kiln-interpreter/src/symbol.rs
+index a7195d51..a6c052b7 100644
+--- i/crates/interp/kiln-interpreter/src/symbol.rs
++++ w/crates/interp/kiln-interpreter/src/symbol.rs
+@@ -151,10 +151,17 @@ pub(crate) fn is_reserved(key: &str) -> bool {
+     if !key.starts_with(RESERVED_KEY_PREFIX) {
+         return false;
+     }
+-    WellKnown::from_property_key(key).is_some()
+-        || INTERNAL_PREFIXES
+-            .iter()
+-            .any(|prefix| key.starts_with(prefix))
++    WellKnown::from_property_key(key).is_some() || is_internal_key(key)
++}
++
++/// Whether this is a VM-owned reserved spelling rather than a well-known symbol key.
++///
++/// Kept separate from `is_reserved` so a property lookup that has already classified whether
++/// the key is a symbol does not scan `WellKnown::ALL` a second time.
++pub(crate) fn is_internal_key(key: &str) -> bool {
++    INTERNAL_PREFIXES
++        .iter()
++        .any(|prefix| key.starts_with(prefix))
+         || INTERNAL_SLOTS.contains(&key)
+ }
+ 
+diff --git i/crates/interp/kiln-interpreter/src/tests/objects.rs w/crates/interp/kiln-interpreter/src/tests/objects.rs
+index 750d50d1..46ebba32 100644
+--- i/crates/interp/kiln-interpreter/src/tests/objects.rs
++++ w/crates/interp/kiln-interpreter/src/tests/objects.rs
+@@ -280,6 +280,79 @@ fn object_data_property_keys_preserve_lone_surrogates() {
+     assert!(object.get_units(&key).is_none());
+ }
+ 
++#[test]
++fn property_key_classification_preserves_key_kind_through_slot_and_prototype_walks() {
++    let well_known = Symbol::WellKnown(WellKnown::Iterator);
++    let symbol_units = StringUnits::from(well_known.property_key());
++    let ordinary_units = StringUnits::from(well_known.property_key());
++    let surrogate = StringUnits::from_units(&[0xd800]);
++
++    let ordinary = PropertyKeyRef::Utf8("@@ordinary-key").classification();
++    assert_eq!((ordinary.symbol, ordinary.internal), (false, false));
++    let internal = PropertyKeyRef::Utf8("@@private:cache").classification();
++    assert_eq!((internal.symbol, internal.internal), (false, true));
++    let text_symbol_spelling = PropertyKeyRef::Units(&ordinary_units).classification();
++    assert_eq!(
++        (text_symbol_spelling.symbol, text_symbol_spelling.internal),
++        (false, false)
++    );
++    let actual_symbol = PropertyKeyRef::SymbolUnits(&symbol_units).classification();
++    assert_eq!(
++        (actual_symbol.symbol, actual_symbol.internal),
++        (true, false)
++    );
++    let surrogate_key = PropertyKeyRef::Units(&surrogate).classification();
++    assert_eq!(
++        (surrogate_key.symbol, surrogate_key.internal),
++        (false, false)
++    );
++
++    let mut prototype = ObjectData::default();
++    prototype.set("@@ordinary-key", Value::Number(1.0));
++    prototype.set("@@private:cache", Value::Number(2.0));
++    prototype.set_units(&ordinary_units, Value::Number(3.0));
++    prototype.set_key(
++        PropertyKeyRef::SymbolUnits(&symbol_units),
++        Value::Number(4.0),
++    );
++    prototype.set_units(&surrogate, Value::Number(5.0));
++
++    let mut child = ObjectData::default();
++    child.set_prototype(Value::Object(tracked_object(prototype)));
++    assert_eq!(
++        child.lookup("@@ordinary-key"),
++        Some(Property::Value(Value::Number(1.0)))
++    );
++    assert_eq!(
++        child.lookup("@@private:cache"),
++        Some(Property::Value(Value::Number(2.0)))
++    );
++    assert_eq!(
++        child.lookup_units(&ordinary_units),
++        Some(Property::Value(Value::Number(3.0)))
++    );
++    assert_eq!(
++        child.lookup_key(PropertyKeyRef::SymbolUnits(&symbol_units)),
++        Some(Property::Value(Value::Number(4.0)))
++    );
++    assert_eq!(
++        child.lookup_units(&surrogate),
++        Some(Property::Value(Value::Number(5.0)))
++    );
++
++    child.set("@@ordinary-key", Value::Number(6.0));
++    child.remove("@@ordinary-key");
++    assert_eq!(
++        child.lookup("@@ordinary-key"),
++        Some(Property::Value(Value::Number(1.0)))
++    );
++    child.set("@@ordinary-key", Value::Number(7.0));
++    assert_eq!(
++        child.lookup("@@ordinary-key"),
++        Some(Property::Value(Value::Number(7.0)))
++    );
++}
++
+ #[test]
+ fn computed_lone_surrogate_reads_share_ordinary_and_proxy_paths() {
+     let program = no_program();

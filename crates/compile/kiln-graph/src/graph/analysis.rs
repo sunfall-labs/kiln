@@ -516,7 +516,7 @@ pub fn proven_types_with_bounds(
                     },
                     GraphOp::Unary { op, value } => match op {
                         UnaryOp::Not => Some(Proven::Boolean),
-                        UnaryOp::TypeOf => Some(Proven::String),
+                        UnaryOp::TypeOf | UnaryOp::ToString => Some(Proven::String),
                         UnaryOp::Void => Some(Proven::Undefined),
                         UnaryOp::BitwiseNot => number(&state, value).then_some(Proven::Int),
                         UnaryOp::Increment
@@ -934,6 +934,9 @@ pub fn candidate_number_parameters_with_profile(
 pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
     Some(match instruction {
         Instruction::HostCall { argc, .. } => (usize::from(*argc), 1),
+        // A direct-eval call carries the same callee/argument stack shape as a normal call.
+        // Spread calls materialize their arguments as one array before this instruction.
+        Instruction::DirectEval(site) => (usize::from(site.argc.unwrap_or(1)) + 1, 1),
         Instruction::LoadArguments
         | Instruction::LoadTemplateObject(_)
         | Instruction::RestArguments(_)
@@ -956,6 +959,7 @@ pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
         | Instruction::SetPrototype
         | Instruction::DefinePrivate { .. }
         | Instruction::GetPrivate(_)
+        | Instruction::HasPrivate { .. }
         | Instruction::LoadSuperElement
         | Instruction::SetSuperPropertyStrict { .. }
         | Instruction::DeleteComputed
@@ -971,7 +975,8 @@ pub fn bridge_effect(instruction: &Instruction) -> Option<(usize, u8)> {
         | Instruction::DynamicImport => (1, 1),
         Instruction::DynamicImportWithOptions => (2, 1),
         Instruction::SuperCall { argc } => (usize::from(*argc) + 1, 1),
-        Instruction::CallComputed { argc } => (usize::from(*argc) + 2, 1),
+        Instruction::CallMethodPrepared { argc, .. } => (usize::from(*argc) + 2, 1),
+        Instruction::CallComputed { argc } => (usize::from(*argc) + 3, 1),
         Instruction::ToPropertyKey => (2, 2),
         _ => return None,
     })

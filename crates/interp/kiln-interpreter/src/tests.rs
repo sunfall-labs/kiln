@@ -20,6 +20,35 @@ fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
 use kiln_host_abi::{HostError, HostOp};
 use kiln_ir::Builtin;
 
+#[test]
+fn suspended_engine_private_window_is_hidden_and_reopened_per_activation() {
+    let private = Rc::new(RefCell::new(ObjectData::default()));
+    let mut global = ObjectData::default();
+    global.set_non_enumerable(ENGINE_PRIVATE_SLOT, Value::Object(Rc::clone(&private)));
+    global.set("__kilnPrivate", Value::Number(1.0));
+
+    let mut window = Some(open_private_window(&mut global));
+    assert!(matches!(
+        global.get_own("__kilnPrivate"),
+        Some(Value::Object(current)) if Rc::ptr_eq(current, &private)
+    ));
+
+    park_private_window(&mut global, &mut window);
+    assert_eq!(global.get_own("__kilnPrivate"), Some(&Value::Number(1.0)));
+
+    // Code running while the module is parked can observe and update the public global slot.
+    // Resume opens a fresh window whose close restores that current value, not a stale snapshot.
+    global.set("__kilnPrivate", Value::Number(2.0));
+    resume_private_window(&mut global, &mut window);
+    assert!(matches!(
+        global.get_own("__kilnPrivate"),
+        Some(Value::Object(current)) if Rc::ptr_eq(current, &private)
+    ));
+
+    close_private_window(&mut global, window.expect("resumed private window"));
+    assert_eq!(global.get_own("__kilnPrivate"), Some(&Value::Number(2.0)));
+}
+
 struct TestHost {
     calls: Vec<(HostOp, Vec<HostValue>)>,
     clock_now: Option<f64>,
@@ -65,7 +94,11 @@ fn calling_program(argc: u16, arguments: Vec<Instruction>) -> Program {
     Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![number(1.0), number(2.0), number(3.0)],
         code,
         local_count: 0,
@@ -99,7 +132,11 @@ fn no_program() -> Rc<Program> {
     Rc::new(Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -154,7 +191,11 @@ fn stub_eval_compiler(request: &EvalSource<'_>) -> Result<(Program, Strictness),
         Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             // `x = 2; x` against the cell installed in slot 0.
             constants: vec![Constant::Number(2.0f64.to_bits())],
             code: vec![
@@ -176,7 +217,7 @@ fn object(pairs: &[(&str, Value)]) -> Value {
     for (key, value) in pairs {
         data.set(key, value.clone());
     }
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 fn number(value: f64) -> Constant {
@@ -187,7 +228,11 @@ fn program(constants: Vec<Constant>, code: Vec<Instruction>) -> Program {
     Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants,
         code,
         local_count: 0,
@@ -202,7 +247,11 @@ fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
     Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String("valueOf".to_owned().into()),
             Constant::String("called".to_owned().into()),
@@ -392,12 +441,130 @@ fn timer_program(schedule: &[(&str, f64)]) -> Program {
     Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants,
         code,
         local_count: 0,
         functions,
     }
+}
+
+#[test]
+fn node_host_clock_waits_for_the_timer_deadline() {
+    struct WallClockHost {
+        started: std::time::SystemTime,
+        output: Vec<String>,
+    }
+    impl HostOps for WallClockHost {
+        fn call(
+            &mut self,
+            operation: HostOp,
+            arguments: &[HostValue],
+        ) -> Result<HostValue, HostError> {
+            match operation {
+                HostOp::ClockNow => {
+                    let elapsed = self.started.elapsed().unwrap_or_default().as_secs_f64();
+                    Ok(HostValue::number(1_725_000_000_000.0 + elapsed * 1000.0))
+                }
+                HostOp::WriteStdout => {
+                    self.output
+                        .extend(arguments.iter().map(HostValue::to_console_string));
+                    Ok(HostValue::Undefined)
+                }
+                _ => Ok(HostValue::Undefined),
+            }
+        }
+    }
+
+    let mut host = WallClockHost {
+        started: std::time::SystemTime::now(),
+        output: Vec::new(),
+    };
+    let started = std::time::Instant::now();
+    let program = Rc::new(timer_program(&[("fired", 70.0)]));
+    execute_node_with_clock_and_strictness(
+        Rc::clone(&program),
+        Rc::new(kiln_ir::Strictness::sloppy(&program)),
+        &mut host,
+        ExecutionLimits::default(),
+        ExecutionCapabilities::default(),
+        kiln_runtime::ClockCapability::Host,
+    )
+    .expect("Node timer completes");
+    assert_eq!(host.output, ["fired"]);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+}
+
+#[test]
+fn node_timer_armed_after_synchronous_work_uses_the_arm_time() {
+    struct SlowClockHost {
+        started: std::time::Instant,
+        clock_calls: usize,
+        output: Vec<String>,
+    }
+    impl HostOps for SlowClockHost {
+        fn call(
+            &mut self,
+            operation: HostOp,
+            arguments: &[HostValue],
+        ) -> Result<HostValue, HostError> {
+            match operation {
+                HostOp::ClockNow => {
+                    self.clock_calls += 1;
+                    if self.clock_calls == 2 {
+                        std::thread::sleep(std::time::Duration::from_millis(80));
+                    }
+                    let elapsed = self.started.elapsed().as_secs_f64();
+                    Ok(HostValue::number(1_725_000_000_000.0 + elapsed * 1000.0))
+                }
+                HostOp::WriteStdout => {
+                    self.output
+                        .extend(arguments.iter().map(HostValue::to_console_string));
+                    Ok(HostValue::Undefined)
+                }
+                _ => Ok(HostValue::Undefined),
+            }
+        }
+    }
+
+    let mut program = timer_program(&[("after-work", 30.0)]);
+    let now_name = program.constants.len() as u32;
+    program
+        .constants
+        .push(Constant::String("now".to_owned().into()));
+    program.code.splice(
+        0..0,
+        [
+            Instruction::LoadBuiltin(Builtin::Date),
+            Instruction::CallMethod {
+                name: now_name,
+                argc: 0,
+            },
+            Instruction::Pop,
+        ],
+    );
+    let mut host = SlowClockHost {
+        started: std::time::Instant::now(),
+        clock_calls: 0,
+        output: Vec::new(),
+    };
+    let started = std::time::Instant::now();
+    let program = Rc::new(program);
+    execute_node_with_clock_and_strictness(
+        Rc::clone(&program),
+        Rc::new(kiln_ir::Strictness::sloppy(&program)),
+        &mut host,
+        ExecutionLimits::default(),
+        ExecutionCapabilities::default(),
+        kiln_runtime::ClockCapability::Host,
+    )
+    .expect("Node timer completes after synchronous work");
+    assert_eq!(host.output, ["after-work"]);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(100));
 }
 
 /// `({ mark: "receiver", step: function* () { yield this.mark; } }).step().next().value`,
@@ -413,7 +580,11 @@ fn generator_receiver_program() -> Program {
     Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants,
         code: vec![
             Instruction::Const(0),

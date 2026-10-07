@@ -1,6 +1,42 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn write_cell(
+        &mut self,
+        cell: &Cell,
+        value: Value,
+        instruction: usize,
+        initializing_store: bool,
+    ) -> Result<bool, ExecutionError> {
+        let program = Rc::clone(&self.program);
+        let readonly =
+            self.readonly_cells
+                .borrow_mut()
+                .kind_for_write(cell, &program, initializing_store);
+        if let Some(kind) = readonly {
+            if kind == ReadonlyCellKind::Const
+                && matches!(&*cell.borrow(), Value::Native(Native::Uninitialized, _))
+            {
+                self.throw_error(
+                    ErrorKind::Reference,
+                    "cannot access a binding before its declaration".to_owned(),
+                    instruction,
+                )?;
+            } else if self.strict || kind == ReadonlyCellKind::Const {
+                self.throw_error(
+                    ErrorKind::Type,
+                    "Assignment to constant variable.".to_owned(),
+                    instruction,
+                )?;
+            }
+            // A named function expression's private name ignores sloppy writes and throws in
+            // strict code. Const writes throw in both modes above.
+            return Ok(true);
+        }
+        *cell.borrow_mut() = value;
+        Ok(false)
+    }
+
     /// The dispatch loop reached [`Self::checkpoint`]: find out which boundary that was.
     ///
     /// Deliberately not inlined into the loop. Everything here is either the end of the program
@@ -79,6 +115,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         stop_before: usize,
         stop_depth: usize,
     ) -> Result<ExecutionResult, ExecutionError> {
+        let run_guard = crate::gc_census::enter_vm_run();
+        self.run_bounded_inner(stop_at, stop_before, stop_depth, run_guard.outermost())
+    }
+
+    fn run_bounded_inner(
+        &mut self,
+        stop_at: usize,
+        stop_before: usize,
+        stop_depth: usize,
+        outermost_run: bool,
+    ) -> Result<ExecutionResult, ExecutionError> {
         // Held across steps and refreshed only when the running frame's program actually
         // changes. The borrow has to come from a local rather than from `self`, which every
         // instruction below needs mutably -- but paying a refcount pair per *instruction* to
@@ -94,6 +141,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if !self.self_bindings.is_empty() || !self.self_namespaces.is_empty() {
                 self.refresh_self_imports();
             }
+            // Cycle collection is pressure-triggered and runs only between instructions, after
+            // self-import namespace snapshots catch up with their live cells. The outermost-run
+            // guard excludes nested interpreter entries whose Rust callers may retain RefCell
+            // borrows. The weak census preserves ordinary VM/Rust roots.
+            if outermost_run && self.steps & 0x3ff == 0 {
+                let module_map = self.gc_module_map();
+                let (module_allocations, module_threshold) = {
+                    let module_map = module_map.borrow();
+                    (
+                        module_map.gc_cycle_candidate_allocations,
+                        module_map.gc_cycle_candidate_threshold,
+                    )
+                };
+                if crate::gc_census::automatic_collection_due(module_allocations, module_threshold)
+                {
+                    self.collect_closure_cycles();
+                }
+            }
             // One comparison, two boundaries. `checkpoint` is `max_steps` for every program that
             // has no second agent, so this is the step-limit check it always was; when a second
             // agent exists it is also the end of this agent's quantum, and the slow path decides
@@ -107,6 +172,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Ok(ExecutionResult {
                     value: Value::Undefined,
                     steps: self.steps,
+                    process_exit_code: None,
                 });
             }
             if !Rc::ptr_eq(&program, &self.program) {
@@ -172,6 +238,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::Unary(operator) => {
                     let value = self.pop(current)?;
+                    if *operator == UnaryOp::ToString {
+                        let converted = self.as_text_units(&value, current);
+                        if let Some(text) = self.catchable(converted, current)? {
+                            self.stack.push(Value::String(text));
+                        }
+                        continue;
+                    }
                     // Numbers cannot invoke coercion or fail a unary operation. Reuse the
                     // scalar implementation without constructing two fallible call results.
                     if matches!(value, Value::Number(_)) {
@@ -399,17 +472,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     let args_start = self.stack.len() - argc;
                     let mut args = self.stack.drain(args_start..).collect::<Vec<_>>();
-                    if matches!(op, HostOp::WriteStdout | HostOp::WriteStderr) {
+                    let line = matches!(op, HostOp::WriteStdout | HostOp::WriteStderr);
+                    if line {
                         args = self.console_arguments(args, current)?;
                     }
                     let args = args.into_iter().map(HostValue::from).collect::<Vec<_>>();
-                    let result =
-                        self.host
-                            .call(*op, &args)
-                            .map_err(|error| ExecutionError::Host {
-                                instruction: current,
-                                message: error.to_string(),
-                            })?;
+                    let result = if line {
+                        self.host_line(*op == HostOp::WriteStderr, args)
+                    } else {
+                        self.host.call(*op, &args)
+                    }
+                    .map_err(|error| ExecutionError::Host {
+                        instruction: current,
+                        message: error.to_string(),
+                    })?;
                     self.stack.push(result.into());
                 }
                 Instruction::MakeFunction(index) => {
@@ -436,7 +512,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )?;
                         continue;
                     }
-                    let invoked = self.invoke(method, receiver, arguments, current);
+                    let invoked = self.invoke(method, receiver, arguments, current, Some(name));
+                    let Some(result) = self.catchable(invoked, current)? else {
+                        continue;
+                    };
+                    if let Some(result) = result {
+                        self.stack.push(result);
+                    }
+                }
+                Instruction::CallMethodPrepared { name, argc } => {
+                    let name = self.string_constant_units(*name, current)?;
+                    let arguments = self.take_call_arguments(*argc, current)?;
+                    let method = self.pop(current)?;
+                    let receiver = self.pop(current)?;
+                    if !is_callable(&method) {
+                        let shown = name.to_lossy_string();
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!("{}.{shown} is not a function", receiver.type_name()),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let invoked = self.invoke(method, receiver, arguments, current, Some(name));
                     let Some(result) = self.catchable(invoked, current)? else {
                         continue;
                     };
@@ -446,15 +544,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::CallComputed { argc } => {
                     let arguments = self.take_call_arguments(*argc, current)?;
+                    let method = self.pop(current)?;
                     let key = self.pop(current)?;
                     let receiver = self.pop(current)?;
-                    // Reading the method is an ordinary read: `o["m"]()` where `m` is a getter
-                    // has to call it, exactly as `o.m()` does.
-                    let read = self.read_computed(&receiver, &key, current);
-                    let Some(method) = self.catchable(read, current)? else {
-                        continue;
+                    let method_name = match &key {
+                        Value::String(name) => Some(name.clone()),
+                        _ => None,
                     };
-                    let invoked = self.invoke(method, receiver, arguments, current);
+                    let invoked = self.invoke(method, receiver, arguments, current, method_name);
                     let Some(result) = self.catchable(invoked, current)? else {
                         continue;
                     };
@@ -563,11 +660,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )?;
                         continue;
                     }
-                    let read = self.read_computed(&target, &key, current);
+                    let read = self
+                        .prepare_computed_read(&target, &key, &target, current)
+                        .and_then(|read| self.dispatch_property_read(read, current));
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
-                    self.stack.push(value);
+                    if let Some(value) = value {
+                        self.stack.push(value);
+                    }
                 }
                 Instruction::SetComputed => {
                     let value = self.pop(current)?;
@@ -586,6 +687,71 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let assigned =
                         self.assign_with_strict(&target, &key, value.clone(), current, *strict);
                     if self.catchable(assigned, current)?.is_none() {
+                        continue;
+                    }
+                    self.stack.push(value);
+                }
+                Instruction::DefineOwnProperty(name) => {
+                    let value = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let name = self.string_constant_units(*name, current)?;
+                    let descriptor = Descriptor {
+                        value: Some(value.clone()),
+                        writable: Some(true),
+                        enumerable: Some(true),
+                        configurable: Some(true),
+                        ..Descriptor::default()
+                    };
+                    let defined = self.define_own_operation_key(
+                        &target,
+                        PropertyKeyRef::Units(&name),
+                        &descriptor,
+                        current,
+                    );
+                    let Some(accepted) = self.catchable(defined, current)? else {
+                        continue;
+                    };
+                    if !accepted {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            "Cannot define class field".into(),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    self.stack.push(value);
+                }
+                Instruction::DefineOwnComputed => {
+                    let value = self.pop(current)?;
+                    let key = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let Some(key_units) =
+                        self.catchable(key.property_key_units_checked(), current)?
+                    else {
+                        continue;
+                    };
+                    let descriptor = Descriptor {
+                        value: Some(value.clone()),
+                        writable: Some(true),
+                        enumerable: Some(true),
+                        configurable: Some(true),
+                        ..Descriptor::default()
+                    };
+                    let defined = self.define_own_operation_key(
+                        &target,
+                        PropertyKeyRef::from_value(&key, &key_units),
+                        &descriptor,
+                        current,
+                    );
+                    let Some(accepted) = self.catchable(defined, current)? else {
+                        continue;
+                    };
+                    if !accepted {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            "Cannot define class field".into(),
+                            current,
+                        )?;
                         continue;
                     }
                     self.stack.push(value);
@@ -716,6 +882,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(ExecutionResult {
                         value,
                         steps: self.steps,
+                        process_exit_code: None,
                     });
                 }
                 Instruction::YieldStar(exit_target) => {
@@ -731,6 +898,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(ExecutionResult {
                         value,
                         steps: self.steps,
+                        process_exit_code: None,
                     });
                 }
                 Instruction::ToObject => {
@@ -823,11 +991,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // specification hands the promise back first and only then looks at what it
                     // was given, so `import({ toString() { throw x } })` is a rejection and not
                     // an exception at the call site.
+                    let generation_owner = self
+                        .module_map
+                        .borrow_mut()
+                        .import_generation_handle_for_id(
+                            self.current_realm,
+                            self.module_path.as_deref(),
+                            self.module_generation,
+                        );
+                    let import_generation = generation_owner.borrow().id;
                     let scheduled = self.scheduled(Job::Import(
                         Rc::clone(&promise),
                         text,
                         _options,
                         self.module_path.clone(),
+                        import_generation,
+                        generation_owner,
                     ));
                     self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                     self.stack.push(Value::Promise(promise));
@@ -870,8 +1049,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(prototype);
                 }
                 Instruction::DirectEval(site) => {
-                    // No callee sits under the arguments: a direct eval names no value, which is
-                    // exactly why it is an instruction rather than a call.
+                    // The compiler read the global `eval` binding before evaluating arguments.
+                    // It stays under them so an accessor or replacement follows ordinary call
+                    // ordering while the intrinsic case still enters the caller's environment.
                     let arguments = match site.argc {
                         Some(argc) => {
                             let argc = usize::from(argc);
@@ -887,6 +1067,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             argument => vec![argument],
                         },
                     };
+                    let callee = self.pop(current)?;
+                    if !matches!(&callee, Value::Native(Native::Eval, _)) {
+                        let called = self.call_value(&callee, Value::Undefined, arguments, current);
+                        if let Some(result) = self.catchable(called, current)? {
+                            self.stack.push(result);
+                        }
+                        continue;
+                    }
                     // An eval of anything but a string *is* that value, per the specification,
                     // which is what makes `eval(someObject)` harmless rather than a coercion.
                     let source = match arguments.into_iter().next() {
@@ -900,6 +1088,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             continue;
                         }
                     };
+                    if !self.string_code_generation_allowed {
+                        self.throw_error(
+                            ErrorKind::Eval,
+                            "Code generation from strings disallowed for this context".into(),
+                            current,
+                        )?;
+                        continue;
+                    }
                     // Entered rather than driven: the interpreter loop runs the eval's frame
                     // next, and its `Return` leaves the completion value where this instruction's
                     // result belongs. Nothing is pushed here.
@@ -909,10 +1105,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
                 Instruction::LoadBuiltin(builtin) => {
-                    // The running code's realm, not the primary one: a bare `ArrayBuffer` in code
-                    // a second realm runs names *that* realm's intrinsic (ADR 0038), which is what
-                    // makes its bootstrap install onto its own prototypes, and what makes
-                    // `other.evalScript("Array") === other.global.Array`.
+                    // Read the running code's realm global, so a secondary realm's bare Array
+                    // agrees with other.global.Array (ADR 0038).
+                    // A source-level builtin name is a mutable global binding. Bootstrap
+                    // replacements and user descriptors must be observed just like any other
+                    // global property; LoadIntrinsicBuiltin below keeps the engine identity.
+                    let global = self.global_object();
+                    let key = PropertyKeyRef::Utf8(builtin.name());
+                    if !has_property_key(&self.intrinsics, &global, key) {
+                        self.throw_error(
+                            ErrorKind::Reference,
+                            format!("{} is not defined", builtin.name()),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let read = self.read_property(&global, builtin.name(), current);
+                    let Some(value) = self.catchable(read, current)? else {
+                        continue;
+                    };
+                    self.stack.push(value);
+                }
+                Instruction::LoadIntrinsicBuiltin(builtin) => {
                     let value = self.builtin_value(*builtin, self.current_realm);
                     self.stack.push(value);
                 }
@@ -988,8 +1202,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     if raised {
                         continue;
                     }
-                    self.stack
-                        .push(Value::Object(Rc::new(RefCell::new(object))));
+                    self.stack.push(Value::Object(tracked_object(object)));
                 }
                 Instruction::SpreadObject => {
                     let source = self.pop(current)?;
@@ -1009,22 +1222,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // an Event used to turn its four enumerable symbol slots into strings.
                     // This operation path also runs proxy traps and later getters after any
                     // changes an earlier getter made to the source.
-                    for key in self.own_keys_reflected(&source, current)? {
-                        let Some(descriptor) = self.own_descriptor_value(&source, &key, current)?
-                        else {
-                            continue;
-                        };
-                        if !self
-                            .read_property(&descriptor, "enumerable", current)?
-                            .is_truthy()
-                        {
-                            continue;
+                    // Proxy traps and source accessors are user code. Run the whole abstract
+                    // operation under the instruction loop's catchable boundary: letting a
+                    // getter's `ThrownAcrossNative` escape this arm turns an ordinary JS throw
+                    // into a host failure instead of allowing an enclosing `try` to catch it.
+                    let copied = (|| {
+                        for key in self.own_keys_reflected(&source, current)? {
+                            let Some(descriptor) =
+                                self.own_descriptor_value(&source, &key, current)?
+                            else {
+                                continue;
+                            };
+                            if !self
+                                .read_property(&descriptor, "enumerable", current)?
+                                .is_truthy()
+                            {
+                                continue;
+                            }
+                            let value = self.read_computed(&source, &key, current)?;
+                            let units = key.property_key_units_checked()?;
+                            object
+                                .borrow_mut()
+                                .set_key(PropertyKeyRef::from_value(&key, &units), value);
                         }
-                        let value = self.read_computed(&source, &key, current)?;
-                        let units = key.property_key_units_checked()?;
-                        object
-                            .borrow_mut()
-                            .set_key(PropertyKeyRef::from_value(&key, &units), value);
+                        Ok::<(), ExecutionError>(())
+                    })();
+                    if self.catchable(copied, current)?.is_none() {
+                        continue;
                     }
                     self.stack.push(target);
                 }
@@ -1045,16 +1269,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     };
                     let arguments = arguments.borrow().clone();
-                    // Through `catchable`, like every other call: a throw from inside `f(...xs)`
-                    // reaches this as `ThrownAcrossNative` and has to be handed to the handler
-                    // that is now reachable again. A bare `?` made `try { f(...xs) } catch {}`
-                    // end the run instead of catching -- the exact trap the comment on
-                    // `ExecutionError::CyclicJson` warns about.
-                    let called = self.call_value(&callee, this_value, arguments, current);
+                    // Use the same frame dispatch as an ordinary call. Compiled callees return
+                    // through `Return`; immediate native results and failures still pass through
+                    // the instruction's catchable boundary. Synchronously driving a compiled
+                    // callee here made recursive spread calls consume the Rust stack.
+                    let called = self.invoke(callee, this_value, arguments, current, None);
                     let Some(result) = self.catchable(called, current)? else {
                         continue;
                     };
-                    self.stack.push(result);
+                    if let Some(result) = result {
+                        self.stack.push(result);
+                    }
                 }
                 Instruction::ConstructSpread => {
                     let arguments = self.pop(current)?;
@@ -1255,6 +1480,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     }
                 }
+                Instruction::HasPrivate { name, .. } => {
+                    let name = self.string_constant_scalar(*name, current)?;
+                    let brand = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    if !is_reflect_target(&target) {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            "right-hand side of private `in` must be an object".to_owned(),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let answer = private_brand_matches(&target, &name, &brand)
+                        && own_private_element(&target, &name).is_some();
+                    self.stack.push(Value::Boolean(answer));
+                }
                 Instruction::GetPrivate(name) => {
                     let name = self.string_constant_scalar(*name, current)?;
                     let brand = self.pop(current)?;
@@ -1385,7 +1626,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             continue;
                         }
                         Property::Value(_) => {
-                            let Some(store) = prototype_slot(&target) else {
+                            let Some(store) = private_slot(&target) else {
                                 return Err(ExecutionError::NotAnObject {
                                     instruction: current,
                                     value: target.type_name(),
@@ -1436,7 +1677,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             data.define_accessor(&name, None, Some(function.clone()), attributes);
                         }
                     };
-                    let Some(store) = prototype_slot(&target) else {
+                    let Some(store) = private_slot(&target) else {
                         return Err(ExecutionError::NotAnObject {
                             instruction: current,
                             value: target.type_name(),
@@ -1641,12 +1882,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     // Catchable: a proxy trap and a getter are both ordinary code, and what
                     // they throw is the program's to handle.
-                    let read =
-                        self.read_property_key(&target, PropertyKeyRef::Units(&name), current);
+                    let read = self
+                        .prepare_property_read_key(&target, PropertyKeyRef::Units(&name), current)
+                        .and_then(|read| self.dispatch_property_read(read, current));
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
-                    self.stack.push(value);
+                    if let Some(value) = value {
+                        self.stack.push(value);
+                    }
                 }
                 // `super.x`. The prototype answers *which* property, and `this` answers who a
                 // getter up there is asked about -- which is the whole reason this is not the
@@ -1668,16 +1912,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     }
                     let receiver = self.this_value.clone();
-                    let read = self.read_computed_with_receiver(
-                        &target,
-                        &Value::String(name),
-                        &receiver,
-                        current,
-                    );
+                    let read = self
+                        .prepare_computed_read(&target, &Value::String(name), &receiver, current)
+                        .and_then(|read| self.dispatch_property_read(read, current));
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
-                    self.stack.push(value);
+                    if let Some(value) = value {
+                        self.stack.push(value);
+                    }
                 }
                 Instruction::LoadSuperElement => {
                     let target = self.pop(current)?;
@@ -1695,11 +1938,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         continue;
                     }
                     let receiver = self.this_value.clone();
-                    let read = self.read_computed_with_receiver(&target, &key, &receiver, current);
+                    let read = self
+                        .prepare_computed_read(&target, &key, &receiver, current)
+                        .and_then(|read| self.dispatch_property_read(read, current));
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
-                    self.stack.push(value);
+                    if let Some(value) = value {
+                        self.stack.push(value);
+                    }
                 }
                 Instruction::SetSuperPropertyStrict { name, strict } => {
                     let name = self.string_constant_units(*name, current)?;
@@ -1775,7 +2022,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .ok()
                         .filter(|key| key.starts_with(PRIVATE_KEY_PREFIX))
                     {
-                        let Some(store) = prototype_slot(&target) else {
+                        let Some(store) = private_slot(&target) else {
                             return Err(ExecutionError::NotAnObject {
                                 instruction: current,
                                 value: target.type_name(),
@@ -1801,7 +2048,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .ok()
                         .filter(|key| key.starts_with(PRIVATE_KEY_PREFIX))
                     {
-                        let Some(store) = prototype_slot(&target) else {
+                        let Some(store) = private_slot(&target) else {
                             return Err(ExecutionError::NotAnObject {
                                 instruction: current,
                                 value: target.type_name(),
@@ -1834,7 +2081,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::LoadCell(slot) => {
                     let cell = self.cell(*slot as usize)?;
-                    let value = cell.borrow().clone();
+                    // Imported bindings can cross a cycle before their provider has
+                    // published. Publishing then aliases the canonical export cell through
+                    // the pending link cell, so read the complete chain here just as namespace
+                    // construction and star expansion do.
+                    let value = read_through_cell(&Value::Cell(cell));
                     if matches!(value, Value::Native(Native::Uninitialized, _)) {
                         self.throw_error(
                             ErrorKind::Reference,
@@ -1848,10 +2099,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::StoreCell(slot) => {
                     let value = self.pop(current)?;
                     let cell = self.cell(*slot as usize)?;
-                    *cell.borrow_mut() = value;
+                    self.write_cell(&cell, value, current, true)?;
+                }
+                Instruction::MarkCellFunctionName(slot) => {
+                    let cell = self.cell(*slot as usize)?;
+                    self.readonly_cells.borrow_mut().mark(
+                        &cell,
+                        ReadonlyCellKind::FunctionName,
+                        None,
+                    );
                 }
                 Instruction::LoadUpvalue(index) => {
-                    let value = self.upvalue(*index)?.borrow().clone();
+                    let value = read_through_cell(&Value::Cell(Rc::clone(&self.upvalue(*index)?)));
                     if matches!(value, Value::Native(Native::Uninitialized, _)) {
                         let message = self.upvalue_name(*index).map_or_else(
                             || "cannot access a binding before its declaration".to_owned(),
@@ -1864,7 +2123,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::StoreUpvalue(index) => {
                     let value = self.pop(current)?;
-                    *self.upvalue(*index)?.borrow_mut() = value;
+                    let cell = self.upvalue(*index)?;
+                    self.write_cell(&cell, value, current, false)?;
                 }
                 Instruction::Call { argc } => {
                     let argc = *argc;
@@ -1901,11 +2161,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             };
                             self.stack.push(result);
                         }
-                        // Both defer to `call_value`: a bound function knows its own receiver,
-                        // and a proxy has to consult its `apply` trap before anything else can
-                        // happen.
-                        Value::Bound(_)
-                        | Value::Proxy(_)
+                        // A bound target can be a compiled function. Normalize its receiver
+                        // and arguments through the frame dispatcher rather than recursively
+                        // driving another interpreter loop for every bound call.
+                        Value::Bound(_) => {
+                            let callee = callee.clone();
+                            let arguments = self.take_arguments(argc, current)?;
+                            let called = self.invoke(
+                                callee,
+                                Value::Undefined,
+                                arguments,
+                                current,
+                                None,
+                            );
+                            let Some(result) = self.catchable(called, current)? else {
+                                continue;
+                            };
+                            if let Some(result) = result {
+                                self.stack.push(result);
+                            }
+                        }
+                        // A proxy has to consult its `apply` trap before anything else can happen.
+                        Value::Proxy(_)
                         // A wrapped function defers for the strongest reason of the four: the
                         // call has to cross a realm boundary in both directions, and
                         // `call_value` is where entering the callee's realm happens.
@@ -1922,6 +2199,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             self.stack.push(result);
                         }
                         Value::Native(native, realm) => {
+                            // These realm markers back the non-callable objects that sit in the
+                            // function-kind prototype chain. Ordinary `Instruction::Call`
+                            // dispatches natives directly for speed, so it must enforce the same
+                            // [[Call]] check as `call_value`/`invoke_dispatch` before treating a
+                            // marker as a native function. Otherwise `AsyncFunction.prototype()`
+                            // silently returned undefined in the interpreter.
+                            if matches!(
+                                native,
+                                Native::AsyncFunctionPrototype
+                                    | Native::GeneratorFunctionPrototype
+                                    | Native::AsyncGeneratorFunctionPrototype
+                            ) {
+                                self.throw_error(
+                                    ErrorKind::Type,
+                                    "a object is not a function".to_owned(),
+                                    current,
+                                )?;
+                                continue;
+                            }
                             let native = *native;
                             let realm = *realm;
                             let mut arguments = self.take_arguments(argc, current)?;
@@ -1985,6 +2281,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(ExecutionResult {
                             value,
                             steps: self.steps,
+                            process_exit_code: None,
                         });
                     };
                     // Discard anything the callee left behind. A well-formed program leaves
@@ -2007,7 +2304,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.current_realm = frame.realm;
                     self.strict = frame.strict;
                     self.module_path = frame.module_path;
+                    self.module_generation = frame.module_generation;
+                    self.module_generation_owner = frame.module_generation_owner;
                     self.function = frame.function;
+                    self.method_name = frame.method_name;
                     self.this_value = frame.this_value;
                     self.new_target = frame.new_target;
                     self.arguments = frame.arguments;
@@ -2043,6 +2343,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(ExecutionResult {
                             value: self.stack.pop().unwrap_or(Value::Undefined),
                             steps: self.steps,
+                            process_exit_code: None,
                         });
                     }
                 }
@@ -2146,7 +2447,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.current_realm = frame.realm;
                 self.strict = frame.strict;
                 self.module_path = frame.module_path;
+                self.module_generation = frame.module_generation;
+                self.module_generation_owner = frame.module_generation_owner;
                 self.function = frame.function;
+                self.method_name = frame.method_name;
                 self.this_value = frame.this_value;
                 self.new_target = frame.new_target;
                 self.arguments = frame.arguments;
@@ -2167,7 +2471,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.current_realm = frame.realm;
             self.strict = frame.strict;
             self.module_path = frame.module_path;
+            self.module_generation = frame.module_generation;
+            self.module_generation_owner = frame.module_generation_owner;
             self.function = frame.function;
+            self.method_name = frame.method_name;
             self.this_value = frame.this_value;
             self.new_target = frame.new_target;
             self.arguments = frame.arguments;
@@ -2196,14 +2503,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if self.stack.len() < argc + 1 {
             return Err(ExecutionError::StackUnderflow { instruction });
         }
-        let mut arguments = self.stack.split_off(self.stack.len() - argc);
+        let received = self.stack.split_off(self.stack.len() - argc);
         self.stack.pop();
 
         let mut locals = vec![Value::Undefined; proto.local_count as usize];
-        let received = arguments.clone();
-        arguments.truncate(proto.parameter_count as usize);
-        for (slot, argument) in arguments.into_iter().enumerate() {
-            locals[slot] = argument;
+        // The generator retains every actual for `arguments`, rest parameters and resumptions.
+        // Locals need only a separate copy of the formal prefix; cloning the whole argument
+        // vector here duplicated surplus actuals and allocated a second vector per generator.
+        for (slot, argument) in received
+            .iter()
+            .take(proto.parameter_count as usize)
+            .enumerate()
+        {
+            locals[slot] = argument.clone();
         }
 
         // Binding the parameters is part of the *call*, not of the first resumption: the
@@ -2231,26 +2543,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             0
         };
 
-        Ok(Value::Generator(Rc::new(RefCell::new(GeneratorState {
-            closure: Rc::clone(closure),
-            locals,
-            stack: Vec::new(),
-            handlers: Vec::new(),
-            instruction: start,
-            // Captured at the call, not at the first resumption: the receiver a generator body
-            // sees is the one the *call* named, and by the time `next` runs the interpreter is
-            // in whatever frame the consumer happens to be in. Dropping it here made `this`
-            // undefined in every generator, async function and async method body.
-            this_value,
-            new_target,
-            arguments: received,
-            started: false,
-            running: false,
-            done: false,
-            awaiting: false,
-            returning: None,
-            delegate: None,
-        }))))
+        let generator = Rc::new(GeneratorData {
+            properties: RefCell::new(ObjectData::default()),
+            state: RefCell::new(GeneratorState {
+                closure: Rc::clone(closure),
+                locals,
+                stack: Vec::new(),
+                handlers: Vec::new(),
+                instruction: start,
+                // Captured at the call, not at the first resumption: the receiver a generator body
+                // sees is the one the *call* named, and by the time `next` runs the interpreter is
+                // in whatever frame the consumer happens to be in. Dropping it here made `this`
+                // undefined in every generator, async function and async method body.
+                this_value,
+                new_target,
+                arguments: received,
+                started: false,
+                running: false,
+                done: false,
+                awaiting: false,
+                returning: None,
+                delegate: None,
+            }),
+        });
+        let module_map = self.gc_module_map();
+        let mut module_map = module_map.borrow_mut();
+        if module_map.gc_generators.len() >= module_map.gc_generators_prune_at {
+            module_map
+                .gc_generators
+                .retain(|entry| entry.strong_count() > 0);
+            module_map.gc_generators_prune_at = module_map
+                .gc_generators
+                .len()
+                .saturating_add(module_map.gc_generators.len().max(1024));
+        }
+        module_map.gc_generators.push(Rc::downgrade(&generator));
+        module_map.gc_cycle_candidate_allocations =
+            module_map.gc_cycle_candidate_allocations.saturating_add(1);
+        Ok(Value::Generator(generator))
     }
 
     /// Run a generator's parameter binding, before the generator object exists.
@@ -2283,7 +2613,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
+            module_generation: std::mem::replace(
+                &mut self.module_generation,
+                closure.module_generation,
+            ),
+            module_generation_owner: std::mem::replace(
+                &mut self.module_generation_owner,
+                closure
+                    .module_generation_owner
+                    .borrow()
+                    .clone()
+                    .or_else(|| {
+                        self.module_map
+                            .borrow()
+                            .generation_handle(closure.realm, closure.module_generation)
+                    }),
+            ),
             function: self.function.take(),
+            method_name: std::mem::replace(&mut self.method_name, None),
             this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
             new_target: std::mem::replace(&mut self.new_target, new_target.clone()),
             arguments: std::mem::replace(&mut self.arguments, arguments.to_vec()),
@@ -2382,7 +2729,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     pub(crate) fn delegate_generator_return(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         delegate: Value,
         exit_target: usize,
         sent: Value,
@@ -2469,7 +2816,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     pub(crate) fn delegate_generator_throw(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         delegate: Value,
         exit_target: usize,
         thrown: Value,
@@ -2612,7 +2959,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Start or resume a generator, returning its next value and whether it finished.
     pub(crate) fn resume_generator(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         sent: Value,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
@@ -2626,7 +2973,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// `finally`.
     pub(crate) fn resume_generator_return(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         sent: Value,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
@@ -2642,7 +2989,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Resume a generator, optionally by throwing the `.return()` signal into it.
     pub(crate) fn resume_generator_with(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         resume: Resume,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
@@ -2677,7 +3024,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// One resumption, with the guards already taken.
     pub(crate) fn resume_generator_body(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         resume: Resume,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
@@ -2718,7 +3065,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             module_path: std::mem::replace(&mut self.module_path, closure.module_path.clone()),
+            module_generation: std::mem::replace(
+                &mut self.module_generation,
+                closure.module_generation,
+            ),
+            module_generation_owner: std::mem::replace(
+                &mut self.module_generation_owner,
+                closure
+                    .module_generation_owner
+                    .borrow()
+                    .clone()
+                    .or_else(|| {
+                        self.module_map
+                            .borrow()
+                            .generation_handle(closure.realm, closure.module_generation)
+                    }),
+            ),
             function: self.function.take(),
+            method_name: std::mem::replace(&mut self.method_name, None),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
@@ -2780,7 +3144,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // this the caller inherits whatever it had part-way through an expression.
                     self.stack.truncate(stack_base);
                     self.restore_caller_frame();
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     return Ok((sent.clone(), true));
                 }
                 // The same ending, reached the other way: the innermost handler belongs to
@@ -2795,7 +3159,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.caught = None;
                     self.stack.truncate(stack_base);
                     self.restore_caller_frame();
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     return Ok((sent.clone(), true));
                 }
                 // Any other abrupt completion leaves the body for good. The specification
@@ -2803,7 +3167,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // `next()` answers `{value: undefined, done: true}` rather than re-entering a
                 // body that has already unwound -- which ran it a second time from the top.
                 Err(error) => {
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     return Err(error);
                 }
                 Ok(outcome) => outcome,
@@ -2814,7 +3178,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Same ending, reached from an ordinary `next()`: a throw out of the body is an
                 // abrupt completion, and a completed generator is finished.
                 Err(error) => {
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     return Err(error);
                 }
             }
@@ -2853,7 +3217,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
 
         // A normal return finished the generator; `run_frames` already restored the caller.
-        generator.borrow_mut().done = true;
+        generator.borrow_mut().complete();
         let _ = instruction;
         Ok((outcome.value, true))
     }
@@ -2988,6 +3352,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         name: &StringUnits,
         reviver: &Value,
         instruction: usize,
+        sources: &JsonSourceMap,
     ) -> Result<Value, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
             return Err(ExecutionError::CallDepthExceeded {
@@ -3023,7 +3388,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
             for key in keys {
                 self.native_depth += 1;
-                let revived = self.internalize_json_property(&value, &key, reviver, instruction);
+                let revived =
+                    self.internalize_json_property(&value, &key, reviver, instruction, sources);
                 self.native_depth -= 1;
                 let revived = revived?;
                 if matches!(revived, Value::Undefined) {
@@ -3045,17 +3411,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         &[
                             value.clone(),
                             Value::String(key),
-                            Value::Object(Rc::new(RefCell::new(descriptor))),
+                            Value::Object(tracked_object(descriptor)),
                         ],
                         instruction,
                     )?;
                 }
             }
         }
+        let holder_identity = match holder {
+            Value::Object(object) => Rc::as_ptr(object) as usize,
+            Value::Array(array) => Rc::as_ptr(array) as usize,
+            _ => 0,
+        };
+        let mut context = ObjectData::default();
+        if let Some((expected, raw)) = sources.get(&(holder_identity, name.clone()))
+            && same_value(&value, expected)
+        {
+            context.set("source", Value::String(raw.clone()));
+        }
         self.call_value(
             reviver,
             holder.clone(),
-            vec![Value::String(name.clone()), value],
+            vec![
+                Value::String(name.clone()),
+                value,
+                Value::Object(tracked_object(context)),
+            ],
             instruction,
         )
     }
@@ -3072,7 +3453,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.current_realm = frame.realm;
         self.strict = frame.strict;
         self.module_path = frame.module_path;
+        self.module_generation = frame.module_generation;
+        self.module_generation_owner = frame.module_generation_owner;
         self.function = frame.function;
+        self.method_name = frame.method_name;
         self.this_value = frame.this_value;
         self.new_target = frame.new_target;
         self.arguments = frame.arguments;
@@ -3205,12 +3589,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             let read = self.read_property_key(source, key_ref, instruction)?;
             let descriptor = self.read_descriptor(&read, instruction)?;
-            descriptors.push((key, key_ref, read, descriptor));
+            descriptors.push((key, key_ref, descriptor));
         }
-        for (key, key_ref, read, descriptor) in descriptors {
-            // A proxy's `defineProperty` trap takes the descriptor object the program wrote, not
-            // the fields it was read into, so it keeps the route it already had. The trap names
-            // its key as the language does: a reserved spelling resolves back into the symbol,
+        for (key, key_ref, descriptor) in descriptors {
+            // `DefinePropertyOrThrow` applies the internal descriptor record, so a proxy sees a
+            // fresh `FromPropertyDescriptor` object rather than the source descriptor. The trap
+            // names its key as the language does: a reserved spelling resolves back into the symbol,
             // mirroring `own_keys_reflected`, so a symbol descriptor arrives as the symbol
             // rather than `"@@symbol:N"`. String keys pass through unchanged, and an
             // unresolvable spelling keeps the string it already had rather than inventing a key.
@@ -3225,7 +3609,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.dispatch_native(
                     Native::ObjectDefineProperty,
                     &Value::Undefined,
-                    &[target.clone(), trap_arg, read],
+                    &[
+                        target.clone(),
+                        trap_arg,
+                        Self::descriptor_object(&descriptor),
+                    ],
                     instruction,
                 )?;
                 continue;

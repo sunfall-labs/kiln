@@ -764,7 +764,7 @@ fn heap_sort_lowering(
                          {negate}\
                          if (count0 > 0) memcpy(phsort_sorted, phsort_keys, count0 * sizeof(double)); \
                          struct {{ const double *sorted; size_t count; }} phsort_order = {{ phsort_sorted, count0 }}; \
-                         if (kiln_parallel_sort(phsort_sorted, count0, 8, 1) == 0 && kiln_parallel_map(phsort_keys, count0, phsort_ranks, {symbol}_pmap_hrank_{target}, &phsort_order) == 0) {{ \
+                         if (kiln_parallel_sort(phsort_sorted, count0, KILN_TYPED_FLOAT64, 1) == 0 && kiln_parallel_map(phsort_keys, count0, phsort_ranks, {symbol}_pmap_hrank_{target}, &phsort_order) == 0) {{ \
                              uint32_t *phsort_seen = phsort_ranks + count0 + 1; \
                              if (count0 > 0) memcpy(phsort_copy, arr->elements, count0 * sizeof(kiln_val)); \
                              for (size_t i = 0; i < count0; ++i) {{ uint32_t r = phsort_ranks[i]; arr->elements[r + phsort_seen[r]++] = phsort_copy[i]; }} \
@@ -781,6 +781,28 @@ fn heap_sort_lowering(
         o = object,
         c = comparator,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallel_key_sort_uses_the_float64_kind_constant_for_its_scratch_keys() {
+        let emitted = heap_sort_lowering(
+            &crate::direct::CallPlan::default(),
+            "fixture",
+            2,
+            crate::parallel::SortOrder::Ascending,
+            0,
+            1,
+            3,
+        );
+        assert!(
+            emitted.contains("kiln_parallel_sort(phsort_sorted, count0, KILN_TYPED_FLOAT64, 1)")
+        );
+        assert!(!emitted.contains("kiln_parallel_sort(phsort_sorted, count0, 8, 1)"));
+    }
 }
 
 /// The pooled `parallelMap` (and `parallelFlatMap`) lowering of one site whose callback is proto
@@ -1203,7 +1225,7 @@ fn emit_map_typed(
                      kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
                      kiln_val prod = KILN_VAL_UNDEFINED; \
                      int status; \
-                     if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                     if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
                      else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
                      if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ {check} }} \
                      if (built_arr->is_numeric && !KILN_VAL_IS_NUMBER(prod)) built_arr->is_numeric = 0; \
@@ -1249,7 +1271,7 @@ fn emit_map_typed(
         "{header} \
              if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
-                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                 kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      size_t count0 = arr->count; \
                      kiln_value built_val; \
@@ -1284,7 +1306,7 @@ fn emit_map_typed(
                          kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
                          kiln_val prod = KILN_VAL_UNDEFINED; \
                          int status; \
-                         if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                         if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
                          else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
                          if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
                              {check} \
@@ -1373,7 +1395,7 @@ fn emit_filter_typed(
         "{header} \
              if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
-                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                 kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      size_t count0 = arr->count; \
                      kiln_value built_val; \
@@ -1399,7 +1421,7 @@ fn emit_filter_typed(
                          kiln_val vargs[3] = {{ elem, kiln_c99_val_from_double((double)idx), v{o} }}; \
                          kiln_val prod = KILN_VAL_UNDEFINED; \
                          int status; \
-                         if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
+                         if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
                          else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)3, depth, thrown, NULL, 0); \
                          if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
                              {check} \
@@ -1467,7 +1489,7 @@ fn emit_reduce_typed(
         "{header} \
              if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                  kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
-                 if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                 kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                  if (arr->is_numeric && plain->body == (kiln_body_fn){symbol}_fn_{target}{relies}) {{ \
                      double dacc = {init_dacc}; \
                      for (size_t idx = 0; idx < arr->count; ++idx) {{ \
@@ -1485,7 +1507,7 @@ fn emit_reduce_typed(
                          kiln_val vargs[4] = {{ vacc, arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
                          kiln_val prod = KILN_VAL_UNDEFINED; \
                          int status; \
-                         if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)4); }} \
+                         if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)4); }} \
                          else status = kiln_c99_invoke_closure(host, &prod, plain, vrecv, vargs, (size_t)4, depth, thrown, NULL, 0); \
                          if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ \
                              {check} \
@@ -1512,7 +1534,12 @@ fn is_proven_array(
             Some(GraphOp::StoreLocal { value, .. })
             | Some(GraphOp::StoreCell { value, .. })
             | Some(GraphOp::CheckTdz { value, .. }) => curr = *value,
-            Some(GraphOp::CallMethod { object, name, .. }) => {
+            Some(GraphOp::CallMethod {
+                object,
+                name,
+                prepared_callee: None,
+                ..
+            }) => {
                 let method = program.constants.get(*name as usize).and_then(|c| match c {
                     Constant::String(s) => s.to_scalar_string().ok(),
                     _ => None,
@@ -1554,7 +1581,11 @@ fn is_proven_string(
             Some(GraphOp::StoreLocal { value, .. })
             | Some(GraphOp::StoreCell { value, .. })
             | Some(GraphOp::CheckTdz { value, .. }) => curr = *value,
-            Some(GraphOp::CallMethod { name, .. }) => {
+            Some(GraphOp::CallMethod {
+                name,
+                prepared_callee: None,
+                ..
+            }) => {
                 let is_str_method = program
                     .constants
                     .get(*name as usize)
@@ -1593,8 +1624,15 @@ pub(super) fn emit_call_method(
     object: &ValueId,
     name: &u32,
     args: &[ValueId],
+    line: u32,
+    column: u32,
+    prepared_callee: Option<ValueId>,
     ctx: &OpContext,
 ) {
+    if let Some(callee) = prepared_callee {
+        emit_call_prepared_method(output, vid, object, name, &callee, args, line, column, ctx);
+        return;
+    }
     let v = vid.0;
     let program = ctx.program;
     let symbol = ctx.symbol;
@@ -1721,12 +1759,17 @@ pub(super) fn emit_call_method(
         .get(&vid)
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
+    let diagnostic_source = diagnostic_source(diagnostic_site);
+    writeln!(
+        output,
+        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
+    )
+    .unwrap();
     let argc = args.len();
     let key_str = match program.constants.get(*name as usize) {
         Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
         _ => String::new(),
     };
-    let diagnostic_source = diagnostic_source(diagnostic_site);
     // Every parallel site (`parallelMap` and the family) says, in the C, what was decided for it
     // and why; see `parallel::SiteRecord`.
     let parallel_site = crate::parallel::ParallelMethod::from_name(&key_str).map(|method| {
@@ -2760,7 +2803,7 @@ pub(super) fn emit_call_method(
                              if (status != KILN_C99_OK) return status; \
                              kiln_array *built_arr = kiln_c99_array_of(built_val); \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
-                             if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                             kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                              for (size_t idx = 0; idx < count0; ++idx) {{ \
                                  if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
                                      kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], KILN_VAL_HOLE); \
@@ -2839,7 +2882,7 @@ pub(super) fn emit_call_method(
                              if (status != KILN_C99_OK) return status; \
                              kiln_array *built_arr = kiln_c99_array_of(built_val); \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
-                             if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                             kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                              for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                  if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
                                  kiln_val elem = arr->elements[idx]; \
@@ -2900,7 +2943,7 @@ pub(super) fn emit_call_method(
                          if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH)) {{ \
                              kiln_val vacc = v{a1}; \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
-                             if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vrecv); \
+                             kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                              for (size_t idx = 0; idx < arr->count; ++idx) {{ \
                                  if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
                                  kiln_val prod = KILN_VAL_UNDEFINED; \
@@ -3304,7 +3347,7 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             if (col->is_map) {{ \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"set\", sizeof(\"set\") - 1)) {{ \
                                  kiln_c99_collection_put_val_fast(col, v{a0}, v{a1}); \
                                  v{v} = v{o}; \
                                  handled = 1; \
@@ -3321,7 +3364,7 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             if (col->is_map) {{ \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"get\", sizeof(\"get\") - 1)) {{ \
                                  v{v} = kiln_c99_collection_get_val_fast(col, v{a0}); \
                                  handled = 1; \
                              }} \
@@ -3336,8 +3379,10 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             v{v} = kiln_c99_collection_has_val_fast(col, v{a0}); \
-                             handled = 1; \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"has\", sizeof(\"has\") - 1)) {{ \
+                                 v{v} = kiln_c99_collection_has_val_fast(col, v{a0}); \
+                                 handled = 1; \
+                             }} \
                          }} \
                      }}",
             o = object.0,
@@ -3349,7 +3394,7 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             if (!col->is_map) {{ \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"add\", sizeof(\"add\") - 1)) {{ \
                                  kiln_c99_collection_put_val_fast(col, v{a0}, v{a0}); \
                                  v{v} = v{o}; \
                                  handled = 1; \
@@ -3365,8 +3410,10 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             v{v} = kiln_c99_collection_delete_val_fast(col, v{a0}); \
-                             handled = 1; \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"delete\", sizeof(\"delete\") - 1)) {{ \
+                                 v{v} = kiln_c99_collection_delete_val_fast(col, v{a0}); \
+                                 handled = 1; \
+                             }} \
                          }} \
                      }}",
             o = object.0,
@@ -3378,13 +3425,15 @@ pub(super) fn emit_call_method(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              kiln_collection *col = (kiln_collection *)ptr; \
-                             col->count = 0; \
-                             col->live = 0; \
-                             if (col->hash_table != NULL && col->hash_capacity > 0) {{ \
-                                 memset(col->hash_table, 0, col->hash_capacity * sizeof(uint32_t)); \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"clear\", sizeof(\"clear\") - 1)) {{ \
+                                 col->count = 0; \
+                                 col->live = 0; \
+                                 if (col->hash_table != NULL && col->hash_capacity > 0) {{ \
+                                     memset(col->hash_table, 0, col->hash_capacity * sizeof(uint32_t)); \
+                                 }} \
+                                 v{v} = KILN_VAL_UNDEFINED; \
+                                 handled = 1; \
                              }} \
-                             v{v} = KILN_VAL_UNDEFINED; \
-                             handled = 1; \
                          }} \
                      }}",
             o = object.0,
@@ -3617,7 +3666,14 @@ pub(super) fn emit_call_method(
                              const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                              const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                              if (s_recv != NULL && s_ndl != NULL) {{ \
-                                 int sw = (!kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl) && s_recv->unit_len >= s_ndl->unit_len && memcmp(kiln_string_latin1(s_recv), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0); \
+                                 int sw = s_recv->unit_len >= s_ndl->unit_len; \
+                                 if (sw && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
+                                     sw = memcmp(kiln_string_latin1(s_recv), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0; \
+                                 }} else if (sw) {{ \
+                                     for (size_t index = 0; index < s_ndl->unit_len; ++index) {{ \
+                                         if (kiln_string_unit_at(s_recv, index) != kiln_string_unit_at(s_ndl, index)) {{ sw = 0; break; }} \
+                                     }} \
+                                 }} \
                                  v{v} = sw ? KILN_VAL_TRUE : KILN_VAL_FALSE; \
                                  handled = 1; \
                              }} \
@@ -3639,7 +3695,15 @@ pub(super) fn emit_call_method(
                              const kiln_string *s_recv = (const kiln_string *)KILN_VAL_PTR(v{o}); \
                              const kiln_string *s_ndl = (const kiln_string *)KILN_VAL_PTR(v{a0}); \
                              if (s_recv != NULL && s_ndl != NULL) {{ \
-                                 int ew = (!kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl) && s_recv->unit_len >= s_ndl->unit_len && memcmp(kiln_string_latin1(s_recv) + (s_recv->unit_len - s_ndl->unit_len), kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0); \
+                                 int ew = s_recv->unit_len >= s_ndl->unit_len; \
+                                 size_t start = ew ? s_recv->unit_len - s_ndl->unit_len : 0; \
+                                 if (ew && !kiln_string_is_utf16(s_recv) && !kiln_string_is_utf16(s_ndl)) {{ \
+                                     ew = memcmp(kiln_string_latin1(s_recv) + start, kiln_string_latin1(s_ndl), s_ndl->unit_len) == 0; \
+                                 }} else if (ew) {{ \
+                                     for (size_t index = 0; index < s_ndl->unit_len; ++index) {{ \
+                                         if (kiln_string_unit_at(s_recv, start + index) != kiln_string_unit_at(s_ndl, index)) {{ ew = 0; break; }} \
+                                     }} \
+                                 }} \
                                  v{v} = ew ? KILN_VAL_TRUE : KILN_VAL_FALSE; \
                                  handled = 1; \
                              }} \
@@ -4137,10 +4201,10 @@ pub(super) fn emit_call_method(
                             kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn); \
                             {typed_chain}if (!plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                                 kiln_val vreceiver = plain->arrow ? plain->captured_this : v{o}; \
-                                if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&vreceiver); \
+                                kiln_c99_normalize_closure_receiver(&vreceiver, plain); \
                                 v{v} = KILN_VAL_UNDEFINED; \
                                 int status; \
-                                if (!plain->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; {prep_args}{by_name} {{ status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} }} \
+                                if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; {prep_args}{by_name} {{ status = plain->body(&ctx_call, &v{v}, plain->upvalues, &vreceiver, call_args, (size_t){argc}); }} }} \
                                 else {{ {prep_args}status = kiln_c99_invoke_closure(host, &v{v}, plain, vreceiver, call_args, (size_t){argc}, depth, thrown, NULL, 0); }} \
                                 if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {{ \
                                     if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = kiln_val_to_boundary(v{o}).tag; \
@@ -4163,7 +4227,7 @@ pub(super) fn emit_call_method(
                         }} \
                     }} \
                 }} \
-                if (!handled && kiln_c99_cached_method_matches(&site, v{o}) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
+                if (!handled && kiln_c99_cached_method_matches(&site, v{o}, {symbol}_key_{name}) && depth < KILN_C99_MAX_CALL_DEPTH) {{ \
                     {prep_args}int status = kiln_c99_val_invoke_cached_method(host, site.cached_method, v{o}, call_args, (size_t){argc}, depth, thrown, &v{v}); \
                     {check} \
                     handled = 1; \
@@ -4175,4 +4239,309 @@ pub(super) fn emit_call_method(
                 o = object.0,
             )
             .unwrap();
+}
+
+/// Emit a named call with its property value already resolved before argument evaluation.
+/// Static candidates still enter their generated body directly, but the saved value is always
+/// the authority: arguments may have replaced the property's current value by this point.
+fn emit_call_prepared_method(
+    output: &mut String,
+    vid: ValueId,
+    object: &ValueId,
+    name: &u32,
+    callee: &ValueId,
+    args: &[ValueId],
+    line: u32,
+    column: u32,
+    ctx: &OpContext,
+) {
+    let v = vid.0;
+    let method = callee.0;
+    let receiver = object.0;
+    let argc = args.len();
+    let program = ctx.program;
+    let symbol = ctx.symbol;
+    let diagnostic_site = ctx.diagnostic_site;
+    let plan = ctx.plan;
+    let key_str = program
+        .constants
+        .get(*name as usize)
+        .and_then(|constant| match constant {
+            Constant::String(key) => key.to_scalar_string().ok(),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let (pc, label) = ctx
+        .origins
+        .get(&vid)
+        .map(|origin| (origin.pc, origin.label.as_str()))
+        .unwrap_or((0, "CallMethodPrepared"));
+    let mut candidates = program
+        .constants
+        .get(*name as usize)
+        .and_then(|constant| match constant {
+            Constant::String(key) => {
+                Some(method_candidates(program, key, &ctx.plan.publishes_frame))
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&index| {
+            ctx.plan
+                .available
+                .get(index as usize)
+                .copied()
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+
+    let typed_candidates = candidates
+        .iter()
+        .copied()
+        .filter(|&index| {
+            let callee = &program.functions[index as usize];
+            plan.typed_entries
+                .get(index as usize)
+                .copied()
+                .unwrap_or(false)
+                && !callee.arrow
+                && callee.parameter_count as usize == argc
+                && args.iter().all(|arg| ctx.live_numbers.contains(arg))
+        })
+        .collect::<Vec<_>>();
+    let typed_check = status_check(diagnostic_site, pc, label, ctx.unwind);
+    let mut typed_direct = String::new();
+    for &index in &typed_candidates {
+        let needs = plan.typed_needs[index as usize];
+        let mut call_args = String::from("depth + 1");
+        if needs.upvalues {
+            call_args.push_str(", plain->upvalues");
+        }
+        if needs.receiver {
+            call_args.push_str(", receiver_for_call");
+        }
+        if needs.row {
+            call_args.push_str(&format!(", row_{index}"));
+        }
+        if needs.runtime {
+            call_args.push_str(", host, thrown");
+        }
+        for arg in args {
+            if ctx.live_numbers.contains(arg) {
+                call_args.push_str(&format!(", d{}", arg.0));
+            } else if ctx.ints.contains(arg) && ctx.live_ints.contains(arg) {
+                call_args.push_str(&format!(", (double)i{}", arg.0));
+            } else {
+                call_args.push_str(&format!(", d{}", arg.0));
+            }
+        }
+
+        let guard = typed_entry_guard(plan, index);
+        let row_ready = if needs.row {
+            format!(
+                "const uint32_t *row_{index} = KILN_VAL_IS_OBJECT(receiver_for_call) ? {symbol}_fn_{index}_t_row((const kiln_object *)KILN_VAL_PTR(receiver_for_call)) : NULL; if (row_{index} != NULL && kiln_typed_ok{guard}) {{"
+            )
+        } else {
+            format!("if (kiln_typed_ok{guard}) {{")
+        };
+        let typed_result = if plan.typed_returns[index as usize] {
+            let boxed = ctx
+                .boxed
+                .map_or(true, |boxed| boxed.contains(&vid))
+                .then(|| format!("v{v} = kiln_c99_val_from_double(result_{index});"))
+                .unwrap_or_default();
+            let twin = if ctx.live_numbers.contains(&vid) {
+                format!("d{v} = result_{index};")
+            } else {
+                String::new()
+            };
+            let int_twin = if ctx.live_ints.contains(&vid) {
+                format!("i{v} = (int64_t)result_{index};")
+            } else {
+                String::new()
+            };
+            format!(
+                "double result_{index} = {symbol}_fn_{index}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(result_{index}))) {{ status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {typed_check} }} else {{ {boxed}{twin}{int_twin} kiln_twin = 1; handled = 1; }}"
+            )
+        } else {
+            format!(
+                "kiln_val result_{index} = {symbol}_fn_{index}_t({call_args}); if (KILN_UNLIKELY(result_{index} == KILN_VAL_TYPED_FAIL)) {{ status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) *thrown = kiln_c99_typed_thrown; {typed_check} }} else {{ v{v} = result_{index}; handled = 1; }}"
+            )
+        };
+        typed_direct.push_str(&format!(
+            "if (!handled && plain->body == (kiln_body_fn){symbol}_fn_{index} && !plain->arrow && !plain->generator && !plain->publishes_frame) {{ {row_ready} {typed_result} }} }} "
+        ));
+    }
+
+    let mut direct = String::new();
+    if candidates.len() <= 32 {
+        for index in candidates {
+            // The selected body is proven by pointer identity, but typed entries also need
+            // their argument and builtin guards. Use the ordinary generated entry here; it
+            // still avoids the host boundary without treating a same-name function as proof
+            // that the saved closure has typed arguments.
+            if typed_candidates.contains(&index) {
+                continue;
+            }
+            let entry = format!(
+                "{symbol}_fn_{index}{}",
+                if plan.fast.get(index as usize).copied().unwrap_or(false) {
+                    "_f"
+                } else {
+                    ""
+                }
+            );
+            let keyword = if direct.is_empty() { "if" } else { "else if" };
+            direct.push_str(&format!(
+                "{keyword} (plain->body == (kiln_body_fn){symbol}_fn_{index}) {{ status = {entry}(&ctx_call, &call_result, plain->upvalues, &receiver_for_call, call_args, (size_t){argc}); }} "
+            ));
+        }
+    }
+    if direct.is_empty() {
+        direct = format!(
+            "status = plain->body(&ctx_call, &call_result, plain->upvalues, &receiver_for_call, call_args, (size_t){argc});"
+        );
+    } else {
+        direct.push_str(&format!(
+            "else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &receiver_for_call, call_args, (size_t){argc}); }}"
+        ));
+    }
+
+    let mut arguments = format!("kiln_val call_args[{}] = {{", argc.max(1));
+    for (position, arg) in args.iter().enumerate() {
+        if position != 0 {
+            arguments.push_str(", ");
+        }
+        if ctx.live_numbers.contains(arg) {
+            arguments.push_str(&format!("kiln_c99_val_from_double(d{})", arg.0));
+        } else if ctx.ints.contains(arg) && ctx.live_ints.contains(arg) {
+            arguments.push_str(&format!("kiln_c99_val_from_double((double)i{})", arg.0));
+        } else {
+            arguments.push_str(&format!("v{}", arg.0));
+        }
+    }
+    if argc == 0 {
+        arguments.push_str(" KILN_VAL_UNDEFINED");
+    }
+    arguments.push_str("};");
+    let args_ptr = if argc == 0 {
+        "NULL".to_string()
+    } else {
+        "call_args".to_string()
+    };
+    let method_key = format!("{symbol}_key_{name}");
+    let diagnostic_source = diagnostic_source(diagnostic_site);
+    let check = status_check(diagnostic_site, pc, label, ctx.unwind);
+
+    let mut prepared_intrinsics = String::new();
+    if key_str == "resolve" && argc == 1 && ctx.await_resolve_arg == args.first().copied() {
+        let argument = args[0].0;
+        let guard =
+            static_member_guard(&[("PROMISE", "resolve"), ("PROMISE_PROTOTYPE", "constructor")]);
+        let store = if ctx.live_numbers.contains(&vid) && ctx.live_numbers.contains(&args[0]) {
+            format!("v{v} = v{argument}; d{v} = d{argument}; kiln_twin = 1;")
+        } else if ctx.live_numbers.contains(&vid) && ctx.live_ints.contains(&args[0]) {
+            format!(
+                "v{v} = kiln_c99_val_from_double((double)i{argument}); d{v} = (double)i{argument}; kiln_twin = 1;"
+            )
+        } else {
+            format!("v{v} = v{argument};")
+        };
+        prepared_intrinsics.push_str(&format!(
+            "if (KILN_LIKELY({guard} && KILN_VAL_IS_BUILTIN(recv) && KILN_VAL_BUILTIN_ID(recv) == KILN_C99_BUILTIN_PROMISE && KILN_VAL_IS_METHOD(method) && KILN_VAL_METHOD_ID(method) == KILN_C99_METHOD_PROMISE_RESOLVE && KILN_VAL_IS_NUMBER(v{argument}))) {{ {store} handled = 1; }} "
+        ));
+    }
+    if key_str == "sqrt" && argc == 1 {
+        let argument = args[0].0;
+        let guard = static_member_guard(&[("MATH", "sqrt")]);
+        let store = if ctx.live_numbers.contains(&vid) {
+            let box_value = ctx
+                .boxed
+                .map_or(true, |boxed| boxed.contains(&vid))
+                .then(|| format!(" v{v} = kiln_c99_val_from_double(d{v});"))
+                .unwrap_or_default();
+            format!("d{v} = sqrt(prepared_arg_{v});{box_value} kiln_twin = 1;")
+        } else {
+            format!("v{v} = kiln_c99_val_from_double(sqrt(prepared_arg_{v}));")
+        };
+        prepared_intrinsics.push_str(&format!(
+            "{TYPED_RELIES_MARK} if (KILN_LIKELY({guard})) {{ if (KILN_VAL_IS_BUILTIN(recv) && KILN_VAL_BUILTIN_ID(recv) == KILN_C99_BUILTIN_MATH && KILN_VAL_IS_METHOD(method) && KILN_VAL_METHOD_ID(method) == KILN_C99_METHOD_MATH_SQRT && KILN_VAL_IS_NUMBER(v{argument})) {{ double prepared_arg_{v}; memcpy(&prepared_arg_{v}, &v{argument}, sizeof(prepared_arg_{v})); {store} handled = 1; }} }} "
+        ));
+    }
+
+    let parallel_site =
+        crate::parallel::ParallelMethod::from_name(&key_str).map(|parallel_method| {
+            let (record, site) = parallel_site(
+                plan,
+                program,
+                ctx.self_index,
+                ctx.defs,
+                parallel_method,
+                args,
+                vid,
+            );
+            writeln!(output, "    {}", record.marker()).unwrap();
+            site
+        });
+    // The property read precedes argument evaluation for this graph operation.  The pool is
+    // equivalent only while the saved callee is still the installed Array extension; if user
+    // code changed it while computing an argument, the prepared call below invokes the saved
+    // value.  The member guard ensures the read below sees only the bootstrap data property and
+    // never an accessor installed by the program.
+    let parallel_pool = parallel_site
+        .as_ref()
+        .and_then(Option::as_ref)
+        .filter(|_| key_str.starts_with("parallel"))
+        .map(|site| {
+            let pool = parallel_lowering(plan, symbol, site, receiver, args, v);
+            format!(
+                "if (!handled && kiln_c99_kiln_extensions_on() && KILN_VAL_IS_CLOSURE(method) && (recv & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(recv)) == KILN_GC_ARRAY && kiln_c99_builtin_pair_unmodified(KILN_C99_BUILTIN_ARRAY, KILN_C99_BUILTIN_ARRAY_PROTOTYPE) && kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_ARRAY_PROTOTYPE, \"{key_str}\")) {{ kiln_value canonical = kiln_c99_undefined(); int canonical_status = kiln_c99_get(host, kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE), \"{key_str}\", {key_len}, &canonical, depth, thrown); if (canonical_status != KILN_C99_OK) {{ status = canonical_status; {check} }} else if (kiln_c99_strict_equal(canonical, kiln_val_to_boundary(method))) {{ {pool} }} }}",
+                key_len = key_str.len(),
+            )
+        })
+        .unwrap_or_default();
+
+    let sync = if ctx.live_numbers.contains(&vid) {
+        if ctx.spec.exits && ctx.spec.calls.contains(&vid) {
+            let invariant = lookup_speculation_invariant("method_call_number");
+            format!(
+                " if (!kiln_twin) {{ /* Speculation exit [{}]: {} */ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} goto kiln_generic_resume_{v}; }} memcpy(&d{v}, &v{v}, sizeof(d{v})); }}",
+                invariant.name,
+                invariant.language_rule,
+                super::materialize_all_sunk(ctx.graph, symbol, ctx.defs, ctx.array_slots)
+            )
+        } else {
+            format!(" if (!kiln_twin) memcpy(&d{v}, &v{v}, sizeof(d{v}));")
+        }
+    } else {
+        String::new()
+    };
+    let sync_int = if ctx.live_ints.contains(&vid) {
+        if ctx.live_numbers.contains(&vid) {
+            format!(" i{v} = (int64_t)d{v};")
+        } else {
+            format!(
+                " {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}"
+            )
+        }
+    } else {
+        String::new()
+    };
+    writeln!(
+        output,
+
+        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});\n    {{ {arguments} kiln_val method = v{method}; kiln_val recv = v{receiver}; int status; int kiln_twin = 0; int handled = 0; {prepared_intrinsics} {parallel_pool} if (!handled && KILN_VAL_IS_CLOSURE(method)) {{ kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(method); if (!plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val receiver_for_call = plain->arrow ? plain->captured_this : recv; kiln_c99_normalize_closure_receiver(&receiver_for_call, plain); int kiln_typed_ok = !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH; (void)kiln_typed_ok; {typed_direct} if (!handled) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; kiln_js_frame js_frame; kiln_c99_js_frame_set_method_name({method_key}); kiln_c99_js_frame_enter(&js_frame, plain); {direct} kiln_c99_js_frame_leave(&js_frame); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = call_result; }} }} else if (!handled) {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} }} else if (!handled && KILN_VAL_IS_METHOD(method) && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_val_invoke_cached_method(host, KILN_VAL_METHOD_ID(method), recv, {args_ptr}, (size_t){argc}, depth, thrown, &v{v}); kiln_c99_js_frame_set_method_name(NULL); {check} }} else if (!handled) {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} {sync}{sync_int} }}",
+
+        argcap = argc.max(1),
+        boundary_args = if argc == 0 { "NULL" } else { "bargs" },
+        typed_direct = typed_direct,
+
+        prepared_intrinsics = prepared_intrinsics,
+
+        parallel_pool = parallel_pool,
+
+    )
+    .unwrap();
 }

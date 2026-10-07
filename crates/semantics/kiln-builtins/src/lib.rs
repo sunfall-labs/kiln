@@ -88,13 +88,16 @@ macro_rules! declare_ts_builtins {
                         .iter()
                         .map(|e| e.exported.as_str())
                         .collect();
-                    for name in $exports_const {
-                        assert!(
-                            exported_names.contains(name),
-                            concat!(stringify!($name), " program must export `{}`"),
-                            name
-                        );
-                    }
+                    // Equality, not inclusion: the native backend materializes exactly this
+                    // list, so an export missing from it is unusable natively while the
+                    // interpreter accepts it.
+                    let declared: std::collections::BTreeSet<_> =
+                        $exports_const.iter().copied().collect();
+                    assert_eq!(
+                        exported_names,
+                        declared,
+                        concat!(stringify!($name), " exports must match its declared export list")
+                    );
                 }
             )*
         }
@@ -111,7 +114,16 @@ declare_ts_builtins! {
         sample_source_check: "export async function spawnActor",
         presence_test: actors_builtin_source_is_present,
         compilation_test: actors_builtin_compiles_cleanly,
-        exports: ["Actor", "spawnActor", "connectActor", "isolate", "prepareTransfer", "transfer"],
+        exports: [
+            "ActorClosedError",
+            "ActorRemoteError",
+            "Actor",
+            "spawnActor",
+            "connectActor",
+            "isolate",
+            "prepareTransfer",
+            "transfer",
+        ],
     },
     ActorsCore {
         variant: ActorsCore,
@@ -156,56 +168,140 @@ declare_ts_builtins! {
         presence_test: gui_builtin_source_is_present,
         compilation_test: gui_builtin_compiles_cleanly,
         exports: [
+            "Box",
             "Button",
+            "Card",
+            "Checkbox",
+            "Divider",
+            "Dynamic",
+            "For",
             "Fragment",
+            "Grid",
             "HStack",
-            "HostGuiBridge",
-            "Menu",
-            "MenuItem",
-            "MenuSeparator",
+            "HeadlessHost",
+            "Image",
+            "Index",
+            "JsxElement",
+            "Match",
             "Node",
+            "ProgressBar",
+            "ScrollView",
+            "SegmentedControl",
+            "Select",
+            "Show",
             "Slider",
-            "Submenu",
+            "Spacer",
+            "Spinner",
+            "Switch",
             "Text",
+            "TextArea",
             "TextInput",
             "Toggle",
-            "TrayIcon",
+            "Tray",
             "VStack",
             "Window",
             "app",
+            "appearance",
             "batch",
             "clipboard",
-            "createElement",
+            "createContext",
             "createEffect",
             "createMemo",
-            "createRenderer",
+            "createRoot",
             "createSignal",
-            "default",
+            "currentHost",
             "dialog",
-            "getActiveDriver",
-            "globalShortcut",
-            "gtk",
+            "eventLoopMode",
+            "fire",
+            "flush",
+            "getOwner",
             "h",
-            "hostGuiBridge",
-            "nodeRegistry",
-            "notification",
+            "indexArray",
+            "inspect",
+            "isPending",
+            "jsx",
+            "jsxDEV",
+            "jsxs",
+            "mapArray",
+            "notify",
+            "on",
             "onCleanup",
-            "runLoop",
-            "systemTheme",
-            "turnMailbox",
+            "onMount",
+            "processEvents",
+            "render",
+            "runApp",
+            "runWithOwner",
+            "shortcuts",
             "untrack",
+            "useContext",
+            "useHeadless",
         ],
+    },
+    GuiJsxRuntime {
+        variant: GuiJsxRuntime,
+        file: "jsx-runtime.ts",
+        logical_path: "kiln:gui/jsx-runtime.ts",
+        source_const: GUI_JSX_RUNTIME_SOURCE,
+        exports_const: GUI_JSX_RUNTIME_EXPORTS,
+        sample_source_check: "export { jsx, jsxs, jsxDEV, Fragment }",
+        presence_test: gui_jsx_runtime_builtin_source_is_present,
+        compilation_test: gui_jsx_runtime_builtin_compiles_cleanly,
+        exports: ["Fragment", "jsx", "jsxDEV", "jsxs"],
     },
     Process {
         variant: Process,
-        file: "node/process.ts",
+        file: "kiln_process.ts",
         logical_path: "kiln:process.ts",
         source_const: PROCESS_SOURCE,
         exports_const: PROCESS_EXPORTS,
         sample_source_check: "export async function run",
         presence_test: process_builtin_source_is_present,
         compilation_test: process_builtin_compiles_cleanly,
-        exports: ["default", "exit", "run"],
+        exports: ["default", "run"],
+    },
+    NodeProcess {
+        variant: NodeProcess,
+        file: "node/process.ts",
+        logical_path: "node:process.ts",
+        source_const: NODE_PROCESS_SOURCE,
+        exports_const: NODE_PROCESS_EXPORTS,
+        sample_source_check: "export default process",
+        presence_test: node_process_builtin_source_is_present,
+        compilation_test: node_process_builtin_compiles_cleanly,
+        exports: [
+            "arch",
+            "argv",
+            "cwd",
+            "default",
+            "env",
+            "execArgv",
+            "execPath",
+            "exit",
+            "features",
+            "getBuiltinModule",
+            "hrtime",
+            "kill",
+            "nextTick",
+            "pid",
+            "platform",
+            "release",
+            "stderr",
+            "stdin",
+            "stdout",
+            "version",
+            "versions",
+        ],
+    },
+    OxcUsingCtx {
+        variant: OxcUsingCtx,
+        file: "oxc_using_ctx.ts",
+        logical_path: "kiln:compiler-runtime/helpers/usingCtx.ts",
+        source_const: OXC_USING_CTX_SOURCE,
+        exports_const: OXC_USING_CTX_EXPORTS,
+        sample_source_check: "export default function usingCtx",
+        presence_test: oxc_using_ctx_helper_source_is_present,
+        compilation_test: oxc_using_ctx_helper_compiles_cleanly,
+        exports: ["default"],
     },
     Assert {
         variant: Assert,
@@ -245,7 +341,7 @@ declare_ts_builtins! {
         logical_path: "node:events.ts",
         source_const: EVENTS_SOURCE,
         exports_const: EVENTS_EXPORTS,
-        sample_source_check: "export class EventEmitter",
+        sample_source_check: "export function EventEmitter",
         presence_test: events_builtin_source_is_present,
         compilation_test: events_builtin_compiles_cleanly,
         exports: [
@@ -398,6 +494,7 @@ declare_ts_builtins! {
             "isBoolean",
             "isBuffer",
             "isDate",
+            "isDeepStrictEqual",
             "isError",
             "isFunction",
             "isNull",
@@ -411,6 +508,7 @@ declare_ts_builtins! {
             "isUndefined",
             "promisify",
             "styleText",
+            "stripVTControlCharacters",
             "types",
         ],
     },
@@ -578,8 +676,12 @@ declare_ts_builtins! {
         exports: [
             "Module",
             "builtinModules",
+            "constants",
             "createRequire",
             "default",
+            "enableCompileCache",
+            "flushCompileCache",
+            "getCompileCacheDir",
             "isBuiltin",
         ],
     },
@@ -658,15 +760,21 @@ declare_ts_builtins! {
         exports: [
             "Hash",
             "Hmac",
+            "KeyObject",
             "createHash",
             "createHmac",
+            "createPrivateKey",
+            "createPublicKey",
+            "createSecretKey",
             "default",
             "getHashes",
             "getRandomValues",
             "randomBytes",
             "randomFillSync",
             "randomUUID",
+            "subtle",
             "timingSafeEqual",
+            "webcrypto",
         ],
     },
     Http2 {
@@ -718,7 +826,7 @@ declare_ts_builtins! {
         logical_path: "node:stream.ts",
         source_const: STREAM_SOURCE,
         exports_const: STREAM_EXPORTS,
-        sample_source_check: "export class Readable",
+        sample_source_check: "export const Readable",
         presence_test: stream_builtin_source_is_present,
         compilation_test: stream_builtin_compiles_cleanly,
         exports: [
@@ -748,6 +856,17 @@ declare_ts_builtins! {
             "createServer",
             "default",
         ],
+    },
+    Tls {
+        variant: Tls,
+        file: "node/tls.ts",
+        logical_path: "node:tls.ts",
+        source_const: TLS_SOURCE,
+        exports_const: TLS_EXPORTS,
+        sample_source_check: "export function connect",
+        presence_test: tls_builtin_source_is_present,
+        compilation_test: tls_builtin_compiles_cleanly,
+        exports: ["connect", "createServer", "default"],
     },
     AsyncHooks {
         variant: AsyncHooks,
@@ -878,26 +997,38 @@ declare_ts_builtins! {
             "futimesSync",
             "glob",
             "globSync",
+            "lstat",
             "lstatSync",
+            "mkdir",
             "mkdirSync",
             "mkdtempSync",
             "open",
             "openSync",
             "promises",
+            "readFile",
             "readFileSync",
             "readSync",
+            "readdir",
             "readdirSync",
             "readlinkSync",
+            "realpath",
             "realpathSync",
             "renameSync",
             "rmSync",
+            "rmdir",
+            "rmdirSync",
+            "stat",
             "statSync",
             "truncateSync",
+            "unlink",
             "unlinkSync",
             "unwatchFile",
+            "utimes",
+            "utimesSync",
             "watch",
             "watchFile",
             "write",
+            "writeFile",
             "writeFileSync",
             "writeSync",
         ],
@@ -1349,12 +1480,19 @@ declare_ts_builtins! {
 pub const WEB_BOOTSTRAP_SOURCE: &str = concat!(
     include_str!("web.ts"),
     "\n",
+    // The timer handles `setTimeout` and friends return; before the files that schedule.
+    include_str!("timers.ts"),
+    "\n",
     // Before `web_events_streams.ts`, which deletes the port primitives this reads.
     include_str!("signals.ts"),
     "\n",
     include_str!("web_events_streams.ts"),
     "\n",
-    include_str!("buffer.ts")
+    include_str!("buffer.ts"),
+    "\n",
+    include_str!("web_text_encoding.ts"),
+    "\n",
+    include_str!("web_encoding_crypto.ts")
 );
 
 /// `URL` and `URLSearchParams` over the host's `__kilnUrl*` intrinsics (ADR 0063 rule 4). Part
@@ -1368,17 +1506,38 @@ pub const DATE_BOOTSTRAP_SOURCE: &str = include_str!("date.ts");
 
 /// `%TypedArray%.prototype` (ADR 0005, ADR 0063 rule 4, Phase 5.1).
 pub const TYPEDARRAY_BOOTSTRAP_SOURCE: &str = include_str!("typedarray.ts");
+
+/// `Array.prototype.map`, `reduce`, and `reduceRight` are shared TypeScript callbacks so their
+/// calls enter the ordinary VM instruction loop in both engines.
+pub const ARRAY_CALLBACK_BOOTSTRAP_SOURCE: &str = include_str!("array_callbacks.ts");
+/// `Math.f16round` over the existing Float16Array element conversion.
+pub const NUMERIC_MATH_BOOTSTRAP_SOURCE: &str = include_str!("numeric_math.ts");
+/// BigInt width truncation over existing arbitrary-precision operators.
+pub const NUMERIC_BIGINT_BOOTSTRAP_SOURCE: &str = include_str!("numeric_bigint.ts");
 /// The parallel collection family (ADR 0068, ADR 0069): kiln extensions on `Array.prototype`
 /// and `%TypedArray%.prototype`, after `typedarray.ts`, whose intrinsics it borrows.
 pub const PARALLEL_BOOTSTRAP_SOURCE: &str = include_str!("parallel.ts");
 /// Whether the realm installs kiln's own members (ADR 0068); first in the common bootstrap.
 pub const EXTENSIONS_BOOTSTRAP_SOURCE: &str = include_str!("extensions.ts");
+pub const FUNCTION_KINDS_BOOTSTRAP_SOURCE: &str = include_str!("function_kinds.ts");
 
 /// Error subclass prototypes and `SuppressedError` (ADR 0005, ADR 0063 rule 4).
 pub const ERRORS_BOOTSTRAP_SOURCE: &str = include_str!("errors.ts");
 
+/// Native JSON replacer traversal over the existing serializer primitive.
+pub const JSON_BOOTSTRAP_SOURCE: &str = include_str!("json.ts");
+
 /// Annex B HTML and Object.prototype extensions and Array.fromAsync (ADR 0005, ADR 0063 rule 4).
 pub const ANNEXB_BOOTSTRAP_SOURCE: &str = include_str!("annexb.ts");
+
+/// Locale aware string case methods, backed by the shared Unicode case mappings.
+pub const STRING_LOCALE_BOOTSTRAP_SOURCE: &str = include_str!("string_locale.ts");
+
+/// Shared CanonicalizeLocaleList behavior for the native string and Intl facades.
+pub const LOCALE_TOOLS_BOOTSTRAP_SOURCE: &str = include_str!("locale_tools.ts");
+
+/// Native Intl.DateTimeFormat facade over the shared ICU4X formatter provider.
+pub const INTL_DATETIME_BOOTSTRAP_SOURCE: &str = include_str!("intl_datetime.ts");
 
 /// `DisposableStack` and `AsyncDisposableStack` (ES2024 / Stage 3 Explicit Resource Management).
 pub const DISPOSABLE_BOOTSTRAP_SOURCE: &str = include_str!("disposable.ts");
@@ -1389,9 +1548,8 @@ pub const REGEXP_BOOTSTRAP_SOURCE: &str = include_str!("regexp.ts");
 /// `ArrayBuffer.prototype` and `SharedArrayBuffer.prototype` extensions.
 pub const ARRAYBUFFER_BOOTSTRAP_SOURCE: &str = include_str!("arraybuffer.ts");
 
-/// FinalizationRegistry's language checks for the native backend. The interpreter already
-/// provides this builtin; native installs the TypeScript constructor before arraybuffer.ts
-/// captures its native-backend marker.
+/// Native WeakRef and FinalizationRegistry public classes over private collector cells. The
+/// interpreter provides the same public builtins through its VM object model.
 pub const WEAK_REFS_BOOTSTRAP_SOURCE: &str = include_str!("weak_refs.ts");
 
 /// `Atomics` over the native backend's element primitive and the runtime's waiter list (realms
@@ -1433,7 +1591,18 @@ pub mod native_bootstrap_family {
     pub const MAP_UPSERT: u32 = 1 << 7;
     pub const PROMISE: u32 = 1 << 8;
     pub const OBJECT_REFLECT: u32 = 1 << 9;
-    pub const ALL: u32 = (1 << 10) - 1;
+    pub const STRING_LOCALE: u32 = 1 << 10;
+    pub const INTL_DATETIME: u32 = 1 << 11;
+    pub const JSON: u32 = 1 << 12;
+    pub const NUMERIC_MATH: u32 = 1 << 13;
+    pub const NUMERIC_BIGINT: u32 = 1 << 14;
+    pub const ALL: u32 = (1 << 15) - 1;
+
+    /// The native web-global bootstrap is installed in every realm. MessagePort delivery
+    /// captures `__kilnStructuredClone`, whose transfer path in turn captures the ArrayBuffer
+    /// detach primitive. Keep these two families even when user-code liveness cannot see the
+    /// internal web-bootstrap references.
+    pub const WEB_BOOTSTRAP_DEPENDENCIES: u32 = ARRAY_BUFFER | STRUCTURED_CLONE;
 }
 
 /// Keep the script order and lexical dependencies identical to the full bootstrap. An omitted
@@ -1446,11 +1615,23 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
     };
     let mut source = [
         EXTENSIONS_BOOTSTRAP_SOURCE,
+        FUNCTION_KINDS_BOOTSTRAP_SOURCE,
         selected(family::DATE, DATE_BOOTSTRAP_SOURCE),
         selected(family::TYPED_ARRAY, TYPEDARRAY_BOOTSTRAP_SOURCE),
+        ARRAY_CALLBACK_BOOTSTRAP_SOURCE,
+        selected(family::NUMERIC_MATH, NUMERIC_MATH_BOOTSTRAP_SOURCE),
+        selected(family::NUMERIC_BIGINT, NUMERIC_BIGINT_BOOTSTRAP_SOURCE),
         PARALLEL_BOOTSTRAP_SOURCE,
         ERRORS_BOOTSTRAP_SOURCE,
+        selected(family::JSON, JSON_BOOTSTRAP_SOURCE),
+        selected(
+            family::STRING_LOCALE | family::INTL_DATETIME,
+            LOCALE_TOOLS_BOOTSTRAP_SOURCE,
+        ),
+        selected(family::STRING_LOCALE, STRING_LOCALE_BOOTSTRAP_SOURCE),
+        selected(family::INTL_DATETIME, INTL_DATETIME_BOOTSTRAP_SOURCE),
         ANNEXB_BOOTSTRAP_SOURCE,
+        include_str!("string_wellformed.ts"),
         selected(family::DISPOSABLE, DISPOSABLE_BOOTSTRAP_SOURCE),
         REGEXP_BOOTSTRAP_SOURCE,
         selected(family::WEAK_REFS, WEAK_REFS_BOOTSTRAP_SOURCE),
@@ -1465,18 +1646,24 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
     ]
     .join("\n");
     let cleanup: &[(u32, &str)] = &[
+        (family::JSON, "__kilnJsonSerialize"),
+        (family::JSON, "__kilnJsonParse"),
+        (family::JSON, "__kilnJsonUnbox"),
         (family::TYPED_ARRAY, "__kilnTypedArrayOutOfBounds"),
+        (family::TYPED_ARRAY, "__kilnDataViewState"),
         (family::TYPED_ARRAY, "__kilnTypedArrayCopy"),
         (family::TYPED_ARRAY, "__kilnTypedArraySort"),
         (family::WEAK_REFS, "__kilnSharedWeak"),
         (family::ARRAY_BUFFER, "__kilnArrayBufferDetach"),
+        (family::ARRAY_BUFFER, "__kilnArrayBufferByteLength"),
         (family::ARRAY_BUFFER, "__kilnArrayBufferResize"),
         (family::ARRAY_BUFFER, "__kilnSharedBuffer"),
         (family::ATOMICS, "__kilnAtomics"),
         (family::STRUCTURED_CLONE, "__kilnCloneData"),
-        (family::STRUCTURED_CLONE, "__kilnSharedIs"),
+        (family::MAP_UPSERT, "__kilnCollectionSize"),
         (family::OBJECT_REFLECT, "__kilnSetPrototypeOf"),
         (family::OBJECT_REFLECT, "__kilnPreventExtensions"),
+        (family::INTL_DATETIME, "__kilnIntlDateTimeFormat"),
     ];
     for &(bit, name) in cleanup {
         if families & bit == 0 {
@@ -1485,6 +1672,10 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
             source.push(';');
         }
     }
+    source.push_str("\ndelete (globalThis as any).__kilnLocaleTools;");
+    if families & (family::STRING_LOCALE | family::INTL_DATETIME) == 0 {
+        source.push_str("\ndelete (globalThis as any).__kilnHostStringLocaleCase;");
+    }
     source
 }
 
@@ -1492,12 +1683,31 @@ pub fn common_bootstrap_source_selected(families: u32) -> String {
 /// Includes Date.prototype, %TypedArray%.prototype, Error subclasses, Annex B, DisposableStack,
 /// RegExp.prototype, ArrayBuffer/SharedArrayBuffer, structuredClone, Map.upsert, Promise extensions, unhandled-rejection tracking, Iterator extensions, and Object/Reflect extensions.
 pub fn common_bootstrap_source() -> String {
-    common_bootstrap_source_selected(native_bootstrap_family::ALL)
+    // The interpreter adapters and native provider both call kiln-intl's ICU4X case mapper.
+    // The native backend adds the public TypeScript wrappers only when liveness retains a call.
+    common_bootstrap_source_selected(
+        native_bootstrap_family::ALL
+            & !native_bootstrap_family::STRING_LOCALE
+            & !native_bootstrap_family::INTL_DATETIME,
+    )
 }
 
 #[cfg(test)]
 mod web_tests {
     use super::*;
+
+    #[test]
+    fn array_callback_methods_are_installed_before_parallel_captures_them() {
+        let source = common_bootstrap_source();
+        let callbacks = source
+            .find("installArrayCallbackMethods")
+            .expect("Array callback bootstrap should be present");
+        let parallel = source
+            .find("installParallelFamily")
+            .expect("parallel bootstrap should be present");
+        assert!(callbacks < parallel);
+        assert!(source.contains("__kilnIsOtherRealmArrayConstructor"));
+    }
 
     #[test]
     fn common_bootstrap_compiles_as_single_unit() {
@@ -1513,6 +1723,16 @@ mod web_tests {
         let source = common_bootstrap_source_selected(0);
         assert!(!source.contains("installDatePrototype"));
         assert!(!source.contains("installTypedArrayPrototype"));
+        assert!(!source.contains("installMathNumericBuiltins"));
+        assert!(!source.contains("installBigIntNumericBuiltins"));
+        let math = common_bootstrap_source_selected(
+            native_bootstrap_family::NUMERIC_MATH | native_bootstrap_family::TYPED_ARRAY,
+        );
+        assert!(math.contains("installMathNumericBuiltins"));
+        assert!(!math.contains("installBigIntNumericBuiltins"));
+        let bigint = common_bootstrap_source_selected(native_bootstrap_family::NUMERIC_BIGINT);
+        assert!(!bigint.contains("installMathNumericBuiltins"));
+        assert!(bigint.contains("installBigIntNumericBuiltins"));
         for name in [
             "__kilnTypedArrayCopy",
             "__kilnArrayBufferDetach",
@@ -1592,12 +1812,8 @@ mod web_tests {
     fn bootstrap_extensions_match_the_description() {
         use kiln_builtin_surface::ExtensionInstaller;
         // (owner, the helper that installs on it, the sources that may call it)
-        let installers: [(&str, &str, &[&str]); 3] = [
-            (
-                "%TypedArray%.prototype",
-                "defineExtension(\"",
-                &[TYPEDARRAY_BOOTSTRAP_SOURCE],
-            ),
+        // Every extension is installed by the family's own file; `typedarray.ts` installs none.
+        let installers: [(&str, &str, &[&str]); 2] = [
             (
                 "%TypedArray%.prototype",
                 "defineTypedArrayExtension(\"",
@@ -1651,6 +1867,32 @@ mod web_tests {
         }
         // The family's file installs nothing unless the realm installs extensions.
         assert!(PARALLEL_BOOTSTRAP_SOURCE.contains("if (!kilnExtensions) {\n    return;"));
+        // One definition (ADR 0069): no other bootstrap file defines a member of the family, and
+        // the family looks nothing up when called -- every sequential method is captured once and
+        // applied with the captured `Reflect.apply`, never through `.call` or `this.<method>`.
+        for source in [TYPEDARRAY_BOOTSTRAP_SOURCE, EXTENSIONS_BOOTSTRAP_SOURCE] {
+            assert!(
+                !source.contains("parallelMap("),
+                "a second parallelMap definition"
+            );
+        }
+        let code: String = PARALLEL_BOOTSTRAP_SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for looked_up in [
+            ".call(",
+            "this.map",
+            "this.filter",
+            "this.sort",
+            "this.flatMap",
+        ] {
+            assert!(
+                !code.contains(looked_up),
+                "parallel.ts looks up `{looked_up}` per call"
+            );
+        }
         let common = common_bootstrap_source();
         assert!(common.starts_with(EXTENSIONS_BOOTSTRAP_SOURCE));
     }
@@ -1711,6 +1953,25 @@ mod web_tests {
     }
 
     #[test]
+    fn numeric_bootstraps_compile_cleanly() {
+        for (path, source) in [
+            (
+                "@kiln/numeric-math-bootstrap.ts",
+                NUMERIC_MATH_BOOTSTRAP_SOURCE,
+            ),
+            (
+                "@kiln/numeric-bigint-bootstrap.ts",
+                NUMERIC_BIGINT_BOOTSTRAP_SOURCE,
+            ),
+        ] {
+            let hir = kiln_frontend_oxc::parse(path, source);
+            let program = kiln_ir::compile_module(&hir)
+                .expect("numeric bootstrap should compile to IR without error");
+            assert!(!program.program.code.is_empty());
+        }
+    }
+
+    #[test]
     fn errors_bootstrap_compiles_cleanly() {
         let hir = kiln_frontend_oxc::parse("@kiln/errors-bootstrap.ts", ERRORS_BOOTSTRAP_SOURCE);
         let program = kiln_ir::compile_module(&hir)
@@ -1723,6 +1984,17 @@ mod web_tests {
         let hir = kiln_frontend_oxc::parse("@kiln/annexb-bootstrap.ts", ANNEXB_BOOTSTRAP_SOURCE);
         let program = kiln_ir::compile_module(&hir)
             .expect("annexb bootstrap should compile to IR without error");
+        assert!(!program.program.code.is_empty());
+    }
+
+    #[test]
+    fn string_locale_bootstrap_compiles_cleanly() {
+        let hir = kiln_frontend_oxc::parse(
+            "@kiln/string-locale-bootstrap.ts",
+            STRING_LOCALE_BOOTSTRAP_SOURCE,
+        );
+        let program = kiln_ir::compile_module(&hir)
+            .expect("string locale bootstrap should compile to IR without error");
         assert!(!program.program.code.is_empty());
     }
 

@@ -8,7 +8,7 @@
 # if they print different bytes one of them is wrong and there is nothing else it could be. No
 # specification reading, no node version, no locale enters into it.
 #
-# THE THREE OUTCOMES, and only one is a failure:
+# THE THREE ORDINARY OUTCOMES, and only one is a failure:
 #
 #   match     both engines printed the same bytes *and* exited with the same status.
 #   refused   the backend said which instruction it does not implement yet. Not a failure: the
@@ -16,6 +16,10 @@
 #             below is a work queue rather than a defect report.
 #   DIVERGES  both ran to completion and disagreed -- on the bytes, or on the exit status. That
 #             is a compiler bug.
+#
+# `KILN_NATIVE_TIMEOUT_SECONDS`, when set to a positive integer, adds a failed-probe outcome for
+# an invocation that exceeds its deadline. It is never a backend refusal, and the batch continues
+# so the remaining probes still retain their verdicts.
 #
 # THE EXIT STATUS IS PART OF THE ANSWER. This compared output alone for a long time, and a
 # successful CommonJS program that printed the right bytes and then exited 1 was a *match* to it
@@ -78,6 +82,11 @@ done
 # It is minutes rather than seconds, so it is a task of its own (`mise run native-stress`) and
 # not part of `gate-quick`.
 STRESS="${KILN_NATIVE_GC_STRESS:-}"
+NATIVE_TIMEOUT_SECONDS="${KILN_NATIVE_TIMEOUT_SECONDS:-}"
+if [[ -n $NATIVE_TIMEOUT_SECONDS && ! $NATIVE_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]; then
+	echo "native.sh: KILN_NATIVE_TIMEOUT_SECONDS must be a positive integer" >&2
+	exit 2
+fi
 
 KILN="${KILN_BIN:-}"
 if [[ -z $KILN ]]; then
@@ -90,7 +99,10 @@ if [[ -z $KILN ]]; then
 fi
 
 matched=0
+invalid=0
 diverged=0
+timeouts=0
+interruptions=0
 stress_skipped=0
 declare -a REFUSALS=()
 declare -a DIVERGENCES=()
@@ -110,16 +122,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Keep the default path identical: without the opt-in deadline, invoke the command directly.
+# With it, the helper owns a fresh process group so a timed-out kiln run cannot leave children
+# holding pipes open or continue consuming resources after this probe has failed.
+run_invocation() {
+	local timeout_marker="$1"
+	shift
+	if [[ -z $NATIVE_TIMEOUT_SECONDS ]]; then
+		"$@"
+	else
+		python3 "$(kiln_repo_root)/scripts/native_timeout.py" \
+			"$NATIVE_TIMEOUT_SECONDS" "$timeout_marker" -- "$@"
+	fi
+}
+
 run_probe() {
 	trap - EXIT
 	local probe="$1"
 	local name
 	name="$(basename -- "$probe")"
 	local adapter=""
+	local -a clock_policy=()
+	local native_directive
+	native_directive="$(head -5 -- "$probe" | grep -m1 -oE 'kiln-native:.*' || true)"
 	# `.mjs` too: an application-shaped ES module imports `node:` builtins, and only the adapter
-	# resolves those. Two such probes sat here unrun from 2026-09-19 until the glob below grew.
+	# resolves those. The clock remains virtual unless a probe explicitly requests host progress.
 	if [[ $name == *.cjs || $name == *.mjs ]]; then
 		adapter="--node"
+	fi
+	if [[ $native_directive =~ clock=wall ]]; then
+		clock_policy=(--clock wall)
 	fi
 	name="${name%.*}"
 
@@ -134,26 +166,39 @@ run_probe() {
 		read -r -a probe_env <<<"$directive"
 	fi
 
-	local interpreted
-	if ! interpreted="$(env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot ${adapter:+"$adapter"} run "$probe" 2>&1)"; then
-		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.failed"
+	local interpreted_marker="$WORK_DIR/$name.interpreter-timeout"
+	local interpreted_output="$WORK_DIR/$name.interpreter.out"
+	local interpreted_status=0
+	run_invocation "$interpreted_marker" \
+		env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot \
+		${adapter:+"$adapter"} "${clock_policy[@]}" run "$probe" >"$interpreted_output" 2>&1 || interpreted_status=$?
+	if [[ -f "$interpreted_marker.interrupted" ]]; then
+		cp -- "$interpreted_output" "$WORK_DIR/$name.interrupted"
+		return 0
+	fi
+	if [[ -f "$interpreted_marker" ]]; then
+		{ printf 'interpreter invocation timed out; captured output follows:\n'; cat -- "$interpreted_output"; } > "$WORK_DIR/$name.timedout"
+		return 0
+	fi
+	if ((interpreted_status != 0)); then
+		cp -- "$interpreted_output" "$WORK_DIR/$name.failed"
 		return 0
 	fi
 	# Zero by construction: a nonzero interpreter took the branch above and is already a failure.
 	# Named anyway, because the comparison below is between the two engines and reads as one.
-	local interpreted_status=0
 
 	# A probe may also ask for more than the default build in its first lines:
 	#
 	#   // kiln-native: profile=native-release parallelism=1,2,max
+	#   // kiln-native: clock=wall
 	#
 	# `profile` is passed to `--profile` (the development profile emits generic bodies only, so
-	# the parallel lowering of `parallelMap` exists only in a release build), and `parallelism`
-	# runs the one binary once per KILN_PARALLELISM value (`max` is the core count). Every run
-	# must print the interpreter's bytes: a result that depends on how many threads computed it
-	# is a divergence like any other.
-	local native_directive profile="" parallelism="default"
-	native_directive="$(head -5 -- "$probe" | grep -m1 -oE 'kiln-native:.*' || true)"
+	# the parallel lowering of `parallelMap` exists only in a release build), `parallelism` runs
+	# the one binary once per KILN_PARALLELISM value (`max` is the core count), and `clock=wall`
+	# opts both engines into host-backed timer progress for probes that require external workers.
+	# Every run must print the interpreter's bytes: a result that depends on how many threads
+	# computed it is a divergence like any other.
+	local profile="" parallelism="default"
 	if [[ $native_directive =~ profile=([a-z-]+) ]]; then
 		profile="${BASH_REMATCH[1]}"
 	fi
@@ -179,7 +224,7 @@ run_probe() {
 		fi
 	fi
 
-	local native native_status=0 threads
+	local native_output native_status=0 threads
 	for threads in $parallelism; do
 		native_status=0
 		local -a run_env=(${probe_env[@]+"${probe_env[@]}"})
@@ -191,14 +236,25 @@ run_probe() {
 		if [[ -n $STRESS ]]; then
 			run_env+=("KILN_GC_STRESS=$STRESS")
 		fi
-		native="$(env ${run_env[@]+"${run_env[@]}"} "$KILN" --one-shot ${adapter:+"$adapter"} run --native ${profile:+--profile "$profile"} "$probe" 2>&1)" || native_status=$?
-		if [[ $native != "$interpreted" ]] || ((native_status != interpreted_status)); then
-			[[ $threads != default ]] && native="$native [KILN_PARALLELISM=$threads]"
+		local native_timeout_marker="$WORK_DIR/$name.native-$threads.timeout"
+		native_output="$WORK_DIR/$name.native-$threads.out"
+		run_invocation "$native_timeout_marker" \
+			env ${run_env[@]+"${run_env[@]}"} "$KILN" --one-shot \
+			${adapter:+"$adapter"} "${clock_policy[@]}" run --native ${profile:+--profile "$profile"} "$probe" >"$native_output" 2>&1 || native_status=$?
+		if [[ -f "$native_timeout_marker.interrupted" ]]; then
+			cp -- "$native_output" "$WORK_DIR/$name.interrupted"
+			return 0
+		fi
+		if [[ -f $native_timeout_marker ]]; then
+			{ printf 'native invocation (parallelism=%s) timed out; captured output follows:\n' "$threads"; cat -- "$native_output"; } > "$WORK_DIR/$name.timedout"
+			return 0
+		fi
+		if ! cmp -s -- "$native_output" "$interpreted_output" || ((native_status != interpreted_status)); then
 			break
 		fi
 	done
 
-	if [[ $native == "$interpreted" ]] && ((native_status == interpreted_status)); then
+	if cmp -s -- "$native_output" "$interpreted_output" && ((native_status == interpreted_status)); then
 		touch "$WORK_DIR/$name.matched"
 		return 0
 	fi
@@ -212,9 +268,9 @@ run_probe() {
 	# runs of the same tree without anything saying a word: every one of those refusals was a
 	# build that did not happen.
 	local broken
-	broken="$(printf '%s\n' "$native" | grep -m1 -E '^kiln: native (toolchain|number provider) failed' || true)"
+	broken="$(grep -a -m1 -E '^kiln: native (toolchain|number provider) failed' "$native_output" || true)"
 	if [[ -n $broken ]]; then
-		printf '%s\n' "$native" > "$WORK_DIR/$name.broken"
+		cp -- "$native_output" "$WORK_DIR/$name.broken"
 		return 0
 	fi
 
@@ -222,24 +278,29 @@ run_probe() {
 	# yet. Both spellings are listed rather than prefix-matched, so a new `kiln: native ...`
 	# message has to be classified by somebody instead of quietly joining the backlog.
 	local refusal
-	refusal="$(printf '%s\n' "$native" |
-		grep -m1 -E '^kiln: native (backend refusal:|emission failed: unsupported native emission:)' ||
-		true)"
+	refusal="$(grep -a -m1 -E '^kiln: native (backend refusal:|emission failed: unsupported native emission:)' "$native_output" || true)"
 	if [[ -n $refusal ]]; then
 		local reason
 		reason="$(printf '%s' "$refusal" | sed 's/^kiln: //; s/ module=[^ ]*//')"
-		if [[ $native != kiln:* ]]; then
-			reason="$reason (after $(printf '%s\n' "$native" | grep -c -v '^kiln: native ') line(s) of output)"
+		if [[ $(head -c 5 -- "$native_output") != kiln: ]]; then
+			reason="$reason (after $(grep -a -c -v '^kiln: native ' "$native_output" || true) line(s) of output)"
 		fi
 		printf '%s\n' "$reason" > "$WORK_DIR/$name.refused"
 		return 0
 	fi
 
 	{
-		printf '%s\n' "  interpreter: $(printf '%s' "$interpreted" | head -5) [exit $interpreted_status]"
-		printf '%s\n' "  native:      $(printf '%s' "$native" | head -5) [exit $native_status]"
-		if [[ $native == "$interpreted" ]]; then
-			printf '%s\n' "  the bytes agree; only the exit status differs"
+		printf '  interpreter: exit %s, %s output bytes\n' "$interpreted_status" "$(wc -c <"$interpreted_output" | tr -d '[:space:]')"
+		printf '  native:      exit %s, %s output bytes\n' "$native_status" "$(wc -c <"$native_output" | tr -d '[:space:]')"
+		if cmp -s -- "$native_output" "$interpreted_output"; then
+			printf '  the bytes agree; only the exit status differs\n'
+		else
+			printf '  outputs differ; exact captured bytes (hex):\n'
+			printf '  interpreter: '
+			od -An -v -tx1 "$interpreted_output" | tr '\n' ' '
+			printf '\n  native:      '
+			od -An -v -tx1 "$native_output" | tr '\n' ' '
+			printf '\n'
 		fi
 	} > "$WORK_DIR/$name.diverged"
 }
@@ -266,14 +327,24 @@ wait || true
 for probe in "${PROBES[@]}"; do
 	name="$(basename -- "$probe")"
 	name="${name%.*}"
-	if [[ -f "$WORK_DIR/$name.failed" ]]; then
+	if [[ -f "$WORK_DIR/$name.interrupted" ]]; then
+		kiln_say "FAILED: invocation interrupted while running $name:"
+		cat -- "$WORK_DIR/$name.interrupted" | kiln_block
+		interruptions=$((interruptions + 1))
+		invalid=$((invalid + 1))
+	elif [[ -f "$WORK_DIR/$name.timedout" ]]; then
+		kiln_say "FAILED: deadline expired while running $name (KILN_NATIVE_TIMEOUT_SECONDS=$NATIVE_TIMEOUT_SECONDS):"
+		cat -- "$WORK_DIR/$name.timedout" | kiln_block
+		timeouts=$((timeouts + 1))
+		invalid=$((invalid + 1))
+	elif [[ -f "$WORK_DIR/$name.failed" ]]; then
 		kiln_say "FAILED: the interpreter cannot run $name, so there is nothing to compare:"
-		kiln_say "$(<"$WORK_DIR/$name.failed")"
-		exit 1
+		cat -- "$WORK_DIR/$name.failed" | kiln_block
+		invalid=$((invalid + 1))
 	elif [[ -f "$WORK_DIR/$name.broken" ]]; then
 		kiln_say "FAILED: the native build of $name did not complete, so there is nothing to compare:"
-		kiln_say "$(<"$WORK_DIR/$name.broken")"
-		exit 1
+		cat -- "$WORK_DIR/$name.broken" | kiln_block
+		invalid=$((invalid + 1))
 	elif [[ -f "$WORK_DIR/$name.stress-skipped" ]]; then
 		stress_skipped=$((stress_skipped + 1))
 	elif [[ -f "$WORK_DIR/$name.matched" ]]; then
@@ -286,6 +357,9 @@ for probe in "${PROBES[@]}"; do
 		while IFS= read -r line; do
 			DIVERGENCES+=("$line")
 		done < "$WORK_DIR/$name.diverged"
+	else
+		kiln_say "FAILED: no result was retained for $name"
+		invalid=$((invalid + 1))
 	fi
 done
 
@@ -299,11 +373,24 @@ if ((${#REFUSALS[@]} > 0)); then
 	done
 fi
 
+if ((invalid > 0)); then
+	kiln_say "native: $invalid invalid probes; all collected verdicts are reported above"
+fi
+if ((timeouts > 0)); then
+	kiln_say "native: $timeouts invocation(s) exceeded their opt-in deadline; none were classified as refusals"
+fi
+if ((interruptions > 0)); then
+	kiln_say "native: $interruptions invocation(s) were interrupted; none were classified as refusals"
+fi
+
 if ((diverged > 0)); then
 	kiln_say ""
 	kiln_say "DIVERGED - the two engines ran the same bytecode and did not agree:"
 	printf '%s\n' "${DIVERGENCES[@]}" | while IFS= read -r line; do kiln_say "$line"; done
 	kiln_say ""
 	kiln_say "One of the two is wrong. The bytecode is the same, so nothing else can explain it."
+fi
+
+if ((diverged > 0 || invalid > 0)); then
 	exit 1
 fi

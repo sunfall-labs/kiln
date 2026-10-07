@@ -40,6 +40,7 @@ mkdir -p .scratch
 
 python3 - "$KILN_BIN" "$WORK" "${1:-}" <<'PY'
 import json, os, statistics, subprocess, sys, time
+from bench.checksum_validation import validate_repeated_checksums
 
 kiln, work, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
 PASSES = int(os.environ.get("PASSES", "3"))
@@ -152,7 +153,7 @@ for suite, name, path in scripts:
                     f"{suite}/{name} {runtime}: corrupt record, keys {sorted(record)!r}")
                 samples = []
                 break
-            checksums.setdefault(runtime, record["checksum"])
+            checksums.setdefault(runtime, []).append(record["checksum"])
             if record["mode"] == "in-process":
                 samples.append(record["warm_median"])
             else:
@@ -163,11 +164,10 @@ for suite, name, path in scripts:
                 samples.append(max(wall - paid, 0.0) / record.get("iterations", 1))
         if samples:
             measured[runtime] = statistics.median(samples)
-    want = checksums.get("node")
-    for runtime, got in checksums.items():
-        if want is not None and got != want:
-            divergences.append(f"{suite}/{name} {runtime}: checksum {got!r} != node's {want!r}")
-            measured.pop(runtime, None)
+    excluded, checksum_diagnostics = validate_repeated_checksums(checksums, PASSES)
+    divergences.extend(f"{suite}/{name} {diagnostic}" for diagnostic in checksum_diagnostics)
+    for runtime in excluded:
+        measured.pop(runtime, None)
     rows.append({"suite": suite, "script": name, "ms": measured})
 
 label = {"node": "node", "bun": "bun", "kiln": "kiln", "kiln-native": "native"}

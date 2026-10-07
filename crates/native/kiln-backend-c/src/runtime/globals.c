@@ -22,6 +22,8 @@ static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
     return KILN_C99_OK;
 }
 
+static int kiln_c99_private_object(kiln_value *out);
+
 /* The same names are registered before the first realm in surface.c. A function-local table
  * escaped the prelude's literal-key registration, so each realm made its own 14-shape chain. */
 static const char *const kiln_c99_atomics_names[] = {
@@ -105,6 +107,10 @@ static int kiln_c99_process_object(kiln_value *out) {
     kiln_value exec_argv;
     kiln_value versions;
     kiln_value stream;
+    kiln_value native_modules = kiln_c99_undefined();
+#if KILN_RETAIN_GROUP_NODE_NET
+    kiln_value net_module = kiln_c99_undefined();
+#endif
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process);
     if (status != KILN_C99_OK) return status;
     if (process->tag == KILN_VALUE_OBJECT) {
@@ -113,8 +119,56 @@ static int kiln_c99_process_object(kiln_value *out) {
     }
     status = kiln_c99_new_object(process);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *process, "__kilnFsDescriptor", 18,
-                              kiln_c99_method(KILN_C99_METHOD_FS_DESCRIPTOR_RAW), 0, NULL);
+        status = kiln_c99_define_method(*process, "__kilnFsDescriptor", 18,
+                              kiln_c99_method(KILN_C99_METHOD_FS_DESCRIPTOR_RAW));
+    /* Runtime capabilities live on this non-enumerable process table, never as global names.
+     * The TypeScript Node facades capture and remove the bootstrap-only members before user code
+     * runs, while the CommonJS decorator remains available to the graph runtime. */
+    if (status == KILN_C99_OK) status = kiln_c99_new_object(&native_modules);
+    if (status == KILN_C99_OK) kiln_c99_gc_keep_alive(&native_modules);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(*process, "__kilnNativeModules", sizeof("__kilnNativeModules") - 1,
+                                          native_modules, 0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleRequireResolve", sizeof("__kilnHostModuleRequireResolve") - 1,
+                                          kiln_c99_method(KILN_C99_METHOD_COMMONJS_REQUIRE_RESOLVE),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleCreateRequire", sizeof("__kilnHostModuleCreateRequire") - 1,
+                                          kiln_c99_method(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnHostModuleLoader", sizeof("__kilnHostModuleLoader") - 1,
+                                          kiln_c99_method(KILN_C99_METHOD_MODULE_LOADER_RAW),
+                                          0, 1, 1);
+#if KILN_RETAIN_GROUP_NODE_CRYPTO
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyImport", sizeof("__kilnCryptoKeyImport") - 1,
+                                          kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_IMPORT_RAW),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyPublic", sizeof("__kilnCryptoKeyPublic") - 1,
+                                          kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_PUBLIC_RAW),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyInfo", sizeof("__kilnCryptoKeyInfo") - 1,
+                                          kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_INFO_RAW),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyExport", sizeof("__kilnCryptoKeyExport") - 1,
+                                          kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_EXPORT_RAW),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnCryptoKeyFree", sizeof("__kilnCryptoKeyFree") - 1,
+                                          kiln_c99_method(KILN_C99_METHOD_CRYPTO_KEY_FREE_RAW),
+                                          0, 1, 1);
+#endif
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnDecorateCommonJsRequire", sizeof("__kilnDecorateCommonJsRequire") - 1,
+                                          kiln_c99_undefined(), 0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(native_modules, "__kilnNativeImportMeta", sizeof("__kilnNativeImportMeta") - 1,
+                                          kiln_c99_undefined(), 0, 1, 1);
     /* Demand-driven prelude: `process` is an emitter only in builds that
      * retain the event group (see `retained_method_groups`). Reaching this
      * initializer requires the `process` global, which retains the group,
@@ -363,26 +417,65 @@ static int kiln_c99_process_object(kiln_value *out) {
             status = kiln_c99_put(NULL, *process, "stderr", 6, stream, 0, NULL);
     }
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "nextTick", 8,
-                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_NEXT_TICK));
+        /* Node's process functions are enumerable own properties (`Object.keys(process)` lists
+         * them); the private hooks above and below are not. */
+        status = kiln_c99_put(NULL, *process, "nextTick", 8,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_NEXT_TICK), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "hrtime", 6,
-                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME));
+        status = kiln_c99_put(NULL, *process, "hrtime", 6,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "cwd", 3,
-                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_CWD));
+        status = kiln_c99_put(NULL, *process, "cwd", 3,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_CWD), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "kill", 4,
-                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_KILL));
+        status = kiln_c99_put(NULL, *process, "kill", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_KILL), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(*process, "exit", 4,
-                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT));
+        status = kiln_c99_put(NULL, *process, "exit", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT), 0, NULL);
+#if KILN_RETAIN_GROUP_NODE_NET
+    /* The public node:net module is a TypeScript facade. Its per-socket pause/resume/read and
+     * cork methods reach these private kernels through process.__kilnNativeModules.net; keeping
+     * that adapter separate from the public export object lets the facade own the public API. */
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_new_object(&net_module);
+        if (status == KILN_C99_OK) {
+            kiln_c99_gc_keep_alive(&native_modules);
+            kiln_c99_gc_keep_alive(&net_module);
+        }
+    }
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *process, "__kilnHostProcessStart", 22,
-                              kiln_c99_method(KILN_C99_METHOD_PROCESS_START_RAW), 0, NULL);
+        status = kiln_c99_define_method(net_module, "createServer", 12,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_NET_CREATE_SERVER));
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, *process, "__kilnHostProcessCancel", 23,
-                              kiln_c99_method(KILN_C99_METHOD_PROCESS_CANCEL_RAW), 0, NULL);
+        status = kiln_c99_define_method(net_module, "__serverIsListening", 19,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SERVER_IS_LISTENING));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "connect", 7,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_NET_CONNECT));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "createConnection", 16,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_NET_CONNECT));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__corkSocket", 12,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_CORK_KERNEL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__uncorkSocket", 14,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_UNCORK_KERNEL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__pauseSocket", 13,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_PAUSE_KERNEL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__resumeSocket", 14,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_RESUME_KERNEL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(net_module, "__readSocket", 12,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_SOCKET_READ_KERNEL));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, native_modules, "net", 3, net_module, 0, NULL);
+    kiln_c99_gc_keep_alive(&native_modules);
+    kiln_c99_gc_keep_alive(&net_module);
+#endif
     if (status != KILN_C99_OK) return status;
     *out = *process;
     return KILN_C99_OK;
@@ -480,9 +573,6 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"encodeURIComponent", KILN_C99_METHOD_ENCODE_URI_COMPONENT},
                      {"decodeURI", KILN_C99_METHOD_DECODE_URI},
                      {"decodeURIComponent", KILN_C99_METHOD_DECODE_URI_COMPONENT},
-                     {"__kilnHostProcessStart", KILN_C99_METHOD_PROCESS_START_RAW},
-                     {"__kilnHostProcessCancel", KILN_C99_METHOD_PROCESS_CANCEL_RAW},
-                     {"__kilnHostModuleCreateRequire", KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE},
                      {"queueMicrotask", KILN_C99_METHOD_QUEUE_MICROTASK},
                      {"setTimeout", KILN_C99_METHOD_SET_TIMEOUT},
                      {"setInterval", KILN_C99_METHOD_SET_INTERVAL},
@@ -492,25 +582,43 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"clearImmediate", KILN_C99_METHOD_CLEAR_IMMEDIATE},
                      /* Captured and deleted by the compiled builtin bootstrap before user code. */
                      {"__kilnIntlSegment", KILN_C99_METHOD_INTL_SEGMENT_RAW},
+                     {"__kilnHostStringLocaleCase", KILN_C99_METHOD_STRING_LOCALE_CASE_RAW},
+                     {"__kilnIntlDateTimeFormat", KILN_C99_METHOD_INTL_DATETIME_FORMAT_RAW},
                      {"__kilnUint8ToHex", KILN_C99_METHOD_UINT8_TO_HEX_RAW},
                      {"__kilnUint8ToBase64", KILN_C99_METHOD_UINT8_TO_BASE64_RAW},
                      {"__kilnUrlParse", KILN_C99_METHOD_URL_PARSE_RAW},
                      {"__kilnUrlSet", KILN_C99_METHOD_URL_SET_RAW},
                      {"__kilnUrlFast", KILN_C99_METHOD_URL_FAST_RAW},
                      {"__kilnUrlAdopt", KILN_C99_METHOD_URL_ADOPT_RAW},
+                     {"__kilnWebCryptoPrimitive", KILN_C99_METHOD_WEBCRYPTO_PRIMITIVE_RAW},
+                     {"__kilnCompressionPrimitive", KILN_C99_METHOD_COMPRESSION_PRIMITIVE_RAW},
                      /* The transfer primitive `kiln-builtins/src/arraybuffer.ts` captures. */
                      {"__kilnArrayBufferDetach", KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW},
+                     {"__kilnArrayBufferByteLength", KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW},
                      /* The structured clone's plain-data fast path, captured the same way. */
                      {"__kilnCloneData", KILN_C99_METHOD_CLONE_DATA_RAW},
-                     {"__kilnSharedIs", KILN_C99_METHOD_SHARED_IS_RAW},
                      {"__kilnSharedWeak", KILN_C99_METHOD_SHARED_WEAK_RAW},
+                     {"__kilnCollectionSize", KILN_C99_METHOD_COLLECTION_SIZE_RAW},
+                     {"__kilnJsonSerialize", KILN_C99_METHOD_JSON_STRINGIFY},
+                     {"__kilnJsonParse", KILN_C99_METHOD_JSON_PARSE},
+                     {"__kilnJsonUnbox", KILN_C99_METHOD_JSON_UNBOX_RAW},
+                     {"__kilnJsonRawCreate", KILN_C99_METHOD_JSON_RAW_CREATE},
+                     {"__kilnJsonIsRaw", KILN_C99_METHOD_JSON_IS_RAW},
+                     {"__kilnRegExpLegacyCapture", KILN_C99_METHOD_REGEXP_LEGACY_CAPTURE_RAW},
+                     {"__kilnFunctionKindPrototype", KILN_C99_METHOD_FUNCTION_KIND_PROTOTYPE},
+                     {"__kilnFunctionKindConstructor", KILN_C99_METHOD_FUNCTION_KIND_CONSTRUCTOR},
                      /* `%TypedArray%.prototype`'s element-storage primitives, captured the same
                       * way by `kiln-builtins/src/typedarray.ts`. */
                      {"__kilnTypedArrayCopy", KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW},
                      {"__kilnTypedArraySort", KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW},
+                     {"__kilnDataViewState", KILN_C99_METHOD_DATA_VIEW_STATE_RAW},
+                     {"__kilnIsConstructor", KILN_C99_METHOD_IS_CONSTRUCTOR_RAW},
+                     {"__kilnIsOtherRealmArrayConstructor", KILN_C99_METHOD_IS_OTHER_REALM_ARRAY_CONSTRUCTOR_RAW},
+                     {"__kilnArrayNextPresentIndex", KILN_C99_METHOD_ARRAY_NEXT_PRESENT_INDEX_RAW},
                      /* Message delivery's checkpoint question, captured the same way. */
                      {"__kilnJobsPending", KILN_C99_METHOD_JOBS_PENDING_RAW},
                      {"__kilnQueueIo", KILN_C99_METHOD_QUEUE_IO_RAW},
+                     {"__kilnTimerRef", KILN_C99_METHOD_TIMER_REF_RAW},
                      /* The runtime's cross-realm ports and workers, captured the same way. */
                      {"__kilnWorkerOp", KILN_C99_METHOD_WORKER_OP_RAW},
                      {"__kilnPortWait", KILN_C99_METHOD_PORT_WAIT_RAW},
@@ -571,6 +679,16 @@ static int kiln_c99_global_object(kiln_value *out) {
         status = kiln_c99_commit_own_data(*globals, "__kilnExtensions", 16,
                                           kiln_c99_boolean(kiln_c99_kiln_extensions_on()),
                                           0, 1, 1);
+    }
+    /* The realm's engine-private object, captured and deleted by `kiln-builtins/src/extensions.ts`
+     * before any program runs. Later it is readable only through the read overlay below. */
+    if (status == KILN_C99_OK) {
+        kiln_value private_object;
+        status = kiln_c99_private_object(&private_object);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_commit_own_data(*globals, "__kilnPrivate", 13, private_object,
+                                              0, 1, 1);
+        }
     }
     /* `process` too: the bare name loaded it by demand while `globalThis.process` answered
      * `undefined` (2026-09-19). One object, the realm slot's, so the two spellings agree. */
@@ -633,41 +751,109 @@ static int kiln_c99_global_object(kiln_value *out) {
     return KILN_C99_OK;
 }
 
-/* This flag spans one synchronous `kiln:shared` initializer. A realm never changes lanes in
- * the middle of a turn; the module has no await, so no continuation can inherit the flag. */
-static _Thread_local int kiln_c99_kiln_shared_hooks_active;
+/* The realm's engine-private object (`__kilnPrivate`): the one channel between the engine, the
+ * realm bootstrap and the builtin modules. It holds the engine's own operations -- present only
+ * when kiln's extensions are installed (ADR 0068) -- and whatever one builtin hands another
+ * (the message-port internals, the structured clone's marks). It is a realm slot, so it is a GC
+ * root of its realm like the other slots, and per realm like them (ADR 0071). A program can
+ * never read it: the bootstrap captures it from the global object at realm creation and deletes
+ * the name, and a builtin module reads it only through the overlay below. */
+#define KILN_C99_REALM_SLOT_PRIVATE UINT32_C(13)
 
-/* The read overlay never writes the global. A user-defined property with one of these names
- * therefore keeps its descriptor and slot order across a later dynamic import. */
-static int kiln_c99_kiln_shared_hook_read(kiln_value target, const kiln_string *key,
-                                          kiln_value *out) {
-    kiln_value *global;
-    if (kiln_c99_kiln_shared_hooks_active == 0 || target.tag != KILN_VALUE_OBJECT ||
-        key == NULL || kiln_c99_key_is_reserved(key) || out == NULL) return 0;
-    if (kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &global) != KILN_C99_OK ||
-        global == NULL || global->tag != KILN_VALUE_OBJECT || global->bits != target.bits) return 0;
-    if (kiln_c99_same_name_key(key, "__kilnShare")) {
-        *out = kiln_c99_kiln_shared_hooks_active > 0
-            ? kiln_c99_method(KILN_C99_METHOD_SHARE_RAW) : kiln_c99_undefined();
-        return 1;
+static int kiln_c99_private_object(kiln_value *out) {
+    kiln_value *slot;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PRIVATE, &slot);
+    if (status != KILN_C99_OK) return status;
+    if (slot->tag == KILN_VALUE_OBJECT) {
+        *out = *slot;
+        return KILN_C99_OK;
     }
-    if (kiln_c99_same_name_key(key, "__kilnSharedIs")) {
-        *out = kiln_c99_kiln_shared_hooks_active > 0
-            ? kiln_c99_method(KILN_C99_METHOD_SHARED_IS_RAW) : kiln_c99_undefined();
-        return 1;
+    status = kiln_c99_new_object(slot);
+    if (status != KILN_C99_OK) return status;
+    {
+        kiln_value process;
+        status = kiln_c99_process_object(&process);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_commit_own_data(*slot, "process", 7, process, 0, 0, 0);
+        if (status != KILN_C99_OK) return status;
     }
-    return 0;
-}
-
-/* The generated graph wrapper calls this immediately around the module initializer, after
- * the realm bootstrap. It changes only the read overlay above, never global properties. */
-int kiln_realm_kiln_shared_hooks(int begin) {
-    kiln_c99_kiln_shared_hooks_active = begin ? (kiln_c99_kiln_extensions_on() ? 1 : -1) : 0;
+    status = kiln_c99_commit_own_data(*slot, "extensions", 10,
+                                      kiln_c99_boolean(kiln_c99_kiln_extensions_on()), 0, 1, 1);
+    /* A developer switch for the conformance probes that drive the actor protocol directly: the
+     * bootstrap then leaves the global name in place. Off unless the process is started with it. */
+    if (status == KILN_C99_OK) {
+        const char *exposed = getenv("KILN_ENGINE_PRIVATE_FOR_TESTS");
+        status = kiln_c99_commit_own_data(*slot, "exposed", 7,
+                                          kiln_c99_boolean(exposed != NULL && exposed[0] == '1' &&
+                                                           exposed[1] == '\0'), 0, 1, 1);
+    }
+    if (status == KILN_C99_OK && kiln_c99_kiln_extensions_on()) {
+        status = kiln_c99_commit_own_data(*slot, "share", 5,
+                                          kiln_c99_method(KILN_C99_METHOD_SHARE_RAW), 0, 1, 1);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_commit_own_data(*slot, "sharedIs", 8,
+                                              kiln_c99_method(KILN_C99_METHOD_SHARED_IS_RAW),
+                                              0, 1, 1);
+    }
+    /* Node's child_process adapter shares the same asynchronous host operation as kiln:process.
+     * This remains an engine-private hook regardless of whether public Kiln extensions are on. */
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(*slot, "hostProcessStart", 16,
+                                          kiln_c99_method(KILN_C99_METHOD_PROCESS_START_RAW),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(*slot, "hostProcessCancel", 17,
+                                          kiln_c99_method(KILN_C99_METHOD_PROCESS_CANCEL_RAW),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(*slot, "processExitCodeGet", 18,
+                                          kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT_CODE_GET),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(*slot, "processExitCodeSet", 18,
+                                          kiln_c99_method(KILN_C99_METHOD_PROCESS_EXIT_CODE_SET),
+                                          0, 1, 1);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_commit_own_data(*slot, "gcRequest", 9,
+                                          kiln_c99_method(KILN_C99_METHOD_GC_REQUEST), 0, 1, 1);
+    if (status != KILN_C99_OK) return status;
+    *out = *slot;
     return KILN_C99_OK;
 }
 
-/* The generated graph refuses an engine-owned extension module before entering its body when
- * the runtime switch or the build policy withheld extensions. */
+/* How many engine builtin modules are initializing on this thread right now: the generated graph
+ * wrapper brackets each module's synchronous top-level code with `kiln_realm_private_window`. A
+ * realm never changes lanes in the middle of a turn, and a module body has no await at the
+ * level the overlay answers, so no continuation can inherit the count. */
+static _Thread_local int kiln_c99_private_hooks_active;
+
+/* The read overlay never writes the global. A program's own property of this name therefore
+ * keeps its descriptor and slot order across a later dynamic import, and nothing a builtin
+ * defines on the global object while the window is open is discarded when it closes. */
+static int kiln_c99_private_hook_read(kiln_value target, const kiln_string *key,
+                                      kiln_value *out) {
+    kiln_value *global;
+    if (kiln_c99_private_hooks_active <= 0 || target.tag != KILN_VALUE_OBJECT ||
+        key == NULL || kiln_c99_key_is_reserved(key) || out == NULL) return 0;
+    if (!kiln_c99_same_name_key(key, "__kilnPrivate")) return 0;
+    if (kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &global) != KILN_C99_OK ||
+        global == NULL || global->tag != KILN_VALUE_OBJECT || global->bits != target.bits) return 0;
+    return kiln_c99_private_object(out) == KILN_C99_OK;
+}
+
+/* The generated graph wrapper calls this immediately around each engine builtin module's
+ * initializer, after the realm bootstrap. It changes only the read overlay above. */
+int kiln_realm_private_window(int begin) {
+    if (begin) {
+        kiln_c99_private_hooks_active += 1;
+    } else if (kiln_c99_private_hooks_active > 0) {
+        kiln_c99_private_hooks_active -= 1;
+    }
+    return KILN_C99_OK;
+}
+
+/* Whether this realm installs kiln's own members (ADR 0068). A kiln module refuses itself without
+ * them, in TypeScript, from the `extensions` entry of the engine-private object. */
 int kiln_realm_kiln_extensions_on(void) {
     return kiln_c99_kiln_extensions_on();
 }
@@ -682,15 +868,50 @@ static int kiln_c99_global_object_val(kiln_val *out) {
 
 /* One binding of the realm's global object, for a name the compiler could not place.
  *
- * `found` stays 0 for a name that is genuinely absent, which is the caller's cue to throw. Only
- * *own* properties count: the global object is the last place identifier resolution looks, and
- * inheriting `toString` from `Object.prototype` would make a bare `toString` resolve. */
+ * `found` stays 0 for a name that is genuinely absent, which is the caller's cue to throw. Own
+ * global bindings take priority, followed by inherited Object.prototype methods from the global
+ * object's object record. */
 /* A global the runtime bootstrap defines in TypeScript -- `structuredClone` -- read the way a
  * program's own global read goes. The bootstrap runs before any module body, so the only way to
  * miss is a program compiled without it, which is refused by name rather than read as undefined. */
-int kiln_c99_bootstrap_global(kiln_value *out, const char *name, size_t name_len) {
+static int kiln_c99_object_prototype_binding(kiln_host *host, kiln_value *out,
+                                             const kiln_string *view, int *found, int depth,
+                                             kiln_value *thrown) {
+    kiln_value object_prototype = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+    kiln_value store = kiln_c99_undefined();
+    kiln_property property;
+    char scratch[256];
+    const char *name;
+    size_t name_len;
+    int status;
+    *found = 0;
+    if (!kiln_c99_intrinsic_ascii_view(view, scratch, &name, &name_len)) return KILN_C99_OK;
+    status = kiln_c99_callable_store(object_prototype, &store, 0);
+    if (status != KILN_C99_OK) return status;
+    if (store.tag == KILN_VALUE_OBJECT &&
+        kiln_c99_property_read_own(kiln_c99_object_of(store), view, NULL, &property)) {
+        /* The property may be an accessor or a program's replacement for an intrinsic.
+         * Resolve it through [[Get]] so the live descriptor and correct receiver decide. */
+        status = kiln_c99_get_key(host, object_prototype, view, NULL, out, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        *found = 1;
+        return KILN_C99_OK;
+    }
+    {
+        uint64_t method = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                    name, name_len);
+        if (method != 0) {
+            *out = kiln_c99_method(method);
+            *found = 1;
+        }
+    }
+    return KILN_C99_OK;
+}
+
+int kiln_c99_bootstrap_global(kiln_host *host, kiln_value *out, const char *name,
+                              size_t name_len, int depth, kiln_value *thrown) {
     int found = 0;
-    int status = kiln_c99_global_binding(out, name, name_len, &found);
+    int status = kiln_c99_global_binding(host, out, name, name_len, &found, depth, thrown);
     if (status != KILN_C99_OK) return status;
     if (!found) {
         KILN_C99_REFUSE("a bootstrap-defined global read before the runtime bootstrap defined it");
@@ -698,7 +919,8 @@ int kiln_c99_bootstrap_global(kiln_value *out, const char *name, size_t name_len
     return KILN_C99_OK;
 }
 
-static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found) {
+int kiln_c99_global_binding(kiln_host *host, kiln_value *out, const char *name,
+                            size_t name_len, int *found, int depth, kiln_value *thrown) {
     kiln_value globals;
     kiln_property property;
     kiln_string view;
@@ -712,16 +934,41 @@ static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t nam
     view.flags = kiln_c99_fixed_key_flags(name, name_len);
     view.data = name;
     if (kiln_c99_property_read_own(kiln_c99_object_of(globals), &view, NULL, &property)) {
-        *out = property.value;
+        if (property.accessor) {
+            status = kiln_c99_get_key(host, globals, &view, NULL, out, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        } else {
+            *out = property.value;
+        }
         *found = 1;
+        return KILN_C99_OK;
     }
-    return KILN_C99_OK;
+    return kiln_c99_object_prototype_binding(host, out, &view, found, depth, thrown);
+}
+
+/* A source-level builtin name is an ordinary global-object reference. Keeping this read in the
+ * runtime makes generated code observe replacement, accessors and deletion through the same
+ * binding path used by the interpreter. Intrinsic identity is loaded through kiln_c99_builtin
+ * separately and never comes through here. */
+int kiln_c99_global_builtin(kiln_host *host, kiln_value *out, const char *name, size_t length,
+                            int depth, kiln_value *thrown) {
+    int found = 0;
+    int status;
+    char message[256];
+    if (name == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_global_binding(host, out, name, length, &found, depth, thrown);
+    if (status != KILN_C99_OK || found) return status;
+    if (length > sizeof message - sizeof " is not defined") return KILN_C99_OUT_OF_MEMORY;
+    memcpy(message, name, length);
+    memcpy(message + length, " is not defined", sizeof " is not defined");
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, message);
 }
 
 /* The headed form: global names compare as units, so a non-ASCII binding resolves the
  * way the interpreter resolves it rather than missing every name the ASCII-only
  * comparison cannot spell. */
-static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name, int *found) {
+int kiln_c99_global_binding_key(kiln_host *host, kiln_value *out, const kiln_string *name,
+                                int *found, int depth, kiln_value *thrown) {
     kiln_value globals;
     kiln_property property;
     int status = kiln_c99_global_object(&globals);
@@ -729,6 +976,45 @@ static int kiln_c99_global_binding_key(kiln_value *out, const kiln_string *name,
     if (status != KILN_C99_OK) {
         return status;
     }
+    if (kiln_c99_property_read_own(kiln_c99_object_of(globals), name, NULL, &property)) {
+        if (property.accessor) {
+            status = kiln_c99_get_key(host, globals, name, NULL, out, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        } else {
+            *out = property.value;
+        }
+        *found = 1;
+        return KILN_C99_OK;
+    }
+    return kiln_c99_object_prototype_binding(host, out, name, found, depth, thrown);
+}
+
+static int kiln_c99_global_own_binding(kiln_value *out, const char *name, size_t name_len,
+                                      int *found) {
+    kiln_value globals;
+    kiln_property property;
+    kiln_string view;
+    int status = kiln_c99_global_object(&globals);
+    *found = 0;
+    if (status != KILN_C99_OK) return status;
+    if (name_len > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)name_len;
+    view.flags = kiln_c99_fixed_key_flags(name, name_len);
+    view.data = name;
+    if (kiln_c99_property_read_own(kiln_c99_object_of(globals), &view, NULL, &property)) {
+        *out = property.value;
+        *found = 1;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_global_own_binding_key(kiln_value *out, const kiln_string *name,
+                                          int *found) {
+    kiln_value globals;
+    kiln_property property;
+    int status = kiln_c99_global_object(&globals);
+    *found = 0;
+    if (status != KILN_C99_OK) return status;
     if (kiln_c99_property_read_own(kiln_c99_object_of(globals), name, NULL, &property)) {
         *out = property.value;
         *found = 1;
@@ -748,7 +1034,7 @@ static int kiln_c99_declare_global(const char *name, size_t name_len, int config
     kiln_value existing;
     kiln_property *slot;
     int found = 0;
-    int status = kiln_c99_global_binding(&existing, name, name_len, &found);
+    int status = kiln_c99_global_own_binding(&existing, name, name_len, &found);
     if (status != KILN_C99_OK || found) {
         return status;
     }
@@ -775,7 +1061,7 @@ static int kiln_c99_declare_global_key(const kiln_string *name, int configurable
     kiln_value existing;
     kiln_property *slot;
     int found = 0;
-    int status = kiln_c99_global_binding_key(&existing, name, &found);
+    int status = kiln_c99_global_own_binding_key(&existing, name, &found);
     if (status != KILN_C99_OK || found) {
         return status;
     }

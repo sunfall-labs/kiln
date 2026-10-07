@@ -93,6 +93,19 @@ The interpreter applies its ordinary module resolver. No source text, function, 
 object crosses the boundary. Constructor arguments use the same message rules as calls, including
 the explicit transfer forms below.
 
+**2026-10-02 resolution amendment.** "Statically named" means found through the binding, not
+the spelling: `spawnActor` imported from `kiln:actors` under any local
+name, through a namespace or CommonJS module object, with options written inline, in an
+unreassigned binding (spreads included), and a module written as an absolute path or file URL
+literal, `new URL(literal, import.meta.url)` (bare, `.href`, `.pathname`, `.toString()`),
+`fileURLToPath` of one, or `import.meta.resolve(literal)`. A name computed at run time is not
+linked; the native spawn rejects with a `TypeError` naming the module and saying it was not
+linked into this build. The interpreter loads any module the absolute name reaches: the actor
+worker's request is resolved against the named file itself, never against the worker entry's
+virtual path, and the module's graph is built from disk when the program's graph lacks it.
+`node:worker_threads` targets follow the same discovery and the same rule; an unlinked native
+worker emits an `error` naming the module, then exits 1.
+
 An `ActorRef<T>` has `address` and `call(method, args, options?)`. A call is always asynchronous,
 including when the caller and actor happen to run on the same scheduler thread. Its type permits
 only public callable string keys of `T`, with the corresponding argument tuple and awaited result
@@ -141,6 +154,17 @@ and ends the realm at the next turn boundary; a running synchronous segment is n
 Addresses and references to a stopped actor reject future calls with `ActorClosedError`.
 An unexpected realm exit rejects every outstanding call with that error. Dropping a reference
 does not silently kill a live actor; the owner is responsible for its lifetime.
+
+**2026-10-02 lifecycle amendment.** Construction is the mailbox's first call: the realm loads the
+class, and `spawnActor` then sends the constructor's arguments exactly as a method's, so they take
+every path above (buffer, prepared and isolated tickets) in both engines, and a ticket is consumed
+only when the actor accepts the construction. A constructor that throws rejects the spawn with
+`ActorRemoteError`; a module or export that does not load rejects it with the loader's own error
+and consumes nothing. `ActorClosedError` and `ActorRemoteError` (`remoteName`, `cause`) are
+exported classes; clone and abort failures are the platform's `DOMException`s (`DataCloneError`,
+`AbortError`), as `structuredClone` and `AbortSignal` raise them. An unexpected realm exit reaches
+its callers because the runtime closes every port a worker realm holds when it ends -- a call's
+reply port lives in the actor's realm -- as node closes a dead worker's transferred ports.
 
 ### Scheduler placement
 
@@ -224,6 +248,14 @@ before; this does not change direct `isolate(factory)` or ordinary message seman
 `kiln build --no-kiln-extensions` remove it along with other kiln extensions (ADR 0068), with a
 named unavailable-module error on import. No Node built-in is patched and no ordinary Node-only
 program changes behavior.
+
+**2026-10-02 package amendment.** `@kiln/concurrency` and `@kiln/effect` are removed: a second
+module name for `kiln:actors` contradicts the one-scheme rule, and the Effect adapter's worker
+pool, scheduler and "native" parallelism were names for things kiln does not do. Programs import
+`kiln:actors`; editors get its types from `@kiln/types`, generated from `actors.ts` with every
+other `kiln:` module (`scripts/gen-kiln-types.sh`). An Effect service over an actor is a scoped
+acquire of `spawnActor` released by `owner.stop()` (docs/actors.md). The paragraph below records
+the earlier transition.
 
 `@kiln/concurrency` remains as a compatibility import that re-exports `kiln:actors` and its
 types, and no longer constructs an in-realm proxy or exports identity `isolate`/`transfer`

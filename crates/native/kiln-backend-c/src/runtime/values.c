@@ -1,7 +1,51 @@
 
 void kiln_c99_publish_diagnostic(void);
 
-static kiln_value kiln_c99_builtin(uint64_t code) {
+/* The native module loader may update a live export cell only after its runner-scoped
+ * namespace-spy capability has authorized the realm. Keep the mutation here,
+ * where the boxed-cell representation and heap write barrier are authoritative. */
+int kiln_c99_module_spy_store_cell(kiln_value cell, kiln_value value) {
+    kiln_val boxed = kiln_val_from_boundary(cell);
+    if ((boxed & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR(boxed), kiln_val_from_boundary(value));
+    return KILN_C99_OK;
+}
+
+/* Defined later in strings.c; all runtime parts share one translation unit. */
+static int kiln_c99_is_trimmed(uint16_t unit);
+_Thread_local kiln_js_frame *kiln_c99_js_frame_top = NULL;
+static _Thread_local const kiln_string *kiln_c99_js_frame_pending_method_name = NULL;
+
+void kiln_c99_js_frame_set_method_name(const kiln_string *method_name) {
+    kiln_c99_js_frame_pending_method_name = method_name;
+}
+
+void kiln_c99_js_frame_enter(kiln_js_frame *frame, const kiln_closure *closure) {
+    frame->previous = kiln_c99_js_frame_top;
+    frame->closure = closure;
+    frame->method_name = kiln_c99_js_frame_pending_method_name;
+    kiln_c99_js_frame_pending_method_name = NULL;
+    frame->instruction_source = closure != NULL ? closure->diagnostic_source : NULL;
+    frame->instruction = 0;
+    frame->line = 0;
+    frame->column = 0;
+    kiln_c99_js_frame_top = frame;
+}
+
+void kiln_c99_js_frame_leave(kiln_js_frame *frame) {
+    if (kiln_c99_js_frame_top == frame) kiln_c99_js_frame_top = frame->previous;
+}
+
+void kiln_c99_js_frame_note_instruction(const char *source, size_t instruction,
+                                        size_t line, size_t column) {
+    if (kiln_c99_js_frame_top == NULL) return;
+    kiln_c99_js_frame_top->instruction_source = source;
+    kiln_c99_js_frame_top->instruction = instruction;
+    kiln_c99_js_frame_top->line = line;
+    kiln_c99_js_frame_top->column = column;
+}
+
+kiln_value kiln_c99_builtin(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_BUILTIN, code, NULL, 0);
 }
 
@@ -11,9 +55,178 @@ static int kiln_c99_is_callable(kiln_value value) {
     /* A proxy answers for what it stands in front of: `new Proxy(f, {})` is a function and
      * `new Proxy({}, {})` is not, and `typeof` has to say so before any trap is consulted. */
     value = kiln_c99_proxy_inner(value);
+    if (value.tag == KILN_VALUE_BUILTIN &&
+        (value.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE ||
+         (value.bits >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
+          value.bits <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE) ||
+         value.bits == KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE ||
+         value.bits == KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE ||
+         value.bits == KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE))
+        return 0;
     return value.tag == KILN_VALUE_FUNCTION || value.tag == KILN_VALUE_BUILTIN ||
            value.tag == KILN_VALUE_METHOD || value.tag == KILN_VALUE_SETTLER ||
            value.tag == KILN_VALUE_BOUND || value.tag == KILN_VALUE_COMMONJS_REQUIRE;
+}
+
+static int kiln_c99_new_frame_snapshot(kiln_host *host, kiln_value *out,
+                                       const kiln_js_frame *frame, int depth,
+                                       kiln_value *thrown) {
+    const char *source = frame->instruction_source;
+    kiln_value function_name = kiln_c99_undefined();
+    int status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    if (source == NULL && frame->closure != NULL) source = frame->closure->diagnostic_source;
+    if (frame->closure != NULL && frame->closure->name != NULL) {
+        function_name = kiln_c99_value(KILN_VALUE_STRING, 0,
+                                       (const char *)frame->closure->name,
+                                       frame->closure->name->unit_len);
+    } else if (frame->method_name != NULL) {
+        function_name = kiln_c99_value(KILN_VALUE_STRING, 0,
+                                       (const char *)frame->method_name,
+                                       frame->method_name->unit_len);
+    }
+    status = kiln_c99_put_mode(host, *out, "fileName", 8,
+                               source != NULL ? kiln_c99_copy_text(source, strlen(source))
+                                              : kiln_c99_undefined(),
+                               1, depth, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put_mode(host, *out, "functionName", 12, function_name, 1, depth,
+                                   thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put_mode(
+            host, *out, "methodName", 10,
+            frame->method_name != NULL
+                ? kiln_c99_value(KILN_VALUE_STRING, 0,
+                                 (const char *)frame->method_name,
+                                 frame->method_name->unit_len)
+                : kiln_c99_undefined(),
+            1, depth, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put_mode(host, *out, "instruction", 11,
+                                   kiln_c99_number((double)frame->instruction), 1, depth,
+                                   thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put_mode(host, *out, "lineNumber", 10,
+                                   frame->line ? kiln_c99_number((double)frame->line)
+                                               : kiln_c99_undefined(),
+                                   1, depth, thrown);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put_mode(host, *out, "columnNumber", 12,
+                                   frame->column ? kiln_c99_number((double)frame->column)
+                                                 : kiln_c99_undefined(),
+                                   1, depth, thrown);
+    return status;
+}
+
+/* Error construction records activation metadata while the frames are still live. The public
+ * stack formatting policy belongs to errors.ts; this kernel primitive only copies source/name
+ * data into ordinary values, just like Error.captureStackTrace does. */
+int kiln_c99_capture_error_frames(kiln_value *result, size_t limit) {
+    kiln_value frames;
+    size_t count = 0;
+    int status = kiln_c99_new_array(&frames);
+    if (status != KILN_C99_OK) return status;
+    for (kiln_js_frame *frame = kiln_c99_js_frame_top; frame != NULL;
+         frame = frame->previous) {
+        if (count >= limit) break;
+        kiln_value snapshot;
+        status = kiln_c99_new_frame_snapshot(NULL, &snapshot, frame, 0, NULL);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_array_push(frames, snapshot);
+        if (status != KILN_C99_OK) return status;
+        ++count;
+    }
+    *result = frames;
+    return KILN_C99_OK;
+}
+
+int kiln_c99_error_capture_stack_trace(kiln_host *host, kiln_value *result,
+                                       const kiln_value *args, size_t argc, int depth,
+                                       kiln_value *thrown) {
+    kiln_value target = argc > 0 ? args[0] : kiln_c99_undefined();
+    kiln_value constructor = argc > 1 ? args[1] : kiln_c99_undefined();
+    kiln_value sites;
+    int skipping = constructor.tag != KILN_VALUE_UNDEFINED;
+    int skipping_facade = 1;
+    int status;
+    /* Registration is an internal use of this already-owned intrinsic. The opaque token is
+     * created in errors.ts's closure and retained only by the call; it cannot be guessed from JS. */
+    if (target.tag == KILN_VALUE_BUILTIN && target.bits == KILN_C99_BUILTIN_ERROR &&
+        argc >= 5 && args[3].tag == KILN_VALUE_OBJECT && args[4].tag == KILN_VALUE_OBJECT &&
+        args[1].tag == KILN_VALUE_FUNCTION && args[2].tag == KILN_VALUE_FUNCTION) {
+        void *getter_slot = NULL;
+        void *setter_slot = NULL;
+        void *brand_token_slot = NULL;
+        status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_GETTER, &getter_slot);
+        if (status != KILN_C99_OK) return status;
+        if (getter_slot == NULL) return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_SETTER, &setter_slot);
+        if (status != KILN_C99_OK) return status;
+        if (setter_slot == NULL) return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_BRAND_TOKEN,
+                                       &brand_token_slot);
+        if (status != KILN_C99_OK) return status;
+        if (brand_token_slot == NULL) return KILN_C99_INVALID_ARGUMENT;
+        if (((kiln_value *)getter_slot)->tag == KILN_VALUE_UNDEFINED) {
+            *(kiln_value *)getter_slot = args[1];
+            *(kiln_value *)setter_slot = args[2];
+            *(kiln_value *)brand_token_slot = args[4];
+        }
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (argc > 2 && args[2].tag == KILN_VALUE_OBJECT) {
+        void *brand_token_slot = NULL;
+        status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_BRAND_TOKEN,
+                                       &brand_token_slot);
+        if (status != KILN_C99_OK) return status;
+        *result = kiln_c99_boolean(
+            brand_token_slot != NULL &&
+            args[2].tag == KILN_VALUE_OBJECT &&
+            ((kiln_value *)brand_token_slot)->tag == KILN_VALUE_OBJECT &&
+            args[2].ptr == ((kiln_value *)brand_token_slot)->ptr &&
+            target.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(target)->error_brand);
+        return KILN_C99_OK;
+    }
+    /* errors.ts uses the already-captured primitive in this internal mode when the public lazy
+     * stack getter is first read. Reserved frame metadata never becomes a reflectable property. */
+    if (argc > 2 && args[2].tag == KILN_VALUE_BOOLEAN && args[2].bits != 0) {
+        *result = target.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(target)->error_brand
+                      ? kiln_c99_object_of(target)->error_stack_frames
+                      : kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL ||
+        target.tag == KILN_VALUE_BOOLEAN || target.tag == KILN_VALUE_NUMBER ||
+        target.tag == KILN_VALUE_STRING || target.tag == KILN_VALUE_SYMBOL ||
+        target.tag == KILN_VALUE_BIGINT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Error.captureStackTrace target must be an object");
+    }
+    if (constructor.tag != KILN_VALUE_UNDEFINED && !kiln_c99_is_callable(constructor)) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Error.captureStackTrace constructorOpt must be a function");
+    }
+    status = kiln_c99_new_array(&sites);
+    if (status != KILN_C99_OK) return status;
+    for (kiln_js_frame *frame = kiln_c99_js_frame_top; frame != NULL;
+         frame = frame->previous) {
+        if (skipping_facade) {
+            skipping_facade = 0;
+            continue;
+        }
+        if (skipping) {
+            if (constructor.bits == (uint64_t)(uintptr_t)frame->closure) skipping = 0;
+            continue;
+        }
+        kiln_value snapshot;
+        status = kiln_c99_new_frame_snapshot(host, &snapshot, frame, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_array_push(sites, snapshot);
+        if (status != KILN_C99_OK) return status;
+    }
+    *result = sites;
+    return KILN_C99_OK;
 }
 
 /* Every reference value reduces to a primitive before a coercing operator, and none of them can
@@ -71,6 +284,7 @@ static int kiln_c99_has_intrinsic_text(kiln_value value) {
     switch (value.tag) {
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_PROMISE:
+    case KILN_VALUE_TIMER:
     case KILN_VALUE_GENERATOR:
     case KILN_VALUE_REGEXP:
     case KILN_VALUE_ARRAY_BUFFER:
@@ -133,12 +347,27 @@ static kiln_closure *kiln_c99_closure_of(kiln_value value) {
     return (kiln_closure *)(uintptr_t)value.bits;
 }
 
+void kiln_c99_closure_set_external_owner(kiln_closure *closure, void *owner) {
+    if (closure == NULL) return;
+    kiln_c99_heap_store_pointer(closure, &closure->external_owner, owner);
+}
+
+int kiln_c99_object_set_external_owner(kiln_value object_value, void *owner) {
+    kiln_object *object;
+    if (object_value.tag != KILN_VALUE_OBJECT || object_value.bits == 0)
+        return KILN_C99_INVALID_ARGUMENT;
+    object = (kiln_object *)(uintptr_t)object_value.bits;
+    kiln_c99_heap_store_pointer(object, &object->external_owner, owner);
+    return KILN_C99_OK;
+}
+
 
 static kiln_val *kiln_c99_cell_of(kiln_value value) {
     return (kiln_val *)(uintptr_t)value.bits;
 }
 
 static int kiln_c99_val_make_cell(kiln_val *slot);
+static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown);
 
 /* Turn a slot into a box in place.  Whatever the slot already held becomes the box's first
  * contents, which is what makes `let x = 1;` followed by a closure over `x` see the 1. */
@@ -195,6 +424,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const kiln_
         kiln_c99_heap_copy_vals(closure, upvalues, captured, count);
     }
     closure->body = body;
+    closure->module_host = NULL;
     closure->generator = generator;
     closure->asynchronous = asynchronous;
     closure->local_count = local_count;
@@ -276,6 +506,7 @@ static int kiln_c99_region_closure(kiln_value *out, kiln_closure **site, kiln_bo
         kiln_closure *closure = (kiln_closure *)kiln_c99_region_alloc(KILN_GC_CLOSURE, sizeof *closure);
         if (closure != NULL) {
             closure->body = body;
+            closure->module_host = NULL;
             closure->generator = generator;
             closure->asynchronous = asynchronous;
             closure->local_count = local_count;
@@ -416,7 +647,10 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
     int saved_mapped_arguments = kiln_c99_frame_mapped_arguments;
     kiln_value saved_callee = kiln_c99_frame_callee;
     int saved_diagnostic_depth = kiln_c99_diagnostic_active_depth;
+    kiln_js_frame js_frame;
+    kiln_host closure_host;
     int status;
+    host = kiln_c99_closure_host(host, closure, &closure_host);
     if (!inherit_new_target) {
         kiln_c99_new_target =
             closure->arrow ? kiln_val_to_boundary(closure->captured_new_target) : kiln_c99_undefined();
@@ -433,6 +667,7 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
         kiln_c99_frame_argc = argc;
     }
     kiln_c99_diagnostic_active_depth = depth + 1;
+    kiln_c99_js_frame_enter(&js_frame, closure);
     kiln_call_context ctx;
     ctx.host = host;
     ctx.thrown = thrown;
@@ -458,6 +693,7 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
     if (status == KILN_C99_CONTROL_ERROR) {
         *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());
     }
+    kiln_c99_js_frame_leave(&js_frame);
     kiln_c99_new_target = saved_target;
     kiln_c99_frame_args = saved_args;
     kiln_c99_frame_argc = saved_argc;
@@ -503,6 +739,15 @@ static void kiln_c99_attribute_body_function(const kiln_closure *closure) {
     }
 }
 
+void kiln_c99_attribute_direct_body_result(const kiln_closure *closure, int depth, int status) {
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_site == NULL) kiln_c99_attribute_body_refusal(closure, depth);
+        else kiln_c99_attribute_body_function(closure);
+    } else if (status == KILN_C99_THROWN) {
+        kiln_c99_attribute_body_function(closure);
+    }
+}
+
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((always_inline))
 #endif
@@ -518,13 +763,18 @@ static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result,
     if (!closure->publishes_frame && !inherit_new_target) {
         int saved_depth = kiln_c99_diagnostic_active_depth;
         int quick;
+        kiln_js_frame js_frame;
+        kiln_host closure_host;
+        host = kiln_c99_closure_host(host, closure, &closure_host);
         kiln_c99_diagnostic_active_depth = depth + 1;
+        kiln_c99_js_frame_enter(&js_frame, closure);
         kiln_call_context ctx;
         ctx.host = host;
         ctx.thrown = thrown;
         ctx.frame = frame;
         ctx.depth = depth + 1;
         quick = closure->body(&ctx, result, closure->upvalues, &receiver, args, argc);
+        kiln_c99_js_frame_leave(&js_frame);
         if (quick == KILN_C99_CONTROL_ERROR) {
             if (kiln_c99_diagnostic_site == NULL) kiln_c99_attribute_body_refusal(closure, depth);
             else kiln_c99_attribute_body_function(closure);
@@ -576,10 +826,12 @@ static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_
 static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
                                          const kiln_value *args, size_t argc,
                                          int depth, kiln_value *thrown);
+int kiln_c99_dynamic_indirect_eval(kiln_host *host, size_t argc, const kiln_value *args,
+                                  kiln_value *out, int depth, kiln_value *thrown);
 
-static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
-                         kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                         kiln_value *thrown) {
+static int kiln_c99_call_inner(kiln_host *host, kiln_value *result, kiln_value callee,
+                               kiln_value receiver, const kiln_value *args, size_t argc,
+                               int depth, kiln_value *thrown) {
     kiln_closure *closure;
     if (kiln_c99_intrinsic_has_instance(callee)) {
         int answer;
@@ -672,14 +924,21 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                                       thrown);
     }
     if (callee.tag == KILN_VALUE_BUILTIN) {
-        static const char empty[] = "";
         switch (callee.bits) {
+#if KILN_RETAIN_GROUP_BUFFER
+        case KILN_C99_BUILTIN_BUFFER:
+            return kiln_c99_buffer_legacy(result, args, argc, thrown);
+#endif
+        case KILN_C99_BUILTIN_TYPED_ARRAY:
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Abstract class TypedArray cannot be called directly");
         case KILN_C99_BUILTIN_STRING: {
             /* `String()` with no argument is the empty string, not `"undefined"`. */
             kiln_value subject;
             int status;
             if (argc == 0) {
-                *result = kiln_c99_value(KILN_VALUE_STRING, 0, empty, 0);
+                *result = kiln_c99_value(KILN_VALUE_STRING, 0,
+                                          (const char *)&kiln_c99_empty_string, 0);
                 return KILN_C99_OK;
             }
             /* The *string* hint: `toString` before `valueOf`, which is the other way round from
@@ -733,16 +992,64 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             if (subject.tag == KILN_VALUE_STRING) {
                 /* A string that is not an integer is a SyntaxError, unlike `Number("x")` which
                  * is NaN -- a BigInt has no NaN to be. */
-                size_t subject_len = 0;
-                const char *subject_bytes = kiln_c99_string_ascii_bytes(subject, &subject_len);
-                if (subject_bytes == NULL || kiln_bigint_parse((const unsigned char *)subject_bytes,
-                                      subject_len, 10,
-                                      &handle) != 0) {
+                const kiln_string *subject_string =
+                    subject.ptr == NULL ? NULL : (const kiln_string *)subject.ptr;
+                size_t first = 0;
+                size_t last = subject_string == NULL ? 0 : subject_string->unit_len;
+                uint32_t radix = 10;
+                const unsigned char *digits = NULL;
+                unsigned char *owned_digits = NULL;
+                size_t digit_len;
+                int parsed = -1;
+                int empty_input;
+                if (subject_string == NULL) {
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
                                                 "Cannot convert this string to a BigInt");
                 }
-                *result = kiln_c99_bigint_value(handle);
-                return KILN_C99_OK;
+                /* BigInt string grammar accepts unsigned 0x/0o/0b prefixes in addition to
+                 * signed decimal. The provider parses digits in a caller-selected radix, so
+                 * strip only a recognized prefix here; signed non-decimal forms stay invalid. */
+                while (first < last && kiln_c99_is_trimmed(
+                           (uint16_t)kiln_string_unit_at(subject_string, first)))
+                    ++first;
+                while (last > first && kiln_c99_is_trimmed(
+                           (uint16_t)kiln_string_unit_at(subject_string, last - 1)))
+                    --last;
+                empty_input = first == last;
+                if (last - first >= 2 && kiln_string_unit_at(subject_string, first) == '0') {
+                    uint32_t prefix = kiln_string_unit_at(subject_string, first + 1);
+                    if (prefix == 'x' || prefix == 'X') radix = 16;
+                    else if (prefix == 'o' || prefix == 'O') radix = 8;
+                    else if (prefix == 'b' || prefix == 'B') radix = 2;
+                    if (radix != 10) first += 2;
+                }
+                digit_len = last - first;
+                if (empty_input) {
+                    static const unsigned char zero[] = "0";
+                    parsed = kiln_bigint_parse(zero, 1, 10, &handle);
+                } else if (digit_len != 0 && !kiln_string_is_utf16(subject_string)) {
+                    digits = (const unsigned char *)kiln_string_latin1(subject_string) + first;
+                } else if (digit_len != 0) {
+                    size_t index;
+                    owned_digits = (unsigned char *)malloc(digit_len);
+                    if (owned_digits == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    for (index = 0; index < digit_len; ++index) {
+                        uint32_t unit = kiln_string_unit_at(subject_string, first + index);
+                        if (unit > 0x7f) break;
+                        owned_digits[index] = (unsigned char)unit;
+                    }
+                    if (index == digit_len) digits = owned_digits;
+                }
+                if (digit_len != 0 && digits != NULL)
+                    parsed = kiln_bigint_parse(digits, digit_len, radix, &handle);
+                free(owned_digits);
+                if (parsed == 0) {
+                    *result = kiln_c99_bigint_value(handle);
+                    return KILN_C99_OK;
+                } else {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
+                                                "Cannot convert this string to a BigInt");
+                }
             }
             /* Only an exact integer converts: `BigInt(1.5)` is a RangeError rather than a
              * rounding, because rounding is the thing this type exists to avoid. */
@@ -777,6 +1084,7 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         case KILN_C99_BUILTIN_INT32_ARRAY:
         case KILN_C99_BUILTIN_UINT32_ARRAY:
         case KILN_C99_BUILTIN_FLOAT32_ARRAY:
+        case KILN_C99_BUILTIN_FLOAT16_ARRAY:
         case KILN_C99_BUILTIN_FLOAT64_ARRAY: {
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "typed array constructor requires 'new'");
@@ -827,6 +1135,9 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             return kiln_c99_object_constructor(result, args, argc);
         case KILN_C99_BUILTIN_FUNCTION:
             return kiln_c99_dynamic_new_function(host, result, args, argc, depth, thrown);
+        case KILN_C99_BUILTIN_EVAL:
+            /* Dynamic source evaluation owns eval's argument and scope semantics. */
+            return kiln_c99_dynamic_indirect_eval(host, argc, args, result, depth, thrown);
         case KILN_C99_BUILTIN_ERROR:
         case KILN_C99_BUILTIN_TYPE_ERROR:
         case KILN_C99_BUILTIN_RANGE_ERROR:
@@ -855,6 +1166,10 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         }
     }
     closure = kiln_c99_closure_of(callee);
+    if (closure->is_class && !kiln_c99_inheriting_new_target) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Class constructor cannot be invoked without 'new'");
+    }
     if (closure->arrow) {
         receiver = kiln_val_to_boundary(closure->captured_this);
     } else if (!closure->strict &&
@@ -945,4 +1260,13 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         *result = kiln_val_to_boundary(vres);
         return status;
     }
+}
+
+int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
+                  kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                  kiln_value *thrown) {
+    int owns_job = kiln_c99_gc_enter_job_if_idle();
+    int status = kiln_c99_call_inner(host, result, callee, receiver, args, argc, depth, thrown);
+    if (owns_job) kiln_c99_gc_leave_job();
+    return status;
 }

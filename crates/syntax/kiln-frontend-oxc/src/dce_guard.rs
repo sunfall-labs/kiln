@@ -49,6 +49,63 @@ use oxc_span::SPAN;
 /// wrapper ever survived to lowering it would be a loud `ReferenceError`, never a wrong value.
 pub(crate) const OBSERVABLE: &str = "kiln:observable";
 
+/// Remove TypeScript expression wrappers that have no runtime representation before handing the
+/// tree to Oxc's JavaScript-only minifier. Oxc's optional-chain fold unwraps these nodes to inspect
+/// the inner expression, then attempts to reinterpret the outer node as a member expression; a
+/// wrapped chain member consequently panics. Owned HIR already erases these same wrappers, so this
+/// normalization changes no runtime expression and does not lower enums or namespaces.
+pub(crate) fn erase_expression_types_for_dce<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+) {
+    ExpressionTypeEraser {
+        builder: AstBuilder::new(allocator),
+    }
+    .visit_program(program);
+}
+
+struct ExpressionTypeEraser<'a> {
+    builder: AstBuilder<'a>,
+}
+
+impl<'a> VisitMut<'a> for ExpressionTypeEraser<'a> {
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        walk_mut::walk_expression(self, expression);
+        let inner = match expression {
+            Expression::TSAsExpression(wrapper) => Some(wrapper.expression.take_in(&self.builder)),
+            Expression::TSSatisfiesExpression(wrapper) => {
+                Some(wrapper.expression.take_in(&self.builder))
+            }
+            Expression::TSTypeAssertion(wrapper) => Some(wrapper.expression.take_in(&self.builder)),
+            Expression::TSNonNullExpression(wrapper) => {
+                Some(wrapper.expression.take_in(&self.builder))
+            }
+            Expression::TSInstantiationExpression(wrapper) => {
+                Some(wrapper.expression.take_in(&self.builder))
+            }
+            _ => None,
+        };
+        if let Some(inner) = inner {
+            *expression = inner;
+        }
+    }
+
+    fn visit_chain_element(&mut self, element: &mut ChainElement<'a>) {
+        walk_mut::walk_chain_element(self, element);
+        // `foo?.bar!` is represented by a TypeScript wrapper inside the optional-chain element
+        // rather than as an `Expression`. `walk_expression` never sees that wrapper, but Oxc's
+        // JS minifier still unwraps it while folding the chain and can panic if it later tries to
+        // reinterpret the wrapper as a member expression. Erase it here while preserving the
+        // chain boundary and wrapped member.
+        if let ChainElement::TSNonNullExpression(wrapper) = element {
+            let expression = wrapper.expression.take_in(&self.builder);
+            if let Some(chain_element) = expression.into_chain_element() {
+                *element = chain_element;
+            }
+        }
+    }
+}
+
 /// Wrap every expression in `program` that Oxc could wrongly judge free of effects.
 pub(crate) fn guard_observable_effects<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
     FunctionSemanticsGuard {
@@ -324,6 +381,16 @@ impl Facts<'_> {
     /// Whether Oxc might judge `expression` itself free of effects when it is not.
     fn needs_guard(&self, expression: &Expression<'_>) -> bool {
         match expression {
+            // Oxc's minifier treats recognized globals such as `Date` and `Math` as constant
+            // values. In this runtime, source names resolve through the mutable global object:
+            // even a discarded identifier read can call an accessor or throw after deletion.
+            // Keep only names that the compiler itself resolves as builtins, and only when the
+            // reference remains unresolved in this scope; ordinary locals retain normal DCE.
+            Expression::Identifier(identifier) => {
+                self.is_unresolved(identifier)
+                    && kiln_builtin_surface::GlobalBuiltin::from_name(identifier.name.as_str())
+                        .is_some()
+            }
             Expression::BinaryExpression(binary) => {
                 let coerces_both =
                     || !self.is_primitive(&binary.left) || !self.is_primitive(&binary.right);
@@ -342,6 +409,10 @@ impl Facts<'_> {
                 }
             }
             Expression::UnaryExpression(unary) => {
+                // DCE has historically folded deletes of constant primitive properties to
+                // `true`. Guarding the whole unary expression still lets Oxc fold the member
+                // reference inside the call argument. Delete's receiver/key are guarded
+                // separately by `Collect`, preserving the Reference that delete operates on.
                 matches!(
                     unary.operator,
                     UnaryOperator::UnaryPlus
@@ -453,6 +524,24 @@ struct Collect<'s> {
 
 impl<'a> Visit<'a> for Collect<'_> {
     fn visit_expression(&mut self, it: &Expression<'a>) {
+        if let Expression::UnaryExpression(unary) = it
+            && unary.operator == UnaryOperator::Delete
+        {
+            match unary.argument.without_parentheses() {
+                Expression::StaticMemberExpression(member) => {
+                    self.targets.insert(member.object.address());
+                }
+                Expression::ComputedMemberExpression(member) => {
+                    self.targets.insert(member.object.address());
+                    if !self.facts.is_primitive(&member.expression)
+                        && !self.facts.is_well_known_symbol(&member.expression)
+                    {
+                        self.targets.insert(member.expression.address());
+                    }
+                }
+                _ => {}
+            }
+        }
         if self.facts.needs_guard(it) {
             self.targets.insert(it.address());
         }

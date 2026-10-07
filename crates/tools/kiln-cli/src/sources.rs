@@ -14,11 +14,11 @@ use std::sync::OnceLock;
 use crate::error::{Error, Result};
 use kiln_module_resolver::{
     NodeModuleFormat as ResolverNodeModuleFormat, NodePackageResolver, NodeRequestKind,
-    ResolutionKind, ResolutionPolicy, is_asset_extension,
+    NodeRuntimeResolver, ResolutionKind, ResolutionPolicy, is_asset_extension,
 };
 use kiln_proto::{
-    DeclaredInclude, NodeModuleFormat, NodeSourceFormat, PackageResolution, SourceDigest,
-    source_digest,
+    DeclaredInclude, NodeModuleFormat, NodeSourceFormat, PackageResolution,
+    RuntimePackageAlias as WireRuntimePackageAlias, SourceDigest, source_digest,
 };
 
 /// The root package's explicit closed-world module declaration (ADR 0067 §2). A relative
@@ -408,6 +408,16 @@ pub(crate) fn include_reachable_dependencies(
     Ok((resolutions, formats))
 }
 
+fn needs_node_source_format(path: &Path, node: bool) -> bool {
+    node || path
+        .components()
+        .any(|component| component.as_os_str() == "node_modules")
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "mjs" | "mts" | "cjs" | "cts"))
+}
+
 pub(crate) fn include_reachable_dependencies_with_includes(
     root: &Path,
     entry: &str,
@@ -419,8 +429,46 @@ pub(crate) fn include_reachable_dependencies_with_includes(
     Vec<DeclaredInclude>,
 )> {
     let (resolutions, formats, includes, _) =
-        include_reachable_dependencies_with_checker_metadata(root, entry, texts, node, false)?;
+        include_reachable_dependencies_with_aliases(root, entry, texts, node)?;
     Ok((resolutions, formats, includes))
+}
+
+pub(crate) fn include_reachable_dependencies_with_aliases(
+    root: &Path,
+    entry: &str,
+    texts: &mut Vec<(String, String)>,
+    node: bool,
+) -> Result<(
+    Vec<PackageResolution>,
+    Vec<NodeSourceFormat>,
+    Vec<DeclaredInclude>,
+    Vec<WireRuntimePackageAlias>,
+)> {
+    include_reachable_dependencies_with_extra_includes(root, entry, texts, node, &[])
+}
+
+pub(crate) fn include_reachable_dependencies_with_extra_includes(
+    root: &Path,
+    entry: &str,
+    texts: &mut Vec<(String, String)>,
+    node: bool,
+    extra_includes: &[String],
+) -> Result<(
+    Vec<PackageResolution>,
+    Vec<NodeSourceFormat>,
+    Vec<DeclaredInclude>,
+    Vec<WireRuntimePackageAlias>,
+)> {
+    let (resolutions, formats, includes, aliases, _) =
+        include_reachable_dependencies_with_checker_metadata(
+            root,
+            entry,
+            texts,
+            node,
+            extra_includes,
+            false,
+        )?;
+    Ok((resolutions, formats, includes, aliases))
 }
 
 pub(crate) fn include_reachable_dependencies_with_checker_metadata(
@@ -428,18 +476,25 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
     entry: &str,
     texts: &mut Vec<(String, String)>,
     node: bool,
+    extra_includes: &[String],
     capture_checker_metadata: bool,
 ) -> Result<(
     Vec<PackageResolution>,
     Vec<NodeSourceFormat>,
     Vec<DeclaredInclude>,
+    Vec<WireRuntimePackageAlias>,
     Vec<(String, String)>,
 )> {
+    if !node && !extra_includes.is_empty() {
+        return Err(Error::BadInput(
+            "additional module includes require the Node adapter".to_owned(),
+        ));
+    }
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
     let entry = PathBuf::from(entry);
     if !entry.starts_with(resolver.project_root()) {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
 
     let mut indexes = texts
@@ -448,7 +503,7 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
         .map(|(index, (path, _))| (PathBuf::from(path), index))
         .collect::<HashMap<_, _>>();
     // The project walk skips dot-directories, so an entry inside one -- `.scratch/probe.mjs` is
-    // the everyday case, since that is where the issue tracker puts working files -- is reachable
+    // the everyday case, since that is where throwaway probes go -- is reachable
     // but absent from the snapshot. Read it here on the same terms a transitively reached module
     // gets read below. Running a file the caller named explicitly must not depend on whether the
     // walk would have volunteered it.
@@ -470,7 +525,11 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
     let mut checker_metadata = BTreeMap::<String, String>::new();
     if node {
         let package_importer = resolver.project_root().join("package.json");
-        for specifier in declared_include_specifiers(resolver.project_root())? {
+        let mut specifiers = declared_include_specifiers(resolver.project_root())?;
+        specifiers.extend(extra_includes.iter().cloned());
+        specifiers.sort();
+        specifiers.dedup();
+        for specifier in specifiers {
             let resolved = resolver
                 .resolve_with_metadata_for_request(
                     &specifier,
@@ -546,7 +605,7 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
         })?;
         let resolved_importer =
             kiln_module_resolver::ResolvedModule::new(importer.clone(), ResolutionKind::Relative);
-        let importer_format = if node {
+        let importer_format = if needs_node_source_format(&importer, node) {
             Some(
                 resolver
                     .node_format(&resolved_importer)
@@ -627,9 +686,9 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
         };
         // Literal createRequire/getBuiltinModule calls are lazy at runtime, but a relative
         // createRequire target still needs its source text in the synchronized snapshot.
-        for runtime in
-            kiln_frontend_oxc::discover_node_runtime_requests(importer_path, importer_text)
-        {
+        // Reuse facts from the classified parse above. Reparsing by extension loses CommonJS
+        // context for .js files and misses dependencies revealed by bounded literal eval.
+        for runtime in &module.node_runtime_requests {
             let runtime_importer = captured_importer_path(&runtime.importer)?;
             if !requests
                 .iter()
@@ -640,7 +699,7 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
                 })
             {
                 requests.push((
-                    runtime.specifier,
+                    runtime.specifier.clone(),
                     NodeRequestKind::Require,
                     false,
                     runtime_importer,
@@ -690,7 +749,10 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(is_asset_extension);
-            if node && !asset {
+            // Package format determines how every source module is parsed and how its
+            // dependencies are collected, even when the Node builtin adapter is disabled.
+            // Keep builtin availability (`node`) separate from module-format metadata.
+            if !asset && needs_node_source_format(&target, node) {
                 let format = resolver
                     .node_format(&resolved.module)
                     .map_err(|error| Error::BadInput(error.to_string()))?
@@ -710,6 +772,15 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
                 _ => false,
             };
             if node || !exact_explicit {
+                // `createRequire()` can bind a loader to a file other than the source that
+                // contains its call. The runtime asks the pinned resolver with that captured
+                // base path, so key the decision by the same importer used above.
+                let resolution_importer = request_importer.to_str().ok_or_else(|| {
+                    Error::BadInput(format!(
+                        "path is not valid UTF-8: {}",
+                        request_importer.display()
+                    ))
+                })?;
                 let package_json = resolved.package_json.as_deref();
                 let (package_json, package_json_hash) = if let Some(package_json) = package_json {
                     let package_json_text = if capture_checker_metadata {
@@ -731,9 +802,9 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
                     (None, None)
                 };
                 resolutions.insert(
-                    (importer_path.to_owned(), specifier.clone(), request),
+                    (resolution_importer.to_owned(), specifier.clone(), request),
                     PackageResolution {
-                        importer: importer_path.to_owned(),
+                        importer: resolution_importer.to_owned(),
                         specifier: specifier.clone(),
                         target: target.to_string_lossy().into_owned(),
                         condition: match request {
@@ -767,6 +838,26 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
 
     texts.sort_by(|left, right| left.0.cmp(&right.0));
     let checker_metadata = checker_metadata.into_iter().collect();
+    let targets = texts
+        .iter()
+        .map(|(path, _)| PathBuf::from(path))
+        .collect::<Vec<_>>();
+    // Runtime-created modules resolve from a package entry point rather than from one of the
+    // graph modules. Build the same resolver policy used by the runtime so its verified reverse
+    // export map accompanies the synchronized source snapshot.
+    let runtime_resolver = NodeRuntimeResolver::new(root)
+        .map_err(|error| Error::BadInput(format!("cannot resolve runtime aliases: {error}")))?;
+    let runtime_package_aliases = runtime_resolver
+        .runtime_package_aliases_for_targets(&targets)
+        .into_iter()
+        .map(
+            |(package_root, specifier, target)| WireRuntimePackageAlias {
+                package_root: package_root.to_string_lossy().into_owned(),
+                specifier,
+                target: target.to_string_lossy().into_owned(),
+            },
+        )
+        .collect();
     Ok((
         resolutions.into_values().collect(),
         node_formats
@@ -777,6 +868,7 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
             })
             .collect(),
         declared_includes,
+        runtime_package_aliases,
         checker_metadata,
     ))
 }
@@ -2029,6 +2121,73 @@ mod tests {
                 .iter()
                 .any(|resolution| resolution.specifier == "./worker-dependency.cjs")
         );
+        std::fs::write(tree.0.join("package.json"), "{}").expect("remove manifest includes");
+        let mut cli_texts = Vec::new();
+        let (cli_resolutions, cli_formats, cli_includes, _) =
+            include_reachable_dependencies_with_extra_includes(
+                &root,
+                entry.to_str().expect("UTF-8 path"),
+                &mut cli_texts,
+                true,
+                &[
+                    "./worker-task.cjs".to_owned(),
+                    "./worker-task.cjs".to_owned(),
+                ],
+            )
+            .expect("collect command-line includes");
+        assert_eq!(cli_includes, includes);
+        assert_eq!(cli_resolutions.len(), resolutions.len());
+        assert_eq!(cli_resolutions[0].target, resolutions[0].target);
+        assert_eq!(cli_resolutions[0].importer, resolutions[0].importer);
+        assert_eq!(cli_resolutions[0].specifier, resolutions[0].specifier);
+        assert_ne!(
+            cli_resolutions[0].package_json_hash,
+            resolutions[0].package_json_hash
+        );
+        assert_eq!(cli_formats, formats);
+        assert_eq!(cli_texts, texts);
+    }
+
+    #[test]
+    fn node_launch_preload_root_contributes_format_and_transitive_resolution_metadata() {
+        let tree = Tree::new("node-preload-root");
+        tree.file("src/main.mjs");
+        std::fs::write(tree.0.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package format");
+        std::fs::write(
+            tree.0.join("preload.ts"),
+            "import { value } from './preload-dependency.ts'; globalThis.preloaded = value;\n",
+        )
+        .expect("write preload");
+        std::fs::write(
+            tree.0.join("preload-dependency.ts"),
+            "export const value = 42;\n",
+        )
+        .expect("write preload dependency");
+
+        let root = tree.0.canonicalize().expect("canonical root");
+        let entry = root.join("src/main.mjs");
+        let preload = root.join("preload.ts").to_string_lossy().into_owned();
+        let mut texts = Vec::new();
+        let (resolutions, formats, includes, _) =
+            include_reachable_dependencies_with_extra_includes(
+                &root,
+                entry.to_str().expect("UTF-8 entry"),
+                &mut texts,
+                true,
+                &[preload.clone()],
+            )
+            .expect("collect entry and preload roots");
+
+        assert!(includes.iter().any(|include| include.target == preload));
+        for path in [root.join("preload.ts"), root.join("preload-dependency.ts")] {
+            let path = path.to_string_lossy();
+            assert!(texts.iter().any(|(captured, _)| captured == &path));
+            assert!(formats.iter().any(|format| format.path == path));
+        }
+        assert!(resolutions.iter().any(|resolution| {
+            resolution.importer == preload && resolution.specifier == "./preload-dependency.ts"
+        }));
     }
 
     #[test]
@@ -2095,6 +2254,62 @@ mod tests {
     }
 
     #[test]
+    fn runtime_alias_snapshot_contains_only_discovered_export_targets() {
+        let tree = Tree::new("runtime-alias-snapshot");
+        std::fs::write(
+            tree.0.join("package.json"),
+            r#"{"name":"effect","type":"module","exports":{"./*":"./src/*.ts","./hidden/*":null}}"#,
+        )
+        .expect("write project manifest");
+        std::fs::write(
+            tree.0.join("main.ts"),
+            "import { value } from './src/schema/SchemaCompiler/runtime.ts'; console.log(value);",
+        )
+        .expect("write entry");
+        std::fs::create_dir_all(tree.0.join("src/schema/SchemaCompiler"))
+            .expect("create reachable source directory");
+        std::fs::write(
+            tree.0.join("src/schema/SchemaCompiler/runtime.ts"),
+            "export const value = 1;",
+        )
+        .expect("write reachable export");
+        std::fs::write(
+            tree.0.join("src/schema/unused.ts"),
+            "export const unused = 2;",
+        )
+        .expect("write undiscovered export");
+
+        let root = tree.0.canonicalize().expect("canonical root");
+        let mut texts = Vec::new();
+        let (_, _, _, aliases) = include_reachable_dependencies_with_aliases(
+            &root,
+            root.join("main.ts").to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("collect runtime aliases");
+        let entry_target = root.join("src/schema/SchemaCompiler/runtime.ts");
+        let unused_target = root.join("src/schema/unused.ts");
+        assert!(
+            aliases.iter().any(|alias| {
+                alias.specifier == "effect/schema/SchemaCompiler/runtime"
+                    && alias.target == entry_target.to_string_lossy()
+            }),
+            "aliases were {aliases:?}"
+        );
+        assert!(
+            aliases
+                .iter()
+                .all(|alias| { texts.iter().any(|(path, _)| path == &alias.target) })
+        );
+        assert!(
+            aliases
+                .iter()
+                .all(|alias| alias.target != unused_target.to_string_lossy())
+        );
+    }
+
+    #[test]
     fn collects_sources_and_skips_the_usual_noise() {
         let tree = Tree::new("walk");
         tree.file("src/b.ts");
@@ -2147,7 +2362,7 @@ mod tests {
         .expect("write entry");
         std::fs::write(
             tree.0.join("node_modules/pkg/package.json"),
-            r#"{"exports":"./index.js"}"#,
+            r#"{"type":"module","exports":"./index.js"}"#,
         )
         .expect("write manifest");
         std::fs::write(
@@ -2221,7 +2436,44 @@ mod tests {
                     .into_owned()
             )
         );
+        assert_eq!(node_formats.len(), 2);
+        assert!(node_formats.iter().all(|format| {
+            format.path.contains("node_modules/pkg/") && format.format == NodeModuleFormat::EsModule
+        }));
+    }
+
+    #[test]
+    fn ordinary_typescript_modules_keep_the_default_esm_policy_without_node_mode() {
+        let tree = Tree::new("ordinary-typescript-esm-policy");
+        tree.file("src/main.ts");
+        tree.file("src/dep.ts");
+        std::fs::write(
+            tree.0.join("src/main.ts"),
+            "import { value } from './dep.ts'; export const result = value;\n",
+        )
+        .expect("write ESM entry");
+        std::fs::write(tree.0.join("src/dep.ts"), "export const value = 42;\n")
+            .expect("write ESM dependency");
+        let entry = tree
+            .0
+            .join("src/main.ts")
+            .canonicalize()
+            .expect("canonical entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+
+        let (_, node_formats) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            false,
+        )
+        .expect("capture ordinary TypeScript graph");
+
         assert!(node_formats.is_empty());
+        assert!(texts.iter().any(|(path, _)| path.ends_with("dep.ts")));
     }
 
     #[test]
@@ -2397,7 +2649,7 @@ mod tests {
     /// The project walk skips every dot-directory, so nothing under `.scratch/` is in the
     /// snapshot. Naming such a file as the entry used to fail with "reachable module was not
     /// captured in the source snapshot", which reads like a compiler bug and cost several people
-    /// an afternoon each; `.scratch/` is where `docs/agents/issue-tracker.md` tells them to work.
+    /// an afternoon each; `.scratch/` is where throwaway probes go.
     #[test]
     fn an_entry_inside_a_dot_directory_runs_with_its_own_neighbours() {
         let tree = Tree::new("dot-directory-entry");
@@ -2575,6 +2827,64 @@ mod tests {
         assert!(resolutions.is_empty());
         assert_eq!(node_formats.len(), 1);
         assert_eq!(texts.len(), 1);
+    }
+
+    #[test]
+    fn create_require_resolution_is_pinned_to_its_captured_base() {
+        let tree = Tree::new("create-require-base-resolution");
+        tree.file("main.mjs");
+        tree.file("loader/index.cjs");
+        tree.file("loader/node_modules/pkg/package.json");
+        tree.file("loader/node_modules/pkg/index.js");
+        std::fs::write(
+            tree.0.join("loader/node_modules/pkg/package.json"),
+            r#"{"main":"index.js"}"#,
+        )
+        .expect("write nested package manifest");
+        std::fs::write(
+            tree.0.join("loader/node_modules/pkg/index.js"),
+            "module.exports = 42;\n",
+        )
+        .expect("write nested package entry");
+        let loader = tree
+            .0
+            .join("loader/index.cjs")
+            .canonicalize()
+            .expect("canonical createRequire base");
+        std::fs::write(
+            tree.0.join("main.mjs"),
+            format!(
+                "import {{ createRequire }} from 'node:module';\nconst require = createRequire({:?});\nrequire('pkg');\n",
+                loader.to_string_lossy()
+            ),
+        )
+        .expect("write entry");
+        let entry = tree.0.join("main.mjs").canonicalize().expect("entry");
+        let mut texts = vec![(
+            entry.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+
+        let (resolutions, _) = include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("resolve createRequire package from its captured base");
+
+        assert!(resolutions.iter().any(|resolution| {
+            resolution.importer == loader.to_string_lossy()
+                && resolution.specifier == "pkg"
+                && resolution
+                    .target
+                    .ends_with("/loader/node_modules/pkg/index.js")
+        }));
+        assert!(
+            texts
+                .iter()
+                .any(|(path, _)| path.ends_with("/pkg/index.js"))
+        );
     }
 
     #[test]
@@ -3104,7 +3414,6 @@ mod tests {
                         )
                     })
                     .collect::<Vec<_>>();
-
                 let resolver = kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
                     root,
                     entries,

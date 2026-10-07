@@ -3,17 +3,24 @@ use kiln_ir::Builtin;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
+mod c99_state_owners;
+use c99_state_owners::{C99_MUTABLE_STATE_OWNERS, C99StateOwner};
+
 mod fixture_cache;
 
 fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -> Program {
     Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants,
         code,
         local_count,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     }
 }
 
@@ -57,6 +64,12 @@ size_t kiln_regexp_group_count(const void *handle) { (void)handle; return 0; }
 int32_t kiln_regexp_group_name(const void *handle, size_t index, unsigned char *buffer,
                                size_t capacity) {
     (void)handle; (void)index; (void)buffer; (void)capacity;
+    return -1;
+}
+size_t kiln_regexp_named_group_count(const void *handle) { (void)handle; return 0; }
+int32_t kiln_regexp_named_group_at(const void *handle, size_t index, unsigned char *buffer,
+                                   size_t capacity, int64_t *from, int64_t *to, size_t *capture) {
+    (void)handle; (void)index; (void)buffer; (void)capacity; (void)from; (void)to; (void)capture;
     return -1;
 }
 int32_t kiln_bigint_parse(const unsigned char *text, size_t len, uint32_t radix, void **out) {
@@ -249,6 +262,7 @@ int32_t kiln_json_parse(const kiln_string *source, const kiln_json_node **out_no
 const REALM_FIXTURE: &str = r#"
 static uint64_t kiln_test_next_timer_id = 1;
 static int kiln_test_realm_active = 0;
+int kiln_test_string_code_generation_allowed = 1;
 static uint64_t kiln_test_symbol_id = 1;
 static uint16_t kiln_test_symbol_key[256];
 static uint64_t kiln_test_symbol_key_len = 0;
@@ -256,7 +270,7 @@ static uint32_t kiln_test_callable_tags[256];
 static uint64_t kiln_test_callable_codes[256];
 static void *kiln_test_callable_stores[256];
 static size_t kiln_test_callable_store_count = 0;
-static kiln_value kiln_test_value_slots[5];
+static kiln_value kiln_test_value_slots[13];
 static kiln_gc_visit_roots_fn kiln_test_registered_visitors[32];
 static void *kiln_test_registered_contexts[32];
 static size_t kiln_test_registered_count = 0;
@@ -313,6 +327,12 @@ int kiln_realm_create(uint64_t *out_realm) {
     kiln_test_registered_count = 0;
     kiln_test_legacy_roots = 0;
     *out_realm = 1;
+    return KILN_C99_OK;
+}
+int kiln_realm_set_string_code_generation(uint64_t realm, int allowed) {
+    if (realm != 1 || (allowed != 0 && allowed != 1) || kiln_test_realm_active)
+        return KILN_C99_INVALID_ARGUMENT;
+    kiln_test_string_code_generation_allowed = allowed;
     return KILN_C99_OK;
 }
 int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context) {
@@ -383,6 +403,24 @@ int kiln_string_normalize(const uint16_t *units, uint64_t count, uint32_t form, 
     *out_len = 0;
     return KILN_C99_INVALID_ARGUMENT;
 }
+/* Provider-disabled C fixtures still link every prelude handler. Provider semantics are covered
+ * by the native-provider and native graph suites rather than these collector fixtures. */
+double kiln_date_parse(const kiln_string *source) {
+    (void)source;
+    return NAN;
+}
+int kiln_intl_string_case(const uint16_t *units, uint64_t count, const uint8_t *locale,
+                         uint64_t locale_len, uint32_t uppercase, uint16_t *out,
+                         uint64_t capacity, uint64_t *out_len) {
+    (void)units; (void)count; (void)locale; (void)locale_len; (void)uppercase;
+    (void)out; (void)capacity; (void)out_len;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_intl_datetime_format(const uint8_t *spec, uint64_t spec_len, double epoch,
+                            uint32_t operation, const uint8_t **out, uint64_t *out_len) {
+    (void)spec; (void)spec_len; (void)epoch; (void)operation; (void)out; (void)out_len;
+    return KILN_C99_INVALID_ARGUMENT;
+}
 int kiln_intl_collate(const uint16_t *left, uint64_t left_len, const uint16_t *right,
                       uint64_t right_len, const uint8_t *spec, uint64_t spec_len,
                       int32_t *out_order) {
@@ -405,6 +443,39 @@ int kiln_url_set(const uint8_t *href, uint64_t href_len, uint32_t field, const u
     *out_len = 0;
     return KILN_C99_INVALID_ARGUMENT;
 }
+int kiln_text_decoder_label(const uint8_t *label, uint64_t label_len, uint8_t *out,
+                            uint64_t capacity, uint64_t *out_len) {
+    (void)label; (void)label_len; (void)out; (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_text_decode(const uint8_t *name, uint64_t name_len, const uint8_t *bytes,
+                     uint64_t bytes_len, uint32_t flags, uint8_t *out, uint64_t capacity,
+                     uint64_t *out_len) {
+    (void)name; (void)name_len; (void)bytes; (void)bytes_len; (void)flags; (void)out;
+    (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_text_decoder_state_create(const uint8_t *label, uint64_t label_len, uint32_t flags,
+                                   void **out_state, uint8_t *out, uint64_t capacity,
+                                   uint64_t *out_len) {
+    (void)label; (void)label_len; (void)flags; (void)out_state; (void)out; (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_text_decoder_state_decode(void *state, const uint8_t *bytes, uint64_t bytes_len,
+                                   uint32_t stream, uint8_t *out, uint64_t capacity,
+                                   uint64_t *out_len) {
+    (void)state; (void)bytes; (void)bytes_len; (void)stream; (void)out; (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+void kiln_text_decoder_state_free(void *state) { (void)state; }
 int kiln_node_path_relative(const uint8_t *from, uint64_t from_len, const uint8_t *to,
                             uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len) {
     (void)from; (void)from_len; (void)to; (void)to_len; (void)out; (void)capacity;
@@ -491,15 +562,15 @@ int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
         ((candidate == NULL) != (drop_candidate == NULL))) {
         return KILN_C99_INVALID_ARGUMENT;
     }
-    if (candidate == NULL) {
-        *out_store = NULL;
-        return KILN_C99_OK;
-    }
     for (index = 0; index < kiln_test_callable_store_count; ++index) {
         if (kiln_test_callable_tags[index] == tag && kiln_test_callable_codes[index] == code) {
             *out_store = kiln_test_callable_stores[index];
             return KILN_C99_OK;
         }
+    }
+    if (candidate == NULL) {
+        *out_store = NULL;
+        return KILN_C99_OK;
     }
     if (kiln_test_callable_store_count == 256) return KILN_C99_OUT_OF_MEMORY;
     index = kiln_test_callable_store_count++;
@@ -510,7 +581,7 @@ int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
     return KILN_C99_OK;
 }
 int kiln_realm_value_slot(uint32_t key, void **out_slot) {
-    if (!kiln_test_realm_active || key == 0 || key > 5 || out_slot == NULL)
+    if (!kiln_test_realm_active || key == 0 || key > 13 || out_slot == NULL)
         return KILN_C99_INVALID_ARGUMENT;
     *out_slot = &kiln_test_value_slots[key - 1];
     return KILN_C99_OK;
@@ -689,6 +760,11 @@ int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn inspect
     (void)root; (void)inspect; (void)unit; (void)context; (void)out;
     return -2;
 }
+int kiln_shared_graph_refusal(uint32_t kind, const char **text) {
+    (void)kind;
+    *text = "cannot share a function";
+    return 0;
+}
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
     (void)hooks;
@@ -736,7 +812,7 @@ int kiln_realm_gc_visit_provider_roots(void *heap, kiln_gc_visit_root_fn visit, 
     size_t index;
     (void)heap;
     if (!kiln_test_realm_active || visit == NULL) return KILN_C99_INVALID_ARGUMENT;
-    for (index = 0; index < 5; ++index)
+    for (index = 0; index < 13; ++index)
         if (visit(context, &kiln_test_value_slots[index], KILN_GC_VISIT_VALUE) != 0)
             return KILN_C99_HOST_ERROR;
     for (index = 0; index < kiln_test_callable_store_count; ++index)
@@ -798,6 +874,11 @@ int kiln_realm_argv_count(uint64_t *out_count) {
     *out_count = 0;
     return KILN_C99_OK;
 }
+int kiln_realm_string_code_generation_allowed(int *out_allowed) {
+    if (!kiln_test_realm_active || out_allowed == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_allowed = kiln_test_string_code_generation_allowed;
+    return KILN_C99_OK;
+}
 int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len) {
     (void)index;
     (void)out_bytes;
@@ -846,6 +927,24 @@ int kiln_realm_clear_timer(uint64_t id) {
     (void)id;
     return KILN_C99_OK;
 }
+int kiln_realm_refresh_timer(uint64_t id) {
+    (void)id;
+    return 0;
+}
+int kiln_realm_rearm_timeout(uint64_t id, double delay_ms, kiln_realm_work_fn run,
+                             kiln_realm_drop_fn drop, void *work) {
+    (void)id;
+    (void)delay_ms;
+    (void)run;
+    (void)drop;
+    (void)work;
+    return 1;
+}
+int kiln_realm_set_timer_ref(uint64_t id, int referenced) {
+    (void)id;
+    (void)referenced;
+    return KILN_C99_OK;
+}
 int kiln_realm_start_active_host_op(const kiln_async_host_op *operation,
                                     kiln_realm_completion_fn run,
                                     kiln_realm_drop_fn drop,
@@ -860,6 +959,10 @@ int kiln_realm_start_active_host_op(const kiln_async_host_op *operation,
 int kiln_realm_cancel_active_request(uint64_t request) {
     (void)request;
     return KILN_REALM_ASYNC_NOT_FOUND;
+}
+int kiln_realm_cancel_active_request_if_pending(uint64_t request) {
+    (void)request;
+    return 0;
 }
 
 /* Scalar backend fixtures never exercise Node HTTP; production artifacts link these symbols
@@ -901,11 +1004,62 @@ int kiln_realm_http_client_owner_active(uint64_t resource, void **out_owner) {
     *out_owner = NULL;
     return KILN_C99_INVALID_ARGUMENT;
 }
+/* Provider seams retained by the current prelude. These fixtures do not execute transports. */
+int kiln_realm_http_agent_connect_failed_active(const uint8_t *host, uint64_t host_len,
+                                                uint16_t port, uint64_t request,
+                                                uint64_t *out_request) {
+    (void)host; (void)host_len; (void)port; (void)request;
+    if (out_request != NULL) *out_request = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_realm_http_agent_cancel_connect_active(const uint8_t *host, uint64_t host_len,
+                                                uint16_t port, uint64_t request,
+                                                uint64_t *out_request) {
+    return kiln_realm_http_agent_connect_failed_active(host, host_len, port, request, out_request);
+}
+int kiln_realm_http_upgrade_write_active_with_fence(uint64_t resource, uint64_t id,
+                                                    const uint8_t *data, uint64_t data_len,
+                                                    uint64_t *out_fence) {
+    (void)resource; (void)id; (void)data; (void)data_len;
+    if (out_fence != NULL) *out_fence = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_crypto_key_import(const uint8_t *data, size_t length, uint32_t kind,
+                           uint64_t *out_handle) {
+    (void)data; (void)length; (void)kind;
+    if (out_handle != NULL) *out_handle = 0;
+    return -3;
+}
+int kiln_crypto_key_public(uint64_t handle, uint64_t *out_handle) {
+    (void)handle;
+    if (out_handle != NULL) *out_handle = 0;
+    return -3;
+}
+int kiln_crypto_key_info(uint64_t handle, uint32_t *out_type, uint32_t *out_bits) {
+    (void)handle;
+    if (out_type != NULL) *out_type = 0;
+    if (out_bits != NULL) *out_bits = 0;
+    return -3;
+}
+int kiln_crypto_key_export(uint64_t handle, uint32_t format, uint32_t encoding,
+                           uint8_t *output, size_t capacity, size_t *out_length) {
+    (void)handle; (void)format; (void)encoding; (void)output; (void)capacity;
+    if (out_length != NULL) *out_length = 0;
+    return -3;
+}
+int kiln_crypto_key_free(uint64_t handle) {
+    (void)handle;
+    return -3;
+}
 int kiln_realm_http_agent_connected_active(const uint8_t *host, uint64_t host_len,
                                            uint16_t port, uint64_t resource,
                                            uint64_t request) {
     (void)host; (void)host_len; (void)port; (void)resource; (void)request;
     return 1;
+}
+int kiln_realm_http_agent_can_retain_active(uint64_t resource, int reusable) {
+    (void)resource;
+    return reusable != 0;
 }
 int kiln_realm_http_agent_release_active(uint64_t resource, int reusable,
                                          uint64_t *out_request) {
@@ -1024,14 +1178,62 @@ pub(crate) fn linked_source(module_source: &str, wrapper: &str) -> String {
     format!(
         "#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)\n\
              #define _POSIX_C_SOURCE 200809L\n\
-             #endif\n{}\n{}\n{}\n{}\n{}",
+             #endif\n{}\n{}\n{}\n{}\n{}\n{}",
         kiln_native_provider_contract::number::runtime_source(),
         module_source,
         REGEXP_FIXTURE,
         REALM_FIXTURE,
+        SEMANTIC_PROVIDER_FIXTURE,
         wrapper
     )
 }
+
+/// Link-only symbols for executable backend fixtures, which do not link the packaged Rust
+/// semantic provider. Production compression and WebCrypto always resolve to their real archive.
+const SEMANTIC_PROVIDER_FIXTURE: &str = r#"
+int kiln_process_exec_file_sync(const kiln_string *file, const kiln_string *argv,
+                                size_t argc, void **out) {
+    (void)file; (void)argv; (void)argc;
+    if (out != NULL) *out = NULL;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_process_output_view(const void *result, const uint8_t **stdout_bytes,
+                             size_t *stdout_len, const uint8_t **stderr_bytes,
+                             size_t *stderr_len, int32_t *status, uint32_t *pid,
+                             const uint8_t **error_bytes, size_t *error_len,
+                             const uint8_t **signal_bytes, size_t *signal_len) {
+    (void)result; (void)stdout_bytes; (void)stdout_len; (void)stderr_bytes; (void)stderr_len;
+    (void)status; (void)pid; (void)error_bytes; (void)error_len;
+    (void)signal_bytes; (void)signal_len;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+void kiln_process_output_free(void *result) { (void)result; }
+
+int kiln_webcrypto_execute(uint32_t op, const uint8_t *key, size_t key_length,
+                           const uint8_t *data, size_t data_length,
+                           const uint8_t *iv, size_t iv_length,
+                           const uint8_t *additional_data, size_t additional_data_length,
+                           size_t output_length, uint8_t *output, size_t output_capacity,
+                           size_t *required) {
+    (void)op; (void)key; (void)key_length; (void)data; (void)data_length;
+    (void)iv; (void)iv_length; (void)additional_data; (void)additional_data_length;
+    (void)output_length; (void)output; (void)output_capacity;
+    if (required != NULL) *required = 0;
+    return -6;
+}
+void *kiln_compression_state_create(uint32_t format, uint32_t direction) {
+    (void)format; (void)direction; return NULL;
+}
+void kiln_compression_state_free(void *state) { (void)state; }
+int kiln_compression_state_push(void *state, const uint8_t *input, size_t input_length,
+                                uint32_t finish, uint8_t **output, size_t *output_length) {
+    (void)state; (void)input; (void)input_length; (void)finish; (void)output; (void)output_length;
+    return -1;
+}
+void kiln_compression_output_free(uint8_t *output, size_t length) {
+    (void)output; (void)length;
+}
+"#;
 
 fn function(code: Vec<Instruction>) -> FunctionProto {
     FunctionProto {
@@ -1216,7 +1418,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     return 0;
 }}
 int main(void) {{
-    kiln_host host = {{host_call, NULL}};
+    kiln_host host = {{host_call, NULL, NULL}};
     kiln_value result;
     return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 2;
 }}
@@ -1237,6 +1439,7 @@ int main(void) {{
 // `conformance/native/url-surface.mjs` and `app-http-client-url.mjs` hold both engines to node.
 
 mod analysis;
+mod direct_optimization;
 mod emission;
 mod intrinsics;
 mod objects;

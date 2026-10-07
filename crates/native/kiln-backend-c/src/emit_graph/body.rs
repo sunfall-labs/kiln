@@ -4,12 +4,13 @@ use super::sites::{self, receiver_prologue, share_sites, this_columns, typed_row
 use super::{EntryKind, Site, Speculation, this_site_count, typed_signature};
 use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
-    BasicBlock, BlockId, FunctionGraph, FunctionTypeProfile, GraphOp, InductionVariable, Proven,
-    Terminator, ValueId, array_slots, candidate_array_parameters_with_profile,
+    BasicBlock, BlockId, Effects, FunctionGraph, FunctionTypeProfile, GraphOp, InductionVariable,
+    Proven, Terminator, ValueId, array_slots, candidate_array_parameters_with_profile,
     candidate_number_parameters_with_profile, find_induction_variables,
     proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
 use crate::prelude::lookup_speculation_invariant;
+use kiln_graph::suspended_local_liveness;
 use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Instruction, Program, UnaryOp};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -18,6 +19,133 @@ use std::fmt::Write;
 // frame. Below this point the brackets cost more source and object bytes than they save; above it
 // the indexed spelling keeps large generated bodies smaller and modestly faster to compile.
 const COMPACT_INDEXED_VALUE_THRESHOLD: u32 = 512;
+
+/// Return arguments-object loads whose only observed use is an own `length` read.
+/// The arguments object exposes a writable length and can be aliased, so this is safe only
+/// when every live load in the function has that exact use and no nested arrow closes over it.
+/// Those reads can then use the call frame's argc directly without allocating the exotic object.
+fn arguments_length_only_values(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+) -> HashSet<ValueId> {
+    if proto.arrow || proto.generator || proto.asynchronous || proto.async_generator {
+        return HashSet::new();
+    }
+    if proto
+        .code
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
+    {
+        return HashSet::new();
+    }
+    fn arrow_tree_uses_arguments(index: u32, program: &Program) -> bool {
+        let Some(proto) = program.functions.get(index as usize) else {
+            return false;
+        };
+        if proto
+            .code
+            .iter()
+            .any(|op| matches!(op, Instruction::LoadArguments | Instruction::DirectEval(_)))
+        {
+            return true;
+        }
+        proto.code.iter().any(|instruction| {
+            let Instruction::MakeFunction(child) = instruction else {
+                return false;
+            };
+            program
+                .functions
+                .get(*child as usize)
+                .is_some_and(|child_proto| {
+                    child_proto.arrow && arrow_tree_uses_arguments(*child, program)
+                })
+        })
+    }
+    for instruction in &proto.code {
+        let Instruction::MakeFunction(child) = instruction else {
+            continue;
+        };
+        if program
+            .functions
+            .get(*child as usize)
+            .is_some_and(|child_proto| {
+                child_proto.arrow && arrow_tree_uses_arguments(*child, program)
+            })
+        {
+            return HashSet::new();
+        }
+    }
+
+    let mut loads = HashSet::new();
+    let mut uses = HashMap::<ValueId, Vec<&GraphOp>>::new();
+    let mut terminator_uses = HashSet::new();
+    for block in &graph.blocks {
+        for (value, operation) in &block.operations {
+            if matches!(
+                operation,
+                GraphOp::Bridge {
+                    instruction: Instruction::LoadArguments,
+                    pushes: 1,
+                    ..
+                }
+            ) {
+                loads.insert(*value);
+            }
+            for input in operation.operands() {
+                uses.entry(input).or_default().push(operation);
+            }
+        }
+        match &block.terminator {
+            Terminator::Branch { condition, .. }
+            | Terminator::BranchNotNullish { condition, .. }
+            | Terminator::Throw(condition) => {
+                terminator_uses.insert(*condition);
+            }
+            Terminator::Return(Some(value)) => {
+                terminator_uses.insert(*value);
+            }
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                ..
+            } => {
+                terminator_uses.insert(*value);
+                terminator_uses.extend(spilled.iter().copied());
+                if let Some((iterator, _, _)) = delegate {
+                    terminator_uses.insert(*iterator);
+                }
+            }
+            Terminator::Jump(_) | Terminator::Return(None) | Terminator::Unreachable => {}
+        }
+    }
+    if loads.is_empty() {
+        return loads;
+    }
+
+    let mut optimized = HashSet::new();
+    for value in loads.iter().copied() {
+        if terminator_uses.contains(&value) {
+            return HashSet::new();
+        }
+        let Some(value_uses) = uses.get(&value) else {
+            return HashSet::new();
+        };
+        if value_uses.len() != 1 {
+            return HashSet::new();
+        }
+        let GraphOp::GetProperty { object, name, .. } = value_uses[0] else {
+            return HashSet::new();
+        };
+        let is_length = matches!(program.constants.get(*name as usize), Some(Constant::String(units)) if units.to_scalar_string().as_deref() == Ok("length"));
+        if *object != value || !is_length {
+            return HashSet::new();
+        }
+        optimized.insert(value);
+    }
+    optimized
+}
 
 /// Compact bodies use generic runtime calls rather than the optimized call paths. Determine
 /// their context needs from the rendered body, including tail bridges and suspension setup,
@@ -149,19 +277,30 @@ pub fn retain_used_entry_context(output: &mut String, context: std::ops::Range<u
     output.replace_range(context, &retained);
 }
 
-/// Module globals live in the realm's block for this unit (ADR 0070, realms issue 04 step 5), and
-/// `{symbol}_globals` finds it through a generation-checked per-thread cache. A body that reads or
+/// Module globals live in the owning module instance's block for this unit, and
+/// `{symbol}_unit_vals` finds it through the activation's host owner. A body that reads or
 /// writes them asks once, at entry, and indexes the pointer it got: within one activation the
 /// realm cannot change, and a call between two reads would otherwise make the compiler ask again.
 /// A resumed generator or async body re-enters from the top, so it asks again on every resumption.
-fn cache_module_globals(output: &mut String, context_start: usize, symbol: &str) {
+fn cache_module_globals(output: &mut String, context_start: usize, symbol: &str, kind: EntryKind) {
     let needle = format!("{symbol}_globals[");
     if !output[context_start..].contains(&needle) {
         return;
     }
     let body = output[context_start..].replace(&needle, "kiln_mg[");
     output.truncate(context_start);
-    writeln!(output, "    kiln_val *const kiln_mg = {symbol}_globals;").unwrap();
+    // Typed entries receive the host directly; boxed and fast entries receive a call context.
+    // Using `host` here also makes typed-needs discovery retain that runtime argument.
+    let host = if matches!(kind, EntryKind::Typed { .. }) {
+        "host"
+    } else {
+        "ctx->host"
+    };
+    writeln!(
+        output,
+        "    kiln_val *const kiln_mg = {symbol}_unit_vals({host});"
+    )
+    .unwrap();
     output.push_str(&body);
 }
 
@@ -307,13 +446,20 @@ pub fn emit_function_from_graph_with_profile(
             }
         }
     }
-    // 1. Function comment header
-    if let Some(name) = proto.name.as_deref().filter(|name| {
-        !name.is_empty()
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
-    }) {
+    // 1. Keep the established named header used by body-level diagnostics and tests. Source
+    // coordinates belong to the frontend input (which may be transformed), and the effective
+    // name includes inferred method names used by runtime diagnostics.
+    let comment_name = proto
+        .effective_name_units()
+        .filter(|name| name.is_ascii())
+        .map(|name| name.to_lossy_string())
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
+        });
+    if let Some(name) = comment_name.as_deref() {
         match kind {
             EntryKind::Boxed => writeln!(output, "/* function {index}: {name} */").unwrap(),
             EntryKind::Typed { .. } => {
@@ -323,14 +469,27 @@ pub fn emit_function_from_graph_with_profile(
                 writeln!(output, "/* function {index}: {name}, fast clone */").unwrap()
             }
         }
+    } else {
+        writeln!(output, "/* function {index} */").unwrap();
     }
+    writeln!(
+        output,
+        "/* frontend function {index}: bytes {}..{}; method={}; instructions={} */",
+        proto.span.start,
+        proto.span.end,
+        proto.is_method,
+        proto.code.len()
+    )
+    .unwrap();
 
     // 2. Signature. The typed entry takes what a direct call has in registers: no context
     // struct to build and read back, no argument array, no count. Every caller of it proved
     // the arguments are numbers and passed exactly the parameter count.
     match kind {
         EntryKind::Boxed => {
-            let optnone = if proto.code.len() > 3000 {
+            let optnone = if plan.generic_only && !plan.generic_function_optimized {
+                "#if defined(KILN_GENERIC_MIXED_TIER) && !defined(KILN_GENERIC_OPT_OVERRIDE)\n#if defined(__clang__)\n__attribute__((optnone))\n#elif defined(__GNUC__)\n__attribute__((optimize(\"O0\")))\n#endif\n#endif\n"
+            } else if proto.code.len() > 3000 {
                 "__attribute__((optnone)) "
             } else {
                 ""
@@ -429,6 +588,7 @@ pub fn emit_function_from_graph_with_profile(
                     index,
                     &this_col_names,
                     typed_double_mask(&this_col_map, plan),
+                    typed_receiver_row_safe(graph, &this_col_map, plan),
                     linkage,
                 ));
             }
@@ -617,7 +777,7 @@ pub fn emit_function_from_graph_with_profile(
     if plan.compact && kind == EntryKind::Boxed {
         retain_used_context(output, context_start..context_end);
     }
-    cache_module_globals(output, context_start, symbol);
+    cache_module_globals(output, context_start, symbol, kind);
     // The boxed clone, emitted first, declares the sites every clone of this function uses,
     // and the receiver-shape cache: four rows of shapes, a slot per read of `this` in each.
     if kind == EntryKind::Boxed && (shared_sites > 0 || this_sites > 0) {
@@ -1022,11 +1182,27 @@ fn await_resolve_fusion_arg(
         return None;
     }
     let GraphOp::CallMethod {
-        object, name, args, ..
+        object,
+        name,
+        args,
+        prepared_callee,
+        ..
     } = op
     else {
         return None;
     };
+    if prepared_callee.is_some_and(|callee| {
+        !matches!(
+            defs.get(&callee),
+            Some(GraphOp::GetProperty {
+                object: getter_receiver,
+                name: getter_name,
+                ..
+            }) if getter_receiver == object && getter_name == name
+        )
+    }) {
+        return None;
+    }
     let Some(Constant::String(key)) = program.constants.get(*name as usize) else {
         return None;
     };
@@ -1040,7 +1216,10 @@ fn await_resolve_fusion_arg(
         .or_else(|| defs.get(object).copied());
     if !matches!(
         receiver_definition,
-        Some(GraphOp::LoadBuiltin(kiln_ir::Builtin::Promise))
+        Some(
+            GraphOp::LoadBuiltin(kiln_ir::Builtin::Promise)
+                | GraphOp::LoadGlobalBuiltin(kiln_ir::Builtin::Promise)
+        )
     ) {
         return None;
     }
@@ -1076,7 +1255,26 @@ fn emit_block_sequence(
     type_profile_record: bool,
     this_sites: &std::collections::HashMap<ValueId, usize>,
     spec: &Speculation,
+    argument_length_values: &HashSet<ValueId>,
 ) {
+    let prepared_method_properties: HashSet<ValueId> = graph
+        .blocks
+        .iter()
+        .flat_map(|block| block.operations.iter())
+        .filter_map(|(_, operation)| match operation {
+            GraphOp::CallMethod {
+                prepared_callee: Some(callee),
+                ..
+            } => Some(*callee),
+            _ => None,
+        })
+        .collect();
+    let suspended_locals =
+        if matches!(site, Site::Function { .. }) && (proto.generator || proto.asynchronous) {
+            suspended_local_liveness(graph, proto, program)
+        } else {
+            HashMap::new()
+        };
     // A proven number nothing reads boxed is never boxed: its box statement is dropped from
     // the operation's text, and its twin is all that lives. In a versioned body the generic
     // clone always boxes, and a box the generic clone reads that the fast clone dropped
@@ -1133,9 +1331,12 @@ fn emit_block_sequence(
                     | GraphOp::LoadGlobal(_)
                     | GraphOp::MarkUninitialized(_)
                     | GraphOp::CheckTdz { .. }
-                    | GraphOp::GetProperty { .. }
                     | GraphOp::Phi { .. }
                     | GraphOp::MakeCell(_) => true,
+                    // Only a direct `this.x` row read can be reused. Other property reads
+                    // may invoke accessors that mutate `this`, and must invalidate the row
+                    // value cache even though they are represented by the same graph op.
+                    GraphOp::GetProperty { .. } => this_sites.contains_key(vid),
                     GraphOp::Unary { value, .. } => numbers.contains(value),
                     GraphOp::Binary { left, right, .. } => {
                         numbers.contains(left) && numbers.contains(right)
@@ -1164,17 +1365,17 @@ fn emit_block_sequence(
         Site::Entry { .. } | Site::AsyncEntry => None,
     };
     // A pure read nothing consumes is not emitted: it would only name something -- an upvalue
-    // table, a slot -- that the body then appears to need. The callee read a direct self-call
-    // has replaced is the common case.
+    // table or a slot -- that the body then appears to need. Direct-call callee reads are the
+    // exception because the statically proven closure is needed to publish the call frame.
     let mut used: HashSet<ValueId> = HashSet::new();
     for block in &graph.blocks {
         if !block.is_reachable_from_entry(graph.entry_block) {
             continue;
         }
-        for (vid, op) in &block.operations {
-            // A direct call reads its callee value only for the upvalue table it carries: not
-            // on a self-call, which has its own, and not into a typed entry that takes none.
-            // A boxed body's direct call keeps it for the generic path past the depth limit.
+        for (_vid, op) in &block.operations {
+            // Direct call sites need the statically proven closure value for the published
+            // JavaScript frame, including self-calls and typed entries with no upvalue inputs.
+            // The generic fallback past the depth limit uses it as well.
             if let GraphOp::Call { callee, args, .. } = op
                 && let Some(&target) = plan.known.get(callee)
                 && direct_callable(
@@ -1184,21 +1385,7 @@ fn emit_block_sequence(
                 && matches!(kind, EntryKind::Typed { .. })
             {
                 used.extend(args.iter().copied());
-                let self_call = self_index == Some(target);
-                let typed_site = plan.typed_sites.contains(vid);
-                // An arrow's typed entry, when it needs a receiver, reads it out of the
-                // callee's own `captured_this` (see the `Call` arm of `emit_graph_op`), so the
-                // callee value must stay alive for that too -- not only for its upvalue table.
-                // A self-call needs neither: the receiver a self-referencing arrow would read
-                // this way is this frame's own, already in scope as `receiver`.
-                let reads_callee = !self_call
-                    && (!typed_site
-                        || plan.typed_needs[target as usize].upvalues
-                        || (program.functions[target as usize].arrow
-                            && plan.typed_needs[target as usize].receiver));
-                if reads_callee {
-                    used.insert(*callee);
-                }
+                used.insert(*callee);
                 continue;
             }
             used.extend(op.operands());
@@ -1423,6 +1610,8 @@ fn emit_block_sequence(
                 boxed.as_ref(),
                 await_resolve_arg,
                 &used,
+                &prepared_method_properties,
+                &argument_length_values,
             );
             if kind.restarts() {
                 op_text = bail_out(op, &op_text, RESTART);
@@ -1503,6 +1692,8 @@ fn emit_block_sequence(
             plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
             &used,
             boxed.as_ref(),
+            &suspended_locals,
+            proto.local_count,
         );
     }
     if is_fast_clone && !exit_boxes.is_empty() {
@@ -2117,10 +2308,18 @@ fn compute_live_twins(
                     }
                 }
                 GraphOp::SetComputed { key, value, .. }
-                | GraphOp::SetComputedStrict { key, value, .. } => {
+                | GraphOp::SetComputedStrict { key, value, .. }
+                | GraphOp::DefineOwnComputed { key, value, .. } => {
                     if ints.contains(key) {
                         live_ints.insert(*key);
                     }
+                    if ints.contains(value) {
+                        live_ints.insert(*value);
+                    } else if numbers.contains(value) {
+                        live_numbers.insert(*value);
+                    }
+                }
+                GraphOp::DefineOwnProperty { value, .. } => {
                     if ints.contains(value) {
                         live_ints.insert(*value);
                     } else if numbers.contains(value) {
@@ -2482,6 +2681,9 @@ fn boxed_uses(
                 }
                 | GraphOp::SetComputedStrict {
                     object, key, value, ..
+                }
+                | GraphOp::DefineOwnComputed {
+                    object, key, value, ..
                 } => {
                     used.insert(*object);
                     used.insert(*value);
@@ -2489,8 +2691,16 @@ fn boxed_uses(
                         used.insert(*key);
                     }
                 }
+                GraphOp::DefineOwnProperty { object, value, .. } => {
+                    used.insert(*object);
+                    used.insert(*value);
+                }
                 GraphOp::CallMethod {
-                    object, name, args, ..
+                    object,
+                    name,
+                    args,
+                    prepared_callee: None,
+                    ..
                 } => {
                     let builtin = match defs.get(object) {
                         Some(GraphOp::LoadBuiltin(b)) => Some(*b),
@@ -2771,6 +2981,7 @@ fn emit_blocks(
         .iter()
         .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
         .collect();
+    let argument_length_values = arguments_length_only_values(graph, proto, program);
     let use_counts = graph_value_use_counts(graph);
     // A read of `length` bounds a loop below 2^32.
     let length_bounds: HashSet<ValueId> = ops
@@ -2996,6 +3207,7 @@ fn emit_blocks(
                 sinks: spec_sinks.clone(),
                 exits: true,
             },
+            &argument_length_values,
         );
 
         writeln!(output, "    /* Clone B: generic fallback path */").unwrap();
@@ -3033,6 +3245,7 @@ fn emit_blocks(
                 sinks: spec_sinks.clone(),
                 exits: false,
             },
+            &argument_length_values,
         );
     } else {
         let boxed = if plan.generic_only && baseline_numbers.is_empty() {
@@ -3100,6 +3313,7 @@ fn emit_blocks(
             type_profile_record,
             &this_sites,
             &Speculation::default(),
+            &argument_length_values,
         );
     }
 
@@ -3385,6 +3599,8 @@ fn emit_terminator(
     indexed_values: bool,
     used: &HashSet<ValueId>,
     boxed: Option<&HashSet<ValueId>>,
+    suspended_locals: &HashMap<BlockId, HashSet<u32>>,
+    local_count: u32,
 ) {
     match terminator {
         Terminator::Return(value) => match site {
@@ -3673,6 +3889,23 @@ fn emit_terminator(
                     " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0;".to_string()
                 }
             };
+            // The previous caller's sent value has already been consumed or copied into
+            // live locals/spills. A new suspension waits for a new value; retaining the old
+            // one here would keep discarded yield results alive across subsequent jobs.
+            output.push_str(
+                "    kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_undefined());\n",
+            );
+            if let Some(live) = suspended_locals.get(&current_block.id) {
+                for slot in 0..local_count {
+                    if !live.contains(&slot) {
+                        writeln!(
+                            output,
+                            "    kiln_c99_heap_store_val(frame, &frame->locals[{slot}], KILN_VAL_UNDEFINED);"
+                        )
+                        .unwrap();
+                    }
+                }
+            }
             writeln!(
                 output,
                 "   {spill} frame->sp = {}; frame->resume = {pc}; frame->awaiting = {}; frame->handler_top = {covered};{delegate_set} *result = v{}; return KILN_C99_YIELDED;",
@@ -3718,7 +3951,16 @@ fn emit_phi_assignments(
     if moves.is_empty() {
         return;
     }
-    if indexed_values && moves.len() >= 4 {
+    // The indexed-values path batches the boxed `v[]` parallel move below. Values in the
+    // number/integer/boolean side tables also have scalar registers (`dN`, `iN`, `bN`),
+    // however, and omitting those updates leaves loop-carried values stale. In particular,
+    // a numeric loop index can remain at zero forever even while its boxed mirror advances.
+    // Keep the bulk copy only when every destination is represented solely by `v[]`.
+    let has_scalar_destination = moves.iter().any(|(to, _)| {
+        let value = ValueId(*to);
+        numbers.contains(&value) || ints.contains(&value) || booleans.contains(&value)
+    });
+    if indexed_values && moves.len() >= 4 && !has_scalar_destination {
         // Merge phis are allocated together, so their destination IDs are normally one
         // contiguous run. Large bundled module initializers can have hundreds of locals and a
         // branch for every `x ||= value`; spelling both ID arrays at every edge made those tiny
@@ -3853,9 +4095,250 @@ fn typed_double_mask(this_col_map: &HashMap<ValueId, usize>, plan: &CallPlan) ->
     mask
 }
 
+/// A typed receiver row carries the numeric representation captured at method entry. Admit
+/// that entry only when no path can execute an effectful operation before a typed `this.x`
+/// read; otherwise the boxed entry must run from the start, before any user effects can occur.
+fn typed_receiver_row_safe(
+    graph: &FunctionGraph,
+    this_col_map: &HashMap<ValueId, usize>,
+    plan: &CallPlan,
+) -> bool {
+    let typed_reads: HashSet<ValueId> = this_col_map
+        .iter()
+        .filter_map(|(vid, column)| (plan.numbers.contains(vid) && *column < 32).then_some(*vid))
+        .collect();
+    if typed_reads.is_empty() {
+        return true;
+    }
+
+    let block_indices: HashMap<BlockId, usize> = graph
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.id, index))
+        .collect();
+    let Some(&entry_index) = block_indices.get(&graph.entry_block) else {
+        return false;
+    };
+    let mut reachable = vec![false; graph.blocks.len()];
+    let mut incoming = vec![Vec::new(); graph.blocks.len()];
+    let mut outgoing = vec![Vec::new(); graph.blocks.len()];
+    for (index, block) in graph.blocks.iter().enumerate() {
+        for target in block
+            .successors
+            .iter()
+            .chain(block.exception_handler.iter())
+        {
+            if let Some(&successor) = block_indices.get(target) {
+                incoming[successor].push(index);
+                outgoing[index].push(successor);
+            }
+        }
+    }
+    let mut pending = std::collections::VecDeque::from([entry_index]);
+    reachable[entry_index] = true;
+    while let Some(index) = pending.pop_front() {
+        for &next in &outgoing[index] {
+            if !reachable[next] {
+                reachable[next] = true;
+                pending.push_back(next);
+            }
+        }
+    }
+
+    let invalidates_row = |vid: ValueId, op: &GraphOp| {
+        if matches!(op, GraphOp::GetProperty { .. }) && this_col_map.contains_key(&vid) {
+            // This row-backed read is guaranteed to name an own data slot by the row claimer.
+            false
+        } else {
+            op.effects()
+                .intersects(Effects::CALLS_USER_CODE | Effects::WRITES_HEAP)
+        }
+    };
+    let mut dirty_out = vec![false; graph.blocks.len()];
+    loop {
+        let mut changed = false;
+        for (index, block) in graph.blocks.iter().enumerate() {
+            if !reachable[index] {
+                continue;
+            }
+            let mut dirty = incoming[index]
+                .iter()
+                .any(|&predecessor| dirty_out[predecessor]);
+            for (vid, op) in &block.operations {
+                dirty |= invalidates_row(*vid, op);
+            }
+            if matches!(block.terminator, Terminator::Suspend { .. }) {
+                dirty = true;
+            }
+            if dirty && !dirty_out[index] {
+                dirty_out[index] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for (index, block) in graph.blocks.iter().enumerate() {
+        if !reachable[index] {
+            continue;
+        }
+        let mut dirty = incoming[index]
+            .iter()
+            .any(|&predecessor| dirty_out[predecessor]);
+        for (vid, op) in &block.operations {
+            if typed_reads.contains(vid) && dirty {
+                return false;
+            }
+            dirty |= invalidates_row(*vid, op);
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{index_large_ssa_values, retain_used_context};
+    use super::{index_large_ssa_values, retain_used_context, suspended_local_liveness};
+    use crate::BYTECODE_VERSION;
+    use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, Terminator, ValueId};
+    use kiln_ir::{FunctionProto, Program};
+    use std::collections::HashSet;
+
+    fn generator_proto(local_count: u32) -> FunctionProto {
+        FunctionProto {
+            inferred_name: None,
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            declared_length: 0,
+            name: None,
+            parameter_count: 0,
+            local_count,
+            code: Vec::new(),
+            arrow: false,
+            generator: true,
+            asynchronous: false,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            mapped_arguments: false,
+            upvalues: Vec::new(),
+            type_annotations: None,
+        }
+    }
+
+    fn empty_program() -> Program {
+        Program {
+            source: String::new().into(),
+            version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+        }
+    }
+
+    fn block(
+        id: u32,
+        operations: Vec<(u32, GraphOp)>,
+        terminator: Terminator,
+        successors: Vec<u32>,
+        exception_handler: Option<u32>,
+    ) -> BasicBlock {
+        BasicBlock {
+            id: BlockId(id),
+            operations: operations
+                .into_iter()
+                .map(|(value, operation)| (ValueId(value), operation))
+                .collect(),
+            terminator,
+            predecessors: Vec::new(),
+            successors: successors.into_iter().map(BlockId).collect(),
+            exception_handler: exception_handler.map(BlockId),
+        }
+    }
+
+    fn suspend(resume: u32) -> Terminator {
+        Terminator::Suspend {
+            value: ValueId(0),
+            resume: BlockId(resume),
+            spilled: Vec::new(),
+            pc: 1,
+            awaiting: false,
+            delegate: None,
+        }
+    }
+
+    #[test]
+    fn suspended_locals_keep_future_reads_and_release_dead_temporaries() {
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(
+                1,
+                vec![(1, GraphOp::LoadLocal(0))],
+                Terminator::Return(None),
+                vec![],
+                None,
+            ),
+        ];
+        let live = suspended_local_liveness(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([0])));
+    }
+
+    #[test]
+    fn suspended_locals_keep_active_finally_reads_on_injected_completion() {
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], Some(2)),
+            block(1, Vec::new(), Terminator::Return(None), vec![], None),
+            block(
+                2,
+                vec![(2, GraphOp::LoadLocal(1))],
+                Terminator::Return(None),
+                vec![],
+                None,
+            ),
+        ];
+        let live = suspended_local_liveness(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([1])));
+    }
+
+    #[test]
+    fn handler_live_in_survives_a_later_local_store_in_the_protected_block() {
+        let mut graph = FunctionGraph::new(None, 0, 2);
+        graph.blocks = vec![
+            block(
+                0,
+                vec![(
+                    1,
+                    GraphOp::StoreLocal {
+                        slot: 0,
+                        value: ValueId(2),
+                    },
+                )],
+                suspend(1),
+                vec![1],
+                Some(2),
+            ),
+            block(1, Vec::new(), Terminator::Return(None), vec![], None),
+            block(
+                2,
+                vec![(3, GraphOp::LoadLocal(0))],
+                Terminator::Return(None),
+                vec![],
+                None,
+            ),
+        ];
+        let live = suspended_local_liveness(&graph, &generator_proto(2), &empty_program());
+        assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([0])));
+    }
 
     #[test]
     fn compact_operation_macros_retain_the_context_their_expansions_capture() {

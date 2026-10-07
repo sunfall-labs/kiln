@@ -1,0 +1,20 @@
+diff --git i/packages/effect/test/Hash.test.ts w/packages/effect/test/Hash.test.ts
+index 14043e7b7..23e609921 100644
+--- i/packages/effect/test/Hash.test.ts
++++ w/packages/effect/test/Hash.test.ts
+@@ -206,9 +206,13 @@ describe("Hash", () => {
+           } else {
+             map = HashMap.set(map, randomKey(), random(3))
+           }
+-          const rebuilt = HashMap.fromIterable(shuffle(Array.from(map)))
++          const entries = Array.from(map)
++          const rebuilt = HashMap.fromIterable(shuffle(entries))
+           assert.isTrue(Equal.equals(map, rebuilt))
+-          assert.strictEqual(Hash.hash(map), Hash.hash(rebuilt))
++          const mapHash = Hash.hash(map)
++          const rebuiltHash = Hash.hash(rebuilt)
++          assert.strictEqual(mapHash, rebuiltHash)
++          if (step === 39) console.log("HASH_PROGRESS", JSON.stringify({ run: run + 1, steps: 40, size: entries.length, mapHash, rebuiltHash }))
+         }
+       }
+     })

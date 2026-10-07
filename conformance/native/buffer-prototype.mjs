@@ -1,4 +1,4 @@
-// Buffer.prototype (issue 08 of .scratch/full-runtime): the shared TypeScript prototype over each
+// Buffer.prototype (issue 08 of docs/issues/full-runtime): the shared TypeScript prototype over each
 // engine's branded Uint8Array. Every line is node-identical in both engines as of 2026-09-19.
 const b = Buffer.from("héllo wörld", "utf8");
 console.log(typeof Buffer.prototype, Object.getPrototypeOf(b) === Buffer.prototype, b instanceof Buffer, b instanceof Uint8Array, Buffer.isBuffer(b), Buffer.isBuffer(new Uint8Array(1)), b.constructor === Buffer);
@@ -9,3 +9,62 @@ const f = Buffer.alloc(8); f.writeDoubleBE(1.5, 0); console.log(f.readDoubleBE(0
 const g = Buffer.alloc(8); g.writeBigUInt64BE(0x0102030405060708n); console.log(g.readBigUInt64BE(), g.readBigInt64LE(), g.toString("hex"));
 const s = b.subarray(0, 2); s[0] = 65; console.log(b.toString().slice(0, 1), b.fill("ab").toString(), Buffer.from("abc").toString("latin1", 1), new Uint8Array([1, 2]).toString(), typeof new Uint8Array(1).equals);
 console.log(Buffer.from(new Uint8Array([9, 8])).equals(Buffer.from([9, 8])), Buffer.from(b.buffer, 2, 3).length, Buffer.byteLength("aGk=", "base64"), Buffer.isEncoding("utf8"), Buffer.isEncoding("nope"), Buffer.from("x").write("yz", 0), Buffer.alloc(2).fill(0x41).toString());
+console.log(Buffer.from("hi", "utf16le").toString("hex"), Buffer.alloc(4, "ab").toString(), Buffer("xy").toString(), Buffer.from("ff", "hex").toString("hex"));
+const legacyBufferHex = Buffer("ff", "hex");
+const legacyBufferSize = Buffer(3);
+const legacyBufferSizeWithNumber = Buffer(3, 9);
+const legacyBufferSizeWithNull = Buffer(3, null);
+const constructedBufferSize = new Buffer(2);
+if (legacyBufferHex.toString("hex") !== "ff" || legacyBufferSize.length !== 3 ||
+    legacyBufferSize[0] !== 0 || legacyBufferSizeWithNumber.length !== 3 ||
+    legacyBufferSizeWithNumber[0] !== 0 || legacyBufferSizeWithNull[0] !== 0 ||
+    constructedBufferSize.length !== 2) {
+  throw new Error("legacy Buffer call and construction use the public Buffer facade");
+}
+for (const make of [() => Buffer(3, "utf8"), () => new Buffer(3, "utf8")]) {
+  let rejected = false;
+  try { make(); } catch (error) {
+    rejected = error.name === "TypeError" && error.code === "ERR_INVALID_ARG_TYPE";
+  }
+  if (!rejected) throw new Error("legacy numeric Buffer call rejects a string encoding argument");
+}
+const FastBuffer = Buffer[Symbol.species];
+const bufferSpeciesDescriptor = Object.getOwnPropertyDescriptor(Buffer, Symbol.species);
+if (typeof FastBuffer !== "function" || FastBuffer.name !== "FastBuffer" || FastBuffer === Buffer) throw new Error("Buffer species identity");
+const speciesPrototypeDescriptor = Object.getOwnPropertyDescriptor(FastBuffer, "prototype");
+if (FastBuffer.length !== 0 || speciesPrototypeDescriptor.writable || speciesPrototypeDescriptor.configurable || speciesPrototypeDescriptor.enumerable) throw new Error("FastBuffer class constructor metadata");
+if (Object.getPrototypeOf(FastBuffer) !== Uint8Array || FastBuffer.prototype !== Buffer.prototype || Object.getPrototypeOf(FastBuffer.prototype) !== Uint8Array.prototype) throw new Error("Buffer species prototype chain");
+const speciesBacking = new ArrayBuffer(5);
+const speciesView = new FastBuffer(speciesBacking, 1, 3);
+speciesView[0] = 71;
+const speciesSized = new FastBuffer(2);
+const speciesCoerced = new FastBuffer("2");
+const speciesCopied = new FastBuffer(new Uint16Array([257, 258]));
+const speciesSlice = Buffer.from(speciesBacking).subarray(1, 4);
+if (!Buffer.isBuffer(speciesView) || speciesView.buffer !== speciesBacking || speciesView.byteOffset !== 1 || speciesBackingBytes(speciesBacking)[1] !== 71) throw new Error("FastBuffer must return a shared Buffer view");
+if (!Buffer.isBuffer(speciesSized) || speciesSized.length !== 2 || speciesCoerced.length !== 2 || speciesCoerced[0] !== 0 || speciesCopied.toString("hex") !== "0102" || !Buffer.isBuffer(speciesSlice)) throw new Error("Buffer typed-array species construction");
+class DerivedFastBuffer extends FastBuffer {}
+const derivedSpecies = new DerivedFastBuffer(1);
+if (!Buffer.isBuffer(derivedSpecies) || !(derivedSpecies instanceof DerivedFastBuffer)) throw new Error("FastBuffer subclass construction");
+
+Object.defineProperty(Buffer, Symbol.species, {
+  value: Uint8Array,
+  configurable: true,
+});
+const ordinarySpeciesMap = Buffer.from([1, 2]).map(value => value + 1);
+if (Object.getPrototypeOf(ordinarySpeciesMap) !== Uint8Array.prototype ||
+    Buffer.isBuffer(ordinarySpeciesMap) || ordinarySpeciesMap.join(",") !== "2,3") {
+  throw new Error("Buffer map must honor a replacement typed-array species");
+}
+class DerivedTypedArray extends Uint8Array {}
+Object.defineProperty(Buffer, Symbol.species, {
+  value: DerivedTypedArray,
+  configurable: true,
+});
+const derivedSpeciesMap = Buffer.from([3]).filter(() => true);
+if (!(derivedSpeciesMap instanceof DerivedTypedArray) || Buffer.isBuffer(derivedSpeciesMap) ||
+    derivedSpeciesMap[0] !== 3) {
+  throw new Error("Buffer filter must preserve custom species identity");
+}
+Object.defineProperty(Buffer, Symbol.species, bufferSpeciesDescriptor);
+function speciesBackingBytes(buffer) { return new Uint8Array(buffer); }

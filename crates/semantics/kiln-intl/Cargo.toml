@@ -5,9 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+timezone_database = ["dep:timezone_provider"]
+
 [dependencies]
 icu_locale_core = { workspace = true }
 icu_locale = { workspace = true }
+icu_casemap = { workspace = true }
 icu_decimal = { workspace = true }
 icu_plurals = { workspace = true }
 icu_list = { workspace = true }
@@ -18,5 +23,6 @@ icu_datetime = { workspace = true }
 icu_time = { workspace = true }
 icu_calendar = { workspace = true }
 icu_experimental = { workspace = true }
+timezone_provider = { workspace = true, optional = true }
 fixed_decimal = { workspace = true }
 writeable = { workspace = true }

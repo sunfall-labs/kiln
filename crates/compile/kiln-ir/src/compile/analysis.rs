@@ -458,6 +458,7 @@ pub(super) fn expression_contains_direct_eval(expression: &Expression) -> bool {
                 || expression_contains_direct_eval(callee)
                 || arguments.iter().any(list_element_contains_direct_eval)
         }
+        ExpressionKind::InlineLiteralEval { .. } => true,
         ExpressionKind::Function(function) => function_contains_direct_eval(function),
         ExpressionKind::Class(class) => class_contains_direct_eval(class),
         ExpressionKind::ImportCall { specifier, options } => {
@@ -568,6 +569,8 @@ pub(super) fn expression_contains_direct_eval(expression: &Expression) -> bool {
         | ExpressionKind::Update { .. }
         | ExpressionKind::Literal(_)
         | ExpressionKind::This
+        | ExpressionKind::GlobalObject
+        | ExpressionKind::ProcessObject
         | ExpressionKind::NewTarget
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::RegExp { .. }
@@ -759,6 +762,9 @@ pub(super) fn expression_contains_new_function(expression: &Expression) -> bool 
                 || expression_contains_new_function(callee)
                 || arguments.iter().any(list_element_contains_new_function)
         }
+        ExpressionKind::InlineLiteralEval { callee, argument, expression } => {
+            expression_contains_new_function(callee) || expression_contains_new_function(argument) || expression_contains_new_function(expression)
+        }
         ExpressionKind::New { callee, arguments } => {
             matches!(&callee.kind, ExpressionKind::Identifier(name) if name == "Function")
                 || expression_contains_new_function(callee)
@@ -870,6 +876,8 @@ pub(super) fn expression_contains_new_function(expression: &Expression) -> bool 
         | ExpressionKind::Update { .. }
         | ExpressionKind::Literal(_)
         | ExpressionKind::This
+        | ExpressionKind::GlobalObject
+        | ExpressionKind::ProcessObject
         | ExpressionKind::NewTarget
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::RegExp { .. }
@@ -1129,6 +1137,15 @@ pub(super) fn collect_dynamic_imports_from_expression(
                 collect_dynamic_imports_from_list_element(arg, imports);
             }
         }
+        ExpressionKind::InlineLiteralEval {
+            callee,
+            argument,
+            expression,
+        } => {
+            collect_dynamic_imports_from_expression(callee, imports);
+            collect_dynamic_imports_from_expression(argument, imports);
+            collect_dynamic_imports_from_expression(expression, imports);
+        }
         ExpressionKind::New { callee, arguments } => {
             collect_dynamic_imports_from_expression(callee, imports);
             for arg in arguments {
@@ -1272,6 +1289,8 @@ pub(super) fn collect_dynamic_imports_from_expression(
         | ExpressionKind::Update { .. }
         | ExpressionKind::Literal(_)
         | ExpressionKind::This
+        | ExpressionKind::GlobalObject
+        | ExpressionKind::ProcessObject
         | ExpressionKind::NewTarget
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::RegExp { .. }
@@ -1637,8 +1656,21 @@ pub(super) fn private_kind(kind: kiln_hir::MethodKind) -> PrivateKind {
 ///
 /// Reserved rather than ordinary, so nothing that enumerates own string properties can see it and
 /// no computed access can spell it -- `obj["#x"]` names a different property, as it should.
-pub(super) fn private_key(scope: u32, name: &str) -> String {
-    format!("@@private:{scope}:{name}")
+pub(super) fn private_key(module_id: &str, scope: u32, name: &str) -> String {
+    // The module identity is hex-encoded so it cannot introduce a separator into the reserved
+    // key grammar. A class ordinal is only unique within one Compiler; graph modules compile
+    // independently, so the stable module identity is part of the property key as well.
+    if module_id.is_empty() {
+        // Hand-built HIR fixtures have no source graph identity; retain their compact local
+        // spelling while parsed/linked modules always supply one.
+        return format!("@@private:{scope}:{name}");
+    }
+    let mut identity = String::with_capacity(module_id.len() * 2 + 8);
+    for byte in module_id.bytes() {
+        use std::fmt::Write as _;
+        write!(identity, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("@@private:{identity}-{scope}:{name}")
 }
 
 /// The names a pattern binds, in source order.
@@ -1745,6 +1777,8 @@ pub(super) fn collect_identifiers(
         }
         ExpressionKind::Literal(_)
         | ExpressionKind::This
+        | ExpressionKind::GlobalObject
+        | ExpressionKind::ProcessObject
         | ExpressionKind::NewTarget
         | ExpressionKind::SuperMember { .. }
         | ExpressionKind::Unsupported { .. } => {}
@@ -1803,6 +1837,15 @@ pub(super) fn collect_identifiers(
                 };
                 collect_identifiers(value, names, collecting);
             }
+        }
+        ExpressionKind::InlineLiteralEval {
+            callee,
+            argument,
+            expression,
+        } => {
+            collect_identifiers(callee, names, collecting);
+            collect_identifiers(argument, names, collecting);
+            collect_identifiers(expression, names, collecting);
         }
         ExpressionKind::Array { elements } => {
             for element in elements {
@@ -1946,7 +1989,7 @@ pub(super) fn collect_annexb_function_names(
     body: &[Statement],
     nested: bool,
     blocked: &mut Vec<String>,
-    out: &mut Vec<String>,
+    out: &mut Vec<(String, Span)>,
 ) {
     let depth = blocked.len();
     for statement in body {
@@ -1961,9 +2004,8 @@ pub(super) fn collect_annexb_function_names(
             && !function.generator
             && !function.asynchronous
             && !blocked.contains(name)
-            && !out.contains(name)
         {
-            out.push(name.clone());
+            out.push((name.clone(), function.span));
         }
         collect_annexb_in_statement(statement, blocked, out);
     }
@@ -1975,7 +2017,7 @@ pub(super) fn collect_annexb_function_names(
 pub(super) fn collect_annexb_in_statement(
     statement: &Statement,
     blocked: &mut Vec<String>,
-    out: &mut Vec<String>,
+    out: &mut Vec<(String, Span)>,
 ) {
     match &statement.kind {
         StatementKind::Block(body) => collect_annexb_function_names(body, true, blocked, out),
@@ -2043,9 +2085,8 @@ pub(super) fn collect_annexb_in_statement(
                         && !function.generator
                         && !function.asynchronous
                         && !blocked.contains(name)
-                        && !out.contains(name)
                     {
-                        out.push(name.clone());
+                        out.push((name.clone(), function.span));
                     }
                     collect_annexb_in_statement(statement, blocked, out);
                 }
@@ -2075,16 +2116,15 @@ pub(super) fn collect_annexb_in_statement(
 pub(super) fn collect_annexb_branch(
     statement: &Statement,
     blocked: &mut Vec<String>,
-    out: &mut Vec<String>,
+    out: &mut Vec<(String, Span)>,
 ) {
     if let StatementKind::Function(function) = &statement.kind
         && let Some(name) = &function.name
         && !function.generator
         && !function.asynchronous
         && !blocked.contains(name)
-        && !out.contains(name)
     {
-        out.push(name.clone());
+        out.push((name.clone(), function.span));
     }
     collect_annexb_in_statement(statement, blocked, out);
 }

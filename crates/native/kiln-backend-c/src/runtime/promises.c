@@ -70,6 +70,10 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     return KILN_C99_OK;
 }
 
+int kiln_c99_enqueue_finalizer(kiln_value callback, kiln_value held_value) {
+    return kiln_c99_enqueue(callback, held_value, kiln_c99_undefined(), 0, 0);
+}
+
 static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc) {
     kiln_next_tick *task =
         (kiln_next_tick *)kiln_c99_gc_alloc(KILN_GC_NEXT_TICK, sizeof *task);
@@ -679,8 +683,12 @@ static int kiln_c99_run_promise_jobs(void *context, void *host_pointer, void *th
             heap->job_head = 0;
             heap->job_tail = 0;
         }
+        kiln_c99_gc_enter_job();
         status = kiln_c99_run_job(&job, host, thrown);
-        if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_leave_job();
+        if (status != KILN_C99_OK) {
+            return status;
+        }
     }
     /* Node's `processTicksAndRejections`: ticks and promise jobs both run out, then the
      * rejections; the realm's drain comes back around for whatever reporting them queued. */
@@ -720,17 +728,57 @@ static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_p
     kiln_value produced = kiln_c99_undefined();
     int status;
     if (task == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_gc_enter_job();
     kiln_c99_uncount_next_tick(task);
     status = kiln_c99_call(host, &produced, task->callback, kiln_c99_undefined(),
                            task->argc == 0 ? NULL : task->args, task->argc, 0, thrown);
+    kiln_c99_gc_leave_job();
     kiln_c99_publish_turn_refusal(status, produced, thrown);
     kiln_c99_gc_keep_alive(task);
     return status;
 }
 
-/* The finaliser frees `args`, so the release below must not free it a second time. */
+/* A timer is its own record, and the record is the realm's work: the block the queue runs and
+ * roots, and the one a program holds as a `Timeout` or `Immediate` (`KILN_VALUE_TIMER`). It
+ * carries the callback and arguments, so a timeout that already ran can be armed again by a
+ * `refresh()` for as long as the program still holds it, and a cleared one has dropped them.
+ *
+ * The queue's reference is counted in `owners`, because the realm drops its work after running it
+ * and a timeout that re-arms itself from inside its own callback has two entries for a moment.
+ * A drop that finds the last entry gone before the timer ever ran is a cancellation, which is how
+ * a timer cleared by its bare identity -- all the realm has -- still lets go of its callback. The
+ * record itself is collected, never released here: the program may still hold it. */
+static void kiln_c99_timer_drop_state(kiln_timer *timer) {
+    timer->cleared = 1;
+    kiln_c99_heap_store_value(timer, &timer->callback, kiln_c99_undefined());
+    timer->argc = 0;
+}
+
 static void kiln_c99_drop_timer(void *work) {
-    kiln_c99_gc_release(work);
+    kiln_timer *timer = (kiln_timer *)work;
+    if (timer->owners > 0) timer->owners -= 1;
+    if (timer->owners == 0 && !timer->ran) kiln_c99_timer_drop_state(timer);
+}
+
+/* A record for `callback(...args)`, or NULL when memory is short. The arguments are copied into
+ * a malloc'd array the collector traces and the finaliser frees. */
+static kiln_timer *kiln_c99_timer_new(kiln_value callback, const kiln_value *args, size_t argc,
+                                      double delay, int kind) {
+    kiln_timer *timer = (kiln_timer *)kiln_c99_gc_calloc(KILN_GC_TIMER, sizeof *timer);
+    size_t index;
+    if (timer == NULL) return NULL;
+    kiln_c99_heap_store_value(timer, &timer->callback, callback);
+    timer->delay = delay;
+    timer->kind = (uint8_t)kind;
+    timer->owners = 1;
+    if (argc != 0) {
+        timer->args = (kiln_value *)malloc(argc * sizeof *timer->args);
+        if (timer->args == NULL) return NULL;
+        timer->argc = argc;
+        for (index = 0; index < argc; ++index)
+            kiln_c99_heap_store_value(timer, &timer->args[index], args[index]);
+    }
+    return timer;
 }
 
 static int kiln_c99_run_timer(void *work, void *host_pointer, void *thrown_pointer) {
@@ -740,8 +788,13 @@ static int kiln_c99_run_timer(void *work, void *host_pointer, void *thrown_point
     kiln_value produced = kiln_c99_undefined();
     int status;
     if (timer == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (timer->cleared) return KILN_C99_OK;
+    /* Before the callback, so a `refresh()` inside it sees a timeout that has already run. */
+    if (timer->kind != KILN_C99_TIMER_INTERVAL) timer->ran = 1;
+    kiln_c99_gc_enter_job();
     status = kiln_c99_call(host, &produced, timer->callback, kiln_c99_undefined(),
                            timer->argc == 0 ? NULL : timer->args, timer->argc, 0, thrown);
+    kiln_c99_gc_leave_job();
     kiln_c99_publish_turn_refusal(status, produced, thrown);
     /* The Realm removes one shot work from its queue before entering the callback. Keep the
      * payload live through the callback's final use; otherwise an optimized build can retire

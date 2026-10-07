@@ -66,6 +66,7 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
 
     Module {
         type_syntax: Default::default(),
+        module_id: "".into(),
         // No source, deliberately. This frontend synthesizes a fixed shape and never reads
         // `text`, so its spans index into nothing and its bytecode is the same whatever the file
         // says. Handing it the text would imply a relationship that does not exist -- and would
@@ -74,6 +75,8 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
         // comment-only edit now does produce a different `Program`: the bytecode is unchanged but
         // the text `Function.prototype.toString` answers with is not.
         source: "".into(),
+        static_source_provenance: None,
+        source_origin: None,
         source_kind: SourceKind::JavaScript,
         source_goal: SourceGoal::Module,
         strict: false,
@@ -328,6 +331,7 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
 
     Module {
         type_syntax: Default::default(),
+        module_id: "".into(),
         // No source, deliberately. This frontend synthesizes a fixed shape and never reads
         // `text`, so its spans index into nothing and its bytecode is the same whatever the file
         // says. Handing it the text would imply a relationship that does not exist -- and would
@@ -336,6 +340,8 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
         // comment-only edit now does produce a different `Program`: the bytecode is unchanged but
         // the text `Function.prototype.toString` answers with is not.
         source: "".into(),
+        static_source_provenance: None,
+        source_origin: None,
         source_kind: SourceKind::JavaScript,
         source_goal: kiln_hir::SourceGoal::Module,
         strict: false,

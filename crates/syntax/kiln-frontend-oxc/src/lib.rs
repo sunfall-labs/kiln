@@ -7,19 +7,22 @@
 mod dce_guard;
 
 use std::{
+    borrow::Cow,
     collections::{BTreeSet, HashMap, HashSet},
     path::Path,
     sync::Arc,
 };
 
+use kiln_digest::Digest;
 use kiln_hir::{
     AssignmentOperator as HirAssignmentOperator, BinaryOperator as HirBinaryOperator, Diagnostic,
     Export, ExportName, ExportOrigin, Expression as HirExpression,
     ExpressionKind as HirExpressionKind, Function as HirFunction, Import, ImportName, Item,
     ItemKind, ListElement, Literal as HirLiteral, LogicalOperator as HirLogicalOperator, Module,
     ModuleRequestKind, ModuleRequestOccurrence, NodeRuntimeRequest, Parameter as HirParameter,
-    RequestedModule, SourceGoal, SourceKind, Span as HirSpan, Statement as HirStatement,
-    StatementKind as HirStatementKind, StringUnits, TypeAnnotation as HirTypeAnnotation,
+    RequestedModule, SourceGoal, SourceKind, SourceMapSegment, SourceOrigin, Span as HirSpan,
+    Statement as HirStatement, StatementKind as HirStatementKind, StaticSourceProvenance,
+    StaticSourceType, StringUnits, TypeAnnotation as HirTypeAnnotation,
     TypeAnnotationSite as HirTypeAnnotationSite, TypeDeclaration as HirTypeDeclaration,
     TypeDeclarationKind as HirTypeDeclarationKind, TypeExpr as HirTypeExpr,
     TypeExprKind as HirTypeExprKind, TypeSite as HirTypeSite, TypeSyntax as HirTypeSyntax,
@@ -34,27 +37,44 @@ use oxc_ast::{
     AstKind,
     ast::{
         Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern,
-        Class, ClassElement, Declaration, Directive, ExportDefaultDeclarationKind, Expression,
-        FormalParameters, Function, ImportDeclarationSpecifier, MethodDefinitionKind,
-        ObjectExpression, ObjectPropertyKind, PropertyKind, Statement, VariableDeclaration,
+        CallExpression, Class, ClassElement, Declaration, Directive, ExportDefaultDeclarationKind,
+        Expression, FormalParameters, Function, ImportDeclarationSpecifier, ImportExpression,
+        ImportOrExportKind, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind,
+        PropertyKind, Statement, TSEnumDeclaration, TSEnumMemberName, VariableDeclaration,
         VariableDeclarationKind,
     },
 };
-use oxc_ast_visit::{Visit, walk};
+use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_ecmascript::BoundNames;
 use oxc_minifier::{CompressOptions, Compressor};
 use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SymbolId;
-use oxc_semantic::{IsGlobalReference, SemanticBuilder};
+use oxc_semantic::{IsGlobalReference, Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType, Span};
+use oxc_str::Ident;
+use oxc_str::Str;
 use oxc_syntax::module_record::{
     ExportEntry as OxcExportEntry, ExportExportName, ExportImportName, ExportLocalName,
     ImportImportName,
 };
 use oxc_syntax::operator::UpdateOperator;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
-use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
+use oxc_transformer::{Helper, JsxOptions, JsxRuntime, TransformOptions, Transformer};
+
+/// Whether a static TypeScript module is parsed as its authored source or after a real
+/// per-module TypeScript-to-JavaScript transform. Static parser entrypoints use
+/// `TransformToNode22JavaScript`; authored-source parsing remains available to focused
+/// frontend tests that exercise the legacy HIR lowering directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum StaticTypescriptPolicy {
+    PreserveAuthoredSource,
+    TransformToNode22JavaScript,
+}
+
+const STATIC_TS_TRANSFORM_FINGERPRINT: &str = "kiln-static-ts-v2;oxc=0.147.0;target=node22;typescript=default;jsx=automatic;codegen=0.147.0-default";
+const COMPILER_HELPER_SPECIFIER_PREFIX: &str = "kiln:compiler-runtime/helpers/";
 
 /// Convert Oxc's lossless sentinel representation into ECMAScript UTF-16 units.
 ///
@@ -83,6 +103,62 @@ fn oxc_string_units(value: &str, lone_surrogates: bool) -> StringUnits {
         index += 1;
     }
     StringUnits::from_units(&units)
+}
+
+fn mapped_template_raw(
+    span: oxc_span::Span,
+    parsed_raw: &str,
+    source_units: Option<&[u16]>,
+    source_map: Option<&[usize]>,
+) -> StringUnits {
+    let (Some(units), Some(map)) = (source_units, source_map) else {
+        return StringUnits::from(parsed_raw);
+    };
+    let (Some(&start), Some(&end)) = (map.get(span.start as usize), map.get(span.end as usize))
+    else {
+        return StringUnits::from(parsed_raw);
+    };
+    let Some(raw) = units.get(start..end) else {
+        return StringUnits::from(parsed_raw);
+    };
+    let mut normalized = Vec::with_capacity(raw.len());
+    let mut at = 0;
+    while at < raw.len() {
+        if raw[at] == b'\r' as u16 {
+            normalized.push(b'\n' as u16);
+            at += 1;
+            if raw.get(at) == Some(&(b'\n' as u16)) {
+                at += 1;
+            }
+        } else {
+            normalized.push(raw[at]);
+            at += 1;
+        }
+    }
+    StringUnits::from_units(&normalized)
+}
+
+fn mapped_regexp_pattern(
+    literal_span: oxc_span::Span,
+    flags_len: usize,
+    parsed_pattern: &str,
+    source_units: Option<&[u16]>,
+    source_map: Option<&[usize]>,
+) -> StringUnits {
+    let (Some(units), Some(map)) = (source_units, source_map) else {
+        return StringUnits::from(parsed_pattern);
+    };
+    let start_byte = literal_span.start as usize + 1;
+    let Some(end_byte) = (literal_span.end as usize).checked_sub(flags_len + 1) else {
+        return StringUnits::from(parsed_pattern);
+    };
+    let (Some(&start), Some(&end)) = (map.get(start_byte), map.get(end_byte)) else {
+        return StringUnits::from(parsed_pattern);
+    };
+    units
+        .get(start..end)
+        .map(StringUnits::from_units)
+        .unwrap_or_else(|| StringUnits::from(parsed_pattern))
 }
 
 /// Lossless equivalent of Oxc's `PropertyKey::static_name()`. The latter intentionally exposes
@@ -118,19 +194,475 @@ fn oxc_static_key_units(key: &oxc_ast::ast::PropertyKey<'_>) -> Option<StringUni
         .map(|name| StringUnits::from(name.as_ref()))
 }
 
-/// Parse one JavaScript or TypeScript module and lower its module-level structure into Kiln HIR.
+/// Parse one static JavaScript or TypeScript module and lower its module-level structure into Kiln HIR.
 ///
 /// Parser diagnostics are data, not a transport error: Oxc can recover and produce a useful
 /// module after many syntax errors, and the query database must cache that result just like a
-/// clean parse. An unknown extension falls back to module-mode JavaScript; CLI source discovery
-/// already restricts ordinary project files to known JS/TS extensions.
+/// clean parse. Static TypeScript is transformed per file to the pinned Node 22 JavaScript
+/// target before HIR lowering. An unknown extension falls back to module-mode JavaScript; CLI
+/// source discovery already restricts ordinary project files to known JS/TS extensions.
 pub fn parse(path: &str, source: &str) -> Module {
+    parse_static_typescript_with(
+        path,
+        source,
+        StaticTypescriptPolicy::TransformToNode22JavaScript,
+        inferred_static_source_type(path),
+        |text, ty| (parse_source(Some(path), text, ty), ()),
+    )
+    .0
+}
+
+/// Parse a static TypeScript module under an internal source policy.
+///
+/// This policy entrypoint is retained for focused validation. Production [`parse`] selects the
+/// transform policy for static TypeScript; JS modules take the unchanged parser path. Dynamic
+/// source and explicit-goal entrypoints do not call this function.
+#[doc(hidden)]
+pub fn parse_static_typescript(path: &str, source: &str, policy: StaticTypescriptPolicy) -> Module {
+    parse_static_typescript_with(
+        path,
+        source,
+        policy,
+        inferred_static_source_type(path),
+        |text, ty| (parse_source(Some(path), text, ty), ()),
+    )
+    .0
+}
+
+/// Internal DCE-aware static TS entrypoint. The transform policy wraps the same generated-buffer
+/// parser used by ordinary modules, so DCE sees actual JavaScript module records and spans.
+#[doc(hidden)]
+pub fn parse_static_typescript_dce(
+    path: &str,
+    source: &str,
+    demanded_exports: &BTreeSet<String>,
+    policy: StaticTypescriptPolicy,
+) -> Module {
+    let source_type = inferred_static_source_type(path);
+    parse_static_typescript_with(path, source, policy, source_type, |text, ty| {
+        (
+            parse_source_in_context(Some(path), text, ty, None, Some(demanded_exports), None),
+            (),
+        )
+    })
+    .0
+}
+
+/// Internal native DCE route paired with [`parse_dce_native`].
+#[doc(hidden)]
+pub fn parse_static_typescript_dce_native(
+    path: &str,
+    source: &str,
+    demanded_exports: &BTreeSet<String>,
+    is_entry: bool,
+    policy: StaticTypescriptPolicy,
+) -> Module {
+    let source_type = inferred_static_source_type(path);
+    parse_static_typescript_with(path, source, policy, source_type, |text, ty| {
+        (
+            parse_source_in_context(
+                Some(path),
+                text,
+                ty,
+                None,
+                Some(demanded_exports),
+                Some(is_entry),
+            ),
+            (),
+        )
+    })
+    .0
+}
+
+/// CommonJS loader counterpart. The discovered `require` requests come from the generated
+/// JavaScript parser input in transform mode and from authored source in preserve mode.
+#[doc(hidden)]
+pub fn parse_static_typescript_commonjs_with_requires(
+    path: &str,
+    source: &str,
+    policy: StaticTypescriptPolicy,
+) -> (Module, Vec<String>) {
+    let source_type = commonjs_source_type(path);
+    parse_static_typescript_with(path, source, policy, source_type, |text, ty| {
+        parse_source_with_commonjs_requires(Some(path), text, ty)
+    })
+}
+
+fn commonjs_source_type(path: &str) -> SourceType {
+    SourceType::from_path(Path::new(path))
+        .unwrap_or_default()
+        .with_script(true)
+        .with_module(false)
+        .with_commonjs(true)
+}
+
+fn inferred_static_source_type(path: &str) -> SourceType {
     let mut source_type = SourceType::from_path(Path::new(path))
         .unwrap_or_else(|_| SourceType::default().with_module(true));
     if !path.ends_with(".cjs") {
         source_type = source_type.with_module(true);
     }
-    parse_source(Some(path), source, source_type)
+    source_type
+}
+
+fn parse_static_typescript_with<T>(
+    path: &str,
+    source: &str,
+    policy: StaticTypescriptPolicy,
+    original_type: SourceType,
+    parse_buffer: impl FnOnce(&str, SourceType) -> (Module, T),
+) -> (Module, T) {
+    if policy == StaticTypescriptPolicy::PreserveAuthoredSource || !original_type.is_typescript() {
+        return parse_buffer(source, original_type);
+    }
+    match transform_static_typescript(path, source, original_type) {
+        Ok((generated_source, provenance, type_syntax)) => {
+            let mut generated_type = SourceType::mjs()
+                .with_script(true)
+                .with_module(original_type.is_module());
+            if original_type.is_commonjs() {
+                generated_type = generated_type.with_commonjs(true);
+            }
+            let (mut module, side_data) = parse_buffer(&generated_source, generated_type);
+            module.source_kind = source_kind(original_type);
+            module.type_syntax = type_syntax;
+            map_static_diagnostics_to_original(&mut module, &provenance);
+            module.static_source_provenance = Some(Arc::new(provenance));
+            (module, side_data)
+        }
+        Err(diagnostics) => {
+            let (mut module, side_data) = parse_buffer(source, original_type);
+            if module.diagnostics.is_empty() {
+                module.diagnostics.extend(diagnostics);
+            }
+            (module, side_data)
+        }
+    }
+}
+
+fn map_static_diagnostics_to_original(module: &mut Module, provenance: &StaticSourceProvenance) {
+    for diagnostic in &mut module.diagnostics {
+        if let Some(span) = &mut diagnostic.span {
+            if let Some(start) = provenance.original_offset(span.start) {
+                span.start = start;
+            }
+            if let Some(end) = provenance.original_offset(span.end) {
+                span.end = end.max(span.start);
+            }
+        }
+    }
+}
+
+fn transform_static_typescript(
+    path: &str,
+    source: &str,
+    source_type: SourceType,
+) -> Result<(String, StaticSourceProvenance, HirTypeSyntax), Vec<Diagnostic>> {
+    let allocator = Allocator::default();
+    let mut parsed = Parser::new(&allocator, source, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return Err(parsed.diagnostics.iter().map(lower_diagnostic).collect());
+    }
+
+    // Preserve the authored declaration tree for the checker while the executable HIR is built
+    // from transformed JavaScript. This uses the original parser result before TS erasure.
+    let mut type_syntax = capture_type_syntax(Some(path), source, &parsed.program, None);
+    type_syntax.body = capture_original_body(Some(path), source, &parsed, None);
+    retain_erased_declarations(&mut type_syntax);
+    let mut original_module = lower_parsed_in_context(
+        Some(path),
+        &parsed,
+        source,
+        source_type,
+        None,
+        None,
+        None,
+        None,
+    );
+    original_module.type_syntax = type_syntax.clone();
+    type_syntax.original_module = Some(Arc::new(original_module));
+
+    // Capture authored value-import requests before Oxc removes imports used only by types or
+    // erased as unused values. The graph uses these solely to retain resolver-approved runtime
+    // package alias targets as lazy link candidates; they do not become execution dependencies.
+    let authored_value_imports = parsed
+        .program
+        .body
+        .iter()
+        .filter_map(|statement| {
+            let Statement::ImportDeclaration(declaration) = statement else {
+                return None;
+            };
+            if declaration.import_kind == ImportOrExportKind::Type {
+                return None;
+            }
+            let has_runtime_specifier = declaration.specifiers.as_ref().is_none_or(|specifiers| {
+                specifiers.is_empty()
+                    || specifiers.iter().any(|specifier| match specifier {
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                            specifier.import_kind == ImportOrExportKind::Value
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(_)
+                        | ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => true,
+                    })
+            });
+            has_runtime_specifier.then(|| Arc::<str>::from(declaration.source.value.as_str()))
+        })
+        .collect::<Vec<_>>();
+
+    struct AuthoredInternalHelperFinder(HashSet<String>);
+    impl<'ast> Visit<'ast> for AuthoredInternalHelperFinder {
+        fn visit_import_expression(&mut self, expression: &ImportExpression<'ast>) {
+            if let Expression::StringLiteral(source) = expression.source.without_parentheses() {
+                let specifier = source.value.as_str();
+                if specifier.starts_with(COMPILER_HELPER_SPECIFIER_PREFIX) {
+                    self.0.insert(specifier.to_owned());
+                }
+            }
+            walk::walk_import_expression(self, expression);
+        }
+
+        fn visit_call_expression(&mut self, call: &CallExpression<'ast>) {
+            if matches!(&call.callee, Expression::Identifier(callee) if callee.name == "require") {
+                if let Some(Expression::StringLiteral(source)) = call
+                    .arguments
+                    .first()
+                    .and_then(Argument::as_expression)
+                    .map(Expression::without_parentheses)
+                {
+                    let specifier = source.value.as_str();
+                    if specifier.starts_with(COMPILER_HELPER_SPECIFIER_PREFIX) {
+                        self.0.insert(specifier.to_owned());
+                    }
+                }
+            }
+            walk::walk_call_expression(self, call);
+        }
+    }
+    let authored_static_internal_helpers = parsed
+        .module_record
+        .requested_modules
+        .keys()
+        .map(|specifier| specifier.as_str())
+        .filter(|specifier| specifier.starts_with(COMPILER_HELPER_SPECIFIER_PREFIX))
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let mut finder = AuthoredInternalHelperFinder(authored_static_internal_helpers);
+    finder.visit_program(&parsed.program);
+    let mut authored_internal_helper_imports = finder.0.into_iter().collect::<Vec<_>>();
+    authored_internal_helper_imports.sort_unstable();
+
+    let semantic = SemanticBuilder::new()
+        .with_enum_eval(true)
+        .build(&parsed.program)
+        .semantic;
+    let mut options = TransformOptions::from_target("node22")
+        .expect("the pinned Oxc target syntax is part of this transform policy");
+    // Oxc's default helper module is an npm package. Route its compiler-generated helper imports
+    // through a reserved internal namespace so the graph can bind helpers to Kiln-owned modules
+    // without changing authored imports or relying on ambient globals.
+    const OXC_HELPER_MODULE: &str = "kiln:compiler-runtime";
+    options.helper_loader.module_name = Cow::Borrowed(OXC_HELPER_MODULE);
+    options.jsx = JsxOptions {
+        jsx_plugin: source_type.is_jsx(),
+        runtime: JsxRuntime::Automatic,
+        ..JsxOptions::default()
+    };
+    let transform = Transformer::new(&allocator, Path::new(path), &options)
+        .build_with_scoping(semantic.into_scoping(), &mut parsed.program);
+    if !transform.diagnostics.is_empty() {
+        return Err(transform.diagnostics.iter().map(lower_diagnostic).collect());
+    }
+
+    let mut generated_helper_imports = Vec::new();
+    #[expect(
+        deprecated,
+        reason = "Oxc exposes helper provenance only through this transform result"
+    )]
+    for helper in transform.helpers_used.keys().copied() {
+        let compiler_specifier = format!("{OXC_HELPER_MODULE}/helpers/{}", helper.name());
+        if helper == Helper::UsingCtx {
+            generated_helper_imports.push(Arc::<str>::from(compiler_specifier));
+            continue;
+        }
+        // Preserve Oxc's normal runtime-package contract for unrelated helpers. Only the one
+        // helper Kiln currently provides as an internal virtual module is redirected.
+        let external_specifier = format!("@oxc-project/runtime/helpers/{}", helper.name());
+        for statement in &mut parsed.program.body {
+            let Statement::ImportDeclaration(declaration) = statement else {
+                continue;
+            };
+            if declaration.source.value.as_str() == compiler_specifier {
+                declaration.source.value = Str::from_str_in(&external_specifier, &&allocator);
+                declaration.source.raw = None;
+            }
+        }
+    }
+    generated_helper_imports.sort_unstable();
+    generated_helper_imports.dedup();
+
+    let generated = oxc_codegen::Codegen::new()
+        .with_options(oxc_codegen::CodegenOptions {
+            source_map_path: Some(Path::new(path).to_path_buf()),
+            ..oxc_codegen::CodegenOptions::default()
+        })
+        .build(&parsed.program);
+    let source_map = generated
+        .map
+        .expect("source map generation is enabled for static TypeScript");
+    let generated_coordinates = SourceCoordinateIndex::new(&generated.code);
+    let original_coordinates = SourceCoordinateIndex::new(source);
+    let mut segments = source_map
+        .get_tokens()
+        .filter_map(|token| {
+            token.get_source_id()?;
+            let generated_offset =
+                generated_coordinates.byte_offset(token.get_dst_line(), token.get_dst_col())?;
+            let original_offset =
+                original_coordinates.byte_offset(token.get_src_line(), token.get_src_col())?;
+            Some(SourceMapSegment {
+                generated_offset,
+                original_offset,
+            })
+        })
+        .collect::<Vec<_>>();
+    segments.sort_by_key(|segment| segment.generated_offset);
+    // Preserve token order among duplicate generated positions, with the final source-map
+    // segment winning as required by the map consumer's greatest-lower-bound lookup.
+    let mut unique_segments: Vec<SourceMapSegment> = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if let Some(previous) = unique_segments.last_mut()
+            && previous.generated_offset == segment.generated_offset
+        {
+            previous.original_offset = segment.original_offset;
+        } else {
+            unique_segments.push(segment);
+        }
+    }
+    let mut segments = unique_segments;
+    if segments
+        .first()
+        .is_none_or(|segment| segment.generated_offset != 0)
+    {
+        segments.insert(
+            0,
+            SourceMapSegment {
+                generated_offset: 0,
+                original_offset: 0,
+            },
+        );
+    }
+
+    let fingerprint: Arc<str> = Arc::from(format!(
+        "{STATIC_TS_TRANSFORM_FINGERPRINT};source-kind={:?};module={};commonjs={};jsx={};compiler-helper-policy=internal-usingctx-v1",
+        source_kind(source_type),
+        source_type.is_module(),
+        source_type.is_commonjs(),
+        source_type.is_jsx(),
+    ));
+    let mut identity_bytes =
+        Vec::with_capacity(source.len() + fingerprint.len() + segments.len() * 8 + 24);
+    append_identity_field(&mut identity_bytes, source.as_bytes());
+    append_identity_field(&mut identity_bytes, fingerprint.as_bytes());
+    for helper in &generated_helper_imports {
+        append_identity_field(&mut identity_bytes, helper.as_bytes());
+    }
+    for segment in &segments {
+        identity_bytes.extend_from_slice(&segment.generated_offset.to_le_bytes());
+        identity_bytes.extend_from_slice(&segment.original_offset.to_le_bytes());
+    }
+    let identity: Arc<str> = Arc::from(Digest::hash(&identity_bytes).to_hex());
+    Ok((
+        generated.code,
+        StaticSourceProvenance {
+            original_path: Arc::from(path),
+            original_source: Arc::from(source),
+            original_type: StaticSourceType {
+                goal: if source_type.is_module() {
+                    SourceGoal::Module
+                } else {
+                    SourceGoal::Script
+                },
+                commonjs: source_type.is_commonjs(),
+                jsx: source_type.is_jsx(),
+            },
+            transform_fingerprint: fingerprint,
+            identity,
+            authored_value_imports: authored_value_imports.into(),
+            generated_helper_imports: generated_helper_imports.into(),
+            authored_internal_helper_imports: authored_internal_helper_imports
+                .into_iter()
+                .map(Arc::<str>::from)
+                .collect::<Vec<_>>()
+                .into(),
+            source_map: segments.into(),
+        },
+        type_syntax,
+    ))
+}
+
+fn append_identity_field(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    output.extend_from_slice(bytes);
+}
+
+/// Indexed source-map coordinates. Construction is linear in the source size; each mapping
+/// token then resolves in O(log columns-on-line), avoiding a full-source scan per token.
+struct SourceCoordinateIndex {
+    lines: Vec<Vec<(u32, usize)>>,
+}
+
+impl SourceCoordinateIndex {
+    fn new(source: &str) -> Self {
+        let mut ranges = Vec::new();
+        let mut line_start = 0usize;
+        let mut chars = source.char_indices().peekable();
+        while let Some((offset, ch)) = chars.next() {
+            let line_break_end = match ch {
+                '\r' => {
+                    if chars.peek().is_some_and(|(_, next)| *next == '\n') {
+                        chars.next().expect("peeked CRLF continuation").0 + 1
+                    } else {
+                        offset + ch.len_utf8()
+                    }
+                }
+                '\n' | '\u{2028}' | '\u{2029}' => offset + ch.len_utf8(),
+                _ => continue,
+            };
+            ranges.push((line_start, offset));
+            line_start = line_break_end;
+        }
+        ranges.push((line_start, source.len()));
+
+        let lines = ranges
+            .into_iter()
+            .map(|(start, end)| {
+                let text = &source[start..end];
+                let mut boundaries = Vec::with_capacity(text.len().min(128) + 1);
+                let mut units = 0u32;
+                boundaries.push((units, start));
+                for (offset, ch) in text.char_indices() {
+                    units += ch.len_utf16() as u32;
+                    boundaries.push((units, start + offset + ch.len_utf8()));
+                }
+                boundaries
+            })
+            .collect();
+        Self { lines }
+    }
+
+    fn byte_offset(&self, line: u32, column: u32) -> Option<u32> {
+        let boundaries = self.lines.get(line as usize)?;
+        let index = boundaries
+            .binary_search_by_key(&column, |(unit, _)| *unit)
+            .ok()?;
+        u32::try_from(boundaries.get(index)?.1).ok()
+    }
 }
 
 /// Discover package-like source specifiers without constructing the owned executable HIR.
@@ -223,18 +755,11 @@ pub fn discover_module_specifiers(path: &str, source: &str) -> Vec<String> {
 /// declaration remain observable roots. The caller must relink the returned
 /// module because its import and export interface may be smaller.
 pub fn parse_dce(path: &str, source: &str, demanded_exports: &BTreeSet<String>) -> Module {
-    let mut source_type = SourceType::from_path(Path::new(path))
-        .unwrap_or_else(|_| SourceType::default().with_module(true));
-    if !path.ends_with(".cjs") {
-        source_type = source_type.with_module(true);
-    }
-    parse_source_in_context(
-        Some(path),
+    parse_static_typescript_dce(
+        path,
         source,
-        source_type,
-        None,
-        Some(demanded_exports),
-        None,
+        demanded_exports,
+        StaticTypescriptPolicy::TransformToNode22JavaScript,
     )
 }
 
@@ -247,19 +772,58 @@ pub fn parse_dce_native(
     demanded_exports: &BTreeSet<String>,
     is_entry: bool,
 ) -> Module {
-    let mut source_type = SourceType::from_path(Path::new(path))
-        .unwrap_or_else(|_| SourceType::default().with_module(true));
-    if !path.ends_with(".cjs") {
-        source_type = source_type.with_module(true);
-    }
-    parse_source_in_context(
-        Some(path),
+    parse_static_typescript_dce_native(
+        path,
         source,
-        source_type,
+        demanded_exports,
+        is_entry,
+        StaticTypescriptPolicy::TransformToNode22JavaScript,
+    )
+}
+
+/// Reparse a previously transformed static TS module for native DCE without transforming its
+/// generated JavaScript again. The retained provenance is prepared-source metadata from the
+/// graph's original parse; DCE preserves AST byte spans, so the original mapping remains valid.
+#[doc(hidden)]
+pub fn parse_dce_native_prepared(
+    path: &str,
+    generated_source: &str,
+    demanded_exports: &BTreeSet<String>,
+    is_entry: bool,
+    provenance: Arc<StaticSourceProvenance>,
+) -> Module {
+    let original_type = provenance.original_type;
+    let generated_type = generated_javascript_source_type(original_type);
+    let mut module = parse_source_in_context(
+        Some(path),
+        generated_source,
+        generated_type,
         None,
         Some(demanded_exports),
         Some(is_entry),
-    )
+    );
+    module.source_kind = source_kind_from_static_provenance(&provenance);
+    map_static_diagnostics_to_original(&mut module, &provenance);
+    module.static_source_provenance = Some(provenance);
+    module
+}
+
+fn generated_javascript_source_type(original_type: StaticSourceType) -> SourceType {
+    let mut generated_type = SourceType::mjs()
+        .with_script(true)
+        .with_module(original_type.goal == SourceGoal::Module);
+    if original_type.commonjs {
+        generated_type = generated_type.with_commonjs(true);
+    }
+    generated_type
+}
+
+fn source_kind_from_static_provenance(provenance: &StaticSourceProvenance) -> SourceKind {
+    if provenance.original_type.jsx {
+        SourceKind::Tsx
+    } else {
+        SourceKind::TypeScript
+    }
 }
 
 /// Parse with an explicit ECMAScript goal, independent of Oxc's extension convention.
@@ -336,13 +900,110 @@ pub fn parse_eval(path: &str, source: &str, allow: &EvalSyntax) -> Module {
     )
 }
 
+/// Parse dynamic source held as JavaScript UTF-16 code units. Lone surrogates are transported to
+/// Oxc as escaped code units, while a byte-to-code-unit boundary map lets lowering restore tagged
+/// template raw text exactly. The parser never sees an invalid Rust `str`, and values retain the
+/// original UTF-16 semantics.
+pub fn parse_eval_units(path: &str, source: &StringUnits, allow: &EvalSyntax) -> Module {
+    let original = source.to_units();
+    let (text, byte_to_unit) = source_units_transport(&original);
+    let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
+    parse_source_in_context_with_units(
+        Some(path),
+        &text,
+        inferred.with_script(true),
+        Some(allow),
+        None,
+        None,
+        Some((&original, &byte_to_unit)),
+    )
+}
+
+fn source_units_transport(units: &[u16]) -> (String, Vec<usize>) {
+    let mut text = String::with_capacity(units.len());
+    let mut byte_to_unit = vec![0usize];
+    let mut index = 0usize;
+    let mut slash_run = 0usize;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let scalar =
+                0x10000 + (((unit as u32 - 0xd800) << 10) | (units[index + 1] as u32 - 0xdc00));
+            let ch = char::from_u32(scalar).expect("paired UTF-16 units form a scalar");
+            append_source_scalar(&mut text, &mut byte_to_unit, ch, index, 2);
+            index += 2;
+            slash_run = 0;
+        } else if (0xd800..=0xdfff).contains(&unit) {
+            // If the original unit was preceded by an odd backslash run, that final slash was
+            // its identity escape. Replace the pair as one `\uXXXX` escape; an even run leaves
+            // the source unit unescaped and receives an escape at its own position.
+            if slash_run % 2 == 1 {
+                text.pop();
+                byte_to_unit.pop();
+            }
+            let escape = format!("\\u{unit:04X}");
+            for (offset, byte) in escape.bytes().enumerate() {
+                text.push(byte as char);
+                byte_to_unit.push(if offset + 1 == escape.len() {
+                    index + 1
+                } else if slash_run % 2 == 1 {
+                    index.saturating_sub(1)
+                } else {
+                    index
+                });
+            }
+            index += 1;
+            slash_run = 0;
+        } else {
+            let ch = char::from_u32(unit as u32).expect("non-surrogate UTF-16 unit is scalar");
+            append_source_scalar(&mut text, &mut byte_to_unit, ch, index, 1);
+            index += 1;
+            slash_run = if unit == b'\\' as u16 {
+                slash_run + 1
+            } else {
+                0
+            };
+        }
+    }
+    (text, byte_to_unit)
+}
+
+fn append_source_scalar(
+    text: &mut String,
+    byte_to_unit: &mut Vec<usize>,
+    ch: char,
+    unit_start: usize,
+    unit_count: usize,
+) {
+    let mut bytes = [0; 4];
+    let encoded = ch.encode_utf8(&mut bytes);
+    text.push_str(encoded);
+    for offset in 0..encoded.len() {
+        byte_to_unit.push(if offset + 1 == encoded.len() {
+            unit_start + unit_count
+        } else {
+            unit_start
+        });
+    }
+}
+
 /// Parse a CommonJS file with Oxc's explicit wrapper-aware goal while preserving the owned HIR
 /// boundary. Package-format policy belongs to the Node resolver/graph; the frontend only selects
 /// grammar. Unlike an ordinary Script goal, this admits the wrapper's top-level `return` and
 /// `new.target` while continuing to reject top-level `await`.
 pub fn parse_commonjs(path: &str, source: &str) -> Module {
-    let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
-    parse_source(Some(path), source, inferred.with_commonjs(true))
+    parse_static_typescript_with(
+        path,
+        source,
+        StaticTypescriptPolicy::TransformToNode22JavaScript,
+        commonjs_source_type(path),
+        |text, ty| (parse_source(Some(path), text, ty), ()),
+    )
+    .0
 }
 
 /// Parse CommonJS and return the literal dependencies identified by Oxc's own scope graph.
@@ -350,8 +1011,11 @@ pub fn parse_commonjs(path: &str, source: &str) -> Module {
 /// Keeping this fact beside parsing avoids reimplementing JavaScript hoisting and shadowing in
 /// Kiln HIR. Only owned strings cross the frontend boundary; Oxc nodes and arena lifetimes do not.
 pub fn parse_commonjs_with_requires(path: &str, source: &str) -> (Module, Vec<String>) {
-    let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
-    parse_source_with_commonjs_requires(Some(path), source, inferred.with_commonjs(true))
+    parse_static_typescript_commonjs_with_requires(
+        path,
+        source,
+        StaticTypescriptPolicy::TransformToNode22JavaScript,
+    )
 }
 
 /// Discover literal Node loader requests without guessing from identifier spelling.
@@ -404,18 +1068,33 @@ fn discover_node_runtime_requests_from_semantic(
             continue;
         };
         for specifier in specifiers {
-            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
-                continue;
-            };
-            let imported = match &specifier.imported {
-                oxc_ast::ast::ModuleExportName::IdentifierName(name) => name.name.as_str(),
-                oxc_ast::ast::ModuleExportName::IdentifierReference(name) => name.name.as_str(),
-                oxc_ast::ast::ModuleExportName::StringLiteral(name) => name.value.as_str(),
-            };
-            if imported == "createRequire"
-                && let Some(symbol) = specifier.local.symbol_id.get()
-            {
-                create_symbols.insert(symbol);
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    let imported = match &specifier.imported {
+                        oxc_ast::ast::ModuleExportName::IdentifierName(name) => name.name.as_str(),
+                        oxc_ast::ast::ModuleExportName::IdentifierReference(name) => {
+                            name.name.as_str()
+                        }
+                        oxc_ast::ast::ModuleExportName::StringLiteral(name) => name.value.as_str(),
+                    };
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        if imported == "createRequire" {
+                            create_symbols.insert(symbol);
+                        } else if matches!(imported, "Module" | "default") {
+                            module_symbols.insert(symbol, path.to_owned());
+                        }
+                    }
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        module_symbols.insert(symbol, path.to_owned());
+                    }
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        module_symbols.insert(symbol, path.to_owned());
+                    }
+                }
             }
         }
     }
@@ -480,8 +1159,38 @@ fn discover_node_runtime_requests_from_semantic(
             }
             _ => None,
         };
+        // A plausible path argument does not prove this is the Node loader factory. In
+        // particular, arbitrary local functions (or shadowed `createRequire` identifiers) must
+        // not manufacture captured graph loader capabilities.
+        base.as_ref()?;
         let argument = call.arguments.first().and_then(Argument::as_expression)?;
-        if matches!(argument, Expression::StaticMemberExpression(member) if member.property.name == "url" && matches!(member.object, Expression::ImportMeta(_)))
+        fn is_import_meta_member(expression: &Expression<'_>, property: &str) -> bool {
+            matches!(expression, Expression::StaticMemberExpression(member)
+                if member.property.name == property && matches!(member.object, Expression::ImportMeta(_)))
+        }
+        fn is_current_module_url(
+            expression: &Expression<'_>,
+            scoping: &oxc_semantic::Scoping,
+        ) -> bool {
+            if is_import_meta_member(expression, "url") {
+                return true;
+            }
+            let Expression::NewExpression(new_expression) = expression else {
+                return false;
+            };
+            let Expression::Identifier(callee) = &new_expression.callee else {
+                return false;
+            };
+            callee.name == "URL"
+                && callee.is_global_reference(scoping)
+                && new_expression
+                    .arguments
+                    .first()
+                    .and_then(Argument::as_expression)
+                    .is_some_and(|argument| is_import_meta_member(argument, "url"))
+        }
+        if is_current_module_url(argument, scoping)
+            || is_import_meta_member(argument, "filename")
             || matches!(argument, Expression::Identifier(identifier) if identifier.name == "__filename" && identifier.is_global_reference(scoping))
         {
             return base;
@@ -495,23 +1204,51 @@ fn discover_node_runtime_requests_from_semantic(
     }
 
     create_symbols.retain(|symbol| !scoping.symbol_is_mutated(*symbol));
+    module_symbols.retain(|symbol, _| !scoping.symbol_is_mutated(*symbol));
     let mut require_symbols = HashMap::new();
-    // First collect CommonJS `const m = require("node:module")` symbols. Do this as a separate
-    // pass because semantic node order is an AST walk detail, not a source-order contract.
-    for node in semantic.nodes() {
+    // First collect CommonJS module-object and destructured `createRequire` bindings. Do this as
+    // a separate pass because semantic node order is an AST walk detail, not a source-order
+    // contract.
+    for node in semantic.nodes().iter() {
         let AstKind::VariableDeclarator(declarator) = node.kind() else {
             continue;
         };
         let Some(init) = &declarator.init else {
             continue;
         };
-        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+        if !is_global_require_of_module(init, scoping) {
             continue;
-        };
-        if let Some(symbol) = identifier.symbol_id.get() {
-            if !scoping.symbol_is_mutated(symbol) && is_global_require_of_module(init, scoping) {
-                module_symbols.insert(symbol, path.to_owned());
+        }
+        match &declarator.id {
+            BindingPattern::BindingIdentifier(identifier) => {
+                if let Some(symbol) = identifier.symbol_id.get()
+                    && !scoping.symbol_is_mutated(symbol)
+                {
+                    module_symbols.insert(symbol, path.to_owned());
+                }
             }
+            BindingPattern::ObjectPattern(pattern) => {
+                for property in &pattern.properties {
+                    if property.computed {
+                        continue;
+                    }
+                    let oxc_ast::ast::PropertyKey::StaticIdentifier(key) = &property.key else {
+                        continue;
+                    };
+                    if key.name != "createRequire" {
+                        continue;
+                    }
+                    let BindingPattern::BindingIdentifier(identifier) = &property.value else {
+                        continue;
+                    };
+                    if let Some(symbol) = identifier.symbol_id.get()
+                        && !scoping.symbol_is_mutated(symbol)
+                    {
+                        create_symbols.insert(symbol);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     // Track only aliases initialized from the proven imported/module factory. A shadowed local
@@ -541,11 +1278,259 @@ fn discover_node_runtime_requests_from_semantic(
         }
     }
 
+    fn reference_loader<'a>(
+        expression: &Expression<'a>,
+        scoping: &oxc_semantic::Scoping,
+        loaders: &HashMap<SymbolId, String>,
+    ) -> Option<String> {
+        let Expression::Identifier(identifier) = expression else {
+            return None;
+        };
+        let reference = identifier.reference_id.get()?;
+        let symbol = scoping.get_reference(reference).symbol_id()?;
+        loaders.get(&symbol).cloned()
+    }
+
+    fn wrapper_return_loader<'a>(
+        expression: &Expression<'a>,
+        parameters: &HashSet<SymbolId>,
+        scoping: &oxc_semantic::Scoping,
+        loaders: &HashMap<SymbolId, String>,
+    ) -> Option<String> {
+        match expression {
+            Expression::Identifier(_) => reference_loader(expression, scoping, loaders),
+            Expression::ConditionalExpression(value) => {
+                wrapper_return_loader(&value.consequent, parameters, scoping, loaders).or_else(
+                    || wrapper_return_loader(&value.alternate, parameters, scoping, loaders),
+                )
+            }
+            Expression::LogicalExpression(value) => {
+                wrapper_return_loader(&value.left, parameters, scoping, loaders)
+                    .or_else(|| wrapper_return_loader(&value.right, parameters, scoping, loaders))
+            }
+            Expression::SequenceExpression(value) => value
+                .expressions
+                .last()
+                .and_then(|last| wrapper_return_loader(last, parameters, scoping, loaders)),
+            Expression::CallExpression(call) => {
+                let importer = reference_loader(&call.callee, scoping, loaders)?;
+                let forwards_parameter = call.arguments.iter().any(|argument| {
+                    let Argument::Identifier(identifier) = argument else {
+                        return false;
+                    };
+                    identifier
+                        .reference_id
+                        .get()
+                        .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                        .is_some_and(|symbol| parameters.contains(&symbol))
+                });
+                forwards_parameter.then_some(importer)
+            }
+            _ => None,
+        }
+    }
+
+    fn function_loader<'a>(
+        expression: &Expression<'a>,
+        scoping: &oxc_semantic::Scoping,
+        loaders: &HashMap<SymbolId, String>,
+    ) -> Option<String> {
+        let mut expression = expression;
+        while let Expression::ParenthesizedExpression(parenthesized) = expression {
+            expression = &parenthesized.expression;
+        }
+        let mut parameter_symbols = HashSet::new();
+        let mut returns = Vec::new();
+        match expression {
+            Expression::ArrowFunctionExpression(function) => {
+                for parameter in &function.params.items {
+                    parameter.pattern.bound_names(&mut |identifier| {
+                        if let Some(symbol) = identifier.symbol_id.get() {
+                            parameter_symbols.insert(symbol);
+                        }
+                    });
+                }
+                match &function.body {
+                    ArrowFunctionBody::FunctionBody(body) => {
+                        for statement in &body.statements {
+                            if let Statement::ReturnStatement(returned) = statement {
+                                if let Some(argument) = &returned.argument {
+                                    returns.push(argument);
+                                }
+                            }
+                        }
+                    }
+                    body => {
+                        if let Some(expression) = body.as_expression() {
+                            returns.push(expression);
+                        }
+                    }
+                }
+            }
+            Expression::FunctionExpression(function) => {
+                for parameter in &function.params.items {
+                    parameter.pattern.bound_names(&mut |identifier| {
+                        if let Some(symbol) = identifier.symbol_id.get() {
+                            parameter_symbols.insert(symbol);
+                        }
+                    });
+                }
+                let Some(body) = &function.body else {
+                    return None;
+                };
+                for statement in &body.statements {
+                    if let Statement::ReturnStatement(returned) = statement {
+                        if let Some(argument) = &returned.argument {
+                            returns.push(argument);
+                        }
+                    }
+                }
+            }
+            _ => return None,
+        }
+        returns.into_iter().find_map(|returned| {
+            wrapper_return_loader(returned, &parameter_symbols, scoping, loaders)
+        })
+    }
+
+    // Bundlers wrap lexical `require` in one or more local functions (esbuild names its helper
+    // `__require`). Discover those aliases from symbol-resolved references in each initializer,
+    // so only a value derived from a proven require function acquires a graph edge. A function
+    // with the same spelling and no require provenance remains an ordinary local function.
+    loop {
+        let mut aliases = Vec::new();
+        for node in semantic.nodes() {
+            let AstKind::VariableDeclarator(declarator) = node.kind() else {
+                continue;
+            };
+            let Some(symbol) = declarator
+                .id
+                .get_binding_identifier()
+                .and_then(|id| id.symbol_id.get())
+            else {
+                continue;
+            };
+            if require_symbols.contains_key(&symbol) || scoping.symbol_is_mutated(symbol) {
+                continue;
+            }
+            let Some(init) = &declarator.init else {
+                continue;
+            };
+            let is_symbol_alias = if let Expression::Identifier(identifier) = init {
+                identifier
+                    .reference_id
+                    .get()
+                    .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                    .is_some_and(|source| require_symbols.contains_key(&source))
+            } else {
+                false
+            };
+            let importer = if is_symbol_alias {
+                reference_loader(init, scoping, &require_symbols)
+            } else if let Expression::CallExpression(call) = init {
+                function_loader(&call.callee, scoping, &require_symbols)
+            } else {
+                function_loader(init, scoping, &require_symbols)
+            };
+            if let Some(importer) = importer {
+                aliases.push((symbol, importer));
+            }
+        }
+        if aliases.is_empty() {
+            break;
+        }
+        for (symbol, importer) in aliases {
+            require_symbols.insert(symbol, importer);
+        }
+    }
+
+    fn resolve_importer(
+        expression: &Expression<'_>,
+        scoping: &oxc_semantic::Scoping,
+        require_symbols: &HashMap<SymbolId, String>,
+        resolve_symbols: &HashMap<SymbolId, String>,
+        path: &str,
+    ) -> Option<String> {
+        match expression {
+            Expression::Identifier(identifier) => {
+                let symbol = identifier
+                    .reference_id
+                    .get()
+                    .and_then(|reference| scoping.get_reference(reference).symbol_id())?;
+                resolve_symbols.get(&symbol).cloned()
+            }
+            Expression::StaticMemberExpression(member) if member.property.name == "resolve" => {
+                let Expression::Identifier(identifier) = &member.object else {
+                    return None;
+                };
+                if identifier.name == "require" && identifier.is_global_reference(scoping) {
+                    return Some(path.to_owned());
+                }
+                let symbol = identifier
+                    .reference_id
+                    .get()
+                    .and_then(|reference| scoping.get_reference(reference).symbol_id())?;
+                require_symbols.get(&symbol).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    let mut resolve_symbols = HashMap::<SymbolId, String>::new();
+    loop {
+        let mut aliases = Vec::new();
+        for node in semantic.nodes() {
+            let AstKind::VariableDeclarator(declarator) = node.kind() else {
+                continue;
+            };
+            let Some(symbol) = declarator
+                .id
+                .get_binding_identifier()
+                .and_then(|identifier| identifier.symbol_id.get())
+            else {
+                continue;
+            };
+            if resolve_symbols.contains_key(&symbol) || scoping.symbol_is_mutated(symbol) {
+                continue;
+            }
+            let Some(init) = &declarator.init else {
+                continue;
+            };
+            if let Some(importer) =
+                resolve_importer(init, scoping, &require_symbols, &resolve_symbols, path)
+            {
+                aliases.push((symbol, importer));
+            }
+        }
+        if aliases.is_empty() {
+            break;
+        }
+        for (symbol, importer) in aliases {
+            resolve_symbols.insert(symbol, importer);
+        }
+    }
+
     let mut requests = Vec::new();
     for node in semantic.nodes() {
         let AstKind::CallExpression(call) = node.kind() else {
             continue;
         };
+        if let Some(importer) = resolve_importer(
+            &call.callee,
+            scoping,
+            &require_symbols,
+            &resolve_symbols,
+            path,
+        ) {
+            if let Some(specifier) = literal_argument(call) {
+                requests.push(NodeRuntimeRequest {
+                    specifier,
+                    importer,
+                    resolve_only: true,
+                });
+            }
+            continue;
+        }
         if let Expression::Identifier(identifier) = &call.callee {
             let Some(reference) = identifier.reference_id.get() else {
                 continue;
@@ -562,6 +1547,7 @@ fn discover_node_runtime_requests_from_semantic(
             requests.push(NodeRuntimeRequest {
                 specifier,
                 importer: importer.clone(),
+                resolve_only: false,
             });
             continue;
         } else if let Expression::CallExpression(factory) = &call.callee {
@@ -576,9 +1562,23 @@ fn discover_node_runtime_requests_from_semantic(
             requests.push(NodeRuntimeRequest {
                 specifier,
                 importer,
+                resolve_only: false,
             });
             continue;
         } else if let Expression::StaticMemberExpression(member) = &call.callee {
+            if member.property.name == "resolve"
+                && let Expression::Identifier(require) = &member.object
+                && require.name == "require"
+                && require.is_global_reference(scoping)
+                && let Some(specifier) = literal_argument(call)
+            {
+                requests.push(NodeRuntimeRequest {
+                    specifier,
+                    importer: path.to_owned(),
+                    resolve_only: true,
+                });
+                continue;
+            }
             // `x.getBuiltinModule(id)`: the receiver is usually the global `process`, but
             // bundlers routinely alias it (`e.getBuiltinModule(...)` with `e` a parameter),
             // so any receiver is accepted. A literal id is a statically-provable builtin
@@ -593,6 +1593,7 @@ fn discover_node_runtime_requests_from_semantic(
             requests.push(NodeRuntimeRequest {
                 specifier,
                 importer: path.to_owned(),
+                resolve_only: false,
             });
             continue;
         } else {
@@ -606,11 +1607,27 @@ fn discover_node_runtime_requests_from_semantic(
     // import.meta.url)`, `path.join(__dirname, "w.js")`, `fileURLToPath(...)` of either -- and a
     // literal path, which node resolves against the working directory and the graph against
     // the module's (the two agree when a program is run from its own directory).
+    //
+    // The constructor is found by its `node:worker_threads` binding (a renamed import, a
+    // namespace, a destructured `require`) as well as by the spelling `Worker`, which also
+    // covers a bundler's aliased module object.
+    let (worker_symbols, worker_namespaces) = imported_bindings(
+        program,
+        semantic,
+        &["node:worker_threads", "worker_threads"],
+        "Worker",
+    );
     for node in semantic.nodes() {
         let AstKind::NewExpression(new) = node.kind() else {
             continue;
         };
-        let names_worker = match &new.callee {
+        let names_worker = callee_reads_binding(
+            &new.callee,
+            scoping,
+            "Worker",
+            &worker_symbols,
+            &worker_namespaces,
+        ) || match &new.callee {
             Expression::Identifier(identifier) => identifier.name == "Worker",
             Expression::StaticMemberExpression(member) => member.property.name == "Worker",
             _ => false,
@@ -642,55 +1659,160 @@ fn discover_node_runtime_requests_from_semantic(
             requests.push(NodeRuntimeRequest {
                 specifier,
                 importer: path.to_owned(),
+                resolve_only: false,
             });
         }
     }
     // An actor names code in its destination realm with `{ module: "..." }`, rather than
     // handing a constructor across. Retain statically named targets as lazy graph nodes, just
-    // as for `new Worker(path)`. Runtime still refuses a computed module absent from the graph.
+    // as for `new Worker(path)`. Native still refuses a computed module absent from the graph.
+    for specifier in actor_module_requests(program, semantic) {
+        requests.push(NodeRuntimeRequest {
+            specifier,
+            importer: path.to_owned(),
+            resolve_only: false,
+        });
+    }
+    requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+    requests.dedup_by(|left, right| {
+        if left.specifier == right.specifier && left.importer == right.importer {
+            right.resolve_only &= left.resolve_only;
+            true
+        } else {
+            false
+        }
+    });
+    requests
+}
+
+/// Find CommonJS `require("...")` calls hidden inside the narrowly-supported direct-eval
+/// expression. The eval source is parsed independently, while `find_binding` against the
+/// caller's eval-site scope proves that `require` is the CommonJS wrapper binding rather than
+/// a shadowing lexical variable. This keeps the lazy module edge attached to the original file.
+fn discover_literal_eval_requires(
+    path: &str,
+    source_type: SourceType,
+    semantic: &oxc_semantic::Semantic<'_>,
+) -> Vec<NodeRuntimeRequest> {
+    if !source_type.is_commonjs() {
+        return Vec::new();
+    }
+    let caller_scoping = semantic.scoping();
+    if semantic
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.kind(), AstKind::WithStatement(_)))
+    {
+        return Vec::new();
+    }
+    let mut requests = Vec::new();
     for node in semantic.nodes() {
-        let AstKind::CallExpression(call) = node.kind() else {
+        let AstKind::CallExpression(eval_call) = node.kind() else {
             continue;
         };
-        let names_spawn = match &call.callee {
-            Expression::Identifier(name) => name.name == "spawnActor",
-            Expression::StaticMemberExpression(member) => member.property.name == "spawnActor",
-            _ => false,
-        };
-        if !names_spawn {
+        if eval_call.optional || eval_call.arguments.len() != 1 {
             continue;
         }
-        let Some(Expression::ObjectExpression(options)) =
-            call.arguments.first().and_then(Argument::as_expression)
-        else {
+        let Expression::Identifier(eval_id) = &eval_call.callee else {
             continue;
         };
-        for entry in &options.properties {
-            let ObjectPropertyKind::ObjectProperty(property) = entry else {
+        if eval_id.name != "eval" || !eval_id.is_global_reference(caller_scoping) {
+            continue;
+        }
+        let Some(Argument::StringLiteral(source)) = eval_call.arguments.first() else {
+            continue;
+        };
+        if source.lone_surrogates {
+            continue;
+        }
+        if caller_scoping
+            .find_binding(node.scope_id(), Ident::from("require"))
+            .is_some()
+        {
+            continue;
+        }
+        let allocator = Allocator::default();
+        let parsed = Parser::new(
+            &allocator,
+            source.value.as_str(),
+            SourceType::default().with_script(true),
+        )
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+        if parsed.panicked
+            || !parsed.diagnostics.is_empty()
+            || !parsed.program.directives.is_empty()
+            || parsed.program.body.len() != 1
+        {
+            continue;
+        }
+        let Statement::ExpressionStatement(expression_statement) = &parsed.program.body[0] else {
+            continue;
+        };
+        if !inline_eval_oxc_syntax(&expression_statement.expression) {
+            continue;
+        }
+        let inner_semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program)
+            .semantic;
+        let inner_scoping = inner_semantic.scoping();
+        for inner_node in inner_semantic.nodes().iter() {
+            let AstKind::CallExpression(require_call) = inner_node.kind() else {
                 continue;
             };
-            if property
-                .key
-                .static_name()
-                .is_none_or(|name| name != "module")
-            {
+            let Expression::Identifier(require) = &require_call.callee else {
+                continue;
+            };
+            if require.name != "require" || !require.is_global_reference(inner_scoping) {
                 continue;
             }
-            let mut specifiers = Vec::new();
-            worker_script_specifiers(&property.value, semantic, 0, &mut specifiers);
-            for specifier in specifiers {
+            if let Some(Argument::StringLiteral(literal)) = require_call.arguments.first()
+                && require_call.arguments.len() == 1
+            {
                 requests.push(NodeRuntimeRequest {
-                    specifier,
+                    specifier: literal.value.to_string(),
                     importer: path.to_owned(),
+                    resolve_only: false,
                 });
             }
         }
     }
-    requests.sort_by(|left, right| left.specifier.cmp(&right.specifier));
-    requests.dedup_by(|left, right| {
-        left.specifier == right.specifier && left.importer == right.importer
-    });
     requests
+}
+
+fn inline_eval_oxc_syntax(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::ThisExpression(_) => true,
+        Expression::Identifier(identifier) => {
+            !matches!(identifier.name.as_str(), "eval" | "await" | "yield")
+        }
+        Expression::StaticMemberExpression(member) => {
+            !member.optional && inline_eval_oxc_syntax(&member.object)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            !member.optional
+                && inline_eval_oxc_syntax(&member.object)
+                && inline_eval_oxc_syntax(&member.expression)
+        }
+        Expression::CallExpression(call) => {
+            !call.optional
+                && inline_eval_oxc_syntax(&call.callee)
+                && call
+                    .arguments
+                    .iter()
+                    .all(|argument| argument.as_expression().is_some_and(inline_eval_oxc_syntax))
+        }
+        _ => false,
+    }
 }
 
 /// Every module a `new Worker(argument)` can name: through a `const` binding (`const script =
@@ -743,6 +1865,395 @@ fn worker_script_specifiers(
                 out.push(specifier);
             }
         }
+    }
+}
+
+/// The modules this file's `spawnActor` calls name, when the name is fixed at compile time
+/// (ADR 0072): relative to this file (`./x.mjs`) or absolute.
+///
+/// The call is found by its binding, not its spelling: `spawnActor` imported from
+/// `kiln:actors` under any local name, a namespace or
+/// CommonJS module object's `.spawnActor`, and a destructured `require`. A call spelled
+/// `spawnActor` that resolves to none of those is still read, as before: a program's own wrapper
+/// that forwards to the engine is common, and reading one that does not only links a module
+/// the program never spawns. The options may be an object literal or an unreassigned binding
+/// initialised with one (spreads included), and the module a string literal, a
+/// `new URL(literal, import.meta.url)` (bare, `.href`, `.pathname` or `.toString()`), a
+/// `fileURLToPath` of one, `import.meta.resolve(literal)` or `path.join(__dirname, ...)`.
+fn actor_module_requests(
+    program: &oxc_ast::ast::Program<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+) -> Vec<String> {
+    let scoping = semantic.scoping();
+    let (spawn_symbols, namespace_symbols) =
+        imported_bindings(program, semantic, &["kiln:actors"], "spawnActor");
+    let mut out = Vec::new();
+    for node in semantic.nodes() {
+        let AstKind::CallExpression(call) = node.kind() else {
+            continue;
+        };
+        // The spelling is kept beside the bindings: see the comment above.
+        let names_spawn = callee_reads_binding(
+            &call.callee,
+            scoping,
+            "spawnActor",
+            &spawn_symbols,
+            &namespace_symbols,
+        ) || match call.callee.without_parentheses() {
+            Expression::Identifier(name) => name.name == "spawnActor",
+            Expression::StaticMemberExpression(member) => member.property.name == "spawnActor",
+            _ => false,
+        };
+        if !names_spawn {
+            continue;
+        }
+        if let Some(options) = call.arguments.first().and_then(Argument::as_expression) {
+            actor_option_specifiers(options, semantic, 0, &mut out);
+        }
+    }
+    out
+}
+
+/// The local bindings of export `name` from any of `sources`, and of the module objects that
+/// hold it: ES imports under any local name, namespace and default imports, and CommonJS
+/// `require(source)` / `await import(source)` bound whole or destructured. A shadowing local
+/// of the same spelling is a different symbol and is not in either set.
+fn imported_bindings(
+    program: &oxc_ast::ast::Program<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    sources: &[&str],
+    name: &str,
+) -> (HashSet<SymbolId>, HashSet<SymbolId>) {
+    let scoping = semantic.scoping();
+    let mut direct = HashSet::<SymbolId>::new();
+    let mut namespaces = HashSet::<SymbolId>::new();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        if !sources.contains(&import.source.value.as_str()) {
+            continue;
+        }
+        for specifier in import.specifiers.iter().flatten() {
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    if specifier.imported.name() == name
+                        && let Some(symbol) = specifier.local.symbol_id.get()
+                    {
+                        direct.insert(symbol);
+                    }
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        namespaces.insert(symbol);
+                    }
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    if let Some(symbol) = specifier.local.symbol_id.get() {
+                        namespaces.insert(symbol);
+                    }
+                }
+            }
+        }
+    }
+    let loads_source = |expression: &Expression<'_>| -> bool {
+        let expression = match expression.without_parentheses() {
+            Expression::AwaitExpression(awaited) => awaited.argument.without_parentheses(),
+            other => other,
+        };
+        let source = match expression {
+            Expression::CallExpression(call) => match &call.callee {
+                Expression::Identifier(callee)
+                    if callee.name == "require" && callee.is_global_reference(scoping) =>
+                {
+                    call.arguments.first().and_then(Argument::as_expression)
+                }
+                _ => None,
+            },
+            Expression::ImportExpression(import) => Some(&import.source),
+            _ => None,
+        };
+        matches!(source, Some(Expression::StringLiteral(literal))
+            if sources.contains(&literal.value.as_str()))
+    };
+    for node in semantic.nodes().iter() {
+        let AstKind::VariableDeclarator(declarator) = node.kind() else {
+            continue;
+        };
+        if !declarator.init.as_ref().is_some_and(&loads_source) {
+            continue;
+        }
+        match &declarator.id {
+            BindingPattern::BindingIdentifier(identifier) => {
+                if let Some(symbol) = identifier.symbol_id.get() {
+                    namespaces.insert(symbol);
+                }
+            }
+            BindingPattern::ObjectPattern(pattern) => {
+                for property in &pattern.properties {
+                    if property.key.static_name().is_none_or(|key| key != name) {
+                        continue;
+                    }
+                    if let BindingPattern::BindingIdentifier(identifier) = &property.value
+                        && let Some(symbol) = identifier.symbol_id.get()
+                    {
+                        direct.insert(symbol);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (direct, namespaces)
+}
+
+/// Whether `callee` reads export `name` through one of the bindings [`imported_bindings`]
+/// found: the direct binding, `namespace.name` or `namespace["name"]`.
+fn callee_reads_binding(
+    callee: &Expression<'_>,
+    scoping: &oxc_semantic::Scoping,
+    name: &str,
+    direct: &HashSet<SymbolId>,
+    namespaces: &HashSet<SymbolId>,
+) -> bool {
+    let symbol_of = |identifier: &oxc_ast::ast::IdentifierReference<'_>| {
+        identifier
+            .reference_id
+            .get()
+            .and_then(|reference| scoping.get_reference(reference).symbol_id())
+    };
+    let in_namespace = |object: &Expression<'_>| {
+        matches!(object.without_parentheses(), Expression::Identifier(object)
+            if symbol_of(object).is_some_and(|symbol| namespaces.contains(&symbol)))
+    };
+    match callee.without_parentheses() {
+        Expression::Identifier(identifier) => {
+            symbol_of(identifier).is_some_and(|symbol| direct.contains(&symbol))
+        }
+        Expression::StaticMemberExpression(member) => {
+            member.property.name == name && in_namespace(&member.object)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            matches!(&member.expression, Expression::StringLiteral(key) if key.value == name)
+                && in_namespace(&member.object)
+        }
+        _ => false,
+    }
+}
+
+/// The module names an actor options expression can hold: see [`actor_module_requests`].
+fn actor_option_specifiers(
+    options: &Expression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    if depth > 8 {
+        return;
+    }
+    match options {
+        Expression::ParenthesizedExpression(inner) => {
+            actor_option_specifiers(&inner.expression, semantic, depth + 1, out)
+        }
+        Expression::LogicalExpression(logical) => {
+            actor_option_specifiers(&logical.left, semantic, depth + 1, out);
+            actor_option_specifiers(&logical.right, semantic, depth + 1, out);
+        }
+        Expression::ConditionalExpression(conditional) => {
+            actor_option_specifiers(&conditional.consequent, semantic, depth + 1, out);
+            actor_option_specifiers(&conditional.alternate, semantic, depth + 1, out);
+        }
+        Expression::Identifier(identifier) => {
+            if let Some(init) = unreassigned_initializer(identifier, semantic) {
+                actor_option_specifiers(init, semantic, depth + 1, out);
+            }
+        }
+        Expression::ObjectExpression(object) => {
+            for property in &object.properties {
+                match property {
+                    ObjectPropertyKind::ObjectProperty(property) => {
+                        if !property.computed
+                            && property
+                                .key
+                                .static_name()
+                                .is_some_and(|name| name == "module")
+                        {
+                            actor_module_specifiers(&property.value, semantic, depth + 1, out);
+                        }
+                    }
+                    ObjectPropertyKind::SpreadProperty(spread) => {
+                        actor_option_specifiers(&spread.argument, semantic, depth + 1, out);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The initializer of the binding `identifier` reads, when that binding is never reassigned.
+fn unreassigned_initializer<'a>(
+    identifier: &oxc_ast::ast::IdentifierReference<'_>,
+    semantic: &'a oxc_semantic::Semantic<'_>,
+) -> Option<&'a Expression<'a>> {
+    let scoping = semantic.scoping();
+    let symbol = identifier
+        .reference_id
+        .get()
+        .and_then(|reference| scoping.get_reference(reference).symbol_id())?;
+    if scoping.symbol_is_mutated(symbol) {
+        return None;
+    }
+    let declaration = semantic
+        .nodes()
+        .get_node(scoping.symbol_declaration(symbol));
+    let AstKind::VariableDeclarator(declarator) = declaration.kind() else {
+        return None;
+    };
+    declarator.init.as_ref()
+}
+
+/// The module one actor `module:` value names, as a request relative to this file or an
+/// absolute path. A relative *string* is not one: `spawnActor` refuses it at run time.
+fn actor_module_specifiers(
+    value: &Expression<'_>,
+    semantic: &oxc_semantic::Semantic<'_>,
+    depth: usize,
+    out: &mut Vec<String>,
+) {
+    fn text(expression: &Expression<'_>) -> Option<String> {
+        match expression {
+            Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+            Expression::TemplateLiteral(template) if template.expressions.is_empty() => template
+                .quasis
+                .first()
+                .and_then(|quasi| quasi.value.cooked.as_ref())
+                .map(|cooked| cooked.to_string()),
+            _ => None,
+        }
+    }
+    /// An absolute name: a file URL's path, or an absolute path as written.
+    fn absolute(name: &str) -> Option<String> {
+        if name.starts_with("file:") {
+            let path = url::Url::parse(name).ok()?.to_file_path().ok()?;
+            return path.to_str().map(str::to_owned);
+        }
+        Path::new(name).is_absolute().then(|| name.to_owned())
+    }
+    fn is_import_meta_url(expression: &Expression<'_>) -> bool {
+        matches!(expression.without_parentheses(), Expression::StaticMemberExpression(member)
+            if member.property.name == "url" && matches!(member.object, Expression::ImportMeta(_)))
+    }
+    if depth > 8 {
+        return;
+    }
+    match value {
+        Expression::ParenthesizedExpression(inner) => {
+            actor_module_specifiers(&inner.expression, semantic, depth + 1, out)
+        }
+        Expression::LogicalExpression(logical) => {
+            actor_module_specifiers(&logical.left, semantic, depth + 1, out);
+            actor_module_specifiers(&logical.right, semantic, depth + 1, out);
+        }
+        Expression::ConditionalExpression(conditional) => {
+            actor_module_specifiers(&conditional.consequent, semantic, depth + 1, out);
+            actor_module_specifiers(&conditional.alternate, semantic, depth + 1, out);
+        }
+        Expression::Identifier(identifier) => {
+            if let Some(init) = unreassigned_initializer(identifier, semantic) {
+                actor_module_specifiers(init, semantic, depth + 1, out);
+            }
+        }
+        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
+            if let Some(path) = text(value).as_deref().and_then(absolute) {
+                out.push(path);
+            }
+        }
+        // `new URL(name, import.meta.url)` and `new URL("file:///...")`.
+        Expression::NewExpression(url) => {
+            if !matches!(&url.callee, Expression::Identifier(callee) if callee.name == "URL") {
+                return;
+            }
+            let Some(name) = url
+                .arguments
+                .first()
+                .and_then(Argument::as_expression)
+                .and_then(text)
+            else {
+                return;
+            };
+            if let Some(path) = absolute(&name) {
+                out.push(path);
+                return;
+            }
+            let based_here = url
+                .arguments
+                .get(1)
+                .and_then(Argument::as_expression)
+                .is_some_and(is_import_meta_url);
+            if based_here && !name.contains(':') {
+                out.push(if name.starts_with("./") || name.starts_with("../") {
+                    name
+                } else {
+                    format!("./{name}")
+                });
+            }
+        }
+        // `url.href`, `url.pathname`: the same file as the URL.
+        Expression::StaticMemberExpression(member)
+            if matches!(member.property.name.as_str(), "href" | "pathname") =>
+        {
+            actor_module_specifiers(&member.object, semantic, depth + 1, out)
+        }
+        Expression::CallExpression(call) => {
+            let argument = call.arguments.first().and_then(Argument::as_expression);
+            match call.callee.without_parentheses() {
+                // `url.toString()`.
+                Expression::StaticMemberExpression(member)
+                    if member.property.name == "toString" && call.arguments.is_empty() =>
+                {
+                    actor_module_specifiers(&member.object, semantic, depth + 1, out)
+                }
+                // `import.meta.resolve("./x.mjs")`.
+                Expression::StaticMemberExpression(member)
+                    if member.property.name == "resolve"
+                        && matches!(member.object, Expression::ImportMeta(_)) =>
+                {
+                    if let Some(name) = argument.and_then(text)
+                        && (name.starts_with("./") || name.starts_with("../"))
+                    {
+                        out.push(name);
+                    } else if let Some(path) = argument.and_then(text).as_deref().and_then(absolute)
+                    {
+                        out.push(path);
+                    }
+                }
+                callee => {
+                    let name = match callee {
+                        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+                        Expression::StaticMemberExpression(member) => {
+                            Some(member.property.name.as_str())
+                        }
+                        _ => None,
+                    };
+                    match name {
+                        Some("fileURLToPath" | "pathToFileURL" | "String") => {
+                            if let Some(argument) = argument {
+                                actor_module_specifiers(argument, semantic, depth + 1, out);
+                            }
+                        }
+                        _ => {
+                            if let Some(specifier) =
+                                worker_script_specifier(value, semantic.scoping())
+                            {
+                                out.push(specifier);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1017,6 +2528,30 @@ fn resolve_transform_options(path: Option<&str>) -> TransformOptions {
     }
 }
 
+fn unwrap_parenthesized_expression<'a, 'b>(
+    mut expression: &'b Expression<'a>,
+) -> &'b Expression<'a> {
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &parenthesized.expression;
+    }
+    expression
+}
+
+fn function_parameters<'a, 'b>(expression: &'b Expression<'a>) -> Option<&'b FormalParameters<'a>> {
+    match unwrap_parenthesized_expression(expression) {
+        Expression::FunctionExpression(function) => Some(&function.params),
+        Expression::ArrowFunctionExpression(function) => Some(&function.params),
+        _ => None,
+    }
+}
+
+fn simple_parameter_symbol(parameter: &oxc_ast::ast::FormalParameter<'_>) -> Option<SymbolId> {
+    parameter
+        .pattern
+        .get_binding_identifier()
+        .and_then(|identifier| identifier.symbol_id.get())
+}
+
 fn parse_source_with_commonjs_requires(
     path: Option<&str>,
     source: &str,
@@ -1054,6 +2589,81 @@ fn parse_source_with_commonjs_requires(
             .with_build_nodes(true)
             .build(&parsed.program)
             .semantic;
+        let scoping = semantic.scoping();
+        // UMD loaders pass the real `require` through a factory parameter, e.g.
+        // `(factory => factory(require, exports))((require, exports) => { ... })`.
+        // Track only that proven data flow; a function merely named `require` is not a loader.
+        let mut factory_callbacks = HashMap::<SymbolId, Vec<SymbolId>>::new();
+        for node in semantic.nodes() {
+            let AstKind::CallExpression(call) = node.kind() else {
+                continue;
+            };
+            let Some(factory_parameters) = function_parameters(&call.callee) else {
+                continue;
+            };
+            for (parameter, argument) in factory_parameters.items.iter().zip(&call.arguments) {
+                let Some(factory_symbol) = simple_parameter_symbol(parameter) else {
+                    continue;
+                };
+                let Some(callback_parameters) = argument
+                    .as_expression()
+                    .and_then(function_parameters)
+                    .map(|callback| {
+                        callback
+                            .items
+                            .iter()
+                            .filter_map(simple_parameter_symbol)
+                            .collect::<Vec<_>>()
+                    })
+                else {
+                    continue;
+                };
+                factory_callbacks.insert(factory_symbol, callback_parameters);
+            }
+        }
+        let mut loader_parameters = HashSet::new();
+        loop {
+            let mut discovered = Vec::new();
+            for node in semantic.nodes() {
+                let AstKind::CallExpression(call) = node.kind() else {
+                    continue;
+                };
+                let Expression::Identifier(callee) = &call.callee else {
+                    continue;
+                };
+                let Some(reference) = callee.reference_id.get() else {
+                    continue;
+                };
+                let Some(factory_symbol) = scoping.get_reference(reference).symbol_id() else {
+                    continue;
+                };
+                let Some(callback_parameters) = factory_callbacks.get(&factory_symbol) else {
+                    continue;
+                };
+                for (index, argument) in call.arguments.iter().enumerate() {
+                    let Some(Expression::Identifier(identifier)) = argument.as_expression() else {
+                        continue;
+                    };
+                    let is_node_require =
+                        identifier.name == "require" && identifier.is_global_reference(scoping);
+                    let is_forwarded_loader = identifier
+                        .reference_id
+                        .get()
+                        .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                        .is_some_and(|symbol| loader_parameters.contains(&symbol));
+                    if (is_node_require || is_forwarded_loader)
+                        && let Some(parameter) = callback_parameters.get(index)
+                        && !loader_parameters.contains(parameter)
+                    {
+                        discovered.push(*parameter);
+                    }
+                }
+            }
+            if discovered.is_empty() {
+                break;
+            }
+            loader_parameters.extend(discovered);
+        }
         let mut requires = semantic
             .nodes()
             .iter()
@@ -1064,7 +2674,14 @@ fn parse_source_with_commonjs_requires(
                 let Expression::Identifier(callee) = &call.callee else {
                     return None;
                 };
-                if callee.name != "require" || !callee.is_global_reference(semantic.scoping()) {
+                let is_node_require =
+                    callee.name == "require" && callee.is_global_reference(scoping);
+                let is_loader_parameter = callee
+                    .reference_id
+                    .get()
+                    .and_then(|reference| scoping.get_reference(reference).symbol_id())
+                    .is_some_and(|symbol| loader_parameters.contains(&symbol));
+                if !is_node_require && !is_loader_parameter {
                     return None;
                 }
                 let argument = call.arguments.first()?.as_expression()?;
@@ -1076,16 +2693,35 @@ fn parse_source_with_commonjs_requires(
             .collect::<Vec<_>>();
         requires.sort_by_key(|(start, _)| *start);
         let mut seen = HashSet::new();
+        let mut node_runtime_requests = discover_node_runtime_requests_from_semantic(
+            path.unwrap_or("inline.cjs"),
+            &parsed.program,
+            &semantic,
+        );
+        node_runtime_requests.extend(discover_literal_eval_requires(
+            path.unwrap_or("inline.cjs"),
+            source_type,
+            &semantic,
+        ));
+        node_runtime_requests.sort_by(|left, right| {
+            left.specifier
+                .cmp(&right.specifier)
+                .then_with(|| left.importer.cmp(&right.importer))
+        });
+        node_runtime_requests.dedup_by(|left, right| {
+            if left.specifier == right.specifier && left.importer == right.importer {
+                right.resolve_only &= left.resolve_only;
+                true
+            } else {
+                false
+            }
+        });
         (
             requires
                 .into_iter()
                 .filter_map(|(_, value)| seen.insert(value.clone()).then_some(value))
                 .collect(),
-            discover_node_runtime_requests_from_semantic(
-                path.unwrap_or("inline.cjs"),
-                &parsed.program,
-                &semantic,
-            ),
+            node_runtime_requests,
         )
     };
     let mut module = lower_parsed(path, &parsed, source, source_type);
@@ -1189,6 +2825,26 @@ fn parse_source_in_context(
     demanded_exports: Option<&BTreeSet<String>>,
     native_import_meta: Option<bool>,
 ) -> Module {
+    parse_source_in_context_with_units(
+        path,
+        source,
+        source_type,
+        allow,
+        demanded_exports,
+        native_import_meta,
+        None,
+    )
+}
+
+fn parse_source_in_context_with_units(
+    path: Option<&str>,
+    source: &str,
+    source_type: SourceType,
+    allow: Option<&EvalSyntax>,
+    demanded_exports: Option<&BTreeSet<String>>,
+    native_import_meta: Option<bool>,
+    source_units: Option<(&[u16], &[usize])>,
+) -> Module {
     let allocator = Allocator::default();
     // A regular expression literal's *pattern* is a grammar of its own, and Oxc only runs it when
     // asked: without this the tokenizer checks the flags, hands back the pattern as opaque text,
@@ -1224,16 +2880,45 @@ fn parse_source_in_context(
     if let Some(demanded_exports) = demanded_exports
         && !parsed.panicked
         && parsed.diagnostics.is_empty()
-        && early_errors(&parsed).is_empty()
+        && early_errors_with_source_units(&parsed, source_units).is_empty()
         && !has_unexported_top_level_class_heritage(&parsed.program)
     {
-        expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
-        // Oxc's side-effect model assumes coercions are pure and that some global functions
-        // never throw; guard what the language can observe before it runs (issue 19).
-        dce_guard::guard_observable_effects(&allocator, &mut parsed.program);
-        Compressor::new(&allocator)
-            .dead_code_elimination(&mut parsed.program, CompressOptions::dce());
-        dce_guard::release_observable_guards(&allocator, &mut parsed.program);
+        // Direct eval can resolve any lexical binding in its caller, including when a local
+        // parameter named `eval` holds the intrinsic function. The static analyzer cannot prove
+        // the callee value, so any syntactic identifier call named eval makes DCE unsafe here.
+        let has_eval_call = if parsed.panicked || !parsed.diagnostics.is_empty() {
+            false
+        } else {
+            let semantic = SemanticBuilder::new()
+                .with_build_nodes(true)
+                .build(&parsed.program)
+                .semantic;
+            semantic.nodes().iter().any(|node| {
+                let AstKind::CallExpression(call) = node.kind() else {
+                    return false;
+                };
+                matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == "eval")
+            })
+        };
+        if !has_eval_call {
+            expose_only_demanded_declarations(&allocator, &mut parsed.program, demanded_exports);
+            dce_guard::erase_expression_types_for_dce(&allocator, &mut parsed.program);
+            erase_type_only_declarations_for_dce(&mut parsed.program);
+            // Oxc's side-effect traversal is for JavaScript declarations and marks its TypeScript
+            // declaration variants unreachable. Type-only declarations are safely erased here,
+            // but runtime enums/namespaces/import-equals stay in the source tree because Owned
+            // HIR is the sole runtime lowering authority for them. Keep those modules out of the
+            // JS-only pass instead of asking Oxc to reinterpret or delete runtime TypeScript.
+            let has_runtime_typescript = contains_runtime_typescript_declaration(&parsed.program);
+            if !has_runtime_typescript {
+                // Oxc's side-effect model assumes coercions are pure and that some global functions
+                // never throw; guard what the language can observe before it runs (issue 19).
+                dce_guard::guard_observable_effects(&allocator, &mut parsed.program);
+                Compressor::new(&allocator)
+                    .dead_code_elimination(&mut parsed.program, CompressOptions::dce());
+                dce_guard::release_observable_guards(&allocator, &mut parsed.program);
+            }
+        }
     }
     let node_runtime_requests = if parsed.panicked || !parsed.diagnostics.is_empty() {
         Vec::new()
@@ -1242,11 +2927,30 @@ fn parse_source_in_context(
             .with_build_nodes(true)
             .build(&parsed.program)
             .semantic;
-        discover_node_runtime_requests_from_semantic(
+        let mut requests = discover_node_runtime_requests_from_semantic(
             path.unwrap_or("inline.js"),
             &parsed.program,
             &semantic,
-        )
+        );
+        requests.extend(discover_literal_eval_requires(
+            path.unwrap_or("inline.js"),
+            source_type,
+            &semantic,
+        ));
+        requests.sort_by(|left, right| {
+            left.specifier
+                .cmp(&right.specifier)
+                .then_with(|| left.importer.cmp(&right.importer))
+        });
+        requests.dedup_by(|left, right| {
+            if left.specifier == right.specifier && left.importer == right.importer {
+                right.resolve_only &= left.resolve_only;
+                true
+            } else {
+                false
+            }
+        });
+        requests
     };
     let mut module = lower_parsed_in_context(
         path,
@@ -1256,6 +2960,7 @@ fn parse_source_in_context(
         allow,
         demanded_exports,
         native_import_meta,
+        source_units,
     );
     module.node_runtime_requests = node_runtime_requests;
     module.type_syntax = type_syntax;
@@ -1475,11 +3180,8 @@ fn capture_type_syntax(
             key: &oxc_ast::ast::PropertyKey<'_>,
             computed: bool,
         ) -> Option<kiln_hir::ObjectKey> {
-            let mut lowerer = Lowerer {
-                text: self.source,
-                path: self.path.as_deref(),
-                native_import_meta: self.native_import_meta,
-            };
+            let mut lowerer =
+                Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
             lowerer.member_key(key, computed)
         }
         fn type_name_parts(&self, name: &oxc_ast::ast::TSTypeName<'_>) -> Vec<String> {
@@ -1552,11 +3254,8 @@ fn capture_type_syntax(
             options: Option<&oxc_ast::ast::ObjectExpression<'_>>,
         ) -> Option<Box<kiln_hir::Expression>> {
             let options = options?;
-            let mut lowerer = Lowerer {
-                text: self.source,
-                path: self.path.as_deref(),
-                native_import_meta: self.native_import_meta,
-            };
+            let mut lowerer =
+                Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
             Some(Box::new(lowerer.object_literal(
                 options,
                 HirSpan::new(options.span.start, options.span.end),
@@ -1602,11 +3301,8 @@ fn capture_type_syntax(
             pattern: &oxc_ast::ast::BindingPattern<'_>,
             span: Span,
         ) -> kiln_hir::Pattern {
-            let mut lowerer = Lowerer {
-                text: self.source,
-                path: self.path.as_deref(),
-                native_import_meta: self.native_import_meta,
-            };
+            let mut lowerer =
+                Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
             lowerer.pattern(pattern, HirSpan::new(span.start, span.end))
         }
         fn convert(&self, ty: &oxc_ast::ast::TSType<'_>) -> HirTypeExpr {
@@ -2416,11 +4112,8 @@ fn capture_type_syntax(
         fn visit_variable_declaration(&mut self, node: &oxc_ast::ast::VariableDeclaration<'a>) {
             if node.declare {
                 let span = node.span;
-                let mut lowerer = Lowerer {
-                    text: self.source,
-                    path: self.path.as_deref(),
-                    native_import_meta: self.native_import_meta,
-                };
+                let mut lowerer =
+                    Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
                 self.result.declarations.push(HirTypeDeclaration {
                     name: None,
                     span: HirSpan::new(span.start, span.end),
@@ -2917,11 +4610,11 @@ fn capture_type_syntax(
                             name_kind,
                             span: HirSpan::new(member.span.start, member.span.end),
                             initializer: member.initializer.as_ref().map(|e| {
-                                let mut lowerer = Lowerer {
-                                    text: self.source,
-                                    path: self.path.as_deref(),
-                                    native_import_meta: self.native_import_meta,
-                                };
+                                let mut lowerer = Lowerer::new(
+                                    self.source,
+                                    self.path.as_deref(),
+                                    self.native_import_meta,
+                                );
                                 lowerer.expression(e)
                             }),
                         }
@@ -2952,11 +4645,11 @@ fn capture_type_syntax(
                 enum_members: Vec::new(),
                 body: match &node.body {
                     oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) => {
-                        let mut lowerer = Lowerer {
-                            text: self.source,
-                            path: self.path.as_deref(),
-                            native_import_meta: self.native_import_meta,
-                        };
+                        let mut lowerer = Lowerer::new(
+                            self.source,
+                            self.path.as_deref(),
+                            self.native_import_meta,
+                        );
                         lowerer.statements(&block.body)
                     }
                     oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => {
@@ -2975,11 +4668,8 @@ fn capture_type_syntax(
                 .body
                 .as_deref()
                 .map(|block| {
-                    let mut lowerer = Lowerer {
-                        text: self.source,
-                        path: self.path.as_deref(),
-                        native_import_meta: self.native_import_meta,
-                    };
+                    let mut lowerer =
+                        Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
                     lowerer.statements(&block.body)
                 })
                 .unwrap_or_default();
@@ -3003,11 +4693,8 @@ fn capture_type_syntax(
         }
         fn visit_ts_global_declaration(&mut self, node: &oxc_ast::ast::TSGlobalDeclaration<'a>) {
             let span = node.span;
-            let mut lowerer = Lowerer {
-                text: self.source,
-                path: self.path.as_deref(),
-                native_import_meta: self.native_import_meta,
-            };
+            let mut lowerer =
+                Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
             let body = lowerer.statements(&node.body.body);
             self.result.declarations.push(HirTypeDeclaration {
                 name: None,
@@ -3137,11 +4824,7 @@ fn capture_original_body(
     parsed: &oxc_parser::ParserReturn<'_>,
     native_import_meta: Option<bool>,
 ) -> Vec<HirStatement> {
-    let mut lowerer = Lowerer {
-        text: source,
-        path,
-        native_import_meta,
-    };
+    let mut lowerer = Lowerer::new(source, path, native_import_meta);
     lowerer.statements(&parsed.program.body)
 }
 
@@ -3408,7 +5091,7 @@ fn lower_parsed(
     source: &str,
     source_type: SourceType,
 ) -> Module {
-    lower_parsed_in_context(path, parsed, source, source_type, None, None, None)
+    lower_parsed_in_context(path, parsed, source, source_type, None, None, None, None)
 }
 
 fn lower_parsed_in_context(
@@ -3419,6 +5102,7 @@ fn lower_parsed_in_context(
     allow: Option<&EvalSyntax>,
     demanded_exports: Option<&BTreeSet<String>>,
     native_import_meta: Option<bool>,
+    source_units: Option<(&[u16], &[usize])>,
 ) -> Module {
     let filter_module_record = demanded_exports.is_some();
     let module_statement_spans = parsed
@@ -3438,6 +5122,28 @@ fn lower_parsed_in_context(
         })
         .map(|statement| (statement.span().start, statement.span().end))
         .collect::<HashSet<_>>();
+    // A namespace that contains only erased TypeScript declarations has no runtime binding.
+    // Oxc's module record still reports `export namespace N` as a value export, so retain these
+    // declaration spans separately and remove them from the runtime interface below.
+    let erased_namespace_spans = parsed
+        .program
+        .body
+        .iter()
+        .filter_map(|statement| {
+            let declaration = match statement {
+                Statement::TSNamespaceDeclaration(declaration) => Some(declaration),
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    Declaration::TSNamespaceDeclaration(declaration) => Some(declaration),
+                    _ => None,
+                },
+                _ => None,
+            }?;
+            type_only_namespace(declaration)
+                .then_some((statement.span().start, statement.span().end))
+        })
+        .collect::<HashSet<_>>();
+    let (erased_namespace_names, runtime_value_names) =
+        top_level_namespace_binding_kinds(&parsed.program);
     let import_binding_spans = parsed
         .program
         .body
@@ -3596,6 +5302,12 @@ fn lower_parsed_in_context(
             (!filter_module_record
                 || module_statement_spans
                     .contains(&(entry.statement_span.start, entry.statement_span.end)))
+                && !erased_namespace_spans
+                    .contains(&(entry.statement_span.start, entry.statement_span.end))
+                && !entry.local_name.name().is_some_and(|name| {
+                    erased_namespace_names.contains(name.as_str())
+                        && !runtime_value_names.contains(name.as_str())
+                })
                 && demanded_exports.is_none_or(|demanded| match &entry.export_name {
                     ExportExportName::Name(name) => demanded.contains(name.name.as_str()),
                     ExportExportName::Default(_) => demanded.contains("default"),
@@ -3642,22 +5354,43 @@ fn lower_parsed_in_context(
         diagnostics.retain(|diagnostic| !allow.permits(&diagnostic.message));
     }
     if diagnostics.is_empty() {
-        let mut early = early_errors(parsed);
+        let mut early = early_errors_with_source_units(parsed, source_units);
         if let Some(allow) = allow {
             early.retain(|diagnostic| !allow.permits(&diagnostic.message));
         }
         diagnostics.extend(early);
     }
+    // Reuse the semantic graph already built for literal-eval recognition. It also carries
+    // Oxc's resolved enum-member bindings and constant values for the TypeScript lowering below.
+    let (inline_eval_calls, semantic) = global_literal_eval_call_spans(parsed);
     let mut lowerer = Lowerer {
         text: source,
         path,
         native_import_meta,
+        source_units: source_units.map(|(units, _)| units),
+        source_map: source_units.map(|(_, map)| map),
+        inline_eval_calls,
+        enum_scoping: semantic.as_ref().map(|semantic| semantic.scoping()),
+        active_enum_members: None,
+        active_enum_name: None,
+        enum_merge: false,
     };
     let body = lowerer.statements(&parsed.program.body);
+    let source_origin =
+        source_units.and_then(|(units, map)| SourceOrigin::from_parser_transport(units, map));
+    if source_units.is_some() && source_origin.is_none() {
+        diagnostics.push(Diagnostic {
+            message: "dynamic source origin exceeds supported parser span bounds".into(),
+            span: None,
+        });
+    }
 
     let module = Module {
+        module_id: Arc::from(path.unwrap_or_default()),
         // The one copy of the text every span in this module points into.
         source: Arc::from(source),
+        static_source_provenance: None,
+        source_origin,
         source_kind: source_kind(source_type),
         source_goal: if source_type.is_module() {
             SourceGoal::Module
@@ -3684,6 +5417,385 @@ fn lower_parsed_in_context(
         node_runtime_requests: Vec::new(),
     };
     module
+}
+
+/// Type-only wrappers and parentheses do not change an assignment's Reference. Keep their
+/// erasure shared by member references, updates and assignments so nested wrappers cannot change evaluation
+/// order or turn an identifier target into a member read.
+fn erased_reference_expression<'a, 'ast>(
+    mut expression: &'a Expression<'ast>,
+) -> &'a Expression<'ast> {
+    loop {
+        expression = match expression {
+            Expression::ParenthesizedExpression(wrapper) => &wrapper.expression,
+            Expression::TSAsExpression(wrapper) => &wrapper.expression,
+            Expression::TSSatisfiesExpression(wrapper) => &wrapper.expression,
+            Expression::TSTypeAssertion(wrapper) => &wrapper.expression,
+            Expression::TSNonNullExpression(wrapper) => &wrapper.expression,
+            Expression::TSInstantiationExpression(wrapper) => &wrapper.expression,
+            _ => return expression,
+        };
+    }
+}
+
+/// Top-level namespaces are bindings in TypeScript's namespace space. Named exports may
+/// reference them later (`export { N as Alias }`), so remember which namespace bindings have no
+/// runtime declaration and which names also have an emitted value declaration. TypeScript's
+/// function/class/enum namespace merges keep the value export alive.
+fn top_level_namespace_binding_kinds(
+    program: &oxc_ast::ast::Program<'_>,
+) -> (HashSet<String>, HashSet<String>) {
+    use oxc_ast::ast::{Declaration, Statement};
+    let mut erased_names = HashSet::new();
+    let mut runtime_names = HashSet::new();
+
+    fn declaration_name<'a>(declaration: &'a Declaration<'_>) -> Option<&'a str> {
+        match declaration {
+            Declaration::VariableDeclaration(declaration) if !declaration.declare => {
+                declaration.declarations.iter().find_map(|declarator| {
+                    declarator
+                        .id
+                        .get_binding_identifier()
+                        .map(|id| id.name.as_str())
+                })
+            }
+            Declaration::FunctionDeclaration(declaration)
+                if !declaration.declare && declaration.body.is_some() =>
+            {
+                declaration.id.as_ref().map(|id| id.name.as_str())
+            }
+            Declaration::ClassDeclaration(declaration) if !declaration.declare => {
+                declaration.id.as_ref().map(|id| id.name.as_str())
+            }
+            Declaration::TSEnumDeclaration(declaration) => Some(declaration.id.name.as_str()),
+            Declaration::TSImportEqualsDeclaration(declaration)
+                if !declaration.import_kind.is_type() =>
+            {
+                Some(declaration.id.name.as_str())
+            }
+            Declaration::TSNamespaceDeclaration(declaration)
+                if !type_only_namespace(declaration) =>
+            {
+                Some(declaration.id.name.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    for statement in &program.body {
+        match statement {
+            Statement::TSNamespaceDeclaration(declaration) => {
+                let target = if type_only_namespace(declaration) {
+                    &mut erased_names
+                } else {
+                    &mut runtime_names
+                };
+                target.insert(declaration.id.name.to_string());
+            }
+            Statement::ExportDeclaration(export) => {
+                if let Declaration::TSNamespaceDeclaration(declaration) = &export.declaration {
+                    let target = if type_only_namespace(declaration) {
+                        &mut erased_names
+                    } else {
+                        &mut runtime_names
+                    };
+                    target.insert(declaration.id.name.to_string());
+                } else if let Some(name) = declaration_name(&export.declaration) {
+                    runtime_names.insert(name.to_owned());
+                }
+            }
+            Statement::VariableDeclaration(declaration) if !declaration.declare => {
+                for declarator in &declaration.declarations {
+                    if let Some(id) = declarator.id.get_binding_identifier() {
+                        runtime_names.insert(id.name.to_string());
+                    }
+                }
+            }
+            Statement::FunctionDeclaration(declaration)
+                if !declaration.declare && declaration.body.is_some() =>
+            {
+                if let Some(id) = &declaration.id {
+                    runtime_names.insert(id.name.to_string());
+                }
+            }
+            Statement::ClassDeclaration(declaration) if !declaration.declare => {
+                if let Some(id) = &declaration.id {
+                    runtime_names.insert(id.name.to_string());
+                }
+            }
+            Statement::TSEnumDeclaration(declaration) => {
+                runtime_names.insert(declaration.id.name.to_string());
+            }
+            Statement::TSImportEqualsDeclaration(declaration)
+                if !declaration.import_kind.is_type() =>
+            {
+                runtime_names.insert(declaration.id.name.to_string());
+            }
+            _ => {}
+        }
+    }
+    (erased_names, runtime_names)
+}
+
+/// Whether a namespace is guaranteed to disappear during TypeScript erasure. Bun 1.4.2 erases
+/// empty namespaces as well as namespaces containing only type declarations.
+fn type_only_namespace(declaration: &oxc_ast::ast::TSNamespaceDeclaration<'_>) -> bool {
+    use oxc_ast::ast::{TSNamespaceDeclarationBody, TSNamespaceDeclarationBody as NamespaceBody};
+
+    if declaration.declare {
+        return true;
+    }
+    match &declaration.body {
+        NamespaceBody::TSNamespaceDeclaration(nested) => type_only_namespace(nested),
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+            block.body.iter().all(type_only_namespace_statement)
+        }
+    }
+}
+
+fn type_only_namespace_statement(statement: &Statement<'_>) -> bool {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
+    match statement {
+        Statement::EmptyStatement(_) => true,
+        // A `declare` value member still causes TypeScript-compatible emitters to materialize
+        // the containing namespace object, even though the member itself has no implementation.
+        Statement::VariableDeclaration(_)
+        | Statement::FunctionDeclaration(_)
+        | Statement::ClassDeclaration(_) => false,
+        Statement::TSImportEqualsDeclaration(declaration) => declaration.import_kind.is_type(),
+        Statement::TSTypeAliasDeclaration(_)
+        | Statement::TSInterfaceDeclaration(_)
+        | Statement::TSGlobalDeclaration(_)
+        | Statement::TSNamespaceExportDeclaration(_) => true,
+        Statement::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
+        Statement::ImportDeclaration(import) => {
+            import.import_kind.is_type()
+                || import.specifiers.as_ref().is_some_and(|specifiers| {
+                    !specifiers.is_empty()
+                        && specifiers.iter().all(|specifier| match specifier {
+                            oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(
+                                specifier,
+                            ) => specifier.import_kind.is_type(),
+                            _ => false,
+                        })
+                })
+        }
+        Statement::ExportDeclaration(export) => match &export.declaration {
+            Declaration::TSTypeAliasDeclaration(_) | Declaration::TSInterfaceDeclaration(_) => true,
+            Declaration::VariableDeclaration(_)
+            | Declaration::FunctionDeclaration(_)
+            | Declaration::ClassDeclaration(_) => false,
+            Declaration::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
+            _ => false,
+        },
+        Statement::ExportNamedDeclaration(export) => {
+            export.export_kind.is_type()
+                || (!export.specifiers.is_empty()
+                    && export
+                        .specifiers
+                        .iter()
+                        .all(|specifier| specifier.export_kind.is_type()))
+        }
+        Statement::ExportDefaultDeclaration(export) => matches!(
+            export.declaration,
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
+        ),
+        _ => false,
+    }
+}
+
+/// Remove declarations that TypeScript erases before asking Oxc's JavaScript-only DCE pass to
+/// inspect the tree. Runtime TypeScript declarations are deliberately left alone and cause DCE to
+/// be skipped by [`contains_runtime_typescript_declaration`].
+fn erase_type_only_declarations_for_dce(program: &mut oxc_ast::ast::Program<'_>) {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
+
+    fn erased_declaration(declaration: &Declaration<'_>) -> bool {
+        match declaration {
+            Declaration::VariableDeclaration(declaration) => declaration.declare,
+            Declaration::FunctionDeclaration(declaration) => {
+                declaration.declare || declaration.body.is_none()
+            }
+            Declaration::ClassDeclaration(declaration) => declaration.declare,
+            Declaration::TSImportEqualsDeclaration(declaration) => {
+                declaration.import_kind.is_type()
+            }
+            Declaration::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
+            Declaration::TSEnumDeclaration(declaration) => declaration.declare,
+            Declaration::TSExternalModuleDeclaration(_)
+            | Declaration::TSGlobalDeclaration(_)
+            | Declaration::TSInterfaceDeclaration(_)
+            | Declaration::TSTypeAliasDeclaration(_) => true,
+        }
+    }
+
+    fn erased_statement(statement: &Statement<'_>) -> bool {
+        match statement {
+            Statement::VariableDeclaration(declaration) => declaration.declare,
+            Statement::FunctionDeclaration(declaration) => {
+                declaration.declare || declaration.body.is_none()
+            }
+            Statement::ClassDeclaration(declaration) => declaration.declare,
+            Statement::TSImportEqualsDeclaration(declaration) => declaration.import_kind.is_type(),
+            Statement::TSNamespaceDeclaration(declaration) => type_only_namespace(declaration),
+            Statement::TSEnumDeclaration(declaration) => declaration.declare,
+            Statement::TSExternalModuleDeclaration(_)
+            | Statement::TSGlobalDeclaration(_)
+            | Statement::TSInterfaceDeclaration(_)
+            | Statement::TSTypeAliasDeclaration(_)
+            | Statement::TSNamespaceExportDeclaration(_) => true,
+            Statement::ExportDeclaration(export) => erased_declaration(&export.declaration),
+            Statement::ExportDefaultDeclaration(export) => matches!(
+                export.declaration,
+                ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
+            ),
+            Statement::ExportNamedDeclaration(export) => export.export_kind.is_type(),
+            _ => false,
+        }
+    }
+
+    struct TypeOnlyDeclarationEraser;
+    impl<'ast> VisitMut<'ast> for TypeOnlyDeclarationEraser {
+        fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'ast, Statement<'ast>>) {
+            statements.retain(|statement| !erased_statement(statement));
+            walk_mut::walk_statements(self, statements);
+        }
+    }
+
+    TypeOnlyDeclarationEraser.visit_program(program);
+}
+
+/// Oxc's JS side-effect model intentionally treats TypeScript runtime declaration variants as
+/// unreachable. Keep the original source AST for Owned HIR's lowering and only run JS DCE when no
+/// such runtime declaration remains anywhere in the module.
+fn contains_runtime_typescript_declaration(program: &oxc_ast::ast::Program<'_>) -> bool {
+    struct RuntimeDeclarationFinder(bool);
+
+    impl<'ast> Visit<'ast> for RuntimeDeclarationFinder {
+        fn visit_statement(&mut self, statement: &Statement<'ast>) {
+            match statement {
+                Statement::TSEnumDeclaration(declaration) if !declaration.declare => {
+                    self.0 = true;
+                }
+                Statement::TSNamespaceDeclaration(declaration)
+                    if !type_only_namespace(declaration) =>
+                {
+                    self.0 = true;
+                }
+                Statement::TSImportEqualsDeclaration(declaration)
+                    if !declaration.import_kind.is_type() =>
+                {
+                    self.0 = true;
+                }
+                _ => {}
+            }
+            if !self.0 {
+                walk::walk_statement(self, statement);
+            }
+        }
+
+        fn visit_declaration(&mut self, declaration: &Declaration<'ast>) {
+            match declaration {
+                Declaration::TSEnumDeclaration(declaration) if !declaration.declare => {
+                    self.0 = true;
+                }
+                Declaration::TSNamespaceDeclaration(declaration)
+                    if !type_only_namespace(declaration) =>
+                {
+                    self.0 = true;
+                }
+                Declaration::TSImportEqualsDeclaration(declaration)
+                    if !declaration.import_kind.is_type() =>
+                {
+                    self.0 = true;
+                }
+                _ => {}
+            }
+            if !self.0 {
+                walk::walk_declaration(self, declaration);
+            }
+        }
+    }
+
+    let mut finder = RuntimeDeclarationFinder(false);
+    finder.visit_program(program);
+    finder.0
+}
+
+fn global_literal_eval_call_spans<'a>(
+    parsed: &'a oxc_parser::ParserReturn<'a>,
+) -> (HashSet<(u32, u32)>, Option<oxc_semantic::Semantic<'a>>) {
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return (HashSet::new(), None);
+    }
+    let semantic = SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(&parsed.program)
+        .semantic;
+    let scoping = semantic.scoping();
+    let has_enum = semantic
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.kind(), AstKind::TSEnumDeclaration(_)));
+    if semantic
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.kind(), AstKind::WithStatement(_)))
+    {
+        return (HashSet::new(), has_enum.then_some(semantic));
+    }
+    let spans = semantic
+        .nodes()
+        .iter()
+        .filter_map(|node| {
+            let AstKind::CallExpression(call) = node.kind() else {
+                return None;
+            };
+            if call.optional
+                || call.arguments.len() != 1
+                || !matches!(call.arguments.first(), Some(Argument::StringLiteral(literal)) if !literal.lone_surrogates)
+            {
+                return None;
+            }
+            let Expression::Identifier(id) = &call.callee else {
+                return None;
+            };
+            if id.name != "eval" || !id.is_global_reference(scoping) {
+                return None;
+            }
+            Some((call.span.start, call.span.end))
+        })
+        .collect();
+    (spans, has_enum.then_some(semantic))
+}
+
+fn inline_eval_syntax(expression: &HirExpression) -> bool {
+    use HirExpressionKind as K;
+    match &expression.kind {
+        K::Literal(_) | K::This | K::GlobalObject | K::ProcessObject => true,
+        K::Identifier(name) => !matches!(name.as_str(), "eval" | "await" | "yield"),
+        K::StaticMember {
+            object,
+            optional: false,
+            ..
+        } => inline_eval_syntax(object),
+        K::ComputedMember {
+            object,
+            property,
+            optional: false,
+        } => inline_eval_syntax(object) && inline_eval_syntax(property),
+        K::Call {
+            callee,
+            arguments,
+            optional: false,
+        } => {
+            inline_eval_syntax(callee)
+                && arguments
+                    .iter()
+                    .all(|arg| matches!(arg, ListElement::Item(value) if inline_eval_syntax(value)))
+        }
+        _ => false,
+    }
 }
 
 /// Whether a directive prologue opens with `"use strict"`.
@@ -3774,12 +5886,334 @@ fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
     }
     // `new_compiler` is the cheap configuration: syntax checks on, the random-access node store
     // off.  Only the diagnostics are wanted; scope and symbol tables are discarded.
-    SemanticBuilder::new_compiler()
-        .build(&parsed.program)
-        .diagnostics
-        .errors()
-        .map(lower_diagnostic)
-        .collect()
+    let semantic = SemanticBuilder::new_compiler().build(&parsed.program);
+    let mut diagnostics = semantic.diagnostics.errors().collect::<Vec<_>>();
+
+    if !diagnostics
+        .iter()
+        .any(|diagnostic| is_redeclaration_diagnostic(diagnostic))
+    {
+        return diagnostics.into_iter().map(lower_diagnostic).collect();
+    }
+
+    // Oxc models Annex B's switch-function var alias before checking a lexical declaration in
+    // the enclosing function body. Annex B suppresses that alias when it would collide with the
+    // function body's lexical names; our IR lowering applies that rule when it creates aliases.
+    // Discard only Oxc's matching redeclaration diagnostic for that exact pair of identifier
+    // spans, leaving real CaseBlock and other duplicate-name errors untouched.
+    let mut annex_b = AnnexBBlockedAliasVisitor::new();
+    annex_b.visit_program(&parsed.program);
+    diagnostics.retain(|diagnostic| {
+        if !is_redeclaration_diagnostic(diagnostic) {
+            return true;
+        }
+        let first = diagnostic.labels[0].span();
+        let second = diagnostic.labels[1].span();
+        !annex_b
+            .suppressed_pairs
+            .contains(&(first.start, first.end, second.start, second.end))
+            && !annex_b.suppressed_pairs.contains(&(
+                second.start,
+                second.end,
+                first.start,
+                first.end,
+            ))
+    });
+    diagnostics.into_iter().map(lower_diagnostic).collect()
+}
+
+fn is_redeclaration_diagnostic(diagnostic: &OxcDiagnostic) -> bool {
+    diagnostic.message.contains("has already been declared") && diagnostic.labels.len() >= 2
+}
+
+#[derive(Default)]
+struct AnnexBFunctionScope {
+    sloppy: bool,
+    // Lexical bindings before this index belong to outer function environments and cannot block
+    // an Annex B var alias in this environment.
+    lexical_start: usize,
+}
+
+struct AnnexBBlockedAliasVisitor {
+    scopes: Vec<AnnexBFunctionScope>,
+    lexical_scopes: Vec<HashMap<String, oxc_span::Span>>,
+    suppressed_pairs: HashSet<(u32, u32, u32, u32)>,
+}
+
+impl AnnexBBlockedAliasVisitor {
+    fn new() -> Self {
+        Self {
+            scopes: Vec::new(),
+            lexical_scopes: Vec::new(),
+            suppressed_pairs: HashSet::new(),
+        }
+    }
+
+    fn lexical_names<'a>(statements: &[Statement<'a>]) -> HashMap<String, oxc_span::Span> {
+        let mut names = HashMap::new();
+        for statement in statements {
+            match statement {
+                Statement::VariableDeclaration(declaration)
+                    if !matches!(declaration.kind, oxc_ast::ast::VariableDeclarationKind::Var) =>
+                {
+                    for declarator in &declaration.declarations {
+                        declarator.id.bound_names(&mut |identifier| {
+                            names.insert(identifier.name.to_string(), identifier.span);
+                        });
+                    }
+                }
+                Statement::ClassDeclaration(declaration) => {
+                    if let Some(identifier) = &declaration.id {
+                        names.insert(identifier.name.to_string(), identifier.span);
+                    }
+                }
+                _ => {}
+            }
+        }
+        names
+    }
+
+    fn strict_directives(directives: &[oxc_ast::ast::Directive<'_>]) -> bool {
+        directives
+            .iter()
+            .any(|directive| directive.directive.as_str() == "use strict")
+    }
+}
+
+impl<'ast> Visit<'ast> for AnnexBBlockedAliasVisitor {
+    fn visit_program(&mut self, program: &oxc_ast::ast::Program<'ast>) {
+        let sloppy =
+            program.source_type.is_script() && !Self::strict_directives(&program.directives);
+        self.scopes.push(AnnexBFunctionScope {
+            sloppy,
+            lexical_start: self.lexical_scopes.len(),
+        });
+        self.lexical_scopes.push(Self::lexical_names(&program.body));
+        walk::walk_program(self, program);
+        self.lexical_scopes.pop();
+        self.scopes.pop();
+    }
+
+    fn visit_function(&mut self, function: &Function<'ast>, flags: oxc_syntax::scope::ScopeFlags) {
+        let inherited_sloppy = self.scopes.last().is_some_and(|scope| scope.sloppy);
+        let Some(body) = &function.body else {
+            walk::walk_function(self, function, flags);
+            return;
+        };
+        let lexical_start = self.lexical_scopes.len();
+        self.scopes.push(AnnexBFunctionScope {
+            sloppy: inherited_sloppy
+                && !flags.is_strict_mode()
+                && !Self::strict_directives(&body.directives),
+            lexical_start,
+        });
+        self.lexical_scopes
+            .push(Self::lexical_names(&body.statements));
+        walk::walk_function(self, function, flags);
+        self.lexical_scopes.pop();
+        self.scopes.pop();
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &ArrowFunctionExpression<'ast>) {
+        let inherited_sloppy = self.scopes.last().is_some_and(|scope| scope.sloppy);
+        let body = match &function.body {
+            oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => Some(body.as_ref()),
+            _ => None,
+        };
+        let lexical_start = self.lexical_scopes.len();
+        self.scopes.push(AnnexBFunctionScope {
+            sloppy: inherited_sloppy && !function.has_use_strict_directive(),
+            lexical_start,
+        });
+        self.lexical_scopes
+            .push(body.map_or_else(HashMap::new, |body| Self::lexical_names(&body.statements)));
+        walk::walk_arrow_function_expression(self, function);
+        self.lexical_scopes.pop();
+        self.scopes.pop();
+    }
+
+    fn visit_class_body(&mut self, body: &oxc_ast::ast::ClassBody<'ast>) {
+        // Class bodies are strict, including methods and field initializers. The heritage
+        // expression is visited before ClassBody and retains the surrounding function's mode.
+        self.scopes.push(AnnexBFunctionScope {
+            sloppy: false,
+            lexical_start: self.lexical_scopes.len(),
+        });
+        walk::walk_class_body(self, body);
+        self.scopes.pop();
+    }
+
+    fn visit_static_block(&mut self, block: &oxc_ast::ast::StaticBlock<'ast>) {
+        let lexical_start = self.lexical_scopes.len();
+        self.scopes.push(AnnexBFunctionScope {
+            sloppy: false,
+            lexical_start,
+        });
+        self.lexical_scopes.push(Self::lexical_names(&block.body));
+        walk::walk_static_block(self, block);
+        self.lexical_scopes.pop();
+        self.scopes.pop();
+    }
+
+    fn visit_block_statement(&mut self, statement: &oxc_ast::ast::BlockStatement<'ast>) {
+        self.lexical_scopes
+            .push(Self::lexical_names(&statement.body));
+        walk::walk_block_statement(self, statement);
+        self.lexical_scopes.pop();
+    }
+
+    fn visit_catch_clause(&mut self, clause: &oxc_ast::ast::CatchClause<'ast>) {
+        let mut names = HashMap::new();
+        if let Some(parameter) = &clause.param {
+            parameter.pattern.bound_names(&mut |identifier| {
+                names.insert(identifier.name.to_string(), identifier.span);
+            });
+        }
+        self.lexical_scopes.push(names);
+        walk::walk_catch_clause(self, clause);
+        self.lexical_scopes.pop();
+    }
+
+    fn visit_switch_statement(&mut self, statement: &oxc_ast::ast::SwitchStatement<'ast>) {
+        if let Some(scope) = self.scopes.last().filter(|scope| scope.sloppy) {
+            let mut case_lexicals = HashSet::new();
+            for case in &statement.cases {
+                for consequent in &case.consequent {
+                    match consequent {
+                        Statement::VariableDeclaration(declaration)
+                            if !matches!(
+                                declaration.kind,
+                                oxc_ast::ast::VariableDeclarationKind::Var
+                            ) =>
+                        {
+                            for declarator in &declaration.declarations {
+                                declarator.id.bound_names(&mut |identifier| {
+                                    case_lexicals.insert(identifier.name.to_string());
+                                });
+                            }
+                        }
+                        Statement::ClassDeclaration(declaration) => {
+                            if let Some(identifier) = &declaration.id {
+                                case_lexicals.insert(identifier.name.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            for case in &statement.cases {
+                for consequent in &case.consequent {
+                    let Statement::FunctionDeclaration(function) = consequent else {
+                        continue;
+                    };
+                    // B.3.3 only adds aliases for plain function declarations. A generator or
+                    // async declaration can still be diagnosed as a real lexical collision.
+                    if function.generator || function.r#async {
+                        continue;
+                    }
+                    let Some(identifier) = &function.id else {
+                        continue;
+                    };
+                    if case_lexicals.contains(identifier.name.as_str()) {
+                        continue;
+                    }
+                    let Some(lexical_span) = self
+                        .lexical_scopes
+                        .iter()
+                        .skip(scope.lexical_start)
+                        .rev()
+                        .find_map(|names| names.get(identifier.name.as_str()))
+                    else {
+                        continue;
+                    };
+                    self.suppressed_pairs.insert((
+                        lexical_span.start,
+                        lexical_span.end,
+                        identifier.span.start,
+                        identifier.span.end,
+                    ));
+                }
+            }
+        }
+        walk::walk_switch_statement(self, statement);
+    }
+}
+
+fn early_errors_with_source_units(
+    parsed: &oxc_parser::ParserReturn<'_>,
+    source_units: Option<(&[u16], &[usize])>,
+) -> Vec<Diagnostic> {
+    let mut errors = early_errors(parsed);
+    if let Some((units, byte_to_unit)) = source_units {
+        let mut visitor = RawSurrogateRegExpVisitor {
+            units,
+            byte_to_unit,
+            errors: Vec::new(),
+        };
+        visitor.visit_program(&parsed.program);
+        errors.extend(visitor.errors);
+    }
+    errors
+}
+
+struct RawSurrogateRegExpVisitor<'a> {
+    units: &'a [u16],
+    byte_to_unit: &'a [usize],
+    errors: Vec<Diagnostic>,
+}
+
+impl<'ast, 'source> Visit<'ast> for RawSurrogateRegExpVisitor<'source> {
+    fn visit_reg_exp_literal(&mut self, literal: &oxc_ast::ast::RegExpLiteral<'ast>) {
+        use oxc_ast::ast::RegExpFlags;
+
+        if !literal
+            .regex
+            .flags
+            .intersects(RegExpFlags::U | RegExpFlags::V)
+        {
+            return;
+        }
+        let flags_len = literal.regex.flags.to_string().len();
+        let start_byte = literal.span.start as usize + 1;
+        let Some(end_byte) = (literal.span.end as usize).checked_sub(flags_len + 1) else {
+            return;
+        };
+        let (Some(&start), Some(&end)) = (
+            self.byte_to_unit.get(start_byte),
+            self.byte_to_unit.get(end_byte),
+        ) else {
+            return;
+        };
+        let Some(pattern) = self.units.get(start..end) else {
+            return;
+        };
+        let mut backslashes = 0usize;
+        for (index, &unit) in pattern.iter().enumerate() {
+            let lone_surrogate = match unit {
+                0xd800..=0xdbff => !pattern
+                    .get(index + 1)
+                    .is_some_and(|next| (0xdc00..=0xdfff).contains(next)),
+                0xdc00..=0xdfff => !index
+                    .checked_sub(1)
+                    .and_then(|previous| pattern.get(previous))
+                    .is_some_and(|previous| (0xd800..=0xdbff).contains(previous)),
+                _ => false,
+            };
+            if lone_surrogate && backslashes % 2 == 1 {
+                self.errors.push(Diagnostic {
+                    message: "Invalid regular expression: escaped lone surrogate in Unicode mode"
+                        .into(),
+                    span: Some(HirSpan::new(literal.span.start, literal.span.end)),
+                });
+                break;
+            }
+            backslashes = if unit == b'\\' as u16 {
+                backslashes + 1
+            } else {
+                0
+            };
+        }
+    }
 }
 
 /// A BigInt literal's value as plain decimal digits.
@@ -3830,7 +6264,7 @@ fn skipped_trivia(text: &str) -> usize {
     }
 }
 
-struct Lowerer<'a> {
+struct Lowerer<'a, 's> {
     /// The source being lowered, so a span can be *read* and not merely recorded.
     ///
     /// Only one thing needs this, and it needs it for a reason no span arithmetic can supply: a
@@ -3840,12 +6274,82 @@ struct Lowerer<'a> {
     text: &'a str,
     path: Option<&'a str>,
     /// Native-binary `import.meta` mode: `None` lowers to the standard static object with
-    /// build-time paths; `Some(is_entry)` lowers to a `__kilnNativeImportMeta(isEntry)` call
-    /// whose values resolve at runtime from `process.execPath` (Node SEA semantics).
+    /// build-time paths; `Some(is_entry)` calls `__kilnNativeImportMeta(isEntry, filename)`.
+    /// The entry resolves from `process.execPath`; dependencies retain their captured identity.
     native_import_meta: Option<bool>,
+    /// Call spans whose callee is Oxc-proven to be the unresolved global `eval` and whose sole
+    /// argument is a string literal. The inner source is narrowed further before HIR inlining.
+    inline_eval_calls: HashSet<(u32, u32)>,
+    /// Oxc's enum evaluator supplies constant values for resolved enum member references.
+    enum_scoping: Option<&'s Scoping>,
+    /// Resolved references to the enum currently being lowered. Symbol identity preserves
+    /// shadowing when a computed initializer contains a nested binding with the same name.
+    active_enum_members: Option<HashMap<SymbolId, String>>,
+    active_enum_name: Option<String>,
+    /// Whether this enum declaration merges with one earlier in the same statement list.
+    enum_merge: bool,
+    /// Exact input units and parser-transport byte boundaries for dynamic compilation.
+    source_units: Option<&'a [u16]>,
+    source_map: Option<&'a [usize]>,
 }
 
-impl Lowerer<'_> {
+impl<'a, 's> Lowerer<'a, 's> {
+    fn new(text: &'a str, path: Option<&'a str>, native_import_meta: Option<bool>) -> Self {
+        Self {
+            text,
+            path,
+            native_import_meta,
+            inline_eval_calls: HashSet::new(),
+            enum_scoping: None,
+            active_enum_members: None,
+            active_enum_name: None,
+            enum_merge: false,
+            source_units: None,
+            source_map: None,
+        }
+    }
+}
+
+impl Lowerer<'_, '_> {
+    fn inline_eval_expression(&mut self, source: &str) -> Option<HirExpression> {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::default().with_script(true))
+            .with_options(ParseOptions {
+                parse_regular_expression: true,
+                ..ParseOptions::default()
+            })
+            .parse();
+        if parsed.panicked
+            || !parsed.diagnostics.is_empty()
+            || !parsed.program.directives.is_empty()
+            || parsed.program.body.len() != 1
+        {
+            return None;
+        }
+        let Statement::ExpressionStatement(statement) = &parsed.program.body[0] else {
+            return None;
+        };
+        let mut nested = Lowerer {
+            text: source,
+            path: self.path,
+            native_import_meta: None,
+            inline_eval_calls: HashSet::new(),
+            // This is a separately parsed AST with its own SymbolId space. It has no semantic
+            // graph, so borrowing the caller's Scoping could accidentally resolve an unrelated
+            // reference if Oxc assigned colliding IDs. Eval text is intentionally lowered as
+            // ordinary JavaScript; enum-member references are not rewritten inside its string.
+            enum_scoping: None,
+            active_enum_members: None,
+            active_enum_name: None,
+            enum_merge: false,
+            // This separately parsed scalar eval literal has its own source coordinates.
+            source_units: None,
+            source_map: None,
+        };
+        let expression = nested.expression(&statement.expression);
+        inline_eval_syntax(&expression).then_some(expression)
+    }
+
     /// A class member's definition span, which for a static member starts after the `static`.
     ///
     /// `class C { static s() {} }` answers `"s() {}"`: `static` belongs to the `ClassElement`,
@@ -3887,11 +6391,25 @@ impl Lowerer<'_> {
     /// three evals of a four-megabyte source held a gigabyte that nothing pointed at.
     fn statements(&mut self, source: &[Statement<'_>]) -> Vec<HirStatement> {
         let mut lowered = Vec::with_capacity(source.len());
-        lowered.extend(
-            source
-                .iter()
-                .filter_map(|statement| self.statement(statement)),
-        );
+        let mut enum_names = HashSet::new();
+        for statement in source {
+            let name = match statement {
+                Statement::TSEnumDeclaration(declaration) => Some(declaration.id.name.as_str()),
+                Statement::ExportDeclaration(declaration) => {
+                    if let Declaration::TSEnumDeclaration(declaration) = &declaration.declaration {
+                        Some(declaration.id.name.as_str())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            self.enum_merge = name.is_some_and(|name| !enum_names.insert(name.to_owned()));
+            if let Some(statement) = self.statement(statement) {
+                lowered.push(statement);
+            }
+            self.enum_merge = false;
+        }
         lowered
     }
 
@@ -3986,10 +6504,19 @@ impl Lowerer<'_> {
             | Statement::TSExternalModuleDeclaration(_)
             | Statement::TSNamespaceExportDeclaration(_) => return None,
             Statement::TSNamespaceDeclaration(declaration) => {
-                if declaration.declare {
+                if type_only_namespace(declaration) {
                     return None;
                 }
                 self.unsupported_statement("TypeScript runtime declaration", statement_span)
+            }
+            Statement::TSEnumDeclaration(declaration) => {
+                if declaration.declare {
+                    return None;
+                }
+                match self.enum_declaration(declaration, statement_span) {
+                    Ok(statements) => HirStatementKind::Block(statements),
+                    Err(feature) => self.unsupported_statement(&feature, statement_span),
+                }
             }
             Statement::TSImportEqualsDeclaration(_) => {
                 self.unsupported_statement("TypeScript import equals", statement_span)
@@ -4266,6 +6793,15 @@ impl Lowerer<'_> {
             Declaration::TSTypeAliasDeclaration(_)
             | Declaration::TSInterfaceDeclaration(_)
             | Declaration::TSGlobalDeclaration(_) => return None,
+            Declaration::TSEnumDeclaration(declaration) => {
+                if declaration.declare {
+                    return None;
+                }
+                match self.enum_declaration(declaration, statement_span) {
+                    Ok(statements) => HirStatementKind::Block(statements),
+                    Err(feature) => self.unsupported_statement(&feature, statement_span),
+                }
+            }
             // `export function f() {}` is a declaration that also names an export. The export
             // side is read from the module record separately, so lowering only has to produce
             // the declaration -- the same one the unexported form produces.
@@ -4285,7 +6821,7 @@ impl Lowerer<'_> {
                 }
             }
             Declaration::TSNamespaceDeclaration(declaration) => {
-                if declaration.declare {
+                if type_only_namespace(declaration) {
                     return None;
                 }
                 self.unsupported_statement("TypeScript runtime declaration", statement_span)
@@ -4296,6 +6832,188 @@ impl Lowerer<'_> {
             kind,
             span: statement_span,
         })
+    }
+
+    /// Lower a TypeScript enum to ordinary binding and property operations. Keeping this
+    /// desugaring at the syntax boundary means neither bytecode nor either engine needs an enum
+    /// concept. The generated operations follow TypeScript's source-order initialization and
+    /// numeric reverse-map convention.
+    fn enum_declaration(
+        &mut self,
+        declaration: &TSEnumDeclaration<'_>,
+        statement_span: HirSpan,
+    ) -> Result<Vec<HirStatement>, String> {
+        let name = declaration.id.name.to_string();
+        let span = statement_span;
+        let string = |value: &str| HirExpression {
+            kind: HirExpressionKind::Literal(HirLiteral::String(StringUnits::from(value))),
+            span,
+        };
+        let identifier = |value: &str| HirExpression {
+            kind: HirExpressionKind::Identifier(value.to_owned()),
+            span,
+        };
+        let enum_object = || identifier(&name);
+        let member_read = |member: &str| HirExpression {
+            kind: HirExpressionKind::ComputedMember {
+                object: Box::new(enum_object()),
+                property: Box::new(string(member)),
+                optional: false,
+            },
+            span,
+        };
+        let mut statements = Vec::with_capacity(1 + declaration.body.members.len() * 2);
+        let mut member_symbols = HashMap::new();
+        if let (Some(scoping), Some(scope_id)) =
+            (self.enum_scoping, declaration.body.scope_id.get())
+        {
+            for member in &declaration.body.members {
+                if let TSEnumMemberName::Identifier(id) = &member.id
+                    && let Some(symbol) = scoping.get_binding(scope_id, id.name)
+                {
+                    member_symbols.insert(symbol, id.name.to_string());
+                }
+            }
+        }
+        statements.push(HirStatement {
+            kind: HirStatementKind::Variable {
+                kind: HirVariableKind::Var,
+                declarations: vec![HirVariableDeclarator {
+                    pattern: kiln_hir::Pattern::Identifier(name.clone()),
+                    initializer: Some(if self.enum_merge {
+                        HirExpression {
+                            kind: HirExpressionKind::Logical {
+                                operator: HirLogicalOperator::Or,
+                                left: Box::new(identifier(&name)),
+                                right: Box::new(HirExpression {
+                                    kind: HirExpressionKind::Assignment {
+                                        operator: HirAssignmentOperator::Assign,
+                                        target: name.clone(),
+                                        value: Box::new(HirExpression {
+                                            kind: HirExpressionKind::Object {
+                                                members: Vec::new(),
+                                            },
+                                            span,
+                                        }),
+                                    },
+                                    span,
+                                }),
+                            },
+                            span,
+                        }
+                    } else {
+                        HirExpression {
+                            kind: HirExpressionKind::Object {
+                                members: Vec::new(),
+                            },
+                            span,
+                        }
+                    }),
+                    span,
+                }],
+            },
+            span,
+        });
+        let mut previous: Option<(String, bool)> = None;
+        for member in &declaration.body.members {
+            let member_name = match &member.id {
+                TSEnumMemberName::Identifier(id) => id.name.to_string(),
+                TSEnumMemberName::String(value) | TSEnumMemberName::ComputedString(value) => {
+                    value.value.to_string()
+                }
+                TSEnumMemberName::ComputedTemplateString(_) => {
+                    return Err("computed template enum member name".to_owned());
+                }
+            };
+            let constant = self.enum_scoping.and_then(|scoping| {
+                let scope_id = declaration.body.scope_id.get()?;
+                let TSEnumMemberName::Identifier(id) = &member.id else {
+                    return None;
+                };
+                let symbol = scoping.get_binding(scope_id, id.name)?;
+                scoping.get_enum_member_value(symbol).cloned()
+            });
+            let is_string_constant =
+                matches!(
+                    constant,
+                    Some(oxc_syntax::constant_value::ConstantValue::String(_))
+                ) || matches!(member.initializer, Some(Expression::StringLiteral(_)));
+            let (value, auto_incrementable, needs_reverse_map) =
+                if let Some(initializer) = &member.initializer {
+                    let old_members = self.active_enum_members.replace(member_symbols.clone());
+                    let old_name = self.active_enum_name.replace(name.clone());
+                    let value = self.expression(initializer);
+                    self.active_enum_members = old_members;
+                    self.active_enum_name = old_name;
+                    (
+                        value,
+                        matches!(
+                            constant,
+                            Some(oxc_syntax::constant_value::ConstantValue::Number(_))
+                        ) || matches!(initializer, Expression::NumericLiteral(_)),
+                        !is_string_constant,
+                    )
+                } else if let Some((previous_name, true)) = &previous {
+                    (
+                        HirExpression {
+                            kind: HirExpressionKind::Binary {
+                                operator: HirBinaryOperator::Add,
+                                left: Box::new(member_read(previous_name)),
+                                right: Box::new(HirExpression {
+                                    kind: HirExpressionKind::Literal(HirLiteral::Number(
+                                        1.0f64.to_bits(),
+                                    )),
+                                    span,
+                                }),
+                            },
+                            span,
+                        },
+                        true,
+                        true,
+                    )
+                } else if previous.is_none() {
+                    (
+                        HirExpression {
+                            kind: HirExpressionKind::Literal(HirLiteral::Number(0.0f64.to_bits())),
+                            span,
+                        },
+                        true,
+                        true,
+                    )
+                } else {
+                    return Err("implicit enum member after non-numeric initializer".to_owned());
+                };
+            statements.push(HirStatement {
+                kind: HirStatementKind::Expression(HirExpression {
+                    kind: HirExpressionKind::MemberAssignment {
+                        operator: HirAssignmentOperator::Assign,
+                        object: Box::new(enum_object()),
+                        property: member_name.clone(),
+                        value: Box::new(value),
+                    },
+                    span,
+                }),
+                span,
+            });
+            if needs_reverse_map {
+                let assigned_value = member_read(&member_name);
+                let reverse = HirExpression {
+                    kind: HirExpressionKind::ComputedAssignment {
+                        operator: HirAssignmentOperator::Assign,
+                        object: Box::new(enum_object()),
+                        property: Box::new(assigned_value),
+                        value: Box::new(string(&member_name)),
+                    },
+                    span,
+                };
+                statements.push(HirStatement {
+                    kind: HirStatementKind::Expression(reverse),
+                    span,
+                });
+            }
+            previous = Some((member_name, auto_incrementable));
+        }
+        Ok(statements)
     }
 
     fn variable(&mut self, declaration: &VariableDeclaration<'_>) -> HirStatementKind {
@@ -4364,7 +7082,51 @@ impl Lowerer<'_> {
                 oxc_string_units(literal.value.as_str(), literal.lone_surrogates),
             )),
             Expression::Identifier(identifier) => {
-                HirExpressionKind::Identifier(identifier.name.to_string())
+                let enum_value = self.enum_scoping.and_then(|scoping| {
+                    let reference = identifier.reference_id.get()?;
+                    let symbol = scoping.get_reference(reference).symbol_id()?;
+                    self.active_enum_members
+                        .as_ref()
+                        .and_then(|members| members.get(&symbol))
+                        .map(|member_name| {
+                            (
+                                member_name.clone(),
+                                scoping.get_enum_member_value(symbol).cloned(),
+                            )
+                        })
+                });
+                if let Some((member_name, value)) = enum_value {
+                    if let Some(value) = value {
+                        match value {
+                            oxc_syntax::constant_value::ConstantValue::Number(value) => {
+                                HirExpressionKind::Literal(HirLiteral::Number(value.to_bits()))
+                            }
+                            oxc_syntax::constant_value::ConstantValue::String(value) => {
+                                HirExpressionKind::Literal(HirLiteral::String(StringUnits::from(
+                                    value.as_str(),
+                                )))
+                            }
+                        }
+                    } else if let Some(enum_name) = &self.active_enum_name {
+                        HirExpressionKind::ComputedMember {
+                            object: Box::new(HirExpression {
+                                kind: HirExpressionKind::Identifier(enum_name.clone()),
+                                span: expression_span,
+                            }),
+                            property: Box::new(HirExpression {
+                                kind: HirExpressionKind::Literal(HirLiteral::String(
+                                    StringUnits::from(member_name.as_str()),
+                                )),
+                                span: expression_span,
+                            }),
+                            optional: false,
+                        }
+                    } else {
+                        HirExpressionKind::Identifier(identifier.name.to_string())
+                    }
+                } else {
+                    HirExpressionKind::Identifier(identifier.name.to_string())
+                }
             }
             Expression::ParenthesizedExpression(expression) => {
                 return self.expression(&expression.expression);
@@ -4379,6 +7141,11 @@ impl Lowerer<'_> {
                 return self.expression(&expression.expression);
             }
             Expression::TSNonNullExpression(expression) => {
+                return self.expression(&expression.expression);
+            }
+            // Type arguments affect checking, not JavaScript evaluation. Lower the wrapped
+            // expression itself so a generic member call retains its Reference (and `this`).
+            Expression::TSInstantiationExpression(expression) => {
                 return self.expression(&expression.expression);
             }
             // `delete o.x` must not evaluate `o.x`, so it is not a unary operator over a member
@@ -4551,6 +7318,39 @@ impl Lowerer<'_> {
                     arguments: self.arguments(&expression.arguments),
                 }
             }
+            Expression::CallExpression(expression)
+                if self
+                    .inline_eval_calls
+                    .contains(&(expression.span.start, expression.span.end))
+                    && !expression.optional
+                    && expression.arguments.len() == 1
+                    && matches!(
+                        expression.arguments.first(),
+                        Some(Argument::StringLiteral(literal)) if !literal.lone_surrogates
+                    ) =>
+            {
+                let Argument::StringLiteral(argument) = &expression.arguments[0] else {
+                    unreachable!()
+                };
+                match self.inline_eval_expression(&argument.value) {
+                    Some(inlined) => HirExpressionKind::InlineLiteralEval {
+                        callee: Box::new(self.expression(&expression.callee)),
+                        argument: Box::new(HirExpression {
+                            kind: HirExpressionKind::Literal(HirLiteral::String(oxc_string_units(
+                                argument.value.as_str(),
+                                argument.lone_surrogates,
+                            ))),
+                            span: span(argument.span),
+                        }),
+                        expression: Box::new(inlined),
+                    },
+                    None => HirExpressionKind::Call {
+                        callee: Box::new(self.expression(&expression.callee)),
+                        arguments: self.arguments(&expression.arguments),
+                        optional: expression.optional,
+                    },
+                }
+            }
             Expression::CallExpression(expression) => HirExpressionKind::Call {
                 callee: Box::new(self.expression(&expression.callee)),
                 arguments: self.arguments(&expression.arguments),
@@ -4680,7 +7480,14 @@ impl Lowerer<'_> {
                             .quasi
                             .quasis
                             .iter()
-                            .map(|quasi| StringUnits::from(quasi.value.raw.as_str()))
+                            .map(|quasi| {
+                                mapped_template_raw(
+                                    quasi.span,
+                                    quasi.value.raw.as_str(),
+                                    self.source_units,
+                                    self.source_map,
+                                )
+                            })
                             .collect(),
                     },
                     span: expression_span,
@@ -4714,6 +7521,21 @@ impl Lowerer<'_> {
                     SimpleAssignmentTarget::AssignmentTargetIdentifier(_)
                 ) =>
             {
+                if let Some(expression) = update.argument.get_expression() {
+                    return match self.update_wrapped_target(
+                        expression,
+                        update.operator,
+                        update.prefix,
+                    ) {
+                        Some(kind) => HirExpression {
+                            kind,
+                            span: expression_span,
+                        },
+                        None => {
+                            self.unsupported_expression("update of that target", expression_span)
+                        }
+                    };
+                }
                 let (object, property) = match &update.argument {
                     SimpleAssignmentTarget::StaticMemberExpression(member) => (
                         self.expression(&member.object),
@@ -4725,8 +7547,7 @@ impl Lowerer<'_> {
                     ),
                     // `this.#n++`. A private name is a member target like any other here; only
                     // the key differs, and it is one the compiler already knows how to read and
-                    // write. Refusing it made the ordinary way of incrementing a private counter
-                    // a compile error rather than a missing optimisation.
+                    // write.
                     SimpleAssignmentTarget::PrivateFieldExpression(member) => (
                         self.expression(&member.object),
                         kiln_hir::ObjectKey::Private(member.field.name.to_string()),
@@ -4779,7 +7600,13 @@ impl Lowerer<'_> {
             Expression::RegExpLiteral(literal) => HirExpressionKind::RegExp {
                 // The source text, not a compiled program: `re.source` hands the pattern back to
                 // the program, and compiling belongs to whoever owns the engine.
-                pattern: literal.regex.pattern.text.to_string(),
+                pattern: mapped_regexp_pattern(
+                    literal.span,
+                    literal.regex.flags.to_string().len(),
+                    literal.regex.pattern.text.as_str(),
+                    self.source_units,
+                    self.source_map,
+                ),
                 flags: literal.regex.flags.to_string(),
             },
             Expression::Super(_) => {
@@ -4840,20 +7667,40 @@ impl Lowerer<'_> {
                 return self.unsupported_expression("private-in expression", expression_span);
             }
             Expression::ImportMeta(_) => {
-                // Native binary: `import.meta` resolves at runtime from `process.execPath`
-                // (Node SEA semantics). The bootstrap defines `__kilnNativeImportMeta`.
+                // A native entry uses the executable identity; bundled dependencies need their
+                // own captured identity so relative loader bases remain distinct.
                 if let Some(is_entry) = self.native_import_meta {
                     HirExpressionKind::Call {
                         callee: Box::new(HirExpression {
-                            kind: HirExpressionKind::Identifier(
-                                "__kilnNativeImportMeta".to_string(),
-                            ),
+                            kind: HirExpressionKind::StaticMember {
+                                object: Box::new(HirExpression {
+                                    kind: HirExpressionKind::StaticMember {
+                                        object: Box::new(HirExpression {
+                                            kind: HirExpressionKind::ProcessObject,
+                                            span: expression_span,
+                                        }),
+                                        property: "__kilnNativeModules".to_string(),
+                                        optional: false,
+                                    },
+                                    span: expression_span,
+                                }),
+                                property: "__kilnNativeImportMeta".to_string(),
+                                optional: false,
+                            },
                             span: expression_span,
                         }),
-                        arguments: vec![kiln_hir::ListElement::Item(HirExpression {
-                            kind: HirExpressionKind::Literal(HirLiteral::Boolean(is_entry)),
-                            span: expression_span,
-                        })],
+                        arguments: vec![
+                            kiln_hir::ListElement::Item(HirExpression {
+                                kind: HirExpressionKind::Literal(HirLiteral::Boolean(is_entry)),
+                                span: expression_span,
+                            }),
+                            kiln_hir::ListElement::Item(HirExpression {
+                                kind: HirExpressionKind::Literal(HirLiteral::String(
+                                    self.path.unwrap_or("/unknown").into(),
+                                )),
+                                span: expression_span,
+                            }),
+                        ],
                         optional: false,
                     }
                 } else {
@@ -4871,7 +7718,9 @@ impl Lowerer<'_> {
                             .parent()
                             .map(|parent| parent.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        let url_str = format!("file://{filename_str}");
+                        let url_str = url::Url::from_file_path(&abs_path)
+                            .map(|url| url.to_string())
+                            .unwrap_or_else(|_| "file:///unknown".to_string());
                         (url_str, dirname_str, filename_str)
                     } else {
                         (
@@ -4924,12 +7773,6 @@ impl Lowerer<'_> {
             Expression::JSXElement(_) | Expression::JSXFragment(_) => {
                 return self.unsupported_expression("JSX expression", expression_span);
             }
-            Expression::TSInstantiationExpression(_) => {
-                return self.unsupported_expression(
-                    "TypeScript instantiation expression",
-                    expression_span,
-                );
-            }
             Expression::V8IntrinsicExpression(_) => {
                 return self.unsupported_expression("V8 intrinsic expression", expression_span);
             }
@@ -4959,12 +7802,88 @@ impl Lowerer<'_> {
         }
     }
 
-    /// An assignment target read as a binding pattern.
-    ///
-    /// `None` when the target holds something a [`kiln_hir::Pattern`] cannot say. What remains
-    /// in that bucket is narrow -- an optional chain in target position, which is not a valid
-    /// assignment target anyway -- because a pattern leaf may now be a reference as well as a
-    /// name.
+    /// Preserve the member Reference after erasing type-only and parenthesized wrappers.
+    fn member_reference(
+        &mut self,
+        expression: &Expression<'_>,
+    ) -> Option<(HirExpression, kiln_hir::ObjectKey)> {
+        match erased_reference_expression(expression) {
+            Expression::StaticMemberExpression(member) => Some((
+                self.expression(&member.object),
+                kiln_hir::ObjectKey::Static(member.property.name.to_string().into()),
+            )),
+            Expression::ComputedMemberExpression(member) => Some((
+                self.expression(&member.object),
+                kiln_hir::ObjectKey::Computed(self.expression(&member.expression)),
+            )),
+            Expression::PrivateFieldExpression(member) => Some((
+                self.expression(&member.object),
+                kiln_hir::ObjectKey::Private(member.field.name.to_string()),
+            )),
+            _ => None,
+        }
+    }
+
+    fn update_wrapped_target(
+        &mut self,
+        expression: &Expression<'_>,
+        operator: UpdateOperator,
+        prefix: bool,
+    ) -> Option<HirExpressionKind> {
+        let expression = erased_reference_expression(expression);
+        if let Expression::Identifier(identifier) = expression {
+            return Some(HirExpressionKind::Update {
+                increment: matches!(operator, UpdateOperator::Increment),
+                prefix,
+                target: identifier.name.to_string(),
+            });
+        }
+        let (object, property) = self.member_reference(expression)?;
+        Some(HirExpressionKind::UpdateMember {
+            increment: matches!(operator, UpdateOperator::Increment),
+            prefix,
+            object: Box::new(object),
+            property: Box::new(property),
+        })
+    }
+
+    fn assign_erased_member(
+        &mut self,
+        expression: &Expression<'_>,
+        operator: HirAssignmentOperator,
+        value: HirExpression,
+    ) -> Option<HirExpressionKind> {
+        let expression = erased_reference_expression(expression);
+        if let Expression::Identifier(identifier) = expression {
+            return Some(HirExpressionKind::Assignment {
+                operator,
+                target: identifier.name.to_string(),
+                value: Box::new(value),
+            });
+        }
+        let (object, property) = self.member_reference(expression)?;
+        Some(match property {
+            kiln_hir::ObjectKey::Static(property) => HirExpressionKind::MemberAssignment {
+                operator,
+                object: Box::new(object),
+                property: property.to_lossy_string(),
+                value: Box::new(value),
+            },
+            kiln_hir::ObjectKey::Computed(property) => HirExpressionKind::ComputedAssignment {
+                operator,
+                object: Box::new(object),
+                property: Box::new(property),
+                value: Box::new(value),
+            },
+            kiln_hir::ObjectKey::Private(name) => HirExpressionKind::PrivateAssignment {
+                operator,
+                object: Box::new(object),
+                name,
+                value: Box::new(value),
+            },
+        })
+    }
+
     /// Store `value` into whatever `target` names.
     ///
     /// The left-hand side of an assignment and the head of an assigning `for-of` or `for-in` are
@@ -4981,6 +7900,12 @@ impl Lowerer<'_> {
         value: HirExpression,
         span: HirSpan,
     ) -> HirExpression {
+        if let Some(expression) = target.get_expression() {
+            return match self.assign_erased_member(expression, operator, value) {
+                Some(kind) => HirExpression { kind, span },
+                None => self.unsupported_expression("non-identifier assignment", span),
+            };
+        }
         let kind = match target {
             AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
                 HirExpressionKind::Assignment {
@@ -5353,6 +8278,12 @@ impl Lowerer<'_> {
         for element in &class.body.body {
             let method = match element {
                 ClassElement::PropertyDefinition(property) => {
+                    // `declare` fields describe a type only and must not become own properties
+                    // at construction time. Besides changing reflection, materializing one as
+                    // `undefined` breaks checks such as Object.hasOwn on optional issue fields.
+                    if property.declare {
+                        continue;
+                    }
                     let key = self
                         .member_key(&property.key, property.computed)
                         .ok_or("class field name")?;
@@ -5540,7 +8471,15 @@ impl Lowerer<'_> {
                 )
                 .ok_or("class method without a body")?;
             match method.kind {
-                MethodDefinitionKind::Constructor => constructor = Some(lowered),
+                MethodDefinitionKind::Constructor => {
+                    let mut lowered = lowered;
+                    self.assign_parameter_properties(
+                        &method.value.params,
+                        class.heritage.is_some(),
+                        &mut lowered,
+                    );
+                    constructor = Some(lowered);
+                }
                 kind @ (MethodDefinitionKind::Method
                 | MethodDefinitionKind::Get
                 | MethodDefinitionKind::Set) => {
@@ -5576,6 +8515,66 @@ impl Lowerer<'_> {
             initialisers,
             span: statement_span,
         })
+    }
+
+    /// TypeScript parameter properties: `constructor(public x, private readonly y)` declares and
+    /// assigns `this.x` and `this.y`. They are lowered as TypeScript emits them, an assignment
+    /// per parameter at the start of the body, or straight after the top-level `super(...)`
+    /// call in a derived class, since `this` does not exist before it.
+    fn assign_parameter_properties(
+        &mut self,
+        parameters: &FormalParameters<'_>,
+        derived: bool,
+        constructor: &mut HirFunction,
+    ) {
+        let assignments: Vec<HirStatement> = parameters
+            .items
+            .iter()
+            .filter(|p| p.accessibility.is_some() || p.readonly || p.r#override)
+            .filter_map(|p| {
+                let name = p.pattern.get_identifier_name()?.to_string();
+                let at = span(p.span);
+                Some(HirStatement {
+                    kind: HirStatementKind::Expression(HirExpression {
+                        kind: HirExpressionKind::MemberAssignment {
+                            operator: kiln_hir::AssignmentOperator::Assign,
+                            object: Box::new(HirExpression {
+                                kind: HirExpressionKind::This,
+                                span: at,
+                            }),
+                            property: name.clone(),
+                            value: Box::new(HirExpression {
+                                kind: HirExpressionKind::Identifier(name),
+                                span: at,
+                            }),
+                        },
+                        span: at,
+                    }),
+                    span: at,
+                })
+            })
+            .collect();
+        if assignments.is_empty() {
+            return;
+        }
+        let insert_at = if derived {
+            constructor
+                .body
+                .iter()
+                .position(|statement| {
+                    matches!(
+                        &statement.kind,
+                        HirStatementKind::Expression(HirExpression {
+                            kind: HirExpressionKind::SuperCall { .. },
+                            ..
+                        })
+                    )
+                })
+                .map_or(0, |i| i + 1)
+        } else {
+            0
+        };
+        constructor.body.splice(insert_at..insert_at, assignments);
     }
 
     /// Lower a parameter list, including defaults and a rest parameter.
@@ -6167,6 +9166,756 @@ fn name_anonymous_default(inner: &kiln_hir::Pattern, default: &mut kiln_hir::Exp
 mod tests {
     use super::*;
 
+    fn parse_authored_ts(path: &str, source: &str) -> Module {
+        parse_static_typescript(path, source, StaticTypescriptPolicy::PreserveAuthoredSource)
+    }
+
+    #[test]
+    fn source_coordinate_index_handles_multiline_unicode_and_rejects_invalid_columns() {
+        let index = SourceCoordinateIndex::new("a😀b\r\nq\u{2028}z\u{2029}");
+        assert_eq!(index.byte_offset(0, 0), Some(0));
+        assert_eq!(index.byte_offset(0, 1), Some(1));
+        assert_eq!(
+            index.byte_offset(0, 2),
+            None,
+            "halfway through a surrogate pair"
+        );
+        assert_eq!(index.byte_offset(0, 3), Some(5));
+        assert_eq!(index.byte_offset(0, 4), Some(6), "end of line before CRLF");
+        assert_eq!(index.byte_offset(1, 1), Some(9));
+        assert_eq!(index.byte_offset(2, 1), Some(13));
+        assert_eq!(index.byte_offset(3, 0), Some(16), "trailing empty line");
+        assert_eq!(index.byte_offset(0, 5), None, "column past line end");
+        assert_eq!(index.byte_offset(4, 0), None, "line past source end");
+
+        let long = format!("{}\r\n{}", "x".repeat(32_768), "y".repeat(32_768));
+        let long_index = SourceCoordinateIndex::new(&long);
+        assert_eq!(long_index.byte_offset(1, 32_768), Some(65_538));
+    }
+
+    #[test]
+    fn opt_in_static_typescript_uses_generated_parser_buffer_and_retains_provenance() {
+        let path = "formatter-fixture.ts";
+        let source = "export const format = (value: number) => {\n  return value + 1;\n};\n";
+        let authored =
+            parse_static_typescript(path, source, StaticTypescriptPolicy::PreserveAuthoredSource);
+        assert_eq!(authored.source.as_ref(), source);
+        assert!(authored.static_source_provenance.is_none());
+
+        let transformed = parse_static_typescript(
+            path,
+            source,
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(
+            transformed.diagnostics.is_empty(),
+            "{:?}",
+            transformed.diagnostics
+        );
+        assert_eq!(transformed.source_kind, SourceKind::TypeScript);
+        assert_eq!(transformed.source_goal, SourceGoal::Module);
+        assert!(
+            !transformed.source.contains(": number"),
+            "{}",
+            transformed.source
+        );
+        assert!(
+            transformed.source.contains("return value + 1"),
+            "{}",
+            transformed.source
+        );
+
+        let provenance = transformed
+            .static_source_provenance
+            .as_ref()
+            .expect("the opt-in transformed parser path records its origin");
+        assert_eq!(provenance.original_path.as_ref(), path);
+        assert_eq!(provenance.original_source.as_ref(), source);
+        assert!(provenance.transform_fingerprint.contains("target=node22"));
+        let generated_return = transformed
+            .source
+            .find("return value + 1")
+            .expect("generated JavaScript return");
+        let original_return = source.find("return value + 1").unwrap() as u32;
+        let mapped_return = provenance
+            .original_offset(generated_return as u32)
+            .expect("generated source location maps to authored TypeScript");
+        assert!(
+            mapped_return.abs_diff(original_return) <= 2,
+            "{mapped_return} != {original_return}"
+        );
+
+        let changed = parse_static_typescript(
+            path,
+            &source.replace("value + 1", "value + 2"),
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert_ne!(
+            provenance.identity,
+            changed.static_source_provenance.unwrap().identity,
+            "original source text participates in the static transform identity"
+        );
+        let same_input_different_path = parse_static_typescript(
+            "another-checkout/src/entry.ts",
+            source,
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert_eq!(
+            provenance.identity,
+            same_input_different_path
+                .static_source_provenance
+                .unwrap()
+                .identity,
+            "diagnostic paths are not part of generated-program content identity"
+        );
+    }
+
+    #[test]
+    fn static_typescript_provenance_keeps_authored_value_imports_only() {
+        let parsed = parse_static_typescript(
+            "compiler.ts",
+            "import { runtime } from './runtime.ts'; import type { Shape } from './types.ts'; import { type Token } from './tokens.ts'; export const generated = () => String(runtime);",
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let provenance = parsed
+            .static_source_provenance
+            .expect("static TypeScript has provenance");
+        assert_eq!(
+            provenance
+                .authored_value_imports
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            ["./runtime.ts"]
+        );
+        assert!(
+            !parsed
+                .requested_modules
+                .iter()
+                .any(|request| request.specifier == "./types.ts"),
+            "type-only source imports are absent from runtime dependencies"
+        );
+    }
+
+    #[test]
+    fn static_typescript_records_only_generated_oxc_using_helper_edges() {
+        let parsed = parse_static_typescript(
+            "managed.ts",
+            "await using resource = makeResource(); export { resource };",
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let provenance = parsed
+            .static_source_provenance
+            .as_ref()
+            .expect("static TypeScript has source provenance");
+        assert_eq!(
+            provenance
+                .generated_helper_imports
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            ["kiln:compiler-runtime/helpers/usingCtx"]
+        );
+        assert!(
+            parsed
+                .requested_modules
+                .iter()
+                .any(|request| { request.specifier == "kiln:compiler-runtime/helpers/usingCtx" })
+        );
+
+        let authored = parse_static_typescript(
+            "ordinary.ts",
+            "import usingCtx from '@oxc-project/runtime/helpers/usingCtx'; export default usingCtx;",
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        let authored_provenance = authored
+            .static_source_provenance
+            .expect("static TypeScript has source provenance");
+        assert!(authored_provenance.generated_helper_imports.is_empty());
+        assert!(
+            authored
+                .requested_modules
+                .iter()
+                .any(|request| { request.specifier == "@oxc-project/runtime/helpers/usingCtx" })
+        );
+
+        let collision = parse_static_typescript(
+            "collision.mts",
+            "import usingCtx from 'kiln:compiler-runtime/helpers/usingCtx'; void usingCtx; await using resource = makeResource(); void import('kiln:compiler-runtime/helpers/asyncExample'); void require('kiln:compiler-runtime/helpers/requireExample'); void import('kiln:compiler-runtime/helpers/usingCtx');",
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(
+            collision.diagnostics.is_empty(),
+            "{:?}",
+            collision.diagnostics
+        );
+        let provenance = collision
+            .static_source_provenance
+            .expect("static TypeScript has source provenance");
+        assert_eq!(
+            provenance
+                .generated_helper_imports
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            ["kiln:compiler-runtime/helpers/usingCtx"]
+        );
+        assert_eq!(
+            provenance
+                .authored_internal_helper_imports
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            [
+                "kiln:compiler-runtime/helpers/asyncExample",
+                "kiln:compiler-runtime/helpers/requireExample",
+                "kiln:compiler-runtime/helpers/usingCtx"
+            ]
+        );
+    }
+
+    #[test]
+    fn static_parse_transforms_typescript_but_explicit_goal_keeps_authored_source() {
+        let path = "entry.ts";
+        let source = "export const add = (left: number, right: number) => left + right;";
+        let static_module = parse(path, source);
+        assert!(
+            static_module.diagnostics.is_empty(),
+            "{:?}",
+            static_module.diagnostics
+        );
+        assert_ne!(static_module.source.as_ref(), source);
+        assert!(static_module.static_source_provenance.is_some());
+        assert!(static_module.source_origin.is_none());
+
+        let explicit_module = parse_with_goal(path, source, SourceGoal::Module);
+        assert!(
+            explicit_module.diagnostics.is_empty(),
+            "{:?}",
+            explicit_module.diagnostics
+        );
+        assert_eq!(explicit_module.source.as_ref(), source);
+        assert!(explicit_module.static_source_provenance.is_none());
+
+        let demanded = BTreeSet::from(["add".to_owned()]);
+        let dce_module = parse_dce(path, source, &demanded);
+        assert!(
+            dce_module.diagnostics.is_empty(),
+            "{:?}",
+            dce_module.diagnostics
+        );
+        assert!(dce_module.static_source_provenance.is_some());
+        assert!(
+            !dce_module.source.contains(": number"),
+            "{}",
+            dce_module.source
+        );
+
+        let native_dce_module = parse_dce_native(path, source, &demanded, true);
+        assert!(
+            native_dce_module.diagnostics.is_empty(),
+            "{:?}",
+            native_dce_module.diagnostics
+        );
+        assert!(native_dce_module.static_source_provenance.is_some());
+        assert!(
+            !native_dce_module.source.contains(": number"),
+            "{}",
+            native_dce_module.source
+        );
+
+        let generated_source = static_module.source.clone();
+        let provenance = static_module
+            .static_source_provenance
+            .as_ref()
+            .expect("static parse retained its provenance")
+            .clone();
+        let prepared =
+            parse_dce_native_prepared(path, &generated_source, &demanded, true, provenance.clone());
+        assert!(
+            prepared.diagnostics.is_empty(),
+            "{:?}",
+            prepared.diagnostics
+        );
+        assert_eq!(prepared.source.as_ref(), generated_source.as_ref());
+        assert!(Arc::ptr_eq(
+            prepared.static_source_provenance.as_ref().unwrap(),
+            &provenance
+        ));
+    }
+
+    #[test]
+    fn opt_in_static_tsx_preserves_runtime_module_edges_and_erases_type_only_edges() {
+        let source = r#"import type { Shape } from "./types";
+import { keep } from "./dep";
+namespace Values { export const base = 2; }
+enum Mode { On = 1 }
+export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
+"#;
+        let module = parse_static_typescript(
+            "fixture.tsx",
+            source,
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(module.source_kind, SourceKind::Tsx);
+        assert_eq!(module.source_goal, SourceGoal::Module);
+        assert_eq!(
+            module
+                .static_source_provenance
+                .as_ref()
+                .unwrap()
+                .original_type,
+            StaticSourceType {
+                goal: SourceGoal::Module,
+                commonjs: false,
+                jsx: true,
+            }
+        );
+        assert!(
+            module.source.contains("from \"./dep\""),
+            "{}",
+            module.source
+        );
+        assert!(!module.source.contains("./types"), "{}", module.source);
+        assert!(!module.source.contains(": Shape"), "{}", module.source);
+        assert!(
+            !module.source.contains("namespace Values"),
+            "{}",
+            module.source
+        );
+        assert!(!module.source.contains("enum Mode"), "{}", module.source);
+        assert!(module.source.contains("jsx-runtime"), "{}", module.source);
+        assert_eq!(module.requested_modules.len(), 2);
+    }
+
+    #[test]
+    fn opt_in_static_commonjs_discovers_requires_from_generated_buffer() {
+        let source =
+            "const value: number = 3; const dep = require('./dep'); module.exports = value + dep;";
+        let (module, requires) = parse_static_typescript_commonjs_with_requires(
+            "fixture.cts",
+            source,
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(module.source_kind, SourceKind::TypeScript);
+        assert_eq!(module.source_goal, SourceGoal::Script);
+        assert!(!module.source.contains(": number"), "{}", module.source);
+        assert_eq!(requires, ["./dep"]);
+
+        let (default_module, default_requires) =
+            parse_commonjs_with_requires("fixture.cts", source);
+        assert!(
+            default_module.diagnostics.is_empty(),
+            "{:?}",
+            default_module.diagnostics
+        );
+        assert!(
+            !default_module.source.contains(": number"),
+            "{}",
+            default_module.source
+        );
+        assert_eq!(default_requires, ["./dep"]);
+    }
+
+    #[test]
+    fn prepared_native_dce_preserves_explicit_commonjs_goal_for_ts_path() {
+        // Package metadata can classify a `.ts` file as CommonJS. A filename-only reparse
+        // silently changes this to module goal, where top-level return is rejected.
+        let source = "const dep: number = require('./dep'); return dep;";
+        let (module, requires) = parse_static_typescript_commonjs_with_requires(
+            "package-metadata.ts",
+            source,
+            StaticTypescriptPolicy::TransformToNode22JavaScript,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert_eq!(requires, ["./dep"]);
+        let provenance = module
+            .static_source_provenance
+            .as_ref()
+            .expect("transformed CommonJS TS has provenance")
+            .clone();
+        assert_eq!(
+            provenance.original_type,
+            StaticSourceType {
+                goal: SourceGoal::Script,
+                commonjs: true,
+                jsx: false,
+            }
+        );
+
+        let prepared = parse_dce_native_prepared(
+            "package-metadata.ts",
+            &module.source,
+            &BTreeSet::new(),
+            false,
+            provenance,
+        );
+        assert!(
+            prepared.diagnostics.is_empty(),
+            "{:?}",
+            prepared.diagnostics
+        );
+        assert_eq!(prepared.source_goal, SourceGoal::Script);
+        assert!(
+            prepared.source.contains("return dep"),
+            "{}",
+            prepared.source
+        );
+        assert!(prepared.source.contains("require("), "{}", prepared.source);
+        assert!(prepared.source.contains("./dep"), "{}", prepared.source);
+    }
+
+    #[test]
+    fn static_typescript_codegen_is_parser_input_and_maps_back_to_ts() {
+        use oxc_ast_visit::Visit;
+        use oxc_codegen::{Codegen, CodegenOptions};
+        use std::path::PathBuf;
+
+        let source = "export const format = (value: number) => {\n    return value + 1\n};\n";
+        let path = Path::new("formatter-fixture.ts");
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+        let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+        let transform = Transformer::new(&allocator, path, &TransformOptions::default())
+            .build_with_scoping(semantic.into_scoping(), &mut parsed.program);
+        assert!(
+            transform.diagnostics.is_empty(),
+            "{:?}",
+            transform.diagnostics
+        );
+
+        let generated = Codegen::new()
+            .with_options(CodegenOptions {
+                // Codegen's path labels the original source carried by this Program.
+                source_map_path: Some(PathBuf::from("formatter-fixture.ts")),
+                ..CodegenOptions::default()
+            })
+            .build(&parsed.program);
+        assert!(
+            generated.code.contains("return value + 1;"),
+            "{}",
+            generated.code
+        );
+        assert!(!generated.code.contains(": number"), "{}", generated.code);
+
+        let js_allocator = Allocator::default();
+        let reparsed = Parser::new(&js_allocator, &generated.code, SourceType::mjs()).parse();
+        assert!(
+            reparsed.diagnostics.is_empty(),
+            "{:?}",
+            reparsed.diagnostics
+        );
+
+        struct ArrowSpan(Option<Span>);
+        impl<'a> Visit<'a> for ArrowSpan {
+            fn visit_arrow_function_expression(
+                &mut self,
+                arrow: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+            ) {
+                self.0 = Some(arrow.span);
+            }
+        }
+        let mut arrow_span = ArrowSpan(None);
+        arrow_span.visit_program(&reparsed.program);
+        let arrow_span = arrow_span.0.expect("generated module retains its arrow");
+        let function_source = generated
+            .code
+            .get(arrow_span.start as usize..arrow_span.end as usize)
+            .expect("generated parser spans index generated source");
+        assert!(
+            function_source.starts_with("(value) =>"),
+            "{function_source:?}"
+        );
+        assert!(
+            function_source.contains("\n\treturn value + 1;\n"),
+            "{function_source:?}"
+        );
+
+        let map = generated.map.expect("source maps were requested");
+        assert_eq!(
+            map.get_sources().collect::<Vec<_>>(),
+            ["formatter-fixture.ts"]
+        );
+        assert_eq!(
+            map.get_source_contents().collect::<Vec<_>>(),
+            [Some(source)]
+        );
+    }
+
+    #[test]
+    fn static_typescript_codegen_keeps_module_runtime_syntax_and_erases_types() {
+        use oxc_codegen::{Codegen, CodegenOptions};
+        use std::path::PathBuf;
+
+        let source = r#"import type { Shape } from "./types";
+import { keep } from "./dep";
+namespace Values { export const base = 2; }
+enum Mode { On = 1 }
+export const view = (shape: Shape) => <div>{Values.base + Mode.On + keep}</div>;
+"#;
+        let path = Path::new("fixture.tsx");
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let semantic = SemanticBuilder::new()
+            .with_enum_eval(true)
+            .build(&parsed.program)
+            .semantic;
+        let transform = Transformer::new(
+            &allocator,
+            path,
+            // This code-generation fixture has no project config. Resolve the default JSX
+            // runtime independently of tsconfig files in this checkout or its parents.
+            &resolve_transform_options(None),
+        )
+        .build_with_scoping(semantic.into_scoping(), &mut parsed.program);
+        assert!(
+            transform.diagnostics.is_empty(),
+            "{:?}",
+            transform.diagnostics
+        );
+
+        let generated = Codegen::new()
+            .with_options(CodegenOptions {
+                source_map_path: Some(PathBuf::from("fixture.tsx")),
+                ..CodegenOptions::default()
+            })
+            .build(&parsed.program)
+            .code;
+        assert!(generated.contains("from \"./dep\""), "{generated}");
+        assert!(!generated.contains("from \"./types\""), "{generated}");
+        assert!(!generated.contains(": Shape"), "{generated}");
+        assert!(generated.contains("Values"), "{generated}");
+        assert!(generated.contains("Mode"), "{generated}");
+        assert!(generated.contains("jsx"), "{generated}");
+
+        let js_allocator = Allocator::default();
+        let reparsed = Parser::new(&js_allocator, &generated, SourceType::mjs()).parse();
+        assert!(
+            reparsed.diagnostics.is_empty(),
+            "{:?}\n{generated}",
+            reparsed.diagnostics
+        );
+    }
+
+    #[test]
+    fn native_import_meta_uses_the_cached_process_capability() {
+        let module = parse_dce_native(
+            "entry.mjs",
+            "console.log(import.meta);",
+            &BTreeSet::new(),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(hir.contains("ProcessObject"), "{hir}");
+        assert!(!hir.contains("property: \"process\""), "{hir}");
+    }
+
+    #[test]
+    fn native_dce_erases_typescript_expression_wrappers_before_optional_chain_folding() {
+        let module = parse_dce_native(
+            "optional-chain.ts",
+            r#"
+                export function read(value: { child?: { read?: number } }) {
+                    return (value.child as { read?: number } | null)?.read;
+                }
+            "#,
+            &BTreeSet::from(["read".to_owned()]),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(
+            hir.contains("Chain"),
+            "optional chain should remain intact: {hir}"
+        );
+        assert!(
+            !hir.contains("TypeScript instantiation expression"),
+            "{hir}"
+        );
+
+        // Oxc stores `!` here as a ChainElement::TSNonNullExpression. The regular expression
+        // visitor path above cannot reach it, and the DCE optional-chain fold used to panic.
+        let nested_non_null = parse_dce_native(
+            "optional-chain-non-null.ts",
+            r#"
+                export function read(value?: { member: { next: string } } | null) {
+                    return value?.member!.next;
+                }
+            "#,
+            &BTreeSet::from(["read".to_owned()]),
+            true,
+        );
+        assert!(
+            nested_non_null.diagnostics.is_empty(),
+            "{:?}",
+            nested_non_null.diagnostics
+        );
+        let hir = format!("{:?}", nested_non_null.body);
+        assert!(
+            hir.contains("Chain"),
+            "optional chain should remain intact: {hir}"
+        );
+    }
+
+    #[test]
+    fn native_dce_erases_type_only_declarations_and_preserves_runtime_enum_for_owned_hir() {
+        let module = parse_dce_native(
+            "declarations.ts",
+            r#"
+                export interface Shape { value: number }
+                export type Alias = Shape | null
+                declare const ambient: Shape
+                declare global { interface GlobalShape { value: number } }
+                declare module "ambient-package" { export interface ModuleShape { value: number } }
+                declare namespace Ambient { interface NestedShape { value: number } }
+                const unused = "dead";
+                enum RuntimeKind { First = 1, Second }
+                export function answer(): number {
+                    interface LocalShape { value: number }
+                    type LocalAlias = LocalShape | null
+                    return RuntimeKind.Second
+                }
+            "#,
+            &BTreeSet::from(["answer".to_owned()]),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(
+            !hir.contains("Shape"),
+            "type declarations leaked to HIR: {hir}"
+        );
+        assert!(!hir.contains("Alias"), "type alias leaked to HIR: {hir}");
+        assert!(
+            !hir.contains("ambient"),
+            "ambient binding leaked to HIR: {hir}"
+        );
+        assert!(
+            !hir.contains("GlobalShape"),
+            "global declaration leaked to HIR: {hir}"
+        );
+        assert!(
+            !hir.contains("ModuleShape"),
+            "ambient module leaked to HIR: {hir}"
+        );
+        assert!(
+            !hir.contains("Ambient"),
+            "ambient namespace leaked to HIR: {hir}"
+        );
+        assert!(
+            !hir.contains("dead"),
+            "ordinary dead code survived DCE: {hir}"
+        );
+        assert!(hir.contains("RuntimeKind"), "runtime enum was lost: {hir}");
+        assert!(hir.contains("answer"), "demanded export was lost: {hir}");
+        assert!(
+            !hir.contains("LocalShape"),
+            "nested interface leaked to HIR: {hir}"
+        );
+        assert!(
+            !hir.contains("LocalAlias"),
+            "nested type alias leaked to HIR: {hir}"
+        );
+    }
+
+    #[test]
+    fn dce_declaration_erasure_keeps_runtime_namespace_for_owned_hir() {
+        let allocator = Allocator::default();
+        let source = "namespace Runtime { export const value = 1; }";
+        let source_type = SourceType::from_path(Path::new("runtime-namespace.ts"))
+            .unwrap()
+            .with_module(true);
+        let mut parsed = Parser::new(&allocator, source, source_type).parse();
+        assert!(!parsed.panicked);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+        erase_type_only_declarations_for_dce(&mut parsed.program);
+        assert!(contains_runtime_typescript_declaration(&parsed.program));
+        assert!(matches!(
+            parsed.program.body.first(),
+            Some(Statement::TSNamespaceDeclaration(_))
+        ));
+    }
+
+    #[test]
+    fn native_dce_preserves_strict_delete_of_a_primitive_property() {
+        let module = parse_dce_native(
+            "strict-delete.ts",
+            r#"
+                export function remove() {
+                    try { return delete ("text" as any).length; }
+                    catch (error) { return error.constructor.name; }
+                }
+            "#,
+            &BTreeSet::from(["remove".to_owned()]),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(hir.contains("Delete"), "delete must survive DCE: {hir}");
+        assert!(
+            hir.contains("kind: Literal(String"),
+            "DCE must preserve the string receiver instead of folding its `length`: {hir}"
+        );
+    }
+
+    #[test]
+    fn native_dce_preserves_discarded_mutable_builtin_global_reads() {
+        let module = parse_dce_native(
+            "discarded-builtin-global.ts",
+            r#"
+                export function readGlobal() { Date; }
+                export function shadowed(Date: unknown) { Date; }
+            "#,
+            &BTreeSet::from(["readGlobal".to_owned(), "shadowed".to_owned()]),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(
+            hir.contains("Identifier(\"Date\")"),
+            "the unresolved builtin read can invoke a getter or throw after deletion: {hir}"
+        );
+        let shadowed = hir.split("name: Some(\"shadowed\")").nth(1).unwrap();
+        assert!(
+            shadowed.contains("body: []"),
+            "the shadowed local read remains eligible for native DCE: {hir}"
+        );
+        // The local parameter isn't a global-object lookup, so ordinary DCE may still remove it.
+        let functions = hir.matches("Function").count();
+        assert!(functions >= 2, "both exports remain in the HIR: {hir}");
+    }
+
+    #[test]
+    fn native_dce_preserves_bindings_visible_to_direct_eval() {
+        let module = parse_dce_native(
+            "direct-eval-capture.mjs",
+            r#"
+                function factory(source) {
+                    let captured = "scope";
+                    return eval(source)();
+                }
+                console.log(factory("(function () { return captured; })"));
+            "#,
+            &BTreeSet::new(),
+            true,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let hir = format!("{:?}", module.body);
+        assert!(
+            hir.contains("Identifier(\"captured\")"),
+            "DCE must retain lexical bindings a dynamic direct eval can read: {hir}"
+        );
+    }
+
     #[test]
     fn ordinary_isolate_calls_do_not_claim_graph_ownership() {
         // Neither the spelling of a callee nor a local alias proves that a JS object graph
@@ -6300,6 +10049,245 @@ mod tests {
     }
 
     #[test]
+    fn create_require_accepts_url_and_filename_bases_without_shadowed_factories() {
+        let requests = discover_node_runtime_requests(
+            "fixture #.mjs",
+            r#"
+                import { createRequire } from "node:module";
+                const fromUrl = createRequire(new URL(import.meta.url));
+                const fromFilename = createRequire(import.meta.filename);
+                fromUrl("./from-url.cjs");
+                fromFilename("./from-filename.cjs");
+                function shadow(createRequire) {
+                    const fake = createRequire("/virtual/fake.cjs");
+                    fake("./not-a-loader.cjs");
+                }
+                const unrelated = value => value;
+                const fakeLoader = unrelated("/virtual/unrelated.cjs");
+                fakeLoader("./also-not-a-loader.cjs");
+            "#,
+        );
+        assert_eq!(
+            requests,
+            [
+                NodeRuntimeRequest {
+                    specifier: "./from-filename.cjs".to_owned(),
+                    importer: "fixture #.mjs".to_owned(),
+                    resolve_only: false,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./from-url.cjs".to_owned(),
+                    importer: "fixture #.mjs".to_owned(),
+                    resolve_only: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn create_require_tracks_module_namespace_and_default_imports() {
+        let requests = discover_node_runtime_requests(
+            "fixture.mjs",
+            r#"
+                import * as moduleNamespace from "node:module";
+                import Module, { Module as NamedModule } from "node:module";
+                const fromNamespace = moduleNamespace.createRequire(import.meta.url);
+                const fromDefault = Module.createRequire(import.meta.filename);
+                const fromNamed = NamedModule.createRequire(new URL(import.meta.url));
+                fromNamespace("./namespace.cjs");
+                fromDefault("./default.cjs");
+                fromNamed("./named.cjs");
+                function shadow(moduleNamespace) {
+                    const fake = moduleNamespace.createRequire("/virtual/fake.cjs");
+                    fake("./not-a-loader.cjs");
+                }
+                let changed = moduleNamespace;
+                changed = {};
+                const notLoader = changed.createRequire("/virtual/changed.cjs");
+                notLoader("./also-not-a-loader.cjs");
+            "#,
+        );
+        assert_eq!(
+            requests,
+            [
+                NodeRuntimeRequest {
+                    specifier: "./default.cjs".to_owned(),
+                    importer: "fixture.mjs".to_owned(),
+                    resolve_only: false,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./named.cjs".to_owned(),
+                    importer: "fixture.mjs".to_owned(),
+                    resolve_only: false,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./namespace.cjs".to_owned(),
+                    importer: "fixture.mjs".to_owned(),
+                    resolve_only: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn commonjs_runtime_discovery_tracks_require_resolve_without_evaluating() {
+        let requests = discover_node_runtime_requests(
+            "fixture.cjs",
+            r#"
+                require.resolve("./local.js");
+                const read = require.resolve;
+                const readAgain = read;
+                readAgain("./detached.js");
+                function shadow(require) { require.resolve("./not-loader.js"); }
+            "#,
+        );
+        assert_eq!(
+            requests,
+            [
+                NodeRuntimeRequest {
+                    specifier: "./detached.js".to_owned(),
+                    importer: "fixture.cjs".to_owned(),
+                    resolve_only: true,
+                },
+                NodeRuntimeRequest {
+                    specifier: "./local.js".to_owned(),
+                    importer: "fixture.cjs".to_owned(),
+                    resolve_only: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn node_runtime_load_wins_over_resolve_only_for_the_same_request() {
+        for calls in [
+            "req.resolve('./fixture.js'); req('./fixture.js');",
+            "req('./fixture.js'); req.resolve('./fixture.js');",
+        ] {
+            let source = format!(
+                "const {{ createRequire }} = require('module'); \
+                 const req = createRequire(__filename); {calls}"
+            );
+            let requests = discover_node_runtime_requests("fixture.cjs", &source);
+            let request = requests
+                .iter()
+                .find(|request| request.specifier == "./fixture.js")
+                .expect("the createRequire target is discovered");
+            assert!(
+                !request.resolve_only,
+                "a load must not become resolution-only"
+            );
+        }
+    }
+
+    #[test]
+    fn computed_module_destructuring_does_not_invent_create_require_provenance() {
+        let requests = discover_node_runtime_requests(
+            "fixture.cjs",
+            "const key = 'other'; const {[key]: loader} = require('module'); loader('./bogus.js');",
+        );
+        assert!(
+            requests.is_empty(),
+            "computed destructuring does not prove the loader came from createRequire"
+        );
+    }
+
+    #[test]
+    fn commonjs_literal_eval_require_is_a_runtime_edge_only_when_unshadowed() {
+        let module = parse_commonjs(
+            "fixture.cjs",
+            r#"const captured = 1; eval("require('util').inspect");"#,
+        );
+        assert!(module.node_runtime_requests.iter().any(|request| {
+            request.specifier == "util"
+                && request.importer == "fixture.cjs"
+                && !request.resolve_only
+        }));
+
+        let shadowed = parse_commonjs(
+            "fixture.cjs",
+            r#"const require = (name) => name; eval("require('not-a-module')");"#,
+        );
+        assert!(shadowed.node_runtime_requests.is_empty());
+    }
+
+    #[test]
+    fn node_runtime_discovery_tracks_esbuild_require_helper_literals() {
+        let source = r#"
+            import { createRequire as __prettierCreateRequire } from "module";
+            const require = __prettierCreateRequire(import.meta.url);
+            const __require = ((id) => require(id));
+            __require("os");
+        "#;
+        let requests = discover_node_runtime_requests("prettier/index.mjs", source);
+
+        assert_eq!(
+            requests,
+            [NodeRuntimeRequest {
+                specifier: "os".to_owned(),
+                importer: "prettier/index.mjs".to_owned(),
+                resolve_only: false,
+            }]
+        );
+
+        // Prettier's ESM bundle wraps the createRequire loader in a parenthesized esbuild
+        // conditional helper before `__commonJS` modules call it. Preserve its builtin request
+        // edge, just as for the minimal forwarding helper above.
+        let bundled_source = r#"
+            import { createRequire as __prettierCreateRequire } from "module";
+            const require = __prettierCreateRequire(import.meta.url);
+            var __require = ((x) => typeof require !== "undefined" ? require :
+              typeof Proxy !== "undefined" ? new Proxy(x, { get: (a, b) => require[b] }) : x)
+              (function(x) { throw Error("Dynamic require of " + x + " is not supported"); });
+            const require_path = __commonJS((exports) => { const os = __require("os"); });
+        "#;
+        assert!(
+            discover_node_runtime_requests("prettier/index.mjs", bundled_source)
+                .iter()
+                .any(
+                    |request| request.specifier == "os" && request.importer == "prettier/index.mjs"
+                )
+        );
+
+        let unrelated = discover_node_runtime_requests(
+            "fixture.mjs",
+            "function __require(id) { return id; } __require('os');",
+        );
+        assert!(
+            unrelated.is_empty(),
+            "an unrelated function named __require has no Node loader provenance"
+        );
+
+        let loaded_value = discover_node_runtime_requests(
+            "fixture.mjs",
+            "import { createRequire } from 'module'; const require = createRequire(import.meta.url); const loaded = require('os'); loaded('path');",
+        );
+        assert_eq!(
+            loaded_value,
+            [NodeRuntimeRequest {
+                specifier: "os".to_owned(),
+                importer: "fixture.mjs".to_owned(),
+                resolve_only: false,
+            }],
+            "the loaded module is not itself a loader"
+        );
+
+        let ordinary = discover_node_runtime_requests(
+            "fixture.mjs",
+            "import { createRequire } from 'module'; const require = createRequire(import.meta.url); const notLoader = (id) => ({ os: require('os') }); notLoader('path');",
+        );
+        assert_eq!(
+            ordinary,
+            [NodeRuntimeRequest {
+                specifier: "os".to_owned(),
+                importer: "fixture.mjs".to_owned(),
+                resolve_only: false,
+            }],
+            "the returned object/function is not itself a loader"
+        );
+    }
+
+    #[test]
     fn node_runtime_discovery_accepts_aliased_get_builtin_module_receiver() {
         // Bundlers alias `process` (e.g. a parameter named `e`); the builtin id is still
         // statically provable, so it is still a link-time request.
@@ -6331,6 +10319,102 @@ mod tests {
         assert!(requests.iter().any(|request| {
             request.specifier == "./counter.mjs" && request.importer == "app/main.mjs"
         }));
+    }
+
+    #[test]
+    fn actor_modules_are_found_through_bindings_not_spelling() {
+        let source = r#"
+            import { spawnActor as spawn } from "kiln:actors";
+            import * as actors from "kiln:actors";
+            import { fileURLToPath } from "node:url";
+            spawn({ module: new URL("./renamed.mjs", import.meta.url), export: "A" });
+            actors.spawnActor({ module: new URL("./namespace.mjs", import.meta.url), export: "A" });
+            actors["spawnActor"]({ module: new URL("computed-key.mjs", import.meta.url), export: "A" });
+            const options = { module: new URL("./options.mjs", import.meta.url), export: "A" };
+            spawn(options);
+            const base = { module: new URL("./spread.mjs", import.meta.url).href };
+            spawn({ ...base, export: "A" });
+            spawn({ module: new URL("./pathname.mjs", import.meta.url).pathname, export: "A" });
+            const file = fileURLToPath(new URL("./file-path.mjs", import.meta.url));
+            spawn({ module: file, export: "A" });
+            spawn({ module: "/abs/literal.mjs", export: "A" });
+            spawn({ module: "file:///abs/url%20literal.mjs", export: "A" });
+            spawn({ module: new URL("file:///abs/url-object.mjs"), export: "A" });
+            spawn({ module: "./relative-string-is-refused.mjs", export: "A" });
+            let reassigned = { module: new URL("./reassigned.mjs", import.meta.url) };
+            reassigned = {};
+            spawn(reassigned);
+            function shadow(spawn) {
+                spawn({ module: new URL("./shadowed.mjs", import.meta.url), export: "A" });
+            }
+        "#;
+        let mut specifiers = discover_node_runtime_requests("app/main.mjs", source)
+            .into_iter()
+            .map(|request| request.specifier)
+            .collect::<Vec<_>>();
+        specifiers.sort();
+        let mut expected = vec![
+            "./computed-key.mjs",
+            "./file-path.mjs",
+            "./namespace.mjs",
+            "./options.mjs",
+            "./pathname.mjs",
+            "./renamed.mjs",
+            "./spread.mjs",
+            "/abs/literal.mjs",
+            "/abs/url literal.mjs",
+            "/abs/url-object.mjs",
+        ];
+        if cfg!(windows) {
+            expected.retain(|specifier| !specifier.starts_with('/'));
+        }
+        assert_eq!(specifiers, expected);
+    }
+
+    #[test]
+    fn worker_targets_are_found_through_bindings() {
+        let source = r#"
+            import { Worker as Thread } from "node:worker_threads";
+            import * as threads from "node:worker_threads";
+            const { Worker: Required } = require("worker_threads");
+            new Thread(new URL("./renamed.mjs", import.meta.url));
+            new threads.Worker(new URL("./namespace.mjs", import.meta.url));
+            new threads["Worker"](new URL("./computed-key.mjs", import.meta.url));
+            new Required("./required.js");
+            function shadow(Thread) {
+                new Thread(new URL("./shadowed.mjs", import.meta.url));
+            }
+        "#;
+        let mut specifiers = discover_node_runtime_requests("app/main.mjs", source)
+            .into_iter()
+            .map(|request| request.specifier)
+            .collect::<Vec<_>>();
+        specifiers.sort();
+        assert_eq!(
+            specifiers,
+            [
+                "./computed-key.mjs",
+                "./namespace.mjs",
+                "./renamed.mjs",
+                "./required.js"
+            ]
+        );
+    }
+
+    #[test]
+    fn actor_modules_follow_commonjs_bindings() {
+        let source = r#"
+            const { spawnActor: start } = require("kiln:actors");
+            const actors = require("kiln:actors");
+            start({ module: new URL("./destructured.mjs", import.meta.url), export: "A" });
+            actors.spawnActor({ module: new URL("./module-object.mjs", import.meta.url), export: "A" });
+        "#;
+        let mut specifiers = discover_node_runtime_requests("app/main.mjs", source)
+            .into_iter()
+            .map(|request| request.specifier)
+            .collect::<Vec<_>>();
+        specifiers.sort();
+        assert_eq!(specifiers, ["./destructured.mjs", "./module-object.mjs"]);
     }
 
     #[test]
@@ -6373,6 +10457,33 @@ mod tests {
             [
                 "./key", "./value", "./method", "./base", "./field", "./array", "./spread"
             ]
+        );
+    }
+
+    #[test]
+    fn commonjs_require_discovery_tracks_umd_loader_parameters_by_flow() {
+        let source = r#"
+            (function (factory) {
+                factory(require, exports);
+            })(function (require, exports) {
+                exports.format = require("./impl/format");
+                exports.edit = require("./impl/edit");
+            });
+        "#;
+        let (_, requires) = parse_commonjs_with_requires("fixture.cjs", source);
+        assert_eq!(requires, ["./impl/format", "./impl/edit"]);
+
+        let unrelated = r#"
+            (function (factory) {
+                factory(function (require) { return require("./not-a-loader"); });
+            })(function (callback) {
+                callback(function (id) { return id; });
+            });
+        "#;
+        let (_, requires) = parse_commonjs_with_requires("fixture.cjs", unrelated);
+        assert!(
+            requires.is_empty(),
+            "unexpected loader requests: {requires:?}"
         );
     }
 
@@ -6568,6 +10679,7 @@ mod tests {
         let module = parse(
             "module.ts",
             r#"
+                import type { External } from "./external";
                 export interface Shape { width: number }
                 export type Id = string;
                 export const value: Id = "ok";
@@ -6577,6 +10689,104 @@ mod tests {
         assert_eq!(module.source_kind, SourceKind::TypeScript);
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         assert_eq!(module.runtime_export_names(), ["value"]);
+        assert!(module.type_syntax.declarations.iter().any(|declaration| {
+            declaration.name.as_deref() == Some("Shape")
+                && matches!(&declaration.kind, HirTypeDeclarationKind::Interface)
+        }));
+        assert!(module.type_syntax.declarations.iter().any(|declaration| {
+            declaration.name.as_deref() == Some("Id")
+                && matches!(&declaration.kind, HirTypeDeclarationKind::Alias(_))
+        }));
+        let authored = module.type_syntax.original_module.as_ref().unwrap();
+        assert_eq!(
+            authored.source.as_ref(),
+            module
+                .static_source_provenance
+                .as_ref()
+                .unwrap()
+                .original_source
+                .as_ref()
+        );
+        assert!(authored.imports.iter().any(|import| {
+            import.source == "./external" && import.local == "External" && import.type_only
+        }));
+        assert!(authored.exports.iter().any(|export| {
+            export
+                .exported
+                .as_ref()
+                .is_some_and(|name| name.as_str() == "Shape")
+                && export.type_only
+        }));
+        assert!(authored.type_syntax.original_module.is_none());
+    }
+
+    #[test]
+    fn transformed_declaration_files_retain_ambient_global_syntax() {
+        let module = parse(
+            "globals.d.ts",
+            "interface Array<T> { readonly length: number } declare var globalValue: number;",
+        );
+
+        assert_eq!(module.source_kind, SourceKind::TypeScript);
+        assert!(module.type_syntax.declarations.iter().any(|declaration| {
+            declaration.name.as_deref() == Some("Array")
+                && matches!(&declaration.kind, HirTypeDeclarationKind::Interface)
+        }));
+        assert!(module.type_syntax.declarations.iter().any(|declaration| {
+            matches!(&declaration.kind, HirTypeDeclarationKind::Variable)
+                && declaration.body.iter().any(|statement| {
+                    matches!(
+                        &statement.kind,
+                        HirStatementKind::Variable { declarations, .. }
+                            if declarations.iter().any(|declarator| {
+                                declarator.pattern.as_identifier() == Some("globalValue")
+                            })
+                    )
+                })
+        }));
+    }
+
+    #[test]
+    fn erases_only_type_only_typescript_namespaces_and_their_exports() {
+        let module = parse_authored_ts(
+            "namespace.ts",
+            r#"
+                export namespace Empty {}
+                export namespace Vitest {
+                    export interface TestContext { name: string }
+                    export type Hook = (context: TestContext) => void;
+                    export namespace Nested { export interface Item { id: number } }
+                }
+                export namespace Runtime { export const value = 1; }
+                namespace TypesOnly { export interface Shape {} }
+                export { TypesOnly, TypesOnly as TypeAlias };
+                function Merged() {}
+                namespace Merged { export interface Shape {} }
+                export { Merged as RuntimeAlias };
+            "#,
+        );
+
+        assert_eq!(module.source_kind, SourceKind::TypeScript);
+        assert_eq!(module.runtime_export_names(), ["Runtime", "RuntimeAlias"]);
+        let declared_member = parse_authored_ts(
+            "declared.ts",
+            "export namespace Declared { export declare const value: number; }",
+        );
+        assert_eq!(declared_member.runtime_export_names(), ["Declared"]);
+        assert!(
+            declared_member
+                .body
+                .iter()
+                .any(|statement| matches!(&statement.kind, HirStatementKind::Unsupported { .. })),
+            "declared value members materialize a runtime namespace object"
+        );
+        assert!(
+            module
+                .body
+                .iter()
+                .any(|statement| matches!(&statement.kind, HirStatementKind::Unsupported { .. })),
+            "runtime namespace must remain refused"
+        );
     }
 
     #[test]
@@ -6670,7 +10880,7 @@ mod tests {
 
     #[test]
     fn preserves_aliases_defaults_namespaces_and_type_only_bindings() {
-        let module = parse(
+        let module = parse_authored_ts(
             "module.ts",
             r#"
                 import primary, { value as local, type Shape } from "./dep.ts";
@@ -7169,6 +11379,128 @@ export * from "legacy" assert { type: "json" };"#,
     }
 
     #[test]
+    fn erases_typescript_call_and_update_wrappers_at_the_hir_boundary() {
+        let module = parse(
+            "module.ts",
+            "const result = schedule.run<number>(input); buckets[key()]!++; ++buckets[key()]!; getBuckets()[key()]! = rhs(); count!++; count! += rhs();",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+
+        let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
+            panic!("expected generic call declaration");
+        };
+        let call = declarations[0].initializer.as_ref().unwrap();
+        let HirExpressionKind::Call { callee, .. } = &call.kind else {
+            panic!(
+                "expected call after erasing instantiation, got {:?}",
+                call.kind
+            );
+        };
+        assert!(matches!(
+            callee.kind,
+            HirExpressionKind::StaticMember { .. }
+        ));
+
+        for (statement, prefix) in module.body[1..].iter().zip([false, true]) {
+            let HirStatementKind::Expression(expression) = &statement.kind else {
+                panic!("expected update expression");
+            };
+            let HirExpressionKind::UpdateMember {
+                prefix: actual_prefix,
+                property,
+                ..
+            } = &expression.kind
+            else {
+                panic!(
+                    "expected member update after erasure, got {:?}",
+                    expression.kind
+                );
+            };
+            assert_eq!(*actual_prefix, prefix);
+            let kiln_hir::ObjectKey::Computed(key) = property.as_ref() else {
+                panic!("computed update key must remain an expression");
+            };
+            assert!(matches!(key.kind, HirExpressionKind::Call { .. }));
+        }
+
+        let HirStatementKind::Expression(assignment) = &module.body[3].kind else {
+            panic!("expected wrapped member assignment");
+        };
+        let HirExpressionKind::ComputedAssignment {
+            object,
+            property,
+            value,
+            ..
+        } = &assignment.kind
+        else {
+            panic!(
+                "expected computed assignment after erasure, got {:?}",
+                assignment.kind
+            );
+        };
+        assert!(matches!(object.kind, HirExpressionKind::Call { .. }));
+        assert!(matches!(property.kind, HirExpressionKind::Call { .. }));
+        assert!(matches!(value.kind, HirExpressionKind::Call { .. }));
+
+        assert!(matches!(
+            module.body[4].kind,
+            HirStatementKind::Expression(HirExpression {
+                kind: HirExpressionKind::Update { ref target, .. },
+                ..
+            }) if target == "count"
+        ));
+        let HirStatementKind::Expression(assignment) = &module.body[5].kind else {
+            panic!("expected wrapped identifier assignment");
+        };
+        assert!(matches!(
+            &assignment.kind,
+            HirExpressionKind::Assignment { target, value, .. }
+                if target == "count" && matches!(value.kind, HirExpressionKind::Call { .. })
+        ));
+    }
+
+    #[test]
+    fn ordinary_computed_assignment_keeps_its_reference() {
+        let module = parse("module.js", "receiver()[key()] += value();");
+        let HirStatementKind::Expression(assignment) = &module.body[0].kind else {
+            panic!("expected assignment");
+        };
+        let HirExpressionKind::ComputedAssignment {
+            object,
+            property,
+            value,
+            ..
+        } = &assignment.kind
+        else {
+            panic!("expected computed assignment, got {:?}", assignment.kind);
+        };
+        assert!(matches!(object.kind, HirExpressionKind::Call { .. }));
+        assert!(matches!(property.kind, HirExpressionKind::Call { .. }));
+        assert!(matches!(value.kind, HirExpressionKind::Call { .. }));
+    }
+
+    #[test]
+    fn nested_typescript_wrappers_preserve_identifier_assignment_references() {
+        let module = parse(
+            "module.ts",
+            "let count = 1; (count as number)! += 2; (count as number)!++;",
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Expression(assignment) = &module.body[1].kind else {
+            panic!("expected assignment");
+        };
+        assert!(
+            matches!(&assignment.kind, HirExpressionKind::Assignment { target, .. } if target == "count")
+        );
+        let HirStatementKind::Expression(update) = &module.body[2].kind else {
+            panic!("expected update");
+        };
+        assert!(
+            matches!(&update.kind, HirExpressionKind::Update { target, .. } if target == "count")
+        );
+    }
+
+    #[test]
     fn a_refused_class_names_the_member_that_refused_it() {
         // A class is refused whole, so every cause used to arrive as the wrapper "class
         // expression" -- one bucket covering an accessor property, an async method and a
@@ -7287,6 +11619,68 @@ export * from "legacy" assert { type: "json" };"#,
     }
 
     #[test]
+    fn annex_b_switch_alias_diagnostics_respect_the_blocked_binding_scope() {
+        let blocked_alias = parse_with_goal(
+            "case.js",
+            "function f() { switch (0) { case 0: function lexicalName() {} } \
+             let lexicalName; return lexicalName; }",
+            SourceGoal::Script,
+        );
+        assert!(
+            blocked_alias.diagnostics.is_empty(),
+            "a suppressed Annex B alias is not a redeclaration: {:?}",
+            blocked_alias.diagnostics
+        );
+
+        let duplicate_in_case_block = parse_with_goal(
+            "case.js",
+            "function f() { switch (0) { case 0: function lexicalName() {} \
+             let lexicalName; } }",
+            SourceGoal::Script,
+        );
+        assert!(
+            !duplicate_in_case_block.diagnostics.is_empty(),
+            "the filter must preserve a real CaseBlock duplicate"
+        );
+
+        let strict_class_method = parse_with_goal(
+            "case.js",
+            "class C { method() { switch (0) { case 0: function lexicalName() {} } \
+             let lexicalName; } }",
+            SourceGoal::Script,
+        );
+        assert!(
+            strict_class_method.diagnostics.is_empty(),
+            "class methods are strict and do not create Annex B aliases: {:?}",
+            strict_class_method.diagnostics
+        );
+
+        let arrow_body = parse_with_goal(
+            "case.js",
+            "const f = () => { switch (0) { case 0: function lexicalName() {} } \
+             let lexicalName; return lexicalName; };",
+            SourceGoal::Script,
+        );
+        assert!(
+            arrow_body.diagnostics.is_empty(),
+            "an arrow's lexical scope must participate in Annex B suppression: {:?}",
+            arrow_body.diagnostics
+        );
+
+        let captured_outer_name = parse_with_goal(
+            "case.js",
+            "function outer() { let lexicalName; return function inner() { \
+             switch (0) { case 0: function lexicalName() {} } return typeof lexicalName; }; }",
+            SourceGoal::Script,
+        );
+        assert!(
+            captured_outer_name.diagnostics.is_empty(),
+            "an outer lexical binding must not block an inner function's Annex B alias: {:?}",
+            captured_outer_name.diagnostics
+        );
+    }
+
+    #[test]
     fn invalid_regular_expression_patterns_are_syntax_errors() {
         // The flags are checked by the tokenizer either way; these fail only because the pattern
         // itself is parsed.  `\\p{ASCII=F}` is well-formed as a *flagless* pattern and invalid
@@ -7392,6 +11786,49 @@ export * from "legacy" assert { type: "json" };"#,
             HirStatementKind::While { .. }
         ));
         assert!(matches!(module.body[2].kind, HirStatementKind::If { .. }));
+    }
+
+    #[test]
+    fn lowers_numeric_and_string_enums_to_ordered_runtime_operations() {
+        let module = parse_authored_ts(
+            "enum.ts",
+            r#"enum Fruits { Apple, Banana, "Golden Pear" = "pear" }"#,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Block(statements) = &module.body[0].kind else {
+            panic!(
+                "enum should lower to ordinary statements: {:?}",
+                module.body[0]
+            );
+        };
+        assert_eq!(statements.len(), 6); // binding, two numeric reverse maps, one string value
+        assert!(matches!(
+            &statements[0].kind,
+            HirStatementKind::Variable { kind: HirVariableKind::Var, declarations }
+                if matches!(&declarations[0].pattern, kiln_hir::Pattern::Identifier(name) if name == "Fruits")
+        ));
+        assert!(matches!(
+            &statements[1].kind,
+            HirStatementKind::Expression(HirExpression {
+                kind: HirExpressionKind::MemberAssignment { property, .. }, ..
+            }) if property == "Apple"
+        ));
+        assert!(matches!(
+            &statements[2].kind,
+            HirStatementKind::Expression(HirExpression {
+                kind: HirExpressionKind::ComputedAssignment { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            &statements[5].kind,
+            HirStatementKind::Expression(HirExpression {
+                kind: HirExpressionKind::MemberAssignment { property, .. }, ..
+            }) if property == "Golden Pear"
+        ));
+
+        let constant = parse_authored_ts("enum.ts", "const enum Flags { Read, Write }");
+        assert!(matches!(&constant.body[0].kind, HirStatementKind::Block(_)));
     }
 
     /// The parameters of the single function a module declares.
@@ -7786,7 +12223,7 @@ export * from "legacy" assert { type: "json" };"#,
     fn typescript_parameter_and_return_annotations_are_extracted() {
         use kiln_hir::TypeAnnotation;
 
-        let module = parse(
+        let module = parse_authored_ts(
             "dist.ts",
             "function dist(x: number, y: number): number { return x + y; }",
         );
@@ -7806,7 +12243,7 @@ export * from "legacy" assert { type: "json" };"#,
         );
         assert_eq!(dist_fn.return_type, Some(TypeAnnotation::Number));
 
-        let module2 = parse(
+        let module2 = parse_authored_ts(
             "arrow.ts",
             "const f = (a: boolean, b: string, c: int): void => {};",
         );
@@ -7837,7 +12274,7 @@ export * from "legacy" assert { type: "json" };"#,
         );
         assert_eq!(arrow_fn.return_type, Some(TypeAnnotation::Void));
 
-        let module3 = parse("untyped.ts", "function untyped(a, b) {}");
+        let module3 = parse_authored_ts("untyped.ts", "function untyped(a, b) {}");
         assert!(module3.diagnostics.is_empty(), "{:?}", module3.diagnostics);
         let Some(kiln_hir::StatementKind::Function(untyped_fn)) =
             module3.body.first().map(|s| &s.kind)
@@ -7848,7 +12285,7 @@ export * from "legacy" assert { type: "json" };"#,
         assert_eq!(untyped_fn.parameters[1].type_annotation, None);
         assert_eq!(untyped_fn.return_type, None);
 
-        let module4 = parse(
+        let module4 = parse_authored_ts(
             "custom.ts",
             "function custom(x: MyType, y: any): CustomReturn {}",
         );
@@ -7988,6 +12425,118 @@ export * from "legacy" assert { type: "json" };"#,
             raw[0].to_units().as_ref(),
             "\\ud800�abcd".encode_utf16().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn dynamic_source_units_preserve_literals_and_tagged_template_raw_units() {
+        let units = [
+            "const literal = \"a".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            "b\"; const regexp = /x".encode_utf16().collect::<Vec<_>>(),
+            vec![0xd800],
+            "/; const tagged = tag`x".encode_utf16().collect::<Vec<_>>(),
+            vec![0xdfff],
+            "y`;".encode_utf16().collect::<Vec<_>>(),
+        ]
+        .concat();
+        let module = parse_eval_units(
+            "dynamic.js",
+            &StringUnits::from_units(&units),
+            &EvalSyntax::default(),
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let origin = module
+            .source_origin
+            .as_ref()
+            .expect("dynamic source origin");
+        assert_eq!(
+            origin.slice_bytes(0, module.source.len() as u32),
+            Some(StringUnits::from_units(&units))
+        );
+
+        let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
+            panic!("expected literal declaration");
+        };
+        let HirExpressionKind::Literal(HirLiteral::String(literal)) = &declarations[0]
+            .initializer
+            .as_ref()
+            .expect("literal initializer")
+            .kind
+        else {
+            panic!("expected string literal");
+        };
+        assert_eq!(
+            literal.to_units().as_ref(),
+            &[b'a' as u16, 0xd800, b'b' as u16]
+        );
+
+        let HirStatementKind::Variable { declarations, .. } = &module.body[1].kind else {
+            panic!("expected regexp declaration");
+        };
+        let HirExpressionKind::RegExp { pattern, .. } = &declarations[0]
+            .initializer
+            .as_ref()
+            .expect("regexp initializer")
+            .kind
+        else {
+            panic!("expected regexp literal");
+        };
+        assert_eq!(pattern.to_units().as_ref(), &[b'x' as u16, 0xd800]);
+
+        let HirStatementKind::Variable { declarations, .. } = &module.body[2].kind else {
+            panic!("expected tagged declaration");
+        };
+        let HirExpressionKind::Call { arguments, .. } = &declarations[0]
+            .initializer
+            .as_ref()
+            .expect("tagged initializer")
+            .kind
+        else {
+            panic!("expected tagged call");
+        };
+        let ListElement::Item(template) = &arguments[0] else {
+            panic!("expected template argument");
+        };
+        let HirExpressionKind::TemplateStrings { cooked, raw } = &template.kind else {
+            panic!("expected template strings");
+        };
+        let expected = &[b'x' as u16, 0xdfff, b'y' as u16];
+        assert_eq!(cooked[0].as_ref().unwrap().to_units().as_ref(), expected);
+        assert_eq!(raw[0].to_units().as_ref(), expected);
+    }
+
+    #[test]
+    fn unicode_regex_validation_uses_original_source_units() {
+        let prefix = "const re = /".encode_utf16().collect::<Vec<_>>();
+        for flag in ["u", "v"] {
+            let suffix = format!("/{flag};").encode_utf16().collect::<Vec<_>>();
+            let invalid = [prefix.clone(), vec![b'\\' as u16, 0xd800], suffix.clone()].concat();
+            let invalid = parse_eval_units(
+                "dynamic.js",
+                &StringUnits::from_units(&invalid),
+                &EvalSyntax::default(),
+            );
+            assert!(
+                invalid
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains("lone surrogate")),
+                "flag {flag}: {:?}",
+                invalid.diagnostics
+            );
+
+            let valid_raw = [prefix.clone(), vec![0xd800], suffix].concat();
+            let valid_raw = parse_eval_units(
+                "dynamic.js",
+                &StringUnits::from_units(&valid_raw),
+                &EvalSyntax::default(),
+            );
+            assert!(
+                valid_raw.diagnostics.is_empty(),
+                "flag {flag}: {:?}",
+                valid_raw.diagnostics
+            );
+        }
     }
 
     #[test]

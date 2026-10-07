@@ -1,5 +1,7 @@
 // kiln-builtins: node:assert implementation (Phase 5.2, ADR 0005)
 
+import { isDeepStrictEqual } from "node:util";
+
 export class AssertionError extends Error {
   actual: any;
   expected: any;
@@ -65,7 +67,17 @@ function matchesExpectedError(err: any, expected: any): boolean {
   return false;
 }
 
-function isDeepEqual(a: any, b: any, strict: boolean): boolean {
+type ComparedPairs = {
+  left: WeakMap<object, object>;
+  right: WeakMap<object, object>;
+};
+
+function isDeepEqual(
+  a: any,
+  b: any,
+  strict: boolean,
+  compared: ComparedPairs,
+): boolean {
   if (strict ? Object.is(a, b) : a == b) {
     return true;
   }
@@ -75,12 +87,33 @@ function isDeepEqual(a: any, b: any, strict: boolean): boolean {
   if (Array.isArray(a) !== Array.isArray(b)) {
     return false;
   }
+  // Deep equality is defined over object graphs, not just trees. Remember
+  // object pairs before descending so self references and mutual cycles end.
+  const leftAncestor = compared.left.has(a);
+  const rightAncestor = compared.right.has(b);
+  if (leftAncestor || rightAncestor) {
+    return leftAncestor && rightAncestor && compared.left.get(a) === b && compared.right.get(b) === a;
+  }
+  compared.left.set(a, b);
+  compared.right.set(b, a);
+  const equal = compareObjectProperties(a, b, strict, compared);
+  compared.left.delete(a);
+  compared.right.delete(b);
+  return equal;
+}
+
+function compareObjectProperties(
+  a: any,
+  b: any,
+  strict: boolean,
+  compared: ComparedPairs,
+): boolean {
   if (Array.isArray(a)) {
     if (a.length !== b.length) {
       return false;
     }
     for (let i = 0; i < a.length; i++) {
-      if (!isDeepEqual(a[i], b[i], strict)) {
+      if (!isDeepEqual(a[i], b[i], strict, compared)) {
         return false;
       }
     }
@@ -96,11 +129,21 @@ function isDeepEqual(a: any, b: any, strict: boolean): boolean {
     if (!Object.prototype.hasOwnProperty.call(b, key)) {
       return false;
     }
-    if (!isDeepEqual(a[key], b[key], strict)) {
+    if (!isDeepEqual(a[key], b[key], strict, compared)) {
       return false;
     }
   }
   return true;
+}
+
+function deepEqualGraph(a: any, b: any, strict: boolean): boolean {
+  // Strict assertions and util share one graph comparator, including enumerable
+  // symbol identity and the internal state of built-in objects.
+  if (strict) return isDeepStrictEqual(a, b);
+  return isDeepEqual(a, b, strict, {
+    left: new WeakMap<object, object>(),
+    right: new WeakMap<object, object>(),
+  });
 }
 
 export function fail(
@@ -219,7 +262,7 @@ export function notStrictEqual(actual: any, expected: any, message?: any): void 
 }
 
 export function deepEqual(actual: any, expected: any, message?: any): void {
-  if (!isDeepEqual(actual, expected, false)) {
+  if (!deepEqualGraph(actual, expected, false)) {
     if (message instanceof Error) {
       throw message;
     }
@@ -237,7 +280,7 @@ export function deepEqual(actual: any, expected: any, message?: any): void {
 }
 
 export function notDeepEqual(actual: any, expected: any, message?: any): void {
-  if (isDeepEqual(actual, expected, false)) {
+  if (deepEqualGraph(actual, expected, false)) {
     if (message instanceof Error) {
       throw message;
     }
@@ -255,7 +298,7 @@ export function notDeepEqual(actual: any, expected: any, message?: any): void {
 }
 
 export function deepStrictEqual(actual: any, expected: any, message?: any): void {
-  if (!isDeepEqual(actual, expected, true)) {
+  if (!deepEqualGraph(actual, expected, true)) {
     if (message instanceof Error) {
       throw message;
     }
@@ -273,7 +316,7 @@ export function deepStrictEqual(actual: any, expected: any, message?: any): void
 }
 
 export function notDeepStrictEqual(actual: any, expected: any, message?: any): void {
-  if (isDeepEqual(actual, expected, true)) {
+  if (deepEqualGraph(actual, expected, true)) {
     if (message instanceof Error) {
       throw message;
     }

@@ -4,10 +4,13 @@ use kiln_hir::*;
 fn module(body: Vec<Statement>) -> Module {
     Module {
         type_syntax: kiln_hir::TypeSyntax::default(),
+        module_id: "".into(),
         // These modules are built as HIR rather than parsed, so there is no text their spans
         // point into. A function compiled from one answers `toString` with the empty string,
         // which is what "no source" means here.
         source: "".into(),
+        static_source_provenance: None,
+        source_origin: None,
         strict: false,
         source_kind: kiln_hir::SourceKind::JavaScript,
         // Script, because these fixtures are bodies rather than ESM: the goal now decides
@@ -37,6 +40,84 @@ fn builtin_global_bindings_round_trip_and_keep_global_alias() {
         assert_eq!(Builtin::from_name(name), Some(builtin));
     }
     assert_eq!(Builtin::from_name("global"), Some(Builtin::GlobalThis));
+}
+
+#[test]
+fn call_debug_sites_keep_expression_coordinates() {
+    let mut source_module = module(vec![]);
+    source_module.source = "\n f()".into();
+    let mut invocation = call(identifier("f"), vec![]);
+    invocation.span = Span::new(2, 5);
+    source_module
+        .body
+        .push(statement(StatementKind::Expression(invocation)));
+    let program = compile(&source_module).expect("module compiles");
+    let site = program
+        .debug_call_sites
+        .first()
+        .expect("call has a debug site");
+    assert_eq!((site.line, site.column), (2, 2));
+    assert_eq!(
+        site.instruction as usize,
+        program
+            .code
+            .iter()
+            .position(|op| matches!(op, Instruction::Call { .. }))
+            .unwrap()
+    );
+    assert_eq!(site.function_span, None);
+}
+
+#[test]
+fn transformed_static_callsite_coordinates_use_original_typescript() {
+    let mut source_module = module(vec![]);
+    source_module.source = "f()".into();
+    source_module.static_source_provenance = Some(std::sync::Arc::new(StaticSourceProvenance {
+        original_path: "mapped.ts".into(),
+        original_source: "header\n  f()".into(),
+        original_type: kiln_hir::StaticSourceType {
+            goal: kiln_hir::SourceGoal::Module,
+            commonjs: false,
+            jsx: false,
+        },
+        transform_fingerprint: "test-policy".into(),
+        identity: "map-identity".into(),
+        authored_value_imports: Arc::from([]),
+        generated_helper_imports: Arc::from([]),
+        authored_internal_helper_imports: Arc::from([]),
+        source_map: vec![SourceMapSegment {
+            generated_offset: 0,
+            original_offset: 9,
+        }]
+        .into(),
+    }));
+    let provenance = source_module
+        .static_source_provenance
+        .as_ref()
+        .unwrap()
+        .clone();
+    let mut invocation = call(identifier("f"), vec![]);
+    invocation.span = Span::new(0, 3);
+    source_module
+        .body
+        .push(statement(StatementKind::Expression(invocation)));
+
+    let program = compile(&source_module).expect("module compiles");
+    let site = program.debug_call_sites.first().expect("callsite exists");
+    assert_eq!((site.line, site.column), (2, 3));
+    assert_eq!(
+        program.source.as_ref(),
+        "f()",
+        "runtime source remains generated JS"
+    );
+    assert_eq!(
+        program.static_source_identity.as_deref(),
+        Some("map-identity")
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        program.static_source_provenance.as_ref().unwrap(),
+        &provenance
+    ));
 }
 
 fn number(value: f64) -> Expression {
@@ -1295,6 +1376,74 @@ fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
 }
 
 #[test]
+fn only_classes_with_private_elements_emit_private_brands() {
+    let class = |name: &str, initialisers: Vec<ClassInitialiser>| kiln_hir::Class {
+        inferred_name: None,
+        name: Some(name.to_owned()),
+        superclass: None,
+        constructor: None,
+        methods: Vec::new(),
+        initialisers,
+        span: Span::default(),
+    };
+    let public = compile(&module(vec![statement(StatementKind::Class(Box::new(
+        class("PublicOnly", Vec::new()),
+    )))]))
+    .expect("public-only class compiles");
+    let brand = Constant::String("@@private:0:%brand".to_owned().into());
+    assert!(
+        !public.constants.contains(&brand),
+        "a public-only class has no private brand to install on its instance"
+    );
+
+    let private = compile(&module(vec![statement(StatementKind::Class(Box::new(
+        class(
+            "PrivateMember",
+            vec![ClassInitialiser::Field(ClassField {
+                key: ObjectKey::Private("value".to_owned()),
+                value: Some(number(1.0)),
+                is_static: false,
+            })],
+        ),
+    )))]))
+    .expect("private-field class compiles");
+    assert!(
+        private.constants.contains(&brand),
+        "a private-field class still emits the brand its private access checks require"
+    );
+}
+
+#[test]
+fn private_in_lowers_to_its_own_brand_aware_instruction() {
+    let program = compile(&module(vec![statement(StatementKind::Expression(
+        Expression {
+            kind: ExpressionKind::PrivateIn {
+                name: "value".to_owned(),
+                object: Box::new(identifier("receiver")),
+            },
+            span: Span::default(),
+        },
+    ))]))
+    .expect("private-in expression compiles");
+
+    assert!(program.code.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::HasPrivate { name, brand_key }
+            if matches!(program.constants.get(*name as usize), Some(Constant::String(key))
+                if key.to_scalar_string().ok().as_deref() == Some("@@private:0:value"))
+                && matches!(program.constants.get(*brand_key as usize), Some(Constant::String(key))
+                    if key.to_scalar_string().ok().as_deref() == Some("@@private:0:%brand"))
+    )), "private-in retains both private-key identities in the dedicated instruction: {:?}", program.code);
+    assert!(
+        !program
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Binary(BinaryOp::In))),
+        "private-in must never lower through public Proxy has semantics"
+    );
+}
+
+#[test]
 fn a_class_constructor_inside_a_wrapper_captures_the_wrapper_binding() {
     let constructor = kiln_hir::Function {
         inferred_name: None,
@@ -1472,11 +1621,41 @@ fn return_outside_a_function_is_refused() {
 }
 
 #[test]
-fn duplicate_parameters_are_refused() {
-    let messages = errors(vec![function("dup", &["a", "a"], Vec::new())]);
+fn duplicate_simple_parameters_are_allowed_only_in_sloppy_functions() {
+    let sloppy = function(
+        "dup",
+        &["a", "a"],
+        vec![statement(StatementKind::Return(Some(identifier("a"))))],
+    );
+    let program = compile(&module(vec![sloppy.clone()]))
+        .expect("simple duplicate parameters are legal in sloppy functions");
+    assert_eq!(program.functions.len(), 1);
+    assert_eq!(program.functions[0].parameter_count, 2);
+
+    let mut strict = sloppy.clone();
+    let StatementKind::Function(function) = &mut strict.kind else {
+        unreachable!();
+    };
+    function.strict = true;
+    let messages = errors(vec![strict]);
     assert!(
         messages.iter().any(|m| m.contains("duplicate parameter")),
-        "got: {messages:?}"
+        "strict functions must still reject duplicate parameters: {messages:?}"
+    );
+
+    let StatementKind::Function(base) = &sloppy.kind else {
+        unreachable!();
+    };
+    let mut defaulted_function = (**base).clone();
+    defaulted_function.parameters[1].pattern = Pattern::WithDefault {
+        inner: Box::new(Pattern::Identifier("a".to_owned())),
+        default: Box::new(number(0.0)),
+    };
+    let defaulted = statement(StatementKind::Function(Box::new(defaulted_function)));
+    let messages = errors(vec![defaulted]);
+    assert!(
+        messages.iter().any(|m| m.contains("duplicate parameter")),
+        "non-simple functions must still reject duplicate parameters: {messages:?}"
     );
 }
 
@@ -1785,16 +1964,15 @@ fn linkage_compilation_maps_named_imports_and_local_exports_to_slots() {
     assert_eq!(linked.imports[0].local_slot, 0);
     assert_eq!(linked.exports[0].exported, "answer");
     assert_eq!(linked.exports[0].local_slot, 1);
-    // The import reads through a cell, because an import is a live view of the exporter's
-    // binding rather than a copy of it. The export here is a `const` and so is *not* boxed:
-    // a snapshot of something that cannot change is the same thing as a live view of it, and
-    // leaving it unboxed is what keeps such a module compilable by the native backend.
+    // Imports and exports both use cells: even an immutable export must retain its TDZ
+    // identity while cyclic modules evaluate, before its initializer has produced a value.
     assert!(linked.program.code.contains(&Instruction::LoadCell(0)));
-    assert!(linked.program.code.contains(&Instruction::StoreLocal(1)));
+    assert!(linked.program.code.contains(&Instruction::NewCell(1)));
+    assert!(linked.program.code.contains(&Instruction::StoreCell(1)));
 }
 
 #[test]
-fn linkage_compilation_rejects_assignment_to_import() {
+fn linkage_compilation_defers_import_assignment_failure_until_execution() {
     let mut module = module(vec![Statement {
         kind: StatementKind::Expression(Expression {
             kind: ExpressionKind::Assignment {
@@ -1815,12 +1993,25 @@ fn linkage_compilation_rejects_assignment_to_import() {
         statement_span: Span::default(),
     });
 
-    let diagnostics = compile_module(&module).expect_err("imports are immutable bindings");
+    let linked = compile_module(&module).expect("immutable writes are runtime errors");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("imported binding"))
+        linked
+            .program
+            .code
+            .contains(&Instruction::LoadIntrinsicBuiltin(Builtin::TypeError))
     );
+    assert!(linked.program.code.contains(&Instruction::Throw));
+    assert!(!linked.program.code.contains(&Instruction::StoreCell(0)));
+    let rhs = linked.program.code.iter().position(|instruction| matches!(instruction,
+        Instruction::Const(index) if linked.program.constants[*index as usize] == Constant::Number(1.0f64.to_bits())))
+        .expect("assignment RHS remains in the program");
+    let thrown = linked
+        .program
+        .code
+        .iter()
+        .position(|instruction| *instruction == Instruction::Throw)
+        .expect("PutValue throws");
+    assert!(rhs < thrown);
 }
 
 #[test]
@@ -2114,6 +2305,120 @@ fn a_call_without_a_spread_keeps_its_arity_in_the_bytecode() {
     .expect("compiles");
     assert!(program.code.contains(&Instruction::Call { argc: 1 }));
     assert!(!program.code.contains(&Instruction::Apply));
+}
+
+#[test]
+fn a_named_method_call_resolves_its_callee_before_argument_evaluation() {
+    let program = compile(&module(vec![statement(StatementKind::Expression(
+        Expression {
+            kind: ExpressionKind::Call {
+                callee: Box::new(Expression {
+                    kind: ExpressionKind::StaticMember {
+                        object: Box::new(Expression {
+                            kind: ExpressionKind::Identifier("receiver".into()),
+                            span: Span::default(),
+                        }),
+                        property: "run".into(),
+                        optional: false,
+                    },
+                    span: Span::default(),
+                }),
+                arguments: vec![kiln_hir::ListElement::Item(Expression {
+                    kind: ExpressionKind::Identifier("argument".into()),
+                    span: Span::default(),
+                })],
+                optional: false,
+            },
+            span: Span::default(),
+        },
+    ))]))
+    .expect("compiles");
+
+    let lookup = program
+        .code
+        .windows(2)
+        .find_map(|window| match window {
+            [Instruction::Dup, Instruction::GetProperty(name)] => Some(*name),
+            _ => None,
+        })
+        .expect("receiver is duplicated for GetProperty before argument evaluation");
+    let call = program
+        .code
+        .iter()
+        .position(|instruction| {
+            matches!(instruction, Instruction::CallMethodPrepared { name, argc: 1 } if *name == lookup)
+        })
+        .expect("prepared call consumes the saved method");
+    assert!(
+        program
+            .code
+            .iter()
+            .position(|instruction| matches!(
+                instruction,
+                Instruction::GetProperty(name) if *name == lookup
+            ))
+            .is_some_and(|get| get < call)
+    );
+    assert!(
+        !program
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::CallMethod { .. }))
+    );
+}
+
+#[test]
+fn computed_method_calls_convert_once_and_resolve_before_arguments() {
+    let program = compile(&module(vec![statement(StatementKind::Expression(
+        Expression {
+            kind: ExpressionKind::Call {
+                callee: Box::new(Expression {
+                    kind: ExpressionKind::ComputedMember {
+                        object: Box::new(Expression {
+                            kind: ExpressionKind::Identifier("receiver".into()),
+                            span: Span::default(),
+                        }),
+                        property: Box::new(Expression {
+                            kind: ExpressionKind::Identifier("key".into()),
+                            span: Span::default(),
+                        }),
+                        optional: false,
+                    },
+                    span: Span::default(),
+                }),
+                arguments: vec![kiln_hir::ListElement::Item(Expression {
+                    kind: ExpressionKind::Identifier("argument".into()),
+                    span: Span::default(),
+                })],
+                optional: false,
+            },
+            span: Span::default(),
+        },
+    ))]))
+    .expect("compiles");
+
+    let conversion = program
+        .code
+        .iter()
+        .position(|instruction| matches!(instruction, Instruction::ToPropertyKey))
+        .expect("the original key is canonicalized for lookup and method metadata");
+    let duplicate_and_read = program
+        .code
+        .windows(2)
+        .position(|window| matches!(window, [Instruction::Dup2, Instruction::GetComputed]))
+        .expect("computed lookup reuses the canonical receiver/key pair");
+    let call = program
+        .code
+        .iter()
+        .position(|instruction| matches!(instruction, Instruction::CallComputed { argc: 1 }))
+        .expect("fixed-arity computed calls avoid an argument-array allocation");
+    assert!(conversion < duplicate_and_read && duplicate_and_read < call);
+    assert!(
+        !program
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Apply))
+    );
 }
 
 #[test]

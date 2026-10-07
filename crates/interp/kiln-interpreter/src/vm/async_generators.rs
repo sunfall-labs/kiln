@@ -3,7 +3,7 @@ use super::*;
 impl<H: HostOps + ?Sized> Vm<'_, H> {
     pub(super) fn delegate_async_generator_return(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         step: &Rc<PromiseData>,
         delegate: Value,
         exit_target: usize,
@@ -79,7 +79,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     pub(super) fn delegate_async_generator_throw(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         step: &Rc<PromiseData>,
         delegate: Value,
         exit_target: usize,
@@ -191,7 +191,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// separates this from [`Vm::drive_async`], which has only the first kind.
     pub(super) fn drive_async_generator(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         step: &Rc<PromiseData>,
         resume: Resume,
     ) -> Result<(), ExecutionError> {
@@ -229,7 +229,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // A body that threw is finished, and a later `next` has to answer `{ done: true }`
                 // rather than resuming it and throwing the same thing again -- which is what it
                 // did, and what turned a caught rejection into an uncaught one two lines later.
-                generator.borrow_mut().done = true;
+                generator.borrow_mut().complete();
                 // The `.return()` marker is not a thrown value and must never become one. It
                 // reaches here when the unwind it started crossed a suspension this driver did
                 // not recognise, and rejecting with it hands the program a rejection whose

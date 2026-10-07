@@ -115,6 +115,7 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
                 case KILN_GC_COMMONJS_REQUIRE:  val_tag = KILN_VALUE_COMMONJS_REQUIRE; break;
                 case KILN_GC_CLOSURE:           val_tag = KILN_VALUE_FUNCTION; break;
                 case KILN_GC_CELL:              val_tag = KILN_VALUE_CELL; break;
+                case KILN_GC_TIMER:             val_tag = KILN_VALUE_TIMER; break;
                 default: break;
             }
             return kiln_c99_value(val_tag, (uint64_t)(uintptr_t)ptr, NULL, 0);
@@ -165,7 +166,7 @@ static int kiln_c99_val_array_push_fast(kiln_val receiver, kiln_val arg, kiln_va
         void *ptr = KILN_VAL_PTR(receiver);
         if (KILN_LIKELY(kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY)) {
             kiln_array *arr = (kiln_array *)ptr;
-            if (KILN_LIKELY(!arr->frozen && !arr->not_extensible)) {
+            if (KILN_LIKELY(!arr->has_index_descriptors && !arr->frozen && !arr->not_extensible)) {
                 if (arr->is_numeric && !KILN_VAL_IS_NUMBER(arg)) {
                     arr->is_numeric = 0;
                 }
@@ -222,6 +223,8 @@ static int kiln_c99_val_regexp_test_fast(kiln_val receiver, kiln_val arg, kiln_v
                         if (regexp->global || regexp->sticky) {
                             regexp->last_index = matched ? (double)ranges[1] : 0.0;
                         }
+                        status = kiln_c99_regexp_publish_legacy(sval, ranges, groups, matched);
+                        if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;
                         *out = matched ? KILN_VAL_TRUE : KILN_VAL_FALSE;
                         return KILN_C99_OK;
                     }
@@ -281,6 +284,11 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                         }
                         if (regexp->global || regexp->sticky) {
                             regexp->last_index = matched ? (double)ranges[1] : 0.0;
+                        }
+                        status = kiln_c99_regexp_publish_legacy(sval, ranges, groups, matched);
+                        if (KILN_UNLIKELY(status != KILN_C99_OK)) {
+                            if (ranges != stack_ranges) free(ranges);
+                            return status;
                         }
                         if (!matched) {
                             if (ranges != stack_ranges) free(ranges);
@@ -350,7 +358,7 @@ static int kiln_c99_val_regexp_exec_fast(kiln_val receiver, kiln_val arg, kiln_v
                         arr->match_index = ranges[0];
                         kiln_c99_heap_store_value(arr, &arr->match_input, sval);
                         {
-                            int gstatus = kiln_c99_match_groups(regexp, arr, groups);
+                            int gstatus = kiln_c99_match_groups(regexp, arr);
                             if (gstatus != KILN_C99_OK) {
                                 if (ranges != stack_ranges) free(ranges);
                                 return gstatus;
@@ -565,6 +573,7 @@ static kiln_val kiln_c99_collection_delete_val_fast(kiln_collection *collection,
     kiln_c99_collection_hash_remove(collection, (size_t)at, kiln_val_to_boundary(key));
     kiln_c99_heap_store_value(collection, &collection->entries[(size_t)at].key, kiln_c99_undefined());
     kiln_c99_heap_store_value(collection, &collection->entries[(size_t)at].value, kiln_c99_undefined());
+    kiln_c99_collection_compact_weak(collection);
     return KILN_VAL_TRUE;
 }
 
@@ -621,9 +630,13 @@ static int kiln_c99_val_sort_compare(kiln_c99_val_sort_context *ctx, kiln_val a,
         kiln_val prod = KILN_VAL_UNDEFINED;
         int status;
         if (!plain->publishes_frame) {
-            kiln_call_context ctx_call = { ctx->host, ctx->thrown, NULL, ctx->depth + 1 };
+            kiln_host call_host;
+            kiln_call_context ctx_call = { kiln_c99_closure_host(ctx->host, plain, &call_host), ctx->thrown, NULL, ctx->depth + 1 };
             kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;
+            kiln_js_frame js_frame;
+            kiln_c99_js_frame_enter(&js_frame, plain);
             status = plain->body(&ctx_call, &prod, plain->upvalues, &recv, args, (size_t)2);
+            kiln_c99_js_frame_leave(&js_frame);
         } else {
             status = kiln_c99_invoke_closure(ctx->host, &prod, plain, KILN_VAL_UNDEFINED, args, (size_t)2, ctx->depth, ctx->thrown, NULL, 0);
         }
@@ -947,6 +960,9 @@ static kiln_val kiln_c99_val_unary_fast(uint16_t operation, kiln_val value) {
     return kiln_val_from_boundary(kiln_c99_unary(operation, kiln_val_to_boundary(value)));
 }
 
+static inline int kiln_c99_site_member_matches_bytes(const kiln_c99_site *site,
+                                                     const char *member, size_t len);
+
 static int kiln_c99_read_property(kiln_host *host, kiln_value target,
                                   const char *key, size_t key_len,
                                   int depth, kiln_value *thrown,
@@ -964,7 +980,13 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
             }
         }
         if (KILN_LIKELY(kiln_c99_site_has_method(site) && target.tag == site->cached_tag)) {
-            if (target.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED) {
+            int builtin_key_matches = target.tag != KILN_VALUE_BUILTIN ||
+                ((uint32_t)target.bits == site->cached_builtin &&
+                 kiln_c99_site_member_matches_bytes(site, key, key_len) &&
+                 kiln_c99_realm_cached_builtin_member_untouched(
+                     site->cached_builtin, site->cached_member, site->cached_member_len));
+            if (builtin_key_matches &&
+                (target.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED)) {
                 *out = kiln_c99_method(site->cached_method);
                 return KILN_C99_OK;
             }
@@ -999,7 +1021,8 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
             target.tag == KILN_VALUE_COLLECTION ||
             target.tag == KILN_VALUE_BUILTIN) {
             kiln_c99_site_cache_method(site, (uint8_t)target.tag, out->bits,
-                                       target.tag == KILN_VALUE_BUILTIN ? (uint32_t)target.bits : 0);
+                                       target.tag == KILN_VALUE_BUILTIN ? (uint32_t)target.bits : 0,
+                                       key, key_len);
         }
     }
     return status;
@@ -1049,7 +1072,49 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
 
 #ifndef KILN_C99_CACHED_METHOD_MATCHES_DEFINED
 #define KILN_C99_CACHED_METHOD_MATCHES_DEFINED
-static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target) {
+static inline int kiln_c99_site_member_matches_bytes(const kiln_c99_site *site,
+                                                     const char *member, size_t len) {
+    return site != NULL && member != NULL && len < sizeof site->cached_member &&
+           site->cached_member_len == len && memcmp(site->cached_member, member, len) == 0;
+}
+
+static inline int kiln_c99_site_member_matches_key(const kiln_c99_site *site,
+                                                   const kiln_string *key) {
+    if (site == NULL || key == NULL || key->unit_len >= sizeof site->cached_member ||
+        site->cached_member_len != key->unit_len) return 0;
+    for (size_t index = 0; index < key->unit_len; ++index) {
+        uint32_t unit = kiln_string_unit_at(key, (uint32_t)index);
+        if (unit >= 0x80u || (unsigned char)site->cached_member[index] != unit) return 0;
+    }
+    return 1;
+}
+
+static inline void kiln_c99_site_cache_method_key(kiln_c99_site *site, uint8_t tag,
+                                                  uint64_t method, uint32_t builtin,
+                                                  const kiln_string *key) {
+    char member[32];
+    size_t len = key == NULL ? sizeof member : key->unit_len;
+    if (tag != KILN_VALUE_BUILTIN) {
+        kiln_c99_site_cache_method(site, tag, method, builtin, NULL, 0);
+        return;
+    }
+    if (len >= sizeof member) {
+        kiln_c99_site_cache_method(site, tag, method, builtin, NULL, sizeof member);
+        return;
+    }
+    for (size_t index = 0; index < len; ++index) {
+        uint32_t unit = kiln_string_unit_at(key, (uint32_t)index);
+        if (unit >= 0x80u) {
+            kiln_c99_site_cache_method(site, tag, method, builtin, NULL, sizeof member);
+            return;
+        }
+        member[index] = (char)unit;
+    }
+    kiln_c99_site_cache_method(site, tag, method, builtin, member, len);
+}
+
+static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln_val target,
+                                                 const kiln_string *key) {
     if (site == NULL || !kiln_c99_site_has_method(site)) return 0;
     uint8_t ctag = site->cached_tag;
     /* Issue 30: a kind's remembered method is its table's, which a member the program wrote onto
@@ -1057,7 +1122,11 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
     if (ctag != KILN_VALUE_BUILTIN && KILN_UNLIKELY(!kiln_c99_tag_method_pristine(ctag, site->cached_method))) return 0;
     if (ctag == KILN_VALUE_COLLECTION && (KILN_VAL_IS_OBJECT(target) || ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX))) {
         void *ptr = KILN_VAL_PTR(target);
-        return kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION;
+        if (kiln_c99_gc_kind_of_ptr(ptr) != KILN_GC_COLLECTION) return 0;
+        const kiln_collection *collection = (const kiln_collection *)ptr;
+        const char *method = kiln_c99_method_name(site->cached_method);
+        return kiln_c99_collection_cached_method_allowed(collection, key, site->cached_method,
+                                                         method);
     } else if (ctag == KILN_VALUE_STRING && KILN_VAL_IS_STRING(target)) {
         return 1;
     } else if (ctag == KILN_VALUE_NUMBER && KILN_VAL_IS_NUMBER(target)) {
@@ -1065,12 +1134,11 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
     } else if (ctag == KILN_VALUE_BOOLEAN && KILN_VAL_IS_BOOLEAN(target)) {
         return 1;
     } else if (ctag == KILN_VALUE_BUILTIN) {
-        /* `Promise.resolve`, `Object.keys`, `Math.max`: the same builtin at the same site answers
-         * the same method while the current realm has not modified that built-in (ADR 0071): a
-         * realm's own record, consulted only once some realm has modified some built-in. */
-        return KILN_VAL_IS_BUILTIN(target) && KILN_VAL_BUILTIN_ID(target) == site->cached_builtin &&
-               (KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||
-                !kiln_c99_realm_builtin_modified(site->cached_builtin));
+        if (!kiln_c99_site_member_matches_key(site, key) ||
+            !kiln_c99_realm_cached_builtin_member_untouched(
+                site->cached_builtin, site->cached_member, site->cached_member_len)) return 0;
+        return KILN_VAL_IS_BUILTIN(target) &&
+               KILN_VAL_BUILTIN_ID(target) == site->cached_builtin;
     } else if (ctag == KILN_VALUE_ARRAY && ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) {
         void *ptr = KILN_VAL_PTR(target);
         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
@@ -1110,6 +1178,15 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
                                            const kiln_string *canonical, int depth,
                                            kiln_value *thrown, kiln_c99_site *site,
                                            kiln_val *out) {
+    /* Namespace properties are live export cells, not values. Keep both shape/PIC reads and
+     * cached-method answers out of this wrapper so the semantic path can unwrap the binding. */
+    if (KILN_VAL_IS_OBJECT(target)) {
+        void *ptr = KILN_VAL_PTR(target);
+        if (ptr != NULL && kiln_c99_gc_payload_kind(ptr) == KILN_GC_OBJECT &&
+            ((const kiln_object *)ptr)->module_namespace) {
+            goto generic_read;
+        }
+    }
     if (KILN_LIKELY(site != NULL && KILN_VAL_IS_OBJECT(target))) {
         void *ptr = KILN_VAL_PTR(target);
         if (KILN_LIKELY(ptr != NULL && kiln_c99_gc_payload_kind(ptr) == KILN_GC_OBJECT)) {
@@ -1125,7 +1202,7 @@ static int kiln_c99_val_read_property_view(kiln_host *host, kiln_val target,
             }
         }
     }
-    if (KILN_LIKELY(kiln_c99_cached_method_matches(site, target))) {
+    if (KILN_LIKELY(kiln_c99_cached_method_matches(site, target, key))) {
         *out = KILN_VAL_METHOD(site->cached_method);
         return KILN_C99_OK;
     }
@@ -1230,6 +1307,13 @@ static const kiln_string *kiln_c99_compiler_named_key(const kiln_string *key) {
     };
     size_t index;
     if (key == NULL || kiln_c99_key_is_symbol(key)) return key;
+    /* Compiler-reserved names all begin with two ASCII at-sign code units. Most property
+     * accesses are ordinary names, so reject them before checking the private prefix and the
+     * fixed well-known-symbol table. Use code-unit access rather than inspecting the backing
+     * bytes: callers may supply Latin-1 or UTF-16 property keys. */
+    if (key->unit_len < sizeof "@@dispose" - 1 ||
+        kiln_string_unit_at(key, 0) != '@' ||
+        kiln_string_unit_at(key, 1) != '@') return key;
     if (key->unit_len >= sizeof "@@private:" - 1 &&
         kiln_c99_key_has_prefix(key, "@@private:")) {
         kiln_string private_key = *key;
@@ -1513,7 +1597,8 @@ static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value 
         if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
             size_t slot = (size_t)idx;
             const kiln_array *array = kiln_c99_array_of(target);
-            if (KILN_LIKELY(slot < array->count && array->elements[slot] != KILN_VAL_HOLE)) {
+            if (KILN_LIKELY(!array->has_index_descriptors && slot < array->count &&
+                            array->elements[slot] != KILN_VAL_HOLE)) {
                 *out = kiln_val_to_boundary(array->elements[slot]);
                 return KILN_C99_OK;
             }
@@ -1541,7 +1626,8 @@ static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value
         if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
             size_t slot = (size_t)idx;
             kiln_array *array = kiln_c99_array_of(target);
-            if (KILN_LIKELY(!array->frozen && slot < array->count)) {
+            if (KILN_LIKELY(!array->has_index_descriptors && !array->frozen &&
+                            slot < array->count)) {
                 kiln_c99_heap_store_val(array, &array->elements[slot], kiln_val_from_boundary(value));
                 return KILN_C99_OK;
             }
@@ -1573,9 +1659,26 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
             uint32_t gc_kind = kiln_c99_gc_kind_of_ptr(ptr);
             if (gc_kind == KILN_GC_ARRAY) {
                 const kiln_array *array = (const kiln_array *)ptr;
-                if (KILN_LIKELY(slot < array->count && array->elements[slot] != KILN_VAL_HOLE)) {
+                if (KILN_LIKELY(!array->has_index_descriptors && slot < array->count &&
+                                array->elements[slot] != KILN_VAL_HOLE)) {
                     *out = array->elements[slot];
                     return KILN_C99_OK;
+                }
+            } else if (gc_kind == KILN_GC_TYPED_ARRAY) {
+                const kiln_typed_array *view = (const kiln_typed_array *)ptr;
+                const kiln_typed_buffer *buffer = view->buffer;
+                /* Number indices on ordinary fixed numeric views need no property-key string.
+                 * Keep BigInt allocation, shared storage, detached/out-of-bounds views
+                 * and all coercible keys on the authoritative integer-indexed exotic path. */
+                if (buffer != NULL && !buffer->detached && buffer->shared == NULL &&
+                    !kiln_c99_typed_kind_is_bigint(view->kind) &&
+                    slot < view->length && view->byte_offset <= buffer->byte_length) {
+                    size_t width = kiln_c99_typed_width(view->kind);
+                    size_t remaining = buffer->byte_length - view->byte_offset;
+                    if (slot < remaining / width) {
+                        *out = kiln_c99_val_from_double(kiln_typed_load(view, slot));
+                        return KILN_C99_OK;
+                    }
                 }
             } else if (gc_kind == KILN_GC_OBJECT) {
                 const kiln_object *object = (const kiln_object *)ptr;
@@ -1605,7 +1708,10 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
         kiln_object *obj = (kiln_object *)KILN_VAL_PTR(target);
         const kiln_string *keystr = (const kiln_string *)KILN_VAL_PTR(key);
         if (KILN_LIKELY(obj != NULL && keystr != NULL && kiln_c99_gc_kind_of_ptr(obj) == KILN_GC_OBJECT)) {
-            if (obj->shape != NULL && obj->accessor_count == 0) {
+            /* Namespace slots hold live export cells internally. The generic computed-property
+             * path unwraps those cells (and checks their TDZ); returning the shape slot here
+             * would expose the cell as a JavaScript value. */
+            if (obj->shape != NULL && obj->accessor_count == 0 && !obj->module_namespace) {
                 if (obj->elements != NULL) {
                     double index_num = kiln_c99_key_index_key(keystr);
                     if (index_num >= 0.0 && index_num < 100000.0) {
@@ -1629,7 +1735,8 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
                     *out = KILN_VAL_UNDEFINED;
                     return KILN_C99_OK;
                 }
-            } else if (obj->properties != NULL && obj->accessor_count == 0 && obj->prototype.tag == KILN_VALUE_NULL) {
+            } else if (obj->properties != NULL && obj->accessor_count == 0 &&
+                       obj->prototype.tag == KILN_VALUE_NULL && !obj->module_namespace) {
                 const kiln_string *ikey = kiln_c99_intern_key(keystr);
                 size_t idx = kiln_c99_own_index_key(obj, ikey, keystr);
                 if (idx != obj->count) {
@@ -1661,7 +1768,8 @@ static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val
             uint32_t gc_kind = kiln_c99_gc_kind_of_ptr(ptr);
             if (gc_kind == KILN_GC_ARRAY) {
                 kiln_array *array = (kiln_array *)ptr;
-                if (KILN_LIKELY(!array->frozen && slot < array->count)) {
+                if (KILN_LIKELY(!array->has_index_descriptors && !array->frozen &&
+                                slot < array->count)) {
                     if (array->is_numeric && !KILN_VAL_IS_NUMBER(value)) {
                         array->is_numeric = 0;
                     }
@@ -2037,7 +2145,7 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
             void *ptr = KILN_VAL_PTR(receiver);
             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
                 kiln_array *arr = (kiln_array *)ptr;
-                if (!arr->frozen && !arr->not_extensible) {
+                if (!arr->has_index_descriptors && !arr->frozen && !arr->not_extensible) {
                     if (argc == 0) {
                         *out = kiln_c99_val_from_double((double)arr->count);
                         return KILN_C99_OK;
@@ -2062,7 +2170,7 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
             void *ptr = KILN_VAL_PTR(receiver);
             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
                 kiln_array *arr = (kiln_array *)ptr;
-                if (!arr->frozen && !arr->not_extensible) {
+                if (!arr->has_index_descriptors && !arr->frozen && !arr->not_extensible) {
                     if (arr->count == 0) {
                         *out = KILN_VAL_UNDEFINED;
                         return KILN_C99_OK;
@@ -2078,7 +2186,7 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
             void *ptr = KILN_VAL_PTR(receiver);
             if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {
                 kiln_array *arr = (kiln_array *)ptr;
-                if (!arr->frozen && !arr->not_extensible) {
+                if (!arr->has_index_descriptors && !arr->frozen && !arr->not_extensible) {
                     if (arr->count == 0) {
                         *out = KILN_VAL_UNDEFINED;
                         return KILN_C99_OK;
@@ -2232,21 +2340,17 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
     return status;
 }
 
-/* A method call on machine values, end to end. The property is read once through the site's
- * inline cache on `kiln_val`; a plain strict or arrow closure that publishes no frame is entered
- * directly with the machine arguments; only a built-in method or an exotic callee crosses to the
- * boundary representation, and then only its arguments. This is the seam the shape and slot
- * migration left in front of every method call: the stack-shaped op below converts the whole
- * frame both ways and re-reads nothing, but it does convert. */
-static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, const kiln_val *args,
-                                         size_t argc, const kiln_string *key,
-                                         const kiln_string *canonical, int depth,
-                                         kiln_value *thrown, kiln_c99_site *site,
-                                         const char *inst_site, size_t inst_idx,
-                                         const char *inst_op, kiln_val *out) {
+/* Resolve and cache a method without invoking it. Prepared method calls use this at the
+ * original property-read point, before evaluating arguments; the resulting callee remains the
+ * authority at invocation time. */
+static int kiln_c99_val_prepare_method_view(kiln_host *host, kiln_val receiver,
+                                     const kiln_string *key, const kiln_string *canonical,
+                                     int depth, kiln_value *thrown, kiln_c99_site *site,
+                                     const char *inst_site, size_t inst_idx,
+                                     const char *inst_op, kiln_val *out) {
     kiln_val method = 0;
     int from_cache = 0;
-    if (KILN_LIKELY(kiln_c99_cached_method_matches(site, receiver))) {
+    if (KILN_LIKELY(kiln_c99_cached_method_matches(site, receiver, key))) {
         method = KILN_VAL_METHOD(site->cached_method);
         from_cache = 1;
     } else if (KILN_LIKELY(site != NULL && KILN_VAL_IS_OBJECT(receiver))) {
@@ -2283,9 +2387,10 @@ static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, con
             !(KILN_VAL_IS_OBJECT(receiver) &&
               kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(receiver)) == KILN_GC_OBJECT &&
               ((const kiln_object *)KILN_VAL_PTR(receiver))->shape != NULL)) {
-            kiln_c99_site_cache_method(site, (uint8_t)kiln_val_to_boundary(receiver).tag,
-                                       KILN_VAL_METHOD_ID(method),
-                                       KILN_VAL_IS_BUILTIN(receiver) ? KILN_VAL_BUILTIN_ID(receiver) : 0);
+            kiln_c99_site_cache_method_key(site, (uint8_t)kiln_val_to_boundary(receiver).tag,
+                                           KILN_VAL_METHOD_ID(method),
+                                           KILN_VAL_IS_BUILTIN(receiver) ? KILN_VAL_BUILTIN_ID(receiver) : 0,
+                                           key);
         } else if (site != NULL && KILN_VAL_IS_OBJECT(receiver) &&
                    /* A proxy, a generator and a collection are boxed with the object prefix and
                     * are not objects; a site learns a shape only from an object, so a hit -- a
@@ -2326,16 +2431,43 @@ static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, con
         }
     }
 
+    *out = method;
+    return KILN_C99_OK;
+}
+
+int kiln_c99_val_prepare_method_key(kiln_host *host, kiln_val receiver,
+                                    const kiln_string *key, int depth, kiln_value *thrown,
+                                    kiln_c99_site *site, const char *inst_site,
+                                    size_t inst_idx, const char *inst_op, kiln_val *out) {
+    key = kiln_c99_compiler_named_key(key);
+    if (key == NULL) return KILN_C99_OUT_OF_MEMORY;
+    return kiln_c99_val_prepare_method_view(host, receiver, key, key, depth, thrown, site,
+                                            inst_site, inst_idx, inst_op, out);
+}
+
+/* Invoke a method using the callee resolved by the shared method-site lookup above. */
+static int kiln_c99_val_call_method_view(kiln_host *host, kiln_val receiver, const kiln_val *args,
+                                         size_t argc, const kiln_string *key,
+                                         const kiln_string *canonical, int depth,
+                                         kiln_value *thrown, kiln_c99_site *site,
+                                         const char *inst_site, size_t inst_idx,
+                                         const char *inst_op, kiln_val *out) {
+    kiln_val method = KILN_VAL_UNDEFINED;
+    int status = kiln_c99_val_prepare_method_view(host, receiver, key, canonical, depth, thrown,
+                                                  site, inst_site, inst_idx, inst_op, &method);
+    if (status != KILN_C99_OK) return status;
+
     if (KILN_VAL_IS_CLOSURE(method)) {
         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(method);
         if (!plain->generator && !kiln_c99_inheriting_new_target &&
             depth < KILN_C99_MAX_CALL_DEPTH) {
             kiln_val vreceiver = plain->arrow ? plain->captured_this : receiver;
-            if (!plain->arrow && !plain->strict && (vreceiver == KILN_VAL_UNDEFINED || vreceiver == KILN_VAL_NULL)) {
-                (void)kiln_c99_global_object_val(&vreceiver);
-            }
+            status = kiln_c99_normalize_closure_receiver(&vreceiver, plain);
+            if (status != KILN_C99_OK) goto done;
             *out = KILN_VAL_UNDEFINED;
+            kiln_c99_js_frame_set_method_name(key);
             status = kiln_c99_invoke_closure(host, out, plain, vreceiver, args, argc, depth, thrown, NULL, 0);
+            kiln_c99_js_frame_set_method_name(NULL);
             goto done;
         }
     }
@@ -2411,7 +2543,8 @@ static int kiln_c99_val_call(kiln_host *host, kiln_val callee, const kiln_val *a
         kiln_val call_result = KILN_VAL_UNDEFINED;
         kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;
         int status;
-        if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv);
+        status = kiln_c99_normalize_closure_receiver(&recv, plain);
+        if (status != KILN_C99_OK) return status;
         status = kiln_c99_invoke_closure(host, &call_result, plain, recv, args, argc, depth, thrown, NULL, 0);
         if (status == KILN_C99_CONTROL_ERROR && (call_result & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
             return status;
@@ -2505,7 +2638,8 @@ static int kiln_c99_val_to_property_key(kiln_host *host, kiln_val target, kiln_v
 
 static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown) {
     if (val == KILN_VAL_UNINITIALIZED) {
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR,
+                                    "cannot access a binding before its declaration");
     }
     return KILN_C99_OK;
 }
@@ -2523,6 +2657,16 @@ static int kiln_c99_val_make_cell(kiln_val *slot) {
     }
     kiln_c99_val_store_cell(box, *slot);
     *slot = KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, box);
+    return KILN_C99_OK;
+}
+
+int kiln_c99_val_make_cell_owned(kiln_val *slot, void *external_owner) {
+    kiln_gc_cell *box = (kiln_gc_cell *)kiln_c99_gc_alloc_hot(KILN_GC_CELL, sizeof *box, 1);
+    if (box == NULL) return KILN_C99_OUT_OF_MEMORY;
+    box->value = *slot;
+    kiln_c99_val_store_cell(&box->value, *slot);
+    kiln_c99_heap_store_pointer(box, &box->external_owner, external_owner);
+    *slot = KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, &box->value);
     return KILN_C99_OK;
 }
 

@@ -48,7 +48,7 @@ header echo, an async handler that awaits a timer), every answer checked by the 
 | deno 2.9 | 78.8k | 0.62 ms | 2.89 ms | 126 MB |
 
 The machine was shared while these ran; the per-pass ranges and raw log are in
-`.scratch/server-throughput/measurements-2026-09-02.md`. `bench/server/compare.sh` reproduces the
+`docs/issues/server-throughput/measurements-2026-09-02.md`. `bench/server/compare.sh` reproduces the
 table, `bench/server/run.sh` one row.
 
 The same script on Linux/x86_64 (Xeon Platinum 8259CL, 2026-09-03, node 22.23 and bun 1.4, no deno
@@ -86,7 +86,7 @@ processes are needed before the load generator stops being the limit:
 The comparison table above stays single-realm because that is the like-for-like core-for-core
 number, and it is the one to beat. Absolute figures are about half the macOS table further up,
 which was taken on an unrecorded machine; the two are not comparable and neither is presented as
-the other. Full provenance is in `.scratch/server-throughput/measurements-2026-09-03.md`.
+the other. Full provenance is in `docs/issues/server-throughput/measurements-2026-09-03.md`.
 
 A binary reads `KILN_WORKERS` when it starts, so one artifact is right on every machine it is
 copied to. `kiln build --workers=auto` records a default for when the variable is unset, still
@@ -138,7 +138,7 @@ with it**, and nothing restarts it: crash isolation is what process mode is for.
 
 Process mode is the default (`KILN_WORKERS_MODE=process`, or unset). Measured on 16 hardware
 threads with `bench/server/serve.mjs` under `KILN_WORKERS=auto` and `oha` on the same machine
-(three rounds each, `.scratch/realms-and-concurrency/issues/07-kiln-workers-thread-mode.md`), the
+(three rounds each, `docs/issues/realms-and-concurrency/issues/07-kiln-workers-thread-mode.md`), the
 two serve the same at 32 connections and above (about 300k rps at 64, 370k at 256), thread mode is
 8% slower at 16 connections -- it spreads them over all sixteen cores, where the client runs too --
 and its p99 at 64 connections is 1.2-1.6 ms against 1.1-1.2 ms. It uses 40 MB of PSS idle against
@@ -151,7 +151,32 @@ kernels, and any kernel or seccomp profile that refuses a ring, use epoll. `KILN
 epoll anywhere and `KILN_IO=uring` asks for the ring below the floor. See
 `crates/host/kiln-runtime/src/uring.rs` for the design and the measurements behind that default.
 
-## Using it
+## Installing
+
+Each release is a binary for macOS on Apple silicon and Linux (glibc) on x86_64 and arm64:
+
+```sh
+curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install.sh | sh
+```
+
+That unpacks the release into `~/.kiln/<version>/` and links `kiln` into `~/.local/bin`.
+`KILN_VERSION`, `KILN_INSTALL_DIR` and `KILN_BIN_DIR` override the defaults, and `GITHUB_TOKEN` is
+needed while the repository is private. A release carries the binary and every native provider
+archive (`lib/kiln/`), so `kiln build` needs only a C compiler -- Clang, GCC, cc or Zig -- and no
+Rust toolchain; `kiln run` needs neither. Each archive is checked against the release's
+`SHA256SUMS` before it is unpacked. To unpack one by hand, keep its `bin/` and `lib/` together:
+the binary finds its providers at `bin/../lib/kiln`, through a symlink if you make one.
+
+Not built: Intel macOS and Windows. Linux releases carry no `kiln:gui` provider (the bridge is
+AppKit today, ADR 0074), so a Linux program that imports it is refused by name. In
+`KILN_WORKERS_MODE=thread` one crashing realm takes the others with it; process mode, the
+default, restarts a crashed worker.
+
+`scripts/package-release.sh dist` builds the same archive for the host from a clean checkout and
+smoke-tests it with no Rust toolchain on `PATH`; `.github/workflows/release.yml` runs it for every
+target on a `v*` tag and publishes the result.
+
+## Building from source
 
 Rust 1.97.1 (pinned in `rust-toolchain.toml`) and a C compiler: Zig, Clang, cc or GCC on `PATH`.
 

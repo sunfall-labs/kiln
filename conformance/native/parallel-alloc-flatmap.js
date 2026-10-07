@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 3 (.scratch/parallel-builtins issue 08): `parallelFlatMap` whose callback returns arrays
+// Tier 3 (docs/issues/parallel-builtins issue 08): `parallelFlatMap` whose callback returns arrays
 // -- built in worker arenas, empty, holding objects or strings -- or plain values, over a holey
 // receiver, and arrays the program already had (one level only is flattened). Each answer must be `flatMap`'s.
 const n = typeof process !== "undefined" && process.env.KILN_GC_STRESS ? 1500 : 30001;

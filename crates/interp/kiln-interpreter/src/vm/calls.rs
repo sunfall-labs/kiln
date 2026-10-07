@@ -159,6 +159,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: Vec<Value>,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        if matches!(
+            callee,
+            Value::Native(
+                Native::AsyncFunctionPrototype
+                    | Native::GeneratorFunctionPrototype
+                    | Native::AsyncGeneratorFunctionPrototype,
+                _
+            )
+        ) {
+            return Err(ExecutionError::NotCallable {
+                instruction,
+                value: callee.type_name(),
+            });
+        }
         match callee {
             Value::Native(native, _) => {
                 // A method that changes its array, given a proxy, has to change what is behind
@@ -233,7 +247,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Callback(_, _) => {
                 let this_value = self.as_array_like(callee, this_value, instruction)?;
                 Ok(self
-                    .invoke(callee.clone(), this_value, arguments, instruction)?
+                    .invoke(callee.clone(), this_value, arguments, instruction, None)?
                     .unwrap_or(Value::Undefined))
             }
             // A proxied function runs its `apply` trap, or the target when there is none.
@@ -368,6 +382,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     argc as u16,
                     instruction,
                     this_value,
+                    None,
                     None,
                 )?;
                 // Calling a generator function pushes no frame -- it leaves the generator object

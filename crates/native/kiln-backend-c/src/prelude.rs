@@ -9,6 +9,183 @@ pub(crate) struct MethodId {
     pub(crate) textual_arguments: u32,
 }
 
+const METHOD_LENGTH_UNSPECIFIED: u32 = u32::MAX;
+
+/// Native dispatch IDs whose public owner/key cannot be recovered from the table-driven builtin
+/// receiver rows. The member's arity still comes from `kiln_builtin_surface`; this table only
+/// connects the C dispatch ID to that public identity.
+const NATIVE_METHOD_SURFACE_BINDINGS: &[(&str, &str, &str)] = &[
+    (
+        "KILN_C99_METHOD_QUEUE_MICROTASK",
+        "globalThis",
+        "queueMicrotask",
+    ),
+    ("KILN_C99_METHOD_SET_TIMEOUT", "globalThis", "setTimeout"),
+    ("KILN_C99_METHOD_SET_INTERVAL", "globalThis", "setInterval"),
+    (
+        "KILN_C99_METHOD_CLEAR_TIMEOUT",
+        "globalThis",
+        "clearTimeout",
+    ),
+    (
+        "KILN_C99_METHOD_CLEAR_INTERVAL",
+        "globalThis",
+        "clearInterval",
+    ),
+    (
+        "KILN_C99_METHOD_SET_IMMEDIATE",
+        "globalThis",
+        "setImmediate",
+    ),
+    (
+        "KILN_C99_METHOD_CLEAR_IMMEDIATE",
+        "globalThis",
+        "clearImmediate",
+    ),
+    ("KILN_C99_METHOD_JSON_RAW_CREATE", "JSON", "rawJSON"),
+    ("KILN_C99_METHOD_JSON_IS_RAW", "JSON", "isRawJSON"),
+    ("KILN_C99_METHOD_REGEXP_TEST", "RegExp.prototype", "test"),
+    ("KILN_C99_METHOD_GET_TIME", "Date.prototype", "getTime"),
+    (
+        "KILN_C99_METHOD_STRING_INDEX_OF",
+        "String.prototype",
+        "indexOf",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC",
+        "node:fs",
+        "readFileSync",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC",
+        "node:fs",
+        "writeFileSync",
+    ),
+    ("KILN_C99_METHOD_NODE_FS_MKDIR_SYNC", "node:fs", "mkdirSync"),
+    ("KILN_C99_METHOD_NODE_FS_STAT_SYNC", "node:fs", "statSync"),
+    ("KILN_C99_METHOD_NODE_FS_LSTAT_SYNC", "node:fs", "lstatSync"),
+    (
+        "KILN_C99_METHOD_NODE_FS_READDIR_SYNC",
+        "node:fs",
+        "readdirSync",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_FS_REALPATH_SYNC",
+        "node:fs",
+        "realpathSync",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_FS_UNLINK_SYNC",
+        "node:fs",
+        "unlinkSync",
+    ),
+    ("KILN_C99_METHOD_NODE_FS_RMDIR_SYNC", "node:fs", "rmdirSync"),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER",
+        "node:http.ServerResponse.prototype",
+        "setHeader",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER",
+        "node:http.ServerResponse.prototype",
+        "getHeader",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS",
+        "node:http.ServerResponse.prototype",
+        "getHeaders",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER",
+        "node:http.ServerResponse.prototype",
+        "hasHeader",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER",
+        "node:http.ServerResponse.prototype",
+        "removeHeader",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD",
+        "node:http.ServerResponse.prototype",
+        "writeHead",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_WRITE",
+        "node:http.ServerResponse.prototype",
+        "write",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_RESPONSE_END",
+        "node:http.ServerResponse.prototype",
+        "end",
+    ),
+    (
+        "KILN_C99_METHOD_NODE_WRITABLE_DESTROY",
+        "node:stream.Writable.prototype",
+        "destroy",
+    ),
+];
+
+const fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.len() == 0 || needle.len() > haystack.len() {
+        return false;
+    }
+    let mut start = 0;
+    while start + needle.len() <= haystack.len() {
+        let end = start + needle.len();
+        let before_is_identifier = start > 0
+            && ((haystack[start - 1] >= b'a' && haystack[start - 1] <= b'z')
+                || (haystack[start - 1] >= b'A' && haystack[start - 1] <= b'Z')
+                || (haystack[start - 1] >= b'0' && haystack[start - 1] <= b'9')
+                || haystack[start - 1] == b'_');
+        let after_is_identifier = end < haystack.len()
+            && ((haystack[end] >= b'a' && haystack[end] <= b'z')
+                || (haystack[end] >= b'A' && haystack[end] <= b'Z')
+                || (haystack[end] >= b'0' && haystack[end] <= b'9')
+                || haystack[end] == b'_');
+        if !before_is_identifier && !after_is_identifier && bytes_match_at(haystack, start, needle)
+        {
+            return true;
+        }
+        start += 1;
+    }
+    false
+}
+
+fn method_declared_length(method: &MethodId) -> u32 {
+    for (native_id, owner, member) in NATIVE_METHOD_SURFACE_BINDINGS {
+        if *native_id == method.name {
+            if let Some(length) = kiln_builtin_surface::native_function_length(owner, member) {
+                return length as u32;
+            }
+        }
+    }
+    let mut length = None;
+    let mut index = 0;
+    while index < BUILTIN_SURFACE.len() {
+        let member = BUILTIN_SURFACE[index];
+        if bytes_contain(member.answers.as_bytes(), method.name.as_bytes()) {
+            if let Some(candidate) =
+                kiln_builtin_surface::native_function_length(member.owner, member.name)
+            {
+                if let Some(previous) = length {
+                    if previous != candidate {
+                        return METHOD_LENGTH_UNSPECIFIED;
+                    }
+                } else {
+                    length = Some(candidate);
+                }
+            }
+        }
+        index += 1;
+    }
+    match length {
+        Some(length) => length as u32,
+        None => METHOD_LENGTH_UNSPECIFIED,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NativePrototypeSurface {
     EventEmitter,
@@ -91,6 +268,29 @@ pub(crate) fn render_native_constructor_table() -> String {
     }
     table.push_str("};\n");
     table
+}
+
+fn render_native_method_length_rows() -> String {
+    static ROWS: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(compute_native_method_length_rows);
+    ROWS.clone()
+}
+
+fn compute_native_method_length_rows() -> String {
+    use std::fmt::Write as _;
+    let mut rows = String::new();
+    for method in METHOD_IDS {
+        let length = method_declared_length(method);
+        if length != METHOD_LENGTH_UNSPECIFIED {
+            writeln!(
+                rows,
+                "    case UINT64_C({}): return UINT32_C({});",
+                method.value, length
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+    rows
 }
 
 macro_rules! native_constructor {
@@ -267,10 +467,12 @@ macro_rules! method_metadata_case {
 
 macro_rules! method_ids {
     ($(($name:ident, $value:literal, $first_group:ident $(, $group:ident)* ; $numeric:literal, $textual:literal)),* $(,)?) => {
-        macro_rules! emit_method_define {
-            $(($name) => {
-                concat!("#define ", stringify!($name), " ", stringify!($value), "\n")
-            };)*
+        // One registry owns the numeric IDs and every generated header definition. Keeping a
+        // second hand-written emission list allowed a valid registry row to be missing in C.
+        macro_rules! emit_method_defines {
+            () => {
+                concat!($("#define ", stringify!($name), " ", stringify!($value), "\n"),*)
+            };
         }
 
         macro_rules! method_value {
@@ -567,23 +769,37 @@ const fn validate_method_ids(ids: &[MethodId]) {
     // block took 450..=469. The row goes when it lands -- a reserved ID that has since been
     // declared is simply an ID, and nothing below objects to one.
     const RESERVED_METHOD_IDS: [u16; 8] = [442, 443, 444, 445, 446, 447, 448, 449];
+    // Numbers whose member went away and must never be handed out again: a cached artifact or a
+    // provider built against the old table would read a reused number as the old member. 494 was
+    // `Array.prototype.parallelMap`, now defined once in TypeScript (`kiln-builtins/src/parallel.ts`).
+    const RETIRED_METHOD_IDS: [u16; 1] = [494];
+    // Build a compact presence table once. Scanning the entire method table for every value
+    // makes this const assertion quadratic in the append-only range and crosses rustc's const
+    // evaluation limit as the method inventory grows.
+    let mut present = [0u64; 1024];
+    index = 0;
+    while index < ids.len() {
+        let value = ids[index].value as usize;
+        present[value / 64] |= 1u64 << (value % 64);
+        index += 1;
+    }
     let mut value = APPEND_ONLY_BASE;
     while value <= tail_high {
-        let mut found = false;
-        index = 0;
-        while index < ids.len() {
-            if ids[index].value == value {
-                found = true;
-                break;
-            }
-            index += 1;
-        }
+        let mut found = present[value as usize / 64] & (1u64 << (value as usize % 64)) != 0;
         let mut reserved = 0;
         while !found && reserved < RESERVED_METHOD_IDS.len() {
             if RESERVED_METHOD_IDS[reserved] == value {
                 found = true;
             }
             reserved += 1;
+        }
+        let mut retired = 0;
+        while retired < RETIRED_METHOD_IDS.len() {
+            if RETIRED_METHOD_IDS[retired] == value {
+                assert!(!found, "a retired method ID was handed out again");
+                found = true;
+            }
+            retired += 1;
         }
         assert!(
             found,
@@ -626,6 +842,7 @@ method_ids! {
     (KILN_C99_METHOD_ARRAY_TO_REVERSED, 444, ArrayLookup; 0, 0),
     (KILN_C99_METHOD_ARRAY_TO_SPLICED, 445, ArrayLookup; 0x3, 0),
     (KILN_C99_METHOD_ARRAY_WITH, 446, ArrayLookup; 0x1, 0),
+    (KILN_C99_METHOD_COMMONJS_REQUIRE_RESOLVE, 553, Direct; 0, 0),
     (KILN_C99_METHOD_STRING_CODE_POINT_AT, 240, StringDispatch; 0x1, 0),
     (KILN_C99_METHOD_STRING_SUBSTR, 241, StringDispatch; 0x3, 0),
     (KILN_C99_METHOD_STRING_LOCALE_COMPARE, 242, StringDispatch; 0, 0),
@@ -855,6 +1072,21 @@ method_ids! {
     (KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND, 531, NodeHttp; 0, 0),
     (KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE, 282, NodeHttp; 0, 0),
     (KILN_C99_METHOD_NODE_CLIENT_REQUEST_END, 283, NodeHttp; 0, 0),
+    (KILN_C99_METHOD_NODE_CLIENT_SOCKET_ASSIGN, 563, NodeHttp; 0, 0),
+    (KILN_C99_METHOD_NODE_SOCKET_CLOSE_TICK, 564, NodeNet; 0, 0),
+    (KILN_C99_METHOD_NODE_SOCKET_CORK_KERNEL, 565, NodeNet; 0, 0),
+    (KILN_C99_METHOD_NODE_SOCKET_UNCORK_KERNEL, 566, NodeNet; 0, 0),
+    (KILN_C99_METHOD_NODE_SOCKET_PAUSE_KERNEL, 567, NodeNet; 0, 0),
+    (KILN_C99_METHOD_NODE_SOCKET_RESUME_KERNEL, 568, NodeNet; 0, 0),
+    (KILN_C99_METHOD_NODE_SOCKET_READ_KERNEL, 569, NodeNet; 0, 0),
+    (KILN_C99_METHOD_NODE_SOCKET_READ_END_TICK, 570, NodeNet; 0, 0),
+    // Private HTTP ownership completion invoked by the TS IncomingMessage end bridge.
+    (KILN_C99_METHOD_NODE_HTTP_INCOMING_ENDED, 571, NodeHttp; 0, 0),
+    // Private transport cancellation; public fetch/body semantics stay in TypeScript.
+    (KILN_C99_METHOD_NODE_HTTP_CANCEL_REQUEST, 585, NodeHttp; 0, 0),
+    (KILN_C99_METHOD_PROCESS_EXIT_CODE_GET, 574, Direct; 0, 0),
+    (KILN_C99_METHOD_PROCESS_EXIT_CODE_SET, 575, Direct; 0, 0),
+    (KILN_C99_METHOD_GC_REQUEST, 576, Direct; 0, 0),
     /* Three groups, and no precedence between them: `kiln_c99_invoke_method` routes this
      * code by receiver before it consults any group. See the comment there. */
     (KILN_C99_METHOD_NODE_READABLE_SET_ENCODING, 284, NodeHttp, NodeNet, NodeStream; 0, 0),
@@ -915,6 +1147,7 @@ method_ids! {
     (KILN_C99_METHOD_NODE_ASSERT_OK, 385, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR, 386, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE, 387, Direct; 0, 0),
+    (KILN_C99_METHOD_MODULE_LOADER_RAW, 577, Direct; 0, 0),
     // `require("node:module")`, which node answers with the `Module` class rather than with a
     // namespace. It gets a code of its own rather than borrowing the unmaterialized placeholder
     // above: two values sharing a code are `===` in this runtime, and `require("node:module")`
@@ -931,6 +1164,13 @@ method_ids! {
     // Private bootstrap bridge. Compiled runtime source captures it and removes the global before
     // user code runs; the method itself exposes only ICU4X boundary records, not Intl policy.
     (KILN_C99_METHOD_INTL_SEGMENT_RAW, 501, Direct; 0, 0),
+    (KILN_C99_METHOD_STRING_LOCALE_CASE_RAW, 547, Direct; 0, 0),
+    (KILN_C99_METHOD_INTL_DATETIME_FORMAT_RAW, 548, Direct; 0, 0),
+    (KILN_C99_METHOD_CRYPTO_KEY_IMPORT_RAW, 558, Direct; 0, 0),
+    (KILN_C99_METHOD_CRYPTO_KEY_PUBLIC_RAW, 559, Direct; 0, 0),
+    (KILN_C99_METHOD_CRYPTO_KEY_INFO_RAW, 560, Direct; 0, 0),
+    (KILN_C99_METHOD_CRYPTO_KEY_EXPORT_RAW, 561, Direct; 0, 0),
+    (KILN_C99_METHOD_CRYPTO_KEY_FREE_RAW, 562, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH, 388, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_URL_PARSE, 389, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL, 390, Direct; 0, 0),
@@ -1061,12 +1301,10 @@ method_ids! {
     (KILN_C99_METHOD_NODE_ALS_EXIT, 491, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_ALS_DISABLE, 492, Direct; 0, 0),
     (KILN_C99_METHOD_STRING_FROM_CODE_POINT, 493, Generic; 0, 0),
-    /* `parallelMap` (ADR 0058, application 2). A member of `Array.prototype` on both engines,
-     * so a *read* answers a callable and a feature test takes the same branch as on the
-     * interpreter; called through a read value it is `map` under its own name, generic like
-     * the one borrowed from `Array.prototype`. The pooled walk is a direct-call-site lowering
-     * and never reaches this code. */
-    (KILN_C99_METHOD_ARRAY_PARALLEL_MAP, 494, ArrayLookup; 0, 0),
+    /* 494 was `Array.prototype.parallelMap`, answered here as `map` under its own name. The
+     * parallel family is one TypeScript definition now (`kiln-builtins/src/parallel.ts`), which
+     * the bootstrap installs on `Array.prototype` like the rest of the family; the pooled walk
+     * stays a direct-call-site lowering. The code is retired, not reused. */
     (KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT, 502, NodeEvent; 0, 0),
     (KILN_C99_METHOD_PROCESS_KILL, 503, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE, 504, NodeStream; 0, 0),
@@ -1083,9 +1321,16 @@ method_ids! {
     (KILN_C99_METHOD_URL_SET_RAW, 525, Direct; 0, 0),
     (KILN_C99_METHOD_URL_FAST_RAW, 526, Direct; 0, 0),
     (KILN_C99_METHOD_URL_ADOPT_RAW, 527, Direct; 0, 0),
+    // Shared WebCrypto algorithms are implemented by kiln-webcrypto; this is its private byte
+    // bridge, captured and deleted by the TypeScript facade before user code runs.
+    (KILN_C99_METHOD_WEBCRYPTO_PRIMITIVE_RAW, 582, Direct; 0, 0),
+    (KILN_C99_METHOD_COMPRESSION_PRIMITIVE_RAW, 583, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_CHILD_PROCESS_EXEC_FILE_SYNC, 584, Direct; 0, 0),
     // The transfer primitive (ADR 0065, representation; ADR 0070 primitive C), captured and
     // deleted by `kiln-builtins/src/arraybuffer.ts`.
     (KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW, 532, Direct; 0, 0),
+    // The internal-slot reader behind TypeScript's reflected byteLength accessor.
+    (KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW, 554, Direct; 0, 0),
     // The plain-data fast path of the structured clone (ADR 0065, measured), captured and
     // deleted by `kiln-builtins/src/structured_clone.ts`.
     (KILN_C99_METHOD_CLONE_DATA_RAW, 533, Direct; 0, 0),
@@ -1095,6 +1340,9 @@ method_ids! {
     // The realm's I/O lane, node's poll phase, where the same file queues a port's delivery;
     // the timer case of the generic dispatch, beside `setImmediate`.
     (KILN_C99_METHOD_QUEUE_IO_RAW, 535, Generic; 0, 0),
+    // Whether a timer keeps the loop alive, the flag the runtime's timer queue owns; captured
+    // and deleted by `kiln-builtins/src/timers.ts`, which makes `ref`/`unref` of it.
+    (KILN_C99_METHOD_TIMER_REF_RAW, 573, Generic; 0, 0),
     // Node's unhandled-rejection tracking registers itself here; captured and deleted by
     // `kiln-builtins/src/rejections.ts`.
     (KILN_C99_METHOD_PROMISE_REJECTIONS_RAW, 536, Direct; 0, 0),
@@ -1103,6 +1351,12 @@ method_ids! {
     // copy, and the default-order sort through the provider's `kiln_typed_array_sort`.
     (KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW, 537, Direct; 0, 0),
     (KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW, 538, Direct; 0, 0),
+    // DataView's TypeScript Float16 accessors need an internal-slot check before coercing any
+    // arguments; unlike calling a numeric accessor, this does not inspect detachment or bounds.
+    (KILN_C99_METHOD_DATA_VIEW_STATE_RAW, 572, Direct; 0, 0),
+    (KILN_C99_METHOD_IS_CONSTRUCTOR_RAW, 578, Direct; 0, 0),
+    (KILN_C99_METHOD_IS_OTHER_REALM_ARRAY_CONSTRUCTOR_RAW, 586, Direct; 0, 0),
+    (KILN_C99_METHOD_ARRAY_NEXT_PRESENT_INDEX_RAW, 587, Direct; 0, 0),
     // The runtime's cross-realm ports and workers (realms issue 06), captured and deleted by
     // `kiln-builtins/src/web_events_streams.ts`: every synchronous operation, and the wait.
     (KILN_C99_METHOD_WORKER_OP_RAW, 539, Direct; 0, 0),
@@ -1116,6 +1370,17 @@ method_ids! {
     (KILN_C99_METHOD_SHARE_RAW, 544, Direct; 0, 0),
     (KILN_C99_METHOD_SHARED_IS_RAW, 545, Direct; 0, 0),
     (KILN_C99_METHOD_SHARED_WEAK_RAW, 546, Direct; 0, 0),
+    (KILN_C99_METHOD_NODE_SERVER_IS_LISTENING, 579, NodeNet, NodeServer; 0, 0),
+    /* Existing primitive-wrapper valueOf methods need identities distinct from Object's. */
+    (KILN_C99_METHOD_BOOLEAN_VALUE_OF, 549, Generic; 0, 0),
+    (KILN_C99_METHOD_SYMBOL_VALUE_OF, 550, Generic; 0, 0),
+    (KILN_C99_METHOD_COLLECTION_SIZE_RAW, 551, Direct; 0, 0),
+    (KILN_C99_METHOD_JSON_UNBOX_RAW, 552, Direct; 0, 0),
+    (KILN_C99_METHOD_JSON_RAW_CREATE, 580, Generic; 0, 0),
+    (KILN_C99_METHOD_JSON_IS_RAW, 581, Generic; 0, 0),
+    (KILN_C99_METHOD_REGEXP_LEGACY_CAPTURE_RAW, 555, Direct; 0, 0),
+    (KILN_C99_METHOD_FUNCTION_KIND_PROTOTYPE, 556, Direct; 0, 0),
+    (KILN_C99_METHOD_FUNCTION_KIND_CONSTRUCTOR, 557, Direct; 0, 0),
     (KILN_C99_METHOD_PROCESS_EXIT, 513, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC, 514, Direct; 0, 0),
     (KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC, 515, Direct; 0, 0),
@@ -1259,6 +1524,15 @@ macro_rules! kiln_extension_c_flag {
 }
 
 macro_rules! builtin_member_row {
+    ($builtin:ident, $name:literal, accessor()) => {
+        concat!(
+            "    {",
+            stringify!($builtin),
+            ", KILN_C99_MEMBER_ACCESSOR, 0, 0.0, \"",
+            $name,
+            "\", NULL},\n"
+        )
+    };
     ($builtin:ident, $name:literal, code($code:ident)) => {
         concat!(
             "    {",
@@ -1567,7 +1841,7 @@ builtin_surface! {
     (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "toString",
      code(KILN_C99_METHOD_PRIMITIVE_TO_STRING)),
     (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "valueOf",
-     code(KILN_C99_METHOD_OBJECT_VALUE_OF)),
+     code(KILN_C99_METHOD_SYMBOL_VALUE_OF)),
     (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "constructor",
      ctor(KILN_C99_BUILTIN_SYMBOL)),
     (KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, "Symbol.prototype", "@@toStringTag",
@@ -1576,8 +1850,6 @@ builtin_surface! {
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "length", num("0.0")),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "constructor", ctor(KILN_C99_BUILTIN_ARRAY)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "map", code(KILN_C99_METHOD_ARRAY_GENERIC_MAP)),
-    (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "parallelMap", code(KILN_C99_METHOD_ARRAY_PARALLEL_MAP),
-     kiln_extension),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "forEach", code(KILN_C99_METHOD_FOR_EACH)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "filter", code(KILN_C99_METHOD_ARRAY_GENERIC_FILTER)),
     (KILN_C99_BUILTIN_ARRAY_PROTOTYPE, "Array.prototype", "reduce", code(KILN_C99_METHOD_REDUCE)),
@@ -1628,7 +1900,7 @@ builtin_surface! {
 
     (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "constructor", ctor(KILN_C99_BUILTIN_BOOLEAN)),
     (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "toString", code(KILN_C99_METHOD_PRIMITIVE_TO_STRING)),
-    (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "valueOf", code(KILN_C99_METHOD_OBJECT_VALUE_OF)),
+    (KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, "Boolean.prototype", "valueOf", code(KILN_C99_METHOD_BOOLEAN_VALUE_OF)),
 
     (KILN_C99_BUILTIN_BIGINT_PROTOTYPE, "BigInt.prototype", "constructor", ctor(KILN_C99_BUILTIN_BIGINT)),
     (KILN_C99_BUILTIN_BIGINT_PROTOTYPE, "BigInt.prototype", "toString", code(KILN_C99_METHOD_NUMBER_TO_STRING)),
@@ -1665,6 +1937,7 @@ builtin_surface! {
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "has", code(KILN_C99_METHOD_COLLECTION_HAS)),
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "keys", code(KILN_C99_METHOD_COLLECTION_KEYS)),
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "set", code(KILN_C99_METHOD_COLLECTION_SET)),
+    (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "size", accessor()),
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "values", code(KILN_C99_METHOD_COLLECTION_VALUES)),
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "@@iterator", code(KILN_C99_METHOD_COLLECTION_SELF)),
     (KILN_C99_BUILTIN_MAP_PROTOTYPE, "Map.prototype", "@@toStringTag", text("Map")),
@@ -1677,6 +1950,7 @@ builtin_surface! {
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "forEach", code(KILN_C99_METHOD_COLLECTION_FOR_EACH)),
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "has", code(KILN_C99_METHOD_COLLECTION_HAS)),
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "keys", code(KILN_C99_METHOD_COLLECTION_KEYS)),
+    (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "size", accessor()),
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "values", code(KILN_C99_METHOD_COLLECTION_VALUES)),
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "@@iterator", code(KILN_C99_METHOD_COLLECTION_SELF)),
     (KILN_C99_BUILTIN_SET_PROTOTYPE, "Set.prototype", "@@toStringTag", text("Set")),
@@ -1752,14 +2026,10 @@ builtin_backlog! {
      "legacy Annex B restricted accessor property throwing TypeError not modeled in native C backend"),
     ("Function.prototype", "arguments",
      "legacy Annex B restricted accessor property throwing TypeError not modeled in native C backend"),
-    ("Map.prototype", "size",
-     "Map.prototype.size accessor is evaluated on instances in C99 runtime rather than prototype"),
     ("Map.prototype", "getOrInsert",
      "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Map.prototype", "getOrInsertComputed",
      "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
-    ("Set.prototype", "size",
-     "Set.prototype.size accessor is evaluated on instances in C99 runtime rather than prototype"),
     ("Set.prototype", "union",
      "answered by the runtime bootstrap in TypeScript, from the prototype's store; no row"),
     ("Set.prototype", "intersection",
@@ -1789,9 +2059,9 @@ builtin_backlog! {
     ("Promise", "try",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("JSON", "rawJSON",
-     "not implemented; the raw-JSON marker has no representation in this value kernel"),
+     "answered by the shared JSON bootstrap through the private raw-JSON carrier primitive"),
     ("JSON", "isRawJSON",
-     "not implemented; the raw-JSON marker has no representation in this value kernel"),
+     "answered by the shared JSON bootstrap through the private raw-JSON brand primitive"),
     ("Reflect", "setPrototypeOf",
      "answered by the runtime bootstrap in TypeScript, from the namespace's store; no row"),
     ("Reflect", "isExtensible",
@@ -1801,11 +2071,11 @@ builtin_backlog! {
     ("RegExp", "escape",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Error", "isError",
-     "not implemented"),
+     "answered by shared errors.ts through the Error brand slot; no row"),
     ("BigInt", "asIntN",
-     "not implemented; needs a width-truncating call the BigInt provider does not export"),
+     "answered by the shared numeric_bigint.ts bootstrap using the BigInt value kernel; no row"),
     ("BigInt", "asUintN",
-     "not implemented; needs a width-truncating call the BigInt provider does not export"),
+     "answered by the shared numeric_bigint.ts bootstrap using the BigInt value kernel; no row"),
     ("Map", "groupBy",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Iterator", "concat",
@@ -1817,9 +2087,9 @@ builtin_backlog! {
     ("Buffer", "constants",
      "not implemented; the constants namespace object has no representation here"),
     ("Math", "f16round",
-     "not implemented; needs a half-precision round the number provider does not export"),
+     "answered by the shared numeric_math.ts bootstrap using Float16Array conversion; no row"),
     ("%TypedArray%", "@@species",
-     "not implemented; the intrinsic is not a value this backend hands back"),
+     "answered by the shared typedarray.ts bootstrap on the abstract constructor, not from a C row"),
     ("Promise", "allKeyed",
      "answered by the runtime bootstrap in TypeScript, from the constructor's store; no row"),
     ("Promise", "allSettledKeyed",
@@ -1837,9 +2107,9 @@ builtin_backlog! {
     ("Uint8Array", "BYTES_PER_ELEMENT",
      "answered from the receiver's element kind, not from a row"),
     ("Uint8Array", "fromBase64",
-     "not implemented"),
+     "answered by the shared typedarray.ts bootstrap, not from a row"),
     ("Uint8Array", "fromHex",
-     "not implemented"),
+     "answered by the shared typedarray.ts bootstrap, not from a row"),
     ("Atomics", "add",
      "refused by name: shared memory has no representation here"),
     ("Atomics", "and",
@@ -2061,6 +2331,16 @@ pub(crate) const REFUSAL_INTERNAL_STATUS: &[InternalRefusal] = &[
         sites: 1,
         converted_by: "JSON.parse's SyntaxError, or a data module's materialization",
     },
+    InternalRefusal {
+        function: "kiln_c99_json_value",
+        sites: 1,
+        converted_by: "JSON.stringify, which propagates the serializer's internal status",
+    },
+    InternalRefusal {
+        function: "kiln_c99_json_raw_create",
+        sites: 1,
+        converted_by: "the JSON.rawJSON TypeScript facade, which only passes validated strings to carrier construction",
+    },
 ];
 
 const fn internal_refusal_sites(rows: &[InternalRefusal]) -> usize {
@@ -2151,7 +2431,7 @@ pub struct AbsentAnswer {
 /// `typeof x.member === "function"` walks past. A bundled `postcss` died on `path.dirname` for
 /// weeks that way, and a sweep on 2026-09-02 found thirty more: `Buffer.alloc` off
 /// `require("node:buffer")`, `ArrayBuffer.prototype`, `Symbol.prototype`,
-/// `String.prototype.values`, `Uint8Array.prototype.toBase64`, `Array.length`. Every one was a
+/// `String.prototype.values`, `Array.length`. Every one was a
 /// place where the *membership predicate* behind an `undefined` answer was short, and no build and
 /// no test could see it, because the wrong branch and the right branch look identical from inside.
 ///
@@ -2160,19 +2440,34 @@ pub struct AbsentAnswer {
 /// checks the half a `const` cannot -- that the sites are in the functions claimed here.
 pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     AbsentAnswer {
+        function: "kiln_c99_proxy_private_store",
+        sites: 1,
+        proved_by: "the Proxy has no lazily allocated private-elements store, so it owns no private slot",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_array_custom_parent_read",
+        sites: 1,
+        proved_by: "Array.prototype has an explicit null parent, so no inherited property exists",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_prototype_store_read_with_receiver",
+        sites: 1,
+        proved_by: "an accessor with no getter returns undefined by the language rule",
+    },
+    AbsentAnswer {
         function: "kiln_c99_function_species",
         sites: 2,
         proved_by: "the checked prototype chain ended at null, or an own accessor has no getter",
     },
     AbsentAnswer {
         function: "kiln_c99_callable_store_lookup",
-        sites: 4,
+        sites: 5,
         proved_by: "a callable with no property store has no own member at all, so there is no \
                     list to be short of",
     },
     AbsentAnswer {
         function: "kiln_c99_get_with_receiver",
-        sites: 1,
+        sites: 2,
         proved_by: "an accessor with no getter: the language defines that read as undefined",
     },
     AbsentAnswer {
@@ -2189,7 +2484,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 28,
+        sites: 38,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     a shared facade's complete sealed field list and its reading realm's \
                     Object/Array prototype tables, \
@@ -2198,13 +2493,21 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     beneath it, which answers for a collection *prototype* the same way \
                     (a name belonging to a sibling kind -- `Map.prototype.add` -- is absent \
                     rather than unbuilt), kiln_c99_is_array_buffer_member, \
-                    kiln_c99_is_typed_array_member, RegExp.prototype without name, and BUILTIN_SURFACE plus \
-                    BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. A bound function's \
-                    `prototype` is decided by BoundFunctionCreate, which defines none, so it is \
-                    absent when its [[Prototype]] is null or a `Function.prototype` whose store \
-                    lacks it. These are the lists \
+                    kiln_c99_is_typed_array_member, RegExp instance slots followed by the complete \
+                    RegExp.prototype and Object.prototype stores/tables, and native callable own \
+                    slots, the callable stores and prototype tables, the current typed-array constructor \
+                    prototype chain after an explicit prototype replacement, Set constructor string statics (name, \
+                    length and prototype), BigInt constructor string statics (asIntN and asUintN are \
+                    handled above), then BUILTIN_SURFACE plus \
+                    BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. A synchronous generator has no `@@asyncIterator` member (only async \
+                    generators define it); a bound callable with no matching own property \
+                    and an explicit null [[Prototype]] has no inherited member. These are the lists \
                     the two engines can disagree about, and \
-                    scripts/native-surface-inventory.py --gate is what measures them",
+                    scripts/native-surface-inventory.py --gate is what measures them. An explicit \
+                    null [[Prototype]] ends lookup, so every inherited property is absent; and a \
+                    generator instance explicitly linked to null has no inherited iterator members; \
+                    a timer handle has no member beyond its own store and the Timeout/Immediate \
+                    prototype chain, which kiln_c99_store_get_key has just walked in full",
     },
     AbsentAnswer {
         function: "kiln_c99_get_key",
@@ -2490,6 +2793,7 @@ macro_rules! runtime_part_manifest {
             "runtime/generators.c",
             "runtime/methods.c",
             "runtime/web.c",
+            "runtime/webcrypto.c",
             "runtime/ryu_tables.c",
             "runtime/numbers.c",
             "runtime/builtins.c",
@@ -2586,6 +2890,12 @@ static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code) {
         return (kiln_c99_method_metadata){UINT32_C(0), UINT32_C(0), UINT32_C(0)};
     }
 }
+static uint32_t kiln_c99_method_declared_length(uint64_t code) {
+    switch (code) {
+/* KILN_NATIVE_METHOD_LENGTH_ROWS */
+    default: return UINT32_MAX;
+    }
+}
 "#
         )
     };
@@ -2599,6 +2909,7 @@ macro_rules! method_metadata_decl {
     uint32_t textual_arguments;
 } kiln_c99_method_metadata;
 static kiln_c99_method_metadata kiln_c99_method_metadata_for(uint64_t code);
+static uint32_t kiln_c99_method_declared_length(uint64_t code);
 "#
     };
 }
@@ -2639,7 +2950,22 @@ const _: () = assert_refusals_name_themselves(
 /// One added 2026-09-27 by `kiln_c99_realm_tag_method_pristine` (stores.c, parallel issue 30),
 /// which measures `kiln_c99_method_name`'s answer: a C string literal out of the method table.
 /// One added for the fixed Atomics name table's load-time registration (surface.c, realms 08).
-pub const C_STRING_LENGTH_SITES: usize = 75;
+/// Native callable descriptors measure names from the literal method-name registry.
+/// Stack snapshots measure the emitted source name, a NUL-terminated C literal.
+/// Buffer encoding comparisons measure only the fixed NUL-terminated encoding-name literal;
+/// the user-supplied encoding retains its headed string's explicit length.
+/// Computed builtin own-key tables measure their fixed literal name/symbol rows (four sites).
+/// Dynamic function captures now use the parser's stored identifier lengths; the two former
+/// identifier-buffer scans were removed with lexical capture serialization.
+/// Site 84 measures a constructor own-key name from a fixed NUL-terminated literal table.
+/// The shared callable descriptor authority removed one duplicate fixed method-name scan.
+/// Refused computed builtin own-key queries name the fixed C-literal builtin registry owner.
+// The added parser-error site measures a fixed C diagnostic, never a JavaScript key.
+// The runtime module keyword matcher measures a fixed NUL-terminated lexer spelling.
+// The two collection-cache scans moved from boxed.c into the shared prelude_types.h
+// authority, outside this domain-C manifest. Both still measure the fixed native method
+// registry names, never JavaScript property keys with explicit stored unit lengths.
+pub const C_STRING_LENGTH_SITES: usize = 83;
 
 /// How far the `strlen(` scan may skip after reading the last byte of its seven-byte window:
 /// the Horspool shift, as `refusal_scan_shift` is for the refusal scan, so the const evaluator
@@ -2747,6 +3073,7 @@ macro_rules! header_prefix {
  * This is an operation number, not a field in kiln_host, so the two-word host ABI remains
  * stable across the standalone and generated runtimes. */
 #define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
+#define KILN_C99_HOST_MODULE_LOADER UINT16_C(0x7FF1)
 
 #if defined(__GNUC__) || defined(__clang__)
 #define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
@@ -2799,6 +3126,9 @@ macro_rules! header_prefix {
 #endif
 #ifndef KILN_RETAIN_GROUP_NODE_PATH
 #define KILN_RETAIN_GROUP_NODE_PATH 1
+#endif
+#ifndef KILN_RETAIN_GROUP_NODE_CRYPTO
+#define KILN_RETAIN_GROUP_NODE_CRYPTO 1
 #endif
 #ifndef KILN_RETAIN_GROUP_URL
 #define KILN_RETAIN_GROUP_URL 1
@@ -3175,7 +3505,13 @@ enum kiln_value_tag {
     KILN_VALUE_DATA_VIEW = 27,
     KILN_VALUE_RETURN_SIGNAL = 28,
     /* A realm-local facade over an ADR 0073 sealed graph; bits holds a GC payload. */
-    KILN_VALUE_SHARED = 29
+    KILN_VALUE_SHARED = 29,
+    /* A `Timeout` or `Immediate`: the timer's own record. bits holds a kiln_timer*, the block the
+     * realm's timer queue holds as its work, so the handle a program keeps and the entry the
+     * queue runs are one allocation. An ordinary object to the language, whose properties and
+     * prototype (`Timeout.prototype`, published by `kiln-builtins/src/timers.ts`) live in a store
+     * made on first use, so a timer nothing touches costs the record alone. */
+    KILN_VALUE_TIMER = 30
 };
 
 #define KILN_C99_BUILTIN_PROMISE 15
@@ -3284,81 +3620,27 @@ enum kiln_value_tag {
  * none of these codes reaches a cache key, but renumbering the block would still be a diff nobody
  * could review. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ARRAY_AT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_INDEX),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_SOME),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_EVERY),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_SORT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FLAT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_ENTRIES),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_KEYS),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_REVERSE),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_SHIFT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_UNSHIFT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FILL),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_LAST_INDEX_OF),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_SPLICE),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_COPY_WITHIN),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FLAT_MAP),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_LAST),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_REDUCE_RIGHT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_SORTED),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_REVERSED),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_SPLICED),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_WITH),
+    emit_method_defines!(),
     r#"
 /* String methods, part two, numbered above the array block for the same reason the array block is
  * numbered above the namespace one: the guard that routes a code to a receiver kind is a range,
  * and a new range is cheaper than renumbering an old one. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_STRING_CODE_POINT_AT),
-    emit_method_define!(KILN_C99_METHOD_STRING_SUBSTR),
-    emit_method_define!(KILN_C99_METHOD_STRING_LOCALE_COMPARE),
-    emit_method_define!(KILN_C99_METHOD_STRING_NORMALIZE),
-    emit_method_define!(KILN_C99_METHOD_STRING_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_STRING_VALUE_OF),
     r#"/* These three only ever take a pattern, so they are intercepted before the string block: they
  * need to call back into the program, and the string block has no interpreter to call with. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_STRING_MATCH),
-    emit_method_define!(KILN_C99_METHOD_STRING_MATCH_ALL),
-    emit_method_define!(KILN_C99_METHOD_STRING_SEARCH),
     r#"
 /* `Error.prototype.toString`, which every error inherits and no other object does. Deliberately
  * past the end of every range `kiln_c99_lookup_method` searches: it is not reached by name from a
  * table but handed out by the object read that recognises an error, because an ordinary object
  * with a `toString` of its own must not find this one. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ERROR_TO_STRING),
     r#"
 /* `DataView.prototype`, whose twenty accessors are one contiguous block so that a receiver check
  * and a name lookup are both a range test. The ten `get`s come first and the ten `set`s second,
  * with the BigInt pair at the end of each half, so that "is this a write" is one comparison
  * against the first `set` rather than a second table. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_INT8),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_UINT8),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_INT16),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_UINT16),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_INT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_UINT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_FLOAT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_FLOAT64),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_BIG_INT64),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_BIG_UINT64),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_INT8),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_UINT8),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_INT16),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_UINT16),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_INT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_UINT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_FLOAT32),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_FLOAT64),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_BIG_INT64),
-    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64),
     r#"
 /* The block's endpoints are `..._GET_INT8` and `..._SET_BIG_UINT64`, spelled out at each of the
  * five range tests below rather than aliased to a shorter pair of names.
@@ -3455,6 +3737,11 @@ enum kiln_value_tag {
  * backend builds links to. A method table rather than a constructor, so it reports `typeof
  * "object"` through `kiln_c99_is_namespace` exactly as `Array.prototype` does. */
 #define KILN_C99_BUILTIN_ITERATOR_PROTOTYPE 95
+/* The abstract `%TypedArray%` constructor. Kept distinct from the shared
+ * `%TypedArray%.prototype` method table above: concrete typed-array constructors inherit from
+ * this function, while concrete typed-array prototype objects inherit from that table. */
+#define KILN_C99_BUILTIN_TYPED_ARRAY 104
+#define KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE 105
 
 #define KILN_C99_BUILTIN_DATE 7
 
@@ -3474,326 +3761,98 @@ enum kiln_value_tag {
 /* Array methods.  Stable within a generated unit only -- unlike the instruction and constant
  * tags, none of these reaches a cache key. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_PUSH),
-    emit_method_define!(KILN_C99_METHOD_POP),
-    emit_method_define!(KILN_C99_METHOD_JOIN),
-    emit_method_define!(KILN_C99_METHOD_INDEX_OF),
-    emit_method_define!(KILN_C99_METHOD_INCLUDES),
-    emit_method_define!(KILN_C99_METHOD_SLICE),
-    emit_method_define!(KILN_C99_METHOD_CONCAT),
-    emit_method_define!(KILN_C99_METHOD_MAP),
-    emit_method_define!(KILN_C99_METHOD_FILTER),
-    emit_method_define!(KILN_C99_METHOD_FOR_EACH),
-    emit_method_define!(KILN_C99_METHOD_REDUCE),
     r#"
 /* String methods.  `slice` and `indexOf` are shared with the array table by name and told apart
  * by the receiver, exactly as the language does. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_STRING_SLICE),
-    emit_method_define!(KILN_C99_METHOD_SUBSTRING),
-    emit_method_define!(KILN_C99_METHOD_STRING_INDEX_OF),
-    emit_method_define!(KILN_C99_METHOD_LAST_INDEX_OF),
-    emit_method_define!(KILN_C99_METHOD_STRING_INCLUDES),
-    emit_method_define!(KILN_C99_METHOD_STARTS_WITH),
-    emit_method_define!(KILN_C99_METHOD_ENDS_WITH),
-    emit_method_define!(KILN_C99_METHOD_CHAR_AT),
-    emit_method_define!(KILN_C99_METHOD_CHAR_CODE_AT),
-    emit_method_define!(KILN_C99_METHOD_STRING_AT),
-    emit_method_define!(KILN_C99_METHOD_TRIM),
-    emit_method_define!(KILN_C99_METHOD_TRIM_START),
-    emit_method_define!(KILN_C99_METHOD_TRIM_END),
-    emit_method_define!(KILN_C99_METHOD_SPLIT),
-    emit_method_define!(KILN_C99_METHOD_REPEAT),
-    emit_method_define!(KILN_C99_METHOD_PAD_START),
-    emit_method_define!(KILN_C99_METHOD_PAD_END),
-    emit_method_define!(KILN_C99_METHOD_TO_UPPER_CASE),
-    emit_method_define!(KILN_C99_METHOD_TO_LOWER_CASE),
-    emit_method_define!(KILN_C99_METHOD_REPLACE),
-    emit_method_define!(KILN_C99_METHOD_REPLACE_ALL),
-    emit_method_define!(KILN_C99_METHOD_STRING_CONCAT),
     r#"
 /* Namespace methods.  Unlike the array and string tables these take no receiver: `Math.floor` is
  * reached through `Math`, but `Math` contributes nothing to the answer. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_MATH_FLOOR),
-    emit_method_define!(KILN_C99_METHOD_MATH_CEIL),
-    emit_method_define!(KILN_C99_METHOD_MATH_ROUND),
-    emit_method_define!(KILN_C99_METHOD_MATH_TRUNC),
-    emit_method_define!(KILN_C99_METHOD_MATH_ABS),
-    emit_method_define!(KILN_C99_METHOD_MATH_SIGN),
-    emit_method_define!(KILN_C99_METHOD_MATH_SQRT),
-    emit_method_define!(KILN_C99_METHOD_MATH_CBRT),
-    emit_method_define!(KILN_C99_METHOD_MATH_POW),
-    emit_method_define!(KILN_C99_METHOD_MATH_MIN),
-    emit_method_define!(KILN_C99_METHOD_MATH_MAX),
-    emit_method_define!(KILN_C99_METHOD_MATH_LOG),
-    emit_method_define!(KILN_C99_METHOD_MATH_LOG2),
-    emit_method_define!(KILN_C99_METHOD_MATH_LOG10),
-    emit_method_define!(KILN_C99_METHOD_MATH_EXP),
-    emit_method_define!(KILN_C99_METHOD_MATH_HYPOT),
-    emit_method_define!(KILN_C99_METHOD_MATH_ATAN2),
-    emit_method_define!(KILN_C99_METHOD_MATH_SIN),
-    emit_method_define!(KILN_C99_METHOD_MATH_COS),
-    emit_method_define!(KILN_C99_METHOD_MATH_TAN),
-    emit_method_define!(KILN_C99_METHOD_MATH_ASIN),
-    emit_method_define!(KILN_C99_METHOD_MATH_ACOS),
-    emit_method_define!(KILN_C99_METHOD_MATH_ATAN),
-    emit_method_define!(KILN_C99_METHOD_IS_INTEGER),
-    emit_method_define!(KILN_C99_METHOD_IS_SAFE_INTEGER),
-    emit_method_define!(KILN_C99_METHOD_IS_NAN),
-    emit_method_define!(KILN_C99_METHOD_IS_FINITE),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_KEYS),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_VALUES),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_ENTRIES),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_ASSIGN),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_PREVENT_EXTENSIONS),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_IS_EXTENSIBLE),
-    emit_method_define!(KILN_C99_METHOD_HAS_OWN),
-    emit_method_define!(KILN_C99_METHOD_IS_ARRAY),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_OF),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_CREATE),
-    emit_method_define!(KILN_C99_METHOD_JSON_STRINGIFY),
-    emit_method_define!(KILN_C99_METHOD_JSON_PARSE),
-    emit_method_define!(KILN_C99_METHOD_GENERATOR_NEXT),
-    emit_method_define!(KILN_C99_METHOD_GENERATOR_RETURN),
-    emit_method_define!(KILN_C99_METHOD_GENERATOR_SELF),
     r#"
 /* Date readers. Every one of these is UTC, because the realm has one zone and it is UTC
  * (ADR 0015) -- so the local reader and the UTC reader are the same function rather than two
  * that happen to agree. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_GET_TIME),
-    emit_method_define!(KILN_C99_METHOD_DATE_NOW),
-    emit_method_define!(KILN_C99_METHOD_DATE_UTC),
-    emit_method_define!(KILN_C99_METHOD_DATE_PARSE),
     r#"
 /* The end of every chain is `Object.prototype`, and these are what it carries. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_HAS_OWN_PROPERTY),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_VALUE_OF),
     r#"
 /* Map and Set. `size` is a property rather than a method, so it is answered by the read. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_GET),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_SET),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_ADD),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_HAS),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_DELETE),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_CLEAR),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_FOR_EACH),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_KEYS),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_VALUES),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_ENTRIES),
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_SELF),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_NEXT),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_SELF),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_VALUES),
-    emit_method_define!(KILN_C99_METHOD_THROW_TYPE_ERROR),
     r#"
 /* Promise, and the two halves of driving an async function. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_THEN),
-    emit_method_define!(KILN_C99_METHOD_CATCH),
-    emit_method_define!(KILN_C99_METHOD_FINALLY),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_RESOLVE),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_REJECT),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_ALL),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_RACE),
-    emit_method_define!(KILN_C99_METHOD_ASYNC_RESUME),
-    emit_method_define!(KILN_C99_METHOD_ASYNC_THROW),
-    emit_method_define!(KILN_C99_METHOD_ALL_STEP),
     r#"
 /* The global functions. They are namespace methods with no namespace: nothing is reached through
  * before them, so `LoadBuiltin` pushes the method value directly. Two of them share a name with a
  * `Number` method and not its behaviour -- `isNaN('x')` coerces where `Number.isNaN('x')` does
  * not -- so they are separate codes rather than the same one reached two ways. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_PARSE_INT),
-    emit_method_define!(KILN_C99_METHOD_PARSE_FLOAT),
-    emit_method_define!(KILN_C99_METHOD_GLOBAL_IS_NAN),
-    emit_method_define!(KILN_C99_METHOD_GLOBAL_IS_FINITE),
     r#"
 /* Number methods. Read off the value rather than through a `Number.prototype` object, which is
  * what the interpreter does and for the same reason: there is no such object yet. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_FIXED),
-    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL),
-    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_PRECISION),
-    emit_method_define!(KILN_C99_METHOD_NUMBER_VALUE_OF),
     r#"
 /* The text-escaping globals. `escape`/`unescape` are Annex B and work in code units; the four URI
  * functions work in UTF-8 bytes and differ only in which characters they leave alone. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ESCAPE),
-    emit_method_define!(KILN_C99_METHOD_UNESCAPE),
-    emit_method_define!(KILN_C99_METHOD_ENCODE_URI),
-    emit_method_define!(KILN_C99_METHOD_ENCODE_URI_COMPONENT),
-    emit_method_define!(KILN_C99_METHOD_DECODE_URI),
-    emit_method_define!(KILN_C99_METHOD_DECODE_URI_COMPONENT),
     r#"
 /* `queueMicrotask(fn)`: the queue promises already drain, reached directly. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_QUEUE_MICROTASK),
     r#"
 /* The timer functions. `clearTimeout` and `clearInterval` do the same thing and are two codes
  * because they are two names: a program can print either one. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_SET_TIMEOUT),
-    emit_method_define!(KILN_C99_METHOD_SET_INTERVAL),
-    emit_method_define!(KILN_C99_METHOD_CLEAR_TIMEOUT),
-    emit_method_define!(KILN_C99_METHOD_CLEAR_INTERVAL),
     r#"
 /* The two combinators that do not fail on the first rejection. Named outside the contiguous
  * `Promise` range because that range is how a namespace's methods are found, and it was already
  * closed. `@@rejectStep` is the rejection-side twin of `@@allStep`: `all` and `race` settle their
  * promise on any rejection and need no handler of their own, and these two do. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_PROMISE_ALL_SETTLED),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_ANY),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_WITH_RESOLVERS),
-    emit_method_define!(KILN_C99_METHOD_NODE_TTY_ISATTY),
-    emit_method_define!(KILN_C99_METHOD_TYPED_TO_STRING_TAG),
-    emit_method_define!(KILN_C99_METHOD_REJECT_STEP),
     r#"
 /* The two halves of `finally`, bound to the handler. They run it and then restore the outcome
  * they were passing through, which is the whole difference from `then(f, f)`. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_FINALLY_PASS),
-    emit_method_define!(KILN_C99_METHOD_FINALLY_RAISE),
     r#"/* ...and the two that put the outcome back once the handler's own result has settled. Bound to
  * the outcome, so the pair needs no state object either. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_FINALLY_RESTORE),
-    emit_method_define!(KILN_C99_METHOD_FINALLY_RERAISE),
     r#"
 /* Resolving a promise *with* a promise. The attach is a job of its own, which is a turn a program
  * can see -- so it is a step rather than something `settle` does on the spot. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ADOPT_STEP),
     r#"
 /* `Object.freeze` and `Object.isFrozen`, outside the contiguous `Object` range because it was
  * already closed. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_OBJECT_FREEZE),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_IS_FROZEN),
     r#"
 /* What every callable answers to, whatever kind of callable it is:
  * `Object.prototype.hasOwnProperty.call(x, k)` is how a transpiled module asks whether a key is
  * own, and `Array.prototype.slice.call(arguments)` is how it makes an array. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_FUNCTION_CALL),
-    emit_method_define!(KILN_C99_METHOD_FUNCTION_APPLY),
-    emit_method_define!(KILN_C99_METHOD_FUNCTION_BIND),
-    emit_method_define!(KILN_C99_METHOD_FUNCTION_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW),
     r#"
 /* The reflective statics, and the one instance method that walks a chain. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_FROM_ENTRIES),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_FROM),
-    emit_method_define!(KILN_C99_METHOD_IS_PROTOTYPE_OF),
-    emit_method_define!(KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE),
     r#"
 /* `String.raw`, the one built-in written to be used as a template tag. Numbered with the
  * receiver-less statics because that is what it is: the template object arrives as an argument,
  * not as `this`. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_STRING_RAW),
-    emit_method_define!(KILN_C99_METHOD_STRING_FROM_CHAR_CODE),
     r#"
 /* The descriptor half of the reflective statics: the operations that talk about a property
  * rather than through it. Numbered in the receiver-less range, because every one of them takes
  * its subject as an argument. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR),
-    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS),
     r#"
 /* The global symbol registry. `Symbol.for` is deliberately separate from `Symbol()` because
  * equal registry keys must return one identity across every module in the realm. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_SYMBOL_FOR),
-    emit_method_define!(KILN_C99_METHOD_SYMBOL_KEY_FOR),
-    emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_FILE),
-    emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY),
-    emit_method_define!(KILN_C99_METHOD_ABORT_CONTROLLER_ABORT),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_ABORT),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_LISTEN),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_UNLISTEN),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_THROW),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_TIMEOUT),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_ANY),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_SETTLE),
-    emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW),
-    emit_method_define!(KILN_C99_METHOD_TEXT_ENCODER_ENCODE),
-    emit_method_define!(KILN_C99_METHOD_TEXT_DECODER_DECODE),
-    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_LOCAL_STORAGE),
-    emit_method_define!(KILN_C99_METHOD_NODE_ALS_GET_STORE),
-    emit_method_define!(KILN_C99_METHOD_NODE_ALS_RUN),
-    emit_method_define!(KILN_C99_METHOD_NODE_ALS_ENTER_WITH),
-    emit_method_define!(KILN_C99_METHOD_NODE_ALS_EXIT),
-    emit_method_define!(KILN_C99_METHOD_NODE_ALS_DISABLE),
-    emit_method_define!(KILN_C99_METHOD_STRING_FROM_CODE_POINT),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_PARALLEL_MAP),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_KILL),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_SET_RAW_MODE),
-    emit_method_define!(KILN_C99_METHOD_NODE_OS_HOMEDIR),
-    emit_method_define!(KILN_C99_METHOD_NODE_OS_TMPDIR),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_MKDIR),
-    emit_method_define!(KILN_C99_METHOD_UINT8_TO_HEX_RAW),
-    emit_method_define!(KILN_C99_METHOD_UINT8_TO_BASE64_RAW),
-    emit_method_define!(KILN_C99_METHOD_URL_PARSE_RAW),
-    emit_method_define!(KILN_C99_METHOD_URL_SET_RAW),
-    emit_method_define!(KILN_C99_METHOD_URL_FAST_RAW),
-    emit_method_define!(KILN_C99_METHOD_URL_ADOPT_RAW),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW),
-    emit_method_define!(KILN_C99_METHOD_CLONE_DATA_RAW),
-    emit_method_define!(KILN_C99_METHOD_JOBS_PENDING_RAW),
-    emit_method_define!(KILN_C99_METHOD_QUEUE_IO_RAW),
-    emit_method_define!(KILN_C99_METHOD_PROMISE_REJECTIONS_RAW),
-    emit_method_define!(KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW),
-    emit_method_define!(KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW),
-    emit_method_define!(KILN_C99_METHOD_WORKER_OP_RAW),
-    emit_method_define!(KILN_C99_METHOD_PORT_WAIT_RAW),
-    emit_method_define!(KILN_C99_METHOD_SHARED_BUFFER_RAW),
-    emit_method_define!(KILN_C99_METHOD_ATOMICS_RAW),
-    emit_method_define!(KILN_C99_METHOD_FS_DESCRIPTOR_RAW),
-    emit_method_define!(KILN_C99_METHOD_SHARE_RAW),
-    emit_method_define!(KILN_C99_METHOD_SHARED_IS_RAW),
-    emit_method_define!(KILN_C99_METHOD_SHARED_WEAK_RAW),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_EXIT),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_MKDIR_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_STAT_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_LSTAT_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_READDIR_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_REALPATH_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_UNLINK_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_RMDIR_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_STAT_IS_SYMBOLIC_LINK),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
-    emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"
 /* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_OBJECT_IS),
     r#"
-/* `Error.captureStackTrace`. Present so `typeof` reports "function", which is what libraries
- * feature-detect on; calling it evaluates to undefined rather than inventing a stack this engine
- * does not record. The interpreter makes exactly that trade, and the two have to make it
- * together. */
+/* Private frame-snapshot primitive captured by the TypeScript Error.captureStackTrace facade. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE),
     r#"
 /* `Reflect`: the operations a proxy handler forwards with, as ordinary functions.
  *
@@ -3803,190 +3862,38 @@ enum kiln_value_tag {
  * forms answer with the value; and none of them coerces a primitive target -- `Reflect.get(1, k)`
  * is a TypeError where `(1)[k]` is a read off the string prototype. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_REFLECT_OWN_KEYS),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_GET),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_SET),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_HAS),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_DELETE_PROPERTY),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_APPLY),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_CONSTRUCT),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_DEFINE_PROPERTY),
-    emit_method_define!(KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF),
-    emit_method_define!(KILN_C99_METHOD_GENERATOR_THROW),
     r#"
 /* `Proxy.revocable(target, handler)` and the function it hands back. The second is reached only
  * through the first, as a bound method whose receiver is the proxy it retires -- which is what
  * gives the returned function the one capability it needs and nothing else. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_PROXY_REVOCABLE),
-    emit_method_define!(KILN_C99_METHOD_PROXY_REVOKE),
     r#"
 /* `Math`, part two -- numbered here rather than beside the first range because that range ends
  * where `Number`'s begins. Still below the array boundary, because these take no receiver. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_MATH_RANDOM),
-    emit_method_define!(KILN_C99_METHOD_MATH_SINH),
-    emit_method_define!(KILN_C99_METHOD_MATH_COSH),
-    emit_method_define!(KILN_C99_METHOD_MATH_TANH),
-    emit_method_define!(KILN_C99_METHOD_MATH_ASINH),
-    emit_method_define!(KILN_C99_METHOD_MATH_ACOSH),
-    emit_method_define!(KILN_C99_METHOD_MATH_ATANH),
-    emit_method_define!(KILN_C99_METHOD_MATH_LOG1P),
-    emit_method_define!(KILN_C99_METHOD_MATH_EXPM1),
-    emit_method_define!(KILN_C99_METHOD_MATH_FROUND),
-    emit_method_define!(KILN_C99_METHOD_MATH_CLZ32),
-    emit_method_define!(KILN_C99_METHOD_MATH_IMUL),
     r#"
 /* What a regular expression answers to. Below the array boundary because they take a receiver
  * exactly as the number methods do. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_REGEXP_TEST),
-    emit_method_define!(KILN_C99_METHOD_REGEXP_EXEC),
-    emit_method_define!(KILN_C99_METHOD_REGEXP_TO_STRING),
     r#"/* A collection's own `next`, distinct from the array iterator's because it walks the collection
  * itself rather than a copy of it -- which is the only way a delete during a loop can be seen.
  * Numbered here rather than beside the collection block because the guard that routes a code to
  * a receiver kind is a range, and this has to land inside the one that answers a method reached
  * through an object. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT),
     r#"/* `toString` on a string or a boolean, which is the value itself rather than `[object String]`.
  * Library code reaches for it constantly on values it has already coerced. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_PRIMITIVE_TO_STRING),
     r#"/* The two statics a concrete view constructor carries. Kept below the string block that
  * begins at 240, which `kiln_c99_invoke_method` routes by range. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_TYPED_OF),
-    emit_method_define!(KILN_C99_METHOD_TYPED_FROM),
     r#"/* `Array.prototype.map/filter` keep their generic semantics when borrowed onto a typed array.
  * They need distinct codes from the intrinsic typed-array methods, which return a typed view. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ARRAY_GENERIC_MAP),
-    emit_method_define!(KILN_C99_METHOD_ARRAY_GENERIC_FILTER),
     r#"/* Runtime-module methods. They use the same canonical call path as language intrinsics while
  * keeping their state on ordinary backend objects. Appended outside every range-dispatch block
  * so adding a runtime facade never changes the meaning of an existing intrinsic code. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_ON),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_ONCE),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_EMIT),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_LISTENERS),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_EVENT_NAMES),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS),
-    emit_method_define!(KILN_C99_METHOD_NODE_EVENT_EMITTER),
-    emit_method_define!(KILN_C99_METHOD_NODE_NET_CREATE_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_LISTEN),
-    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_CLOSE),
-    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_ADDRESS),
-    emit_method_define!(KILN_C99_METHOD_NODE_SOCKET_WRITE),
-    emit_method_define!(KILN_C99_METHOD_NODE_SOCKET_END),
-    emit_method_define!(KILN_C99_METHOD_NODE_SOCKET_DESTROY),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_WRITE),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_END),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_GET),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_REQUEST),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND),
-    emit_method_define!(KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE),
-    emit_method_define!(KILN_C99_METHOD_NODE_CLIENT_REQUEST_END),
-    emit_method_define!(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
-    emit_method_define!(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING),
-    emit_method_define!(KILN_C99_METHOD_NODE_NET_CONNECT),
-    emit_method_define!(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_FROM),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_ALLOC),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_IS_BUFFER),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_BYTE_LENGTH),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_CONCAT),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_BUFFER_TO_STRING_RAW),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_DEBUGLOG),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_NOOP),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_DEPRECATE),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_INSPECT),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_INHERITS),
-    emit_method_define!(KILN_C99_METHOD_NODE_UTIL_FORMAT),
-    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL),
-    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL),
-    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH),
-    emit_method_define!(KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_DNS_LOOKUP),
-    emit_method_define!(KILN_C99_METHOD_NODE_OS_HOSTNAME),
-    emit_method_define!(KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES),
-    emit_method_define!(KILN_C99_METHOD_NODE_STREAM),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE),
-    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE),
-    emit_method_define!(KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL),
-    emit_method_define!(KILN_C99_METHOD_NODE_STREAM_FINISHED),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_PUSH),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_READ),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_DESTROY),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_PAUSE),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_RESUME),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_PIPE),
-    emit_method_define!(KILN_C99_METHOD_NODE_READABLE_UNPIPE),
-    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_WRITE),
-    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_END),
-    emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_DESTROY),
-    emit_method_define!(KILN_C99_METHOD_PERFORMANCE_NOW),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_EXISTS_SYNC),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_STAT),
-    emit_method_define!(KILN_C99_METHOD_NODE_FS_WRITE_FILE),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_JOIN),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_RESOLVE),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_DIRNAME),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_BASENAME),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_EXTNAME),
-    emit_method_define!(KILN_C99_METHOD_NODE_PATH_RELATIVE),
-    emit_method_define!(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED),
-    emit_method_define!(KILN_C99_METHOD_NODE_ASSERT_OK),
-    emit_method_define!(KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR),
-    emit_method_define!(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE),
-    emit_method_define!(KILN_C99_METHOD_NODE_MODULE),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_DLOPEN),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_GET_RAW_POINTER),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_TO_ARRAY_BUFFER),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_REGISTER_CALLBACK),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_UNREGISTER_CALLBACK),
-    emit_method_define!(KILN_C99_METHOD_NODE_FFI_CLOSE),
-    emit_method_define!(KILN_C99_METHOD_INTL_SEGMENT_RAW),
-    emit_method_define!(KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH),
-    emit_method_define!(KILN_C99_METHOD_NODE_URL_PARSE),
-    emit_method_define!(KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL),
-    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_RESOURCE),
-    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND),
-    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY),
-    emit_method_define!(KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID),
-    emit_method_define!(KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_NEXT_TICK),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_START_RAW),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_CANCEL_RAW),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_HRTIME),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT),
-    emit_method_define!(KILN_C99_METHOD_PROCESS_CWD),
-    emit_method_define!(KILN_C99_METHOD_ATOMICS_UNAVAILABLE),
-    emit_method_define!(KILN_C99_METHOD_CONSOLE_LOG),
-    emit_method_define!(KILN_C99_METHOD_CONSOLE_ERROR),
-    emit_method_define!(KILN_C99_METHOD_SET_IMMEDIATE),
-    emit_method_define!(KILN_C99_METHOD_CLEAR_IMMEDIATE),
-    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER),
-    emit_method_define!(KILN_C99_METHOD_NODE_SERVER_SET_TIMEOUT),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER),
-    emit_method_define!(KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER),
     r#"/* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
  * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
 /* `from` and `compare` are one function per type in the language -- `Temporal.PlainDate.from`
@@ -3994,60 +3901,29 @@ enum kiln_value_tag {
  * method code, not the value the method was reached through. So the kind rides in the code: the
  * eight are contiguous and the base is subtracted to recover it. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_FROM),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_FROM_LAST),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_COMPARE),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_COMPARE_LAST),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_TO_STRING),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_TO_JSON),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_VALUE_OF),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID),
     r#"/* `Temporal.Now`'s five readers, contiguous so the kind rides in the code the way it does for
  * `from` and `compare`. The clock they read is the realm's, which ADR 0015 makes virtual and UTC.
  * The order is the eight-type order, restricted to the five the namespace offers. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_NOW_READ),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST),
     r#"/* The arithmetic and conversion surface. One code per name, contiguous, because the call path
  * carries only the code -- and the provider is keyed by the name, so the two are the same table
  * read from either end (`KILN_C99_TEMPORAL_OPS` below). */
 "#,
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_OP),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_OP_LAST),
     r#"/* `Temporal.Instant`'s two epoch constructors. Statics rather than `from`, and one code each
  * rather than a kind-bearing range, because only `Instant` has them: an epoch count names a point
  * on the timeline, and no other one of the eight is a point on a timeline by itself. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS),
-    emit_method_define!(KILN_C99_METHOD_TEMPORAL_LAST),
     r#"
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
  * is full. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_SET_TIME),
     r#"
 /* The iterator helpers. 470..481 is a name range -- `kiln_c99_lookup_method` walks it to answer
  * `Iterator.prototype.map` -- and 470..484 is the dispatch range. A helper's own `next` and
  * `return` sit past the name range so that reading `Iterator.prototype.next` finds nothing, which
  * is correct: the helpers live on the table and `next` lives on the helper object. */
 "#,
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_MAP),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_FILTER),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_TAKE),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_DROP),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_FLAT_MAP),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_REDUCE),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_TO_ARRAY),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_FOR_EACH),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_SOME),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_EVERY),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_FIND),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_INCLUDES),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_HELPER_NEXT),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_HELPER_RETURN),
-    emit_method_define!(KILN_C99_METHOD_ITERATOR_FROM),
     r#"
 /* Dispatch membership is generated from the Rust method registry.  Keep these predicates exact:
  * numeric adjacency is an implementation detail, not a category contract. */
@@ -4294,7 +4170,7 @@ static int kiln_c99_is_array_member(const char *key, size_t key_len) {
     static const char *const members[] = {
         "at", "concat", "constructor", "copyWithin", "entries", "every", "fill", "filter", "find",
         "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "forEach", "includes",
-        "indexOf", "join", "keys", "lastIndexOf", "length", "map", "parallelMap", "pop", "push",
+        "indexOf", "join", "keys", "lastIndexOf", "length", "map", "pop", "push",
         "reduce", "reduceRight", "reverse", "shift", "slice", "some", "sort", "splice",
         "toLocaleString", "toReversed", "toSorted", "toSpliced", "toString", "unshift", "values",
         "with"};
@@ -4434,8 +4310,8 @@ static int kiln_c99_is_string_member(const char *key, size_t key_len) {
  * absent and are not implemented either: answering `undefined` for one would be a silent wrong
  * answer, so a read of one refuses instead and lands in the backlog by name. */
 static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t key_len) {
-    /* copyWithin, toLocaleString, toReversed, toSorted, and with are answered by typedarray.ts.
-     * The base64 and hex codecs are Uint8Array's alone and remain unbuilt. */
+    /* copyWithin, toLocaleString, toReversed, toSorted, with, and the Uint8Array codecs are
+     * answered by typedarray.ts. */
     static const char *const byte_members[] = {"setFromBase64", "setFromHex"};
     size_t index;
     if (!byte_view) {
@@ -4469,11 +4345,11 @@ static int kiln_c99_is_array_buffer_member(const char *key, size_t key_len) {
  * answer -- the same question `kiln_c99_is_typed_array_member` asks one type over, and it has the
  * same two-name answer.
  *
- * `getFloat16` and `setFloat16` are the whole list. Half precision has no decode here and the
- * number provider exports no `f16round` either (`Math.f16round` is in the backlog for that
- * reason), and answering a `Float32` decode of the same two bytes would be a wrong answer no
- * program could see coming. The interpreter *does* answer both, so `undefined` would be a
- * divergence the gate cannot see; a refusal is one it can. */
+ * `getFloat16` and `setFloat16` are the whole DataView list. Math.f16round is installed separately
+ * by the shared numeric TypeScript bootstrap through Float16Array element conversion; it is not a
+ * DataView operation. Answering a Float32 decode of these same two bytes would be a wrong answer
+ * no program could see coming. The interpreter also models these DataView operations, so
+ * `undefined` would be a divergence the gate cannot see; a refusal is one it can. */
 static int kiln_c99_is_data_view_member(const char *key, size_t key_len) {
     return kiln_c99_same_name(key, key_len, "getFloat16") ||
            kiln_c99_same_name(key, key_len, "setFloat16");
@@ -4525,6 +4401,7 @@ static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
 #define KILN_C99_MEMBER_SYMBOL 4
 #define KILN_C99_MEMBER_BUILTIN 5
 #define KILN_C99_MEMBER_UNSCOPABLES 6
+#define KILN_C99_MEMBER_ACCESSOR 7
 
 typedef struct {
     uint16_t builtin;
@@ -4677,6 +4554,11 @@ pub fn runtime_prelude_header() -> &'static str {
 }
 
 fn build_runtime_prelude_source(src: &str) -> String {
+    let src = src.replace(
+        "/* KILN_NATIVE_METHOD_LENGTH_ROWS */",
+        &render_native_method_length_rows(),
+    );
+    let src = src.as_str();
     let mut out = String::with_capacity(src.len() + 1024);
     const VARS_TO_EXPORT: &[&str] = &[
         "kiln_c99_diagnostic_active_depth",
@@ -4735,136 +4617,6 @@ fn build_runtime_prelude_source(src: &str) -> String {
         out.push('\n');
     }
     out
-}
-
-/// Mutable static state embedded in the generated-C prelude, classified by its required owner.
-///
-/// This is the migration manifest for ADR 0036, and since realms issue 04 step 5 (ADR 0070) it has
-/// no `Realm` owner: realm state is not a static at all but a field of `kiln_c99_realm_state`
-/// (`runtime/foundation.c`), reached through the realm's heap. Adding a mutable `kiln_c99_*`
-/// static without naming one of the owners below fails the architecture test, and the owners that
-/// are per thread fail it unless the declaration says `_Thread_local`.
-#[cfg(test)]
-pub(crate) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
-    ("kiln_c99_diagnostic", C99StateOwner::Frame),
-    ("kiln_c99_diagnostic_active_depth", C99StateOwner::Frame),
-    ("kiln_c99_active_http_response", C99StateOwner::Frame),
-    ("kiln_c99_new_target", C99StateOwner::Frame),
-    ("kiln_c99_inheriting_new_target", C99StateOwner::Frame),
-    ("kiln_c99_typed_status", C99StateOwner::Frame),
-    ("kiln_c99_typed_thrown", C99StateOwner::Frame),
-    ("kiln_c99_adopted_this", C99StateOwner::Frame),
-    ("kiln_c99_frame_args", C99StateOwner::Frame),
-    ("kiln_c99_frame_argc", C99StateOwner::Frame),
-    ("kiln_c99_captured_arguments", C99StateOwner::Frame),
-    ("kiln_c99_frame_arguments_object", C99StateOwner::Frame),
-    ("kiln_c99_frame_is_arrow", C99StateOwner::Frame),
-    ("kiln_c99_frame_mapped_arguments", C99StateOwner::Frame),
-    ("kiln_c99_frame_callee", C99StateOwner::Frame),
-    ("kiln_c99_ffi_callback_status", C99StateOwner::Frame),
-    ("kiln_c99_ffi_callback_host", C99StateOwner::Frame),
-    ("kiln_c99_ffi_callback_thrown", C99StateOwner::Frame),
-    ("kiln_c99_ffi_callback_depth", C99StateOwner::Frame),
-    ("kiln_c99_ffi_callback_active", C99StateOwner::Frame),
-    // Set only around one synchronous kiln:shared module initializer; no turn boundary sees it.
-    ("kiln_c99_kiln_shared_hooks_active", C99StateOwner::Frame),
-    ("kiln_c99_fixture_method_stores", C99StateOwner::TestFixture),
-    ("kiln_c99_gc_fallback", C99StateOwner::TestFixture),
-    ("kiln_c99_keys_check_mode", C99StateOwner::TestFixture),
-    ("kiln_c99_method_index", C99StateOwner::Constant),
-    ("kiln_c99_method_index_len", C99StateOwner::Constant),
-    ("kiln_c99_method_index_ready", C99StateOwner::Constant),
-    // The surface table's index: the same rows sorted once, a constant once built.
-    ("kiln_c99_builtin_member_index", C99StateOwner::Constant),
-    ("kiln_c99_builtin_member_index_len", C99StateOwner::Constant),
-    (
-        "kiln_c99_builtin_member_index_ready",
-        C99StateOwner::Constant,
-    ),
-    // Per thread, and trusted only under the realm generation it was filled under.
-    ("kiln_c99_realm_cached", C99StateOwner::ThreadCache),
-    // ADR 0071: only whether *some* realm has modified *some* built-in; which ones a realm has
-    // modified is on its heap, and no cache entry holds a value of this.
-    ("kiln_c99_builtin_store_epoch", C99StateOwner::Process),
-    // Recycled byte blocks: plain memory that names no realm's value.
-    ("kiln_c99_bytes_cache", C99StateOwner::ThreadCache),
-    // Parallel issue 30: the lowest address this thread's calls may start at, found once.
-    ("kiln_c99_stack_floor", C99StateOwner::ThreadCache),
-    // Per thread, and trusted only for the heap serial it was built under: the `node:http` layouts.
-    ("kiln_c99_node_http_layouts", C99StateOwner::ThreadCache),
-    ("kiln_c99_gc_stress_checks", C99StateOwner::Process),
-    // Monotonic ID for candidate-only chunks; the arena uses an atomic increment, and no
-    // realm object or graph pointer is stored in this process-wide counter.
-    ("kiln_c99_graph_candidate_next_id", C99StateOwner::Process),
-    // Parallel issue 06's write detector (`KILN_PARALLEL_PROTECT`), read from the environment once.
-    ("kiln_c99_par_protect_state", C99StateOwner::Process),
-    // Parallel issue 08's worker arena budget (`KILN_PARALLEL_ARENA_KIB`), read once.
-    ("kiln_c99_par_arena_budget_bytes", C99StateOwner::Process),
-    // `KILN_PARALLEL_TRACE`: whether each arena join says what it adopted, read once.
-    ("kiln_c99_par_trace_state", C99StateOwner::Process),
-    ("kiln_c99_introspect_pending", C99StateOwner::Process),
-    ("kiln_c99_introspect_armed", C99StateOwner::Process),
-    // The process-shared block (ADR 0071): shared keys and the shape root, one per process.
-    // Each unit caches the pointer to it; the block itself is the provider archive's.
-    ("kiln_c99_shared_block", C99StateOwner::Process),
-    ("kiln_c99_speculate_mode", C99StateOwner::Process),
-    // ADR 0068: whether this process installs kiln's own members, read from the environment once.
-    ("kiln_c99_kiln_extensions_state", C99StateOwner::Process),
-    ("kiln_c99_node_stdin_paused", C99StateOwner::Process),
-    ("kiln_c99_node_stdin_read_active", C99StateOwner::Process),
-    ("kiln_c99_node_stdin_request", C99StateOwner::Process),
-    // Function-scope statics are state too (realms issue 05: nothing process-wide unclassified).
-    // Derived once from constants; a racing second computation writes the same word.
-    ("kiln_c99_method_code_end_cached", C99StateOwner::Constant),
-    // `1n` and 2^64-1 as provider handles, made once; the first published is kept.
-    ("kiln_c99_bigint_one_handle", C99StateOwner::Constant),
-    ("kiln_c99_bigint_u64_mask_handle", C99StateOwner::Constant),
-    // Headers for built-in text, claimed and published once each (`kiln_c99_static_text`).
-    ("kiln_c99_static_texts", C99StateOwner::Constant),
-    // `Symbol()` serials: process-wide so no realm mints one twice.
-    ("kiln_c99_symbol_serial", C99StateOwner::Process),
-    // Each well-known symbol's shared canonical key, published once (`kiln_c99_symbol_ikey`).
-    ("kiln_c99_well_known_ikeys", C99StateOwner::Constant),
-    // The `KILN_SPECULATE=exit` test mode's draw, per thread.
-    ("kiln_c99_speculate_rng", C99StateOwner::ThreadCache),
-    // Which later entry of which site answered this thread last (`kiln_c99_site_answered`).
-    ("kiln_c99_streaks", C99StateOwner::ThreadCache),
-    // The no-write read path (realms issue 08, parallel-builtins issue 06): whether this thread
-    // is reading without writing, around a section that leaves it as it found it.
-    ("kiln_c99_no_write_depth", C99StateOwner::Frame),
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-pub(crate) enum C99StateOwner {
-    /// A register of the running call, saved and restored around it, so idle at every turn
-    /// boundary: per thread (`_Thread_local`), because the machine stack it spills is the
-    /// thread's. See `runtime/builtins.c`.
-    Frame,
-    /// A per-thread cache that is either validated against the realm it was filled in (the realm
-    /// generation, a heap serial) or holds nothing any realm made. `_Thread_local`.
-    ThreadCache,
-    TestFixture,
-    /// Derived once from compile-time constants and never changed again, so every realm in the
-    /// process would compute the same bytes. Realms on several threads may ask for it first at
-    /// once: an index sorted in place is built under `kiln_c99_once`, so nobody searches it
-    /// half-sorted; a single word or an entry is published once, by one store or compare-and-swap,
-    /// and a racing second computation of it writes the same bytes or loses. A realm neither owns
-    /// it nor has to reset it.
-    Constant,
-    /// Belongs to the process and its signal disposition rather than to any realm, and outlives
-    /// every realm the process makes. A realm must not reset it: the `SIGUSR1` handler installed
-    /// for the first realm is still installed for the second, and the flag it sets names a
-    /// request that has arrived, not a value some realm made.
-    Process,
-}
-
-#[cfg(test)]
-impl C99StateOwner {
-    /// Whether the owner requires the declaration to be `_Thread_local`.
-    pub(crate) fn per_thread(self) -> bool {
-        matches!(self, Self::Frame | Self::ThreadCache)
-    }
 }
 
 /// The stack each emitted C function needs: the module body, then one entry per compiled

@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 3 (.scratch/parallel-builtins issue 08): `parallelFilter` keeping objects, with
+// Tier 3 (docs/issues/parallel-builtins issue 08): `parallelFilter` keeping objects, with
 // predicates that build strings and objects along the way (garbage the moment they answer), and a
 // `parallelMap` whose answers are the rows themselves. Each answer must be `filter`'s: the same
 // objects, in order.

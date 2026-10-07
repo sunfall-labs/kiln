@@ -115,10 +115,11 @@ expected = {
     "format_version": contract["format_version"],
     "parse_version": contract["parse_version"],
     "profile": contract["profile"],
-    "exports": contract["exports"],
+    "exports": package["exports"],
     "variant": variant,
     "capabilities": package["capabilities"],
     "archive": package["archive"],
+    "link_arguments": [] if "gui" not in package["capabilities"] else manifest.get("link_arguments"),
 }
 for key, value in expected.items():
     if manifest.get(key) != value:

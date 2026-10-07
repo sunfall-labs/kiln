@@ -40,6 +40,20 @@ console.log('computed key    ', JSON.stringify(withComputed));
 const sym = Symbol('after-spread');
 const withSymbolKey = { ...base, [sym]: 'symbolic', c: 3 };
 console.log('symbol as key   ', withSymbolKey[sym], JSON.stringify(withSymbolKey));
+if (Object.keys(withSymbolKey).length !== 3 ||
+    !Object.getOwnPropertySymbols(withSymbolKey).includes(sym)) {
+  throw new Error('computed symbol key after spread became an enumerable string key');
+}
+
+const symbolA = Symbol.for('record-symbol-a');
+const symbolB = Symbol.for('record-symbol-b');
+const symbolSource = { [symbolA]: 1, [symbolB]: 2 };
+const symbolUpdate = { ...symbolSource, [symbolA]: 'updated' };
+if (Object.keys(symbolUpdate).length !== 0 ||
+    Object.getOwnPropertySymbols(symbolUpdate).length !== 2 ||
+    symbolUpdate[symbolA] !== 'updated' || symbolUpdate[symbolB] !== 2) {
+  throw new Error('computed symbol overwrite after symbol spread lost property identity');
+}
 
 // A duplicate key: the same name spread from the source, then written again by the literal --
 // later must win, and neither the fast path's slot-overwrite branch nor a shape transition may

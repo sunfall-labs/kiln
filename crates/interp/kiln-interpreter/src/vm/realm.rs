@@ -37,11 +37,64 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         })?);
         if let Some(shared) = &self.module_realm {
-            shared.borrow_mut().global_objects.push(None);
+            let mut shared = shared.borrow_mut();
+            shared.global_objects.push(None);
+            shared
+                .regexp_legacy_captures
+                .push(std::array::from_fn(|_| StringUnits::default()));
         }
         self.global_objects.push(None);
+        self.regexp_legacy_captures
+            .push(std::array::from_fn(|_| StringUnits::default()));
         self.intrinsics.add_realm();
         Ok(realm)
+    }
+
+    /// Publish the captures from one successful RegExp execution. Module child VMs use the
+    /// module session's realm-owned table so statics remain visible across module boundaries.
+    pub(crate) fn publish_regexp_legacy_captures(
+        &mut self,
+        subject: &[u16],
+        groups: &[Option<std::ops::Range<usize>>],
+    ) {
+        let mut captures: [StringUnits; 9] = std::array::from_fn(|_| StringUnits::default());
+        for (capture, group) in captures.iter_mut().zip(groups.iter().skip(1)) {
+            if let Some(range) = group {
+                *capture = StringUnits::from_units(&subject[range.clone()]);
+            }
+        }
+        let realm_index = self.current_realm.0 as usize;
+        if let Some(shared) = &self.module_realm {
+            if let Some(slot) = shared
+                .borrow_mut()
+                .regexp_legacy_captures
+                .get_mut(realm_index)
+            {
+                *slot = captures;
+            }
+        } else if let Some(slot) = self.regexp_legacy_captures.get_mut(realm_index) {
+            *slot = captures;
+        }
+    }
+
+    pub(super) fn regexp_legacy_capture(&self, index: usize) -> Option<StringUnits> {
+        if !(1..=9).contains(&index) {
+            return None;
+        }
+        let realm_index = self.current_realm.0 as usize;
+        if let Some(shared) = &self.module_realm {
+            shared
+                .borrow()
+                .regexp_legacy_captures
+                .get(realm_index)
+                .and_then(|captures| captures.get(index - 1))
+                .cloned()
+        } else {
+            self.regexp_legacy_captures
+                .get(realm_index)
+                .and_then(|captures| captures.get(index - 1))
+                .cloned()
+        }
     }
 
     /// `new ShadowRealm()`.
@@ -67,7 +120,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::PrototypeOf(PrototypeTable::ShadowRealm),
             self.current_realm,
         ));
-        Ok(Value::Object(Rc::new(RefCell::new(instance))))
+        Ok(Value::Object(tracked_object(instance)))
     }
 
     /// `ValidateShadowRealmObject`: the realm `receiver` evaluates in, or a `TypeError`.
@@ -365,13 +418,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         source: &StringUnits,
         realm: RealmId,
     ) -> Result<Result<Value, ()>, ExecutionError> {
-        let source = self.checked_dynamic_source(source)?;
-        self.shadow_realm_run(source.as_ref(), realm)
+        match source.to_scalar_cow() {
+            Ok(text) => self.shadow_realm_run(text.as_ref(), realm),
+            Err(_) => {
+                let transport = source.to_lossy_string();
+                self.shadow_realm_run_with_units(&transport, Some(source), realm)
+            }
+        }
     }
 
     pub(crate) fn shadow_realm_run(
         &mut self,
         source: &str,
+        realm: RealmId,
+    ) -> Result<Result<Value, ()>, ExecutionError> {
+        self.shadow_realm_run_with_units(source, None, realm)
+    }
+
+    fn shadow_realm_run_with_units(
+        &mut self,
+        source: &str,
+        source_units: Option<&StringUnits>,
         realm: RealmId,
     ) -> Result<Result<Value, ()>, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
@@ -392,7 +459,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             stack_height: self.stack.len(),
             native_depth: self.native_depth,
         });
-        let outcome = match self.enter_eval(source, None, true) {
+        let outcome = match self.enter_eval_with_units(source, source_units, None, true) {
             Ok(()) => match self.run_frames(depth) {
                 Ok(result) => Ok(Ok(result.value)),
                 Err(ExecutionError::CaughtByHost | ExecutionError::ThrownAcrossNative) => {
@@ -644,23 +711,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let self_bindings = std::mem::take(&mut self.self_bindings);
         let self_namespaces = std::mem::take(&mut self.self_namespaces);
         let outcome = self.entering(realm, |vm| {
-            vm.drive_module(program, locals, Some(Rc::from(REALM_BOOTSTRAP_PATH)))
+            vm.drive_module(
+                program,
+                locals,
+                Some(Rc::from(REALM_BOOTSTRAP_PATH)),
+                0,
+                None,
+            )
         });
         self.self_bindings = self_bindings;
         self.self_namespaces = self_namespaces;
         let thrown = match outcome {
             Ok(Ok(_)) => {
-                if let Some(shared) = &self.module_realm {
-                    let pending = shared.borrow().shared_hooks_pending;
-                    if pending && let Value::Object(object) = &global {
-                        let mut shared = shared.borrow_mut();
-                        let mut object = object.borrow_mut();
-                        shared.saved_shared_global = Some(object.properties.clone());
-                        install_kiln_shared_hooks(
-                            &mut object,
-                            realm,
-                            kiln_builtin_surface::kiln_extensions_installed(),
-                        );
+                // An engine module whose run built this realm opened its window before the
+                // global object existed; the bootstrap has since removed the name, so open it.
+                if realm.0 == 0
+                    && let Some(shared) = &self.module_realm
+                    && let Value::Object(object) = &global
+                {
+                    let mut shared = shared.borrow_mut();
+                    if let Some(window @ PrivateWindow::Absent) = shared.private_windows.last_mut()
+                    {
+                        *window = open_private_window(&mut object.borrow_mut());
                     }
                 }
                 return Ok(global);
@@ -757,24 +829,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "FinalizationRegistry",
             Value::Native(Native::FinalizationRegistryConstructor, realm),
         );
-        globals.set_non_enumerable(
-            "__kilnHostProcessStart",
-            Value::Native(Native::ProcessStartRaw, realm),
-        );
-        globals.set_non_enumerable(
-            "__kilnHostProcessCancel",
-            Value::Native(Native::ProcessCancelRaw, realm),
-        );
-        globals.set_non_enumerable(
-            "__kilnHostModuleCreateRequire",
-            Value::Native(Native::NodeModuleCreateRequire, realm),
-        );
-
+        // The realm's engine-private object (`__kilnPrivate`), kept in an internal slot. The
+        // bootstrap captures it from the global name and deletes the name before any program
+        // line runs; a realm that runs no bootstrap never publishes the name at all.
+        let private = new_engine_private(realm);
+        if let Value::Object(object) = &private {
+            object
+                .borrow_mut()
+                .set_non_enumerable("process", self.process_object());
+        }
+        globals.define_value(ENGINE_PRIVATE_SLOT, private.clone(), Attributes::BUILT_IN);
+        if self.realm_bootstrap.is_some() {
+            globals.set_non_enumerable("__kilnPrivate", private);
+        }
         globals.set_non_enumerable(
             "Intl",
             Value::Native(Native::Intl(intl::Op::Namespace), realm),
         );
         globals.set_non_enumerable("crypto", Value::Native(Native::NodeCrypto, realm));
+        globals.set_non_enumerable(
+            "__kilnWebCryptoPrimitive",
+            Value::Native(Native::WebCryptoPrimitive, realm),
+        );
+        globals.set_non_enumerable(
+            "__kilnCompressionPrimitive",
+            Value::Native(Native::WebCompressionPrimitive, realm),
+        );
         globals.set_non_enumerable(
             "SharedArrayBuffer",
             Value::Native(Native::SharedArrayBufferConstructor, realm),
@@ -829,6 +909,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ("__kilnUrlAdopt", Native::UrlAdoptRaw),
             // The transfer primitive `arraybuffer.ts` captures and deletes (every realm).
             ("__kilnArrayBufferDetach", Native::ArrayBufferDetachRaw),
+            (
+                "__kilnArrayBufferByteLength",
+                Native::ArrayBufferByteLengthRaw,
+            ),
             // The in-place length move `resize` and `grow` make (`arraybuffer.ts`, every realm).
             ("__kilnArrayBufferResize", Native::ArrayBufferResizeRaw),
             // Whether a view has left its buffer (`typedarray.ts`, every realm).
@@ -836,6 +920,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "__kilnTypedArrayOutOfBounds",
                 Native::TypedArrayOutOfBoundsRaw,
             ),
+            ("__kilnDataViewState", Native::DataViewStateRaw),
+            ("__kilnIsConstructor", Native::IsConstructorRaw),
+            (
+                "__kilnIsOtherRealmArrayConstructor",
+                Native::IsOtherRealmArrayConstructorRaw,
+            ),
+            (
+                "__kilnArrayNextPresentIndex",
+                Native::ArrayNextPresentIndexRaw,
+            ),
+            ("__kilnCollectionSize", Native::CollectionSizeRaw),
             // A same-type element copy and the default-order sort (`typedarray.ts`, every realm).
             ("__kilnTypedArrayCopy", Native::TypedArrayCopyRaw),
             ("__kilnTypedArraySort", Native::TypedArraySortRaw),
@@ -847,18 +942,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // The structured clone's plain-data fast path: measured for the native backend
             // only, so here it always answers "not handled" and the shared TypeScript clone runs.
             ("__kilnCloneData", Native::CloneDataRaw),
-            ("__kilnSharedIs", Native::SharedIsRaw),
             // Whether a microtask checkpoint would run anything now, which message delivery
             // (`kiln-builtins/src/web_events_streams.ts`) asks before its next message.
             ("__kilnJobsPending", Native::JobsPendingRaw),
             // The poll phase's lane, where message delivery (the same file) is queued.
             ("__kilnQueueIo", Native::QueueIoRaw),
+            // Whether a timer keeps the loop alive: `ref`/`unref` on the timer objects of
+            // `kiln-builtins/src/timers.ts`, which captures it.
+            ("__kilnTimerRef", Native::TimerRefRaw),
             // The runtime's cross-realm ports and workers, which the same file captures.
             ("__kilnWorkerOp", Native::WorkerOpRaw),
             ("__kilnPortWait", Native::PortWaitRaw),
             // Node's unhandled-rejection tracking registers itself here
             // (`kiln-builtins/src/rejections.ts`).
             ("__kilnPromiseRejections", Native::PromiseRejectionsRaw),
+            ("__kilnRegExpLegacyCapture", Native::RegExpLegacyCaptureRaw),
         ] {
             globals.set_non_enumerable(name, Value::Native(native, realm));
         }
@@ -908,7 +1006,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "profileEnd",
             Value::Native(Native::ConsoleProfileEnd, realm),
         );
-        globals.set_non_enumerable("console", Value::Object(Rc::new(RefCell::new(console))));
+        globals.set_non_enumerable("console", Value::Object(tracked_object(console)));
         // The three value properties of the global object are the only ones the specification
         // locks on every axis: `{ writable: false, enumerable: false, configurable: false }`.
         // That is not decoration -- it is what makes `delete NaN` answer `false` and
@@ -916,7 +1014,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.define_value("NaN", Value::Number(f64::NAN), Attributes::NONE);
         globals.define_value("Infinity", Value::Number(f64::INFINITY), Attributes::NONE);
         globals.define_value("undefined", Value::Undefined, Attributes::NONE);
-        let object = Rc::new(RefCell::new(globals));
+        let object = tracked_object(globals);
         let value = Value::Object(Rc::clone(&object));
         // The global object holds itself under both of its names, which is how a program reaches
         // it without a keyword: `global.Object === Object` is the standard test for "am I in a

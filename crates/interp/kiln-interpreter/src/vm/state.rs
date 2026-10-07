@@ -2,15 +2,63 @@ use super::*;
 
 /// The language payload attached to a Realm Runtime timer.
 #[derive(Clone, Debug)]
-pub(super) struct Timer {
-    pub(super) callback: Value,
-    pub(super) arguments: Vec<Value>,
-    /// The async context in force when the timer was *set*, restored while its callback runs.
-    ///
-    /// Captured at scheduling rather than read at firing, which is the whole of what makes an
-    /// `AsyncLocalStorage` work: `als.run(store, () => setTimeout(f))` has long returned by the
-    /// time `f` runs, and `f` must still see the store.
-    pub(super) context: AsyncContext,
+pub(super) enum Timer {
+    /// A timer that has no handle of its own (`AbortSignal.timeout`, an `Atomics.waitAsync`
+    /// deadline, a realm whose bootstrap published no handles): the callback is held here.
+    Plain {
+        callback: Value,
+        arguments: Vec<Value>,
+        /// The async context in force when the timer was *set*, restored while its callback
+        /// runs.
+        ///
+        /// Captured at scheduling rather than read at firing, which is the whole of what makes
+        /// an `AsyncLocalStorage` work: `als.run(store, () => setTimeout(f))` has long returned
+        /// by the time `f` runs, and `f` must still see the store.
+        context: AsyncContext,
+    },
+    /// A `Timeout` or `Immediate`: the handle object is the record (`TimerRecord`), and this is
+    /// the queue's one reference to it. An interval's re-arm clones the reference, not the
+    /// callback.
+    Handle(Rc<RefCell<ObjectData>>),
+}
+
+impl Timer {
+    pub(super) fn plain(callback: Value, arguments: Vec<Value>, context: AsyncContext) -> Self {
+        Self::Plain {
+            callback,
+            arguments,
+            context,
+        }
+    }
+
+    /// What to call when the timer fires, or nothing when it was cleared. A timeout marks its
+    /// record as having run first, so a `refresh()` inside the callback arms it again.
+    pub(super) fn into_call(self) -> Option<(Value, Vec<Value>, AsyncContext)> {
+        match self {
+            Self::Plain {
+                callback,
+                arguments,
+                context,
+            } => Some((callback, arguments, context)),
+            Self::Handle(handle) => {
+                let mut data = handle.borrow_mut();
+                let Some(NodeObject::TimerHandle(record)) = &mut data.node_object else {
+                    return None;
+                };
+                if record.cleared {
+                    return None;
+                }
+                if !record.interval {
+                    record.ran = true;
+                }
+                Some((
+                    record.callback.clone(),
+                    record.arguments.clone(),
+                    Rc::clone(&record.context),
+                ))
+            }
+        }
+    }
 }
 
 /// One `AsyncLocalStorage`, whose identity is the whole of it.
@@ -93,19 +141,26 @@ pub(super) struct Reaction {
 pub(super) enum Sink {
     /// The promise `then` returned.
     Promise(Rc<PromiseData>),
+    /// A dynamic import waiting for one module in its dependency plan. Once that module settles,
+    /// the request is retried against the same importer and generation; this advances the plan
+    /// without allowing a dependent body to run before its asynchronous dependencies complete.
+    ImportRetry(Rc<ImportRetry>),
+    /// Wake a module-plan scheduler when any one of its pending dependencies settles. The
+    /// scheduler then rechecks all dependency states and starts every newly ready component.
+    ModulePlanWake(Rc<PromiseData>),
     /// Settle a promise with a *recorded* outcome once something else has settled, unless that
     /// something rejected. `finally` waits on its handler's result and then restores the outcome
     /// it was passing through.
     Replay(Rc<PromiseData>, Settled),
     /// An `await` inside an async function: resume its body with whatever the awaited promise
     /// produced, and settle the function's own promise when the body finishes.
-    Async(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
+    Async(Rc<GeneratorData>, Rc<PromiseData>),
     /// An `await` inside an async *generator*: resume its body, and settle the promise the
     /// consumer's `next()` returned once the body reaches its next `yield` or finishes.
     ///
     /// The promise here belongs to one step rather than to the whole function, which is the
     /// whole difference between the two.
-    AsyncGenerator(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
+    AsyncGenerator(Rc<GeneratorData>, Rc<PromiseData>),
     /// One awaited disposer inside `AsyncDisposableStack.prototype.disposeAsync`. Like the two
     /// above, there is no JavaScript handler: what resumes is the walk down the stack.
     AsyncDisposal(Rc<AsyncDisposal>),
@@ -114,7 +169,7 @@ pub(super) enum Sink {
     /// `yield v` in an async generator is `Await(v)` and then the yield, which is why an async
     /// generator that yields promises hands back their *values*. Without this the consumer got
     /// the promise itself, and `for await (const x of gen())` bound `x` to a promise.
-    AsyncGeneratorYield(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
+    AsyncGeneratorYield(Rc<GeneratorData>, Rc<PromiseData>),
     ModuleAwait(Rc<RefCell<ModuleSuspension>>),
     /// `AsyncGeneratorAwaitReturn`: the argument of a `return()` on a generator with no body
     /// left to unwind, being awaited before it becomes the final step.
@@ -123,21 +178,42 @@ pub(super) enum Sink {
     /// finished, and all that remains is to decide the step this `return()` promised.
     AsyncGeneratorReturn(Rc<PromiseData>),
     /// Awaiting the `return` argument when the delegate iterator has no `return` method.
-    AsyncGeneratorDelegateReturnMissing(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
+    AsyncGeneratorDelegateReturnMissing(Rc<GeneratorData>, Rc<PromiseData>),
     /// Awaiting the result of calling `return()` to close the delegate when `throw()` is missing.
-    AsyncGeneratorDelegateClose(Rc<RefCell<GeneratorState>>, Rc<PromiseData>),
+    AsyncGeneratorDelegateClose(Rc<GeneratorData>, Rc<PromiseData>),
     /// Awaiting the result of calling `return()` on an active delegate iterator.
-    AsyncGeneratorDelegateReturn(Rc<RefCell<GeneratorState>>, Rc<PromiseData>, bool),
+    AsyncGeneratorDelegateReturn(Rc<GeneratorData>, Rc<PromiseData>, bool),
     /// Awaiting the result of calling `throw()` on an active delegate iterator.
-    AsyncGeneratorDelegateThrow(Rc<RefCell<GeneratorState>>, Rc<PromiseData>, usize, bool),
+    AsyncGeneratorDelegateThrow(Rc<GeneratorData>, Rc<PromiseData>, usize, bool),
     /// Awaiting an inner promise-valued `.value` from a wrapped synchronous iterator during delegation.
     AsyncGeneratorDelegateStep {
-        generator: Rc<RefCell<GeneratorState>>,
+        generator: Rc<GeneratorData>,
         step: Rc<PromiseData>,
         exit_target: usize,
         done: bool,
         is_return: bool,
     },
+}
+
+#[derive(Debug)]
+pub(super) struct ImportRetry {
+    pub(super) promise: Rc<PromiseData>,
+    pub(super) specifier: String,
+    pub(super) options: Option<ImportAttributes>,
+    pub(super) importer: Option<Rc<str>>,
+    pub(super) generation: u64,
+    pub(super) generation_owner: crate::module_map::ModuleGenerationHandle,
+}
+
+impl PartialEq for ImportRetry {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.promise, &other.promise)
+            && self.specifier == other.specifier
+            && self.options == other.options
+            && self.importer == other.importer
+            && self.generation == other.generation
+            && Rc::ptr_eq(&self.generation_owner, &other.generation_owner)
+    }
 }
 
 /// One `AsyncDisposableStack.prototype.disposeAsync` in flight.
@@ -276,6 +352,8 @@ pub(super) enum Job {
         String,
         Option<ImportAttributes>,
         Option<Rc<str>>,
+        u64,
+        crate::module_map::ModuleGenerationHandle,
     ),
     /// `ShadowRealm.prototype.importValue(specifier, exportName)`.
     ///
@@ -354,10 +432,15 @@ pub(super) struct Frame {
     pub(super) strict: bool,
     /// The module whose lexical code is running, restored with the caller frame.
     pub(super) module_path: Option<Rc<str>>,
+    /// The dynamic import generation of this activation's module context.
+    pub(super) module_generation: u64,
+    pub(super) module_generation_owner: Option<crate::module_map::ModuleGenerationHandle>,
     /// `new.target` in the caller, restored with the frame.
     pub(super) new_target: Value,
     /// The closure that was running, or `None` for the module body.
     pub(super) function: Option<Rc<Closure>>,
+    /// Property name through which this activation was called, for V8-compatible stack aliases.
+    pub(super) method_name: Option<StringUnits>,
     pub(super) this_value: Value,
     /// What this frame was called with, so `super(...arguments)` can forward them.
     pub(super) arguments: Vec<Value>,
@@ -392,11 +475,6 @@ pub(super) struct Frame {
     pub(super) stack_base: usize,
 }
 
-pub(super) enum DynamicModuleState {
-    Evaluated(Rc<Vec<Value>>),
-    Failed(Value),
-}
-
 #[derive(Clone, Copy)]
 pub(super) enum HostResultConversion {
     Direct,
@@ -419,10 +497,15 @@ pub(super) enum PendingNodeRequest {
         request: RequestId,
         server: Rc<RefCell<NodeServerState>>,
         resource: kiln_host_abi::ResourceId,
+        is_write: bool,
+        write_callbacks: Vec<Value>,
     },
     Connect {
         request: RequestId,
         target: PendingConnect,
+    },
+    CloseResource {
+        request: RequestId,
     },
 }
 
@@ -436,7 +519,8 @@ impl PendingNodeRequest {
         match self {
             Self::Server { request, .. }
             | Self::Stream { request, .. }
-            | Self::Connect { request, .. } => *request,
+            | Self::Connect { request, .. }
+            | Self::CloseResource { request } => *request,
         }
     }
 }

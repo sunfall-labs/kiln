@@ -13,11 +13,193 @@ unsafe extern "C" fn record_callable_store_drop(_pointer: *mut c_void) {
 }
 
 use super::*;
+
+#[test]
+fn text_decoder_state_preserves_chunks_bom_and_resets_after_flush_error() {
+    let mut state = ptr::null_mut();
+    let mut out = [0u8; 128];
+    let mut out_len = 0u64;
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_create(
+                b"utf-8".as_ptr(),
+                5,
+                0,
+                &mut state,
+                out.as_mut_ptr(),
+                out.len() as u64,
+                &mut out_len,
+            )
+        },
+        0
+    );
+    let first_bom_byte = [0xEF];
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_decode(
+                state,
+                first_bom_byte.as_ptr(),
+                first_bom_byte.len() as u64,
+                1,
+                out.as_mut_ptr(),
+                0,
+                &mut out_len,
+            )
+        },
+        INVALID_ARGUMENT
+    );
+    let retry_capacity = out_len;
+    assert!(retry_capacity > 0 && retry_capacity <= out.len() as u64);
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_decode(
+                state,
+                first_bom_byte.as_ptr(),
+                first_bom_byte.len() as u64,
+                1,
+                out.as_mut_ptr(),
+                retry_capacity,
+                &mut out_len,
+            )
+        },
+        0
+    );
+    assert_eq!(out_len, 0);
+
+    for (bytes, stream, expected) in [
+        (&[0xBB, 0xBF, 0xF0, 0x9F][..], 1, ""),
+        (&[0x98, 0x80][..], 0, "😀"),
+        (&[0xEF, 0xBB, 0xBF, b'B'][..], 0, "B"),
+    ] {
+        assert_eq!(
+            unsafe {
+                kiln_text_decoder_state_decode(
+                    state,
+                    bytes.as_ptr(),
+                    bytes.len() as u64,
+                    stream,
+                    out.as_mut_ptr(),
+                    out.len() as u64,
+                    &mut out_len,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            std::str::from_utf8(&out[..out_len as usize]).unwrap(),
+            expected
+        );
+    }
+    unsafe { kiln_text_decoder_state_free(state) };
+
+    state = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_create(
+                b"utf-8".as_ptr(),
+                5,
+                kiln_encoding::FLAG_FATAL,
+                &mut state,
+                out.as_mut_ptr(),
+                out.len() as u64,
+                &mut out_len,
+            )
+        },
+        0
+    );
+    let partial = [0xE2];
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_decode(
+                state,
+                partial.as_ptr(),
+                partial.len() as u64,
+                1,
+                out.as_mut_ptr(),
+                out.len() as u64,
+                &mut out_len,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_decode(
+                state,
+                ptr::null(),
+                0,
+                0,
+                out.as_mut_ptr(),
+                out.len() as u64,
+                &mut out_len,
+            )
+        },
+        TEXT_DATA_INVALID
+    );
+    assert_eq!(
+        unsafe {
+            kiln_text_decoder_state_decode(
+                state,
+                b"A".as_ptr(),
+                1,
+                0,
+                out.as_mut_ptr(),
+                out.len() as u64,
+                &mut out_len,
+            )
+        },
+        0
+    );
+    assert_eq!(&out[..out_len as usize], b"A");
+    unsafe { kiln_text_decoder_state_free(state) };
+}
 use std::fs;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn string_code_generation_policy_is_realm_local_and_validated() {
+    struct Observation(i32);
+    unsafe extern "C" fn observe_policy(context: *mut c_void) -> i32 {
+        let observed = unsafe { &mut *context.cast::<Observation>() };
+        unsafe { kiln_realm_string_code_generation_allowed(&raw mut observed.0) }
+    }
+
+    let mut first = 0;
+    let mut second = 0;
+    assert_eq!(unsafe { kiln_realm_create(&raw mut first) }, 0);
+    assert_eq!(unsafe { kiln_realm_create(&raw mut second) }, 0);
+    assert_eq!(
+        kiln_realm_set_string_code_generation(first, 2),
+        INVALID_ARGUMENT
+    );
+    assert_eq!(
+        kiln_realm_set_string_code_generation(0, 0),
+        INVALID_ARGUMENT
+    );
+    assert_eq!(kiln_realm_set_string_code_generation(first, 0), 0);
+
+    let mut denied = Observation(-1);
+    let mut allowed = Observation(-1);
+    assert_eq!(
+        unsafe { kiln_realm_enter(first, Some(observe_policy), (&raw mut denied).cast()) },
+        0
+    );
+    assert_eq!(
+        unsafe { kiln_realm_enter(second, Some(observe_policy), (&raw mut allowed).cast()) },
+        0
+    );
+    assert_eq!(denied.0, 0);
+    assert_eq!(allowed.0, 1);
+    assert_eq!(
+        unsafe { kiln_realm_string_code_generation_allowed(std::ptr::null_mut()) },
+        INVALID_ARGUMENT
+    );
+    assert_eq!(kiln_realm_destroy(first), 0);
+    assert_eq!(kiln_realm_destroy(second), 0);
+}
 
 #[test]
 fn scheduled_native_realms_keep_distinct_worker_programs_on_one_lane() {
@@ -2851,6 +3033,427 @@ fn generic_native_host_ops_exchange_live_tcp_bytes_and_resources() {
 }
 
 #[test]
+fn cancelling_queued_accept_retires_its_resource_but_state_query_does_not() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    struct NoopWake;
+    impl std::task::Wake for NoopWake {
+        fn wake(self: std::sync::Arc<Self>) {}
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {}
+    }
+
+    struct Exchange {
+        handle: u64,
+        stage: u8,
+        listener: HostObservation,
+        trigger: HostObservation,
+        borrowed_query: HostObservation,
+        accepted: HostObservation,
+        accepted_after_cancel: HostObservation,
+        listener_after_cancel: HostObservation,
+        close_listener: HostObservation,
+        peer: Option<TcpStream>,
+        requests: [u64; 7],
+        trigger_callback_ran: usize,
+        cancel_query: i32,
+        cancel_accept: i32,
+        accepted_resource: u64,
+        cancel_work_drops: usize,
+    }
+
+    struct CancelQueuedWork {
+        observation: *mut HostObservation,
+        handle: u64,
+        borrowed_request: *const u64,
+        accepted_request: *const u64,
+        cancel_query: *mut i32,
+        cancel_accept: *mut i32,
+        accepted_resource: *mut u64,
+        callback_ran: *mut usize,
+        drop_count: *mut usize,
+    }
+
+    unsafe extern "C" fn cancel_queued_next_tick(
+        pointer: *mut c_void,
+        _host: *mut c_void,
+        _thrown: *mut c_void,
+    ) -> i32 {
+        if pointer.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let work = unsafe { &mut *pointer.cast::<CancelQueuedWork>() };
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let accept_request = unsafe { *work.accepted_request };
+        let resource = realm
+            .queued
+            .borrow()
+            .get(&RequestId::new(accept_request))
+            .copied()
+            .flatten();
+        unsafe { *work.accepted_resource = resource.map_or(0, ResourceId::get) };
+        // Pending-only cancellation must preserve both queued completions and ownership. The
+        // ordinary cancellation below still retires the accepted resource exactly once.
+        if unsafe { kiln_realm_cancel_active_request_if_pending(*work.borrowed_request) } != 2
+            || unsafe { kiln_realm_cancel_active_request_if_pending(accept_request) } != 2
+            || realm
+                .queued
+                .borrow()
+                .get(&RequestId::new(accept_request))
+                .copied()
+                .flatten()
+                != resource
+        {
+            return RUNTIME_ERROR;
+        }
+        unsafe {
+            *work.cancel_query = kiln_realm_cancel_request(work.handle, *work.borrowed_request);
+            *work.cancel_accept = kiln_realm_cancel_request(work.handle, accept_request);
+        }
+        0
+    }
+
+    unsafe extern "C" fn cancel_queued_completions(
+        pointer: *mut c_void,
+        completion: *const CompletionView,
+        host: *mut c_void,
+        thrown: *mut c_void,
+    ) -> i32 {
+        if pointer.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let work = unsafe { &mut *pointer.cast::<CancelQueuedWork>() };
+        let mut host_work = HostWork {
+            observation: work.observation,
+        };
+        let status = unsafe {
+            record_host_completion((&raw mut host_work).cast(), completion, host, thrown)
+        };
+        if status != 0 {
+            return status;
+        }
+        unsafe { *work.callback_ran += 1 };
+        let followup = CancelQueuedWork {
+            observation: ptr::null_mut(),
+            handle: work.handle,
+            borrowed_request: work.borrowed_request,
+            accepted_request: work.accepted_request,
+            cancel_query: work.cancel_query,
+            cancel_accept: work.cancel_accept,
+            accepted_resource: work.accepted_resource,
+            callback_ran: work.callback_ran,
+            drop_count: work.drop_count,
+        };
+        let next_tick = Box::into_raw(Box::new(followup)).cast::<c_void>();
+        let status = unsafe {
+            kiln_realm_queue_next_tick(
+                Some(cancel_queued_next_tick),
+                Some(drop_cancel_queued_work),
+                next_tick,
+            )
+        };
+        if status != 0 {
+            unsafe { drop_cancel_queued_work(next_tick) };
+        }
+        status
+    }
+
+    unsafe extern "C" fn drop_cancel_queued_work(pointer: *mut c_void) {
+        if pointer.is_null() {
+            return;
+        }
+        let work = unsafe { Box::from_raw(pointer.cast::<CancelQueuedWork>()) };
+        if !work.observation.is_null() {
+            unsafe {
+                (*work.observation).drops = (*work.observation).drops.saturating_add(1);
+            }
+        }
+        if !work.drop_count.is_null() {
+            unsafe {
+                *work.drop_count = (*work.drop_count).saturating_add(1);
+            }
+        }
+    }
+
+    unsafe fn start_cancel_queued_op(
+        handle: u64,
+        operation: &HostOpView,
+        work: CancelQueuedWork,
+        request: *mut u64,
+    ) -> i32 {
+        let pointer = Box::into_raw(Box::new(work)).cast::<c_void>();
+        let status = unsafe {
+            kiln_realm_start_host_op(
+                handle,
+                operation,
+                Some(cancel_queued_completions),
+                Some(drop_cancel_queued_work),
+                pointer,
+                request,
+            )
+        };
+        if status != 0 {
+            unsafe { drop_cancel_queued_work(pointer) };
+        }
+        status
+    }
+
+    unsafe extern "C" fn submit_stage(context: *mut c_void) -> i32 {
+        if context.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let exchange = unsafe { &mut *context.cast::<Exchange>() };
+        let host = b"127.0.0.1";
+        match exchange.stage {
+            0 => {
+                let listen = HostOpView {
+                    operation: OP_TCP_LISTEN,
+                    flags: 1,
+                    resource: 0,
+                    argument: 0,
+                    text: host.as_ptr(),
+                    text_len: host.len() as u64,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &listen,
+                        &raw mut exchange.listener,
+                        &raw mut exchange.requests[0],
+                    )
+                }
+            }
+            1 => {
+                let peer = match TcpStream::connect((
+                    "127.0.0.1",
+                    u16::try_from(exchange.listener.resource_port).expect("listener port fits u16"),
+                )) {
+                    Ok(peer) => peer,
+                    Err(_) => return RUNTIME_ERROR,
+                };
+                let _ = peer.set_read_timeout(Some(Duration::from_secs(2)));
+                exchange.peer = Some(peer);
+                let state = HostOpView {
+                    operation: OP_RESOURCE_STATE,
+                    flags: 0,
+                    resource: exchange.listener.resource,
+                    argument: 0,
+                    text: ptr::null(),
+                    text_len: 0,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                let work = CancelQueuedWork {
+                    observation: &raw mut exchange.trigger,
+                    handle: exchange.handle,
+                    borrowed_request: &raw const exchange.requests[2],
+                    accepted_request: &raw const exchange.requests[3],
+                    cancel_query: &raw mut exchange.cancel_query,
+                    cancel_accept: &raw mut exchange.cancel_accept,
+                    accepted_resource: &raw mut exchange.accepted_resource,
+                    callback_ran: &raw mut exchange.trigger_callback_ran,
+                    drop_count: &raw mut exchange.cancel_work_drops,
+                };
+                let status = unsafe {
+                    start_cancel_queued_op(
+                        exchange.handle,
+                        &state,
+                        work,
+                        &raw mut exchange.requests[1],
+                    )
+                };
+                if status != 0 {
+                    return status;
+                }
+                let status = unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &state,
+                        &raw mut exchange.borrowed_query,
+                        &raw mut exchange.requests[2],
+                    )
+                };
+                if status != 0 {
+                    return status;
+                }
+                let accept = HostOpView {
+                    operation: OP_TCP_ACCEPT,
+                    flags: 1,
+                    resource: exchange.listener.resource,
+                    argument: 0,
+                    text: ptr::null(),
+                    text_len: 0,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                let status = unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &accept,
+                        &raw mut exchange.accepted,
+                        &raw mut exchange.requests[3],
+                    )
+                };
+                if status != 0 {
+                    return status;
+                }
+                0
+            }
+            2 => {
+                let state_accepted = HostOpView {
+                    operation: OP_RESOURCE_STATE,
+                    flags: 0,
+                    resource: exchange.accepted_resource,
+                    argument: 0,
+                    text: ptr::null(),
+                    text_len: 0,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                let status = unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &state_accepted,
+                        &raw mut exchange.accepted_after_cancel,
+                        &raw mut exchange.requests[4],
+                    )
+                };
+                if status != 0 {
+                    return status;
+                }
+                let state_listener = HostOpView {
+                    operation: OP_RESOURCE_STATE,
+                    flags: 0,
+                    resource: exchange.listener.resource,
+                    argument: 0,
+                    text: ptr::null(),
+                    text_len: 0,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &state_listener,
+                        &raw mut exchange.listener_after_cancel,
+                        &raw mut exchange.requests[5],
+                    )
+                }
+            }
+            3 => {
+                let close = HostOpView {
+                    operation: OP_CLOSE_RESOURCE,
+                    flags: 0,
+                    resource: exchange.listener.resource,
+                    argument: 0,
+                    text: ptr::null(),
+                    text_len: 0,
+                    bytes: ptr::null(),
+                    bytes_len: 0,
+                };
+                unsafe {
+                    start_test_host_op(
+                        exchange.handle,
+                        &close,
+                        &raw mut exchange.close_listener,
+                        &raw mut exchange.requests[6],
+                    )
+                }
+            }
+            _ => INVALID_ARGUMENT,
+        }
+    }
+
+    let mut handle = 0;
+    let mut exchange = Exchange {
+        handle: 0,
+        stage: 0,
+        listener: HostObservation::default(),
+        trigger: HostObservation::default(),
+        borrowed_query: HostObservation::default(),
+        accepted: HostObservation::default(),
+        accepted_after_cancel: HostObservation::default(),
+        listener_after_cancel: HostObservation::default(),
+        close_listener: HostObservation::default(),
+        peer: None,
+        requests: [0; 7],
+        trigger_callback_ran: 0,
+        cancel_query: -1,
+        cancel_accept: -1,
+        accepted_resource: 0,
+        cancel_work_drops: 0,
+    };
+    assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+    exchange.handle = handle;
+    let mut host = 0_u8;
+    let mut thrown = 0_u8;
+    for stage in 0..=3 {
+        exchange.stage = stage;
+        assert_eq!(
+            unsafe {
+                kiln_realm_enter(
+                    handle,
+                    Some(submit_stage),
+                    (&raw mut exchange).cast::<c_void>(),
+                )
+            },
+            0
+        );
+        // Drive the local TCP accept outside `kiln_realm_enter`. Enter already runs the entry
+        // callback inside this Realm's Tokio runtime; polling the executor from that callback
+        // would attempt to start a nested runtime. Keeping these polls between submission and
+        // `drive` makes the accept completion available for cancellation while its callback is
+        // still queued, which is the state this regression exercises.
+        if stage == 1 {
+            let Some(realm) = realm(handle) else {
+                panic!("the test Realm disappeared before queued cancellation");
+            };
+            let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
+            realm.runtime.executor().poll_local_once(&waker);
+            realm.runtime.executor().poll_local_once(&waker);
+        }
+        assert_eq!(
+            unsafe {
+                kiln_realm_drive(
+                    handle,
+                    (&raw mut host).cast::<c_void>(),
+                    (&raw mut thrown).cast::<c_void>(),
+                )
+            },
+            0
+        );
+        if stage == 1 {
+            assert_eq!(exchange.trigger_callback_ran, 1);
+            assert_eq!(exchange.cancel_query, 0);
+            assert_eq!(exchange.cancel_accept, 0);
+            assert_ne!(exchange.accepted_resource, 0);
+            assert_eq!(exchange.trigger.value_kind, VALUE_RESOURCE_STATE);
+            assert_eq!(exchange.borrowed_query.value_kind, 0);
+            assert_eq!(exchange.accepted.value_kind, 0);
+            assert_eq!(exchange.trigger.drops, 1);
+            assert_eq!(exchange.borrowed_query.drops, 1);
+            assert_eq!(exchange.accepted.drops, 1);
+            assert_eq!(exchange.cancel_work_drops, 2);
+            let mut byte = [0_u8; 1];
+            assert_eq!(exchange.peer.as_mut().unwrap().read(&mut byte).unwrap(), 0);
+        }
+    }
+    assert_ne!(exchange.accepted_after_cancel.status, 0);
+    assert_eq!(exchange.listener_after_cancel.status, 0);
+    assert_eq!(
+        exchange.listener_after_cancel.value_kind,
+        VALUE_RESOURCE_STATE
+    );
+    assert_eq!(exchange.close_listener.status, 0);
+    assert_eq!(kiln_realm_destroy(handle), 0);
+}
+
+#[test]
 fn active_host_op_submission_needs_no_provider_handle() {
     struct Submission {
         observation: *mut HostObservation,
@@ -3260,6 +3863,160 @@ unsafe extern "C" fn arms_short_timer(context: *mut c_void) -> i32 {
     unsafe { kiln_realm_set_timeout(30.0, Some(stamp), Some(no_drop), fired.cast(), &raw mut id) }
 }
 
+#[derive(Clone, Copy)]
+enum DelayedTimerOperation {
+    Timeout,
+    Interval,
+    Refresh,
+    Rearm,
+}
+
+fn wall_clock_delay_after_synchronous_work(operation: DelayedTimerOperation) {
+    struct Timing {
+        operation: DelayedTimerOperation,
+        id: u64,
+        rearmed: bool,
+        armed: Option<std::time::Instant>,
+        fired: Option<std::time::Instant>,
+    }
+    unsafe extern "C" fn no_drop(_: *mut c_void) {}
+    unsafe extern "C" fn fired(
+        context: *mut c_void,
+        _host: *mut c_void,
+        _thrown: *mut c_void,
+    ) -> i32 {
+        // SAFETY: the timing slot outlives both callbacks and the realm drive.
+        let timing = unsafe { &mut *context.cast::<Timing>() };
+        if matches!(timing.operation, DelayedTimerOperation::Rearm) && !timing.rearmed {
+            timing.rearmed = true;
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            timing.armed = Some(std::time::Instant::now());
+            // SAFETY: the same callbacks and timing slot remain live for the second timeout.
+            return unsafe {
+                kiln_realm_rearm_timeout(timing.id, 30.0, Some(fired), Some(no_drop), context)
+            };
+        }
+        timing.fired = Some(std::time::Instant::now());
+        if matches!(timing.operation, DelayedTimerOperation::Interval) {
+            return kiln_realm_clear_timer(timing.id);
+        }
+        0
+    }
+    unsafe extern "C" fn enter(context: *mut c_void) -> i32 {
+        // SAFETY: the test supplies a live, exclusive timing slot for this entry.
+        let timing = unsafe { &mut *context.cast::<Timing>() };
+        if matches!(
+            timing.operation,
+            DelayedTimerOperation::Refresh | DelayedTimerOperation::Rearm
+        ) {
+            // SAFETY: the callbacks and timing slot remain live through the drive.
+            let status = unsafe {
+                kiln_realm_set_timeout(
+                    30.0,
+                    Some(fired),
+                    Some(no_drop),
+                    context,
+                    &raw mut timing.id,
+                )
+            };
+            if status != 0 || matches!(timing.operation, DelayedTimerOperation::Rearm) {
+                return status;
+            }
+        }
+        // A callback may have done substantial work since the queue's last clock tick.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        timing.armed = Some(std::time::Instant::now());
+        match timing.operation {
+            DelayedTimerOperation::Refresh => {
+                if kiln_realm_refresh_timer(timing.id) == 1 {
+                    0
+                } else {
+                    RUNTIME_ERROR
+                }
+            }
+            DelayedTimerOperation::Interval => {
+                // SAFETY: callbacks and context stay live until the interval cancels itself.
+                unsafe {
+                    kiln_realm_set_interval(
+                        30.0,
+                        Some(fired),
+                        Some(no_drop),
+                        context,
+                        &raw mut timing.id,
+                    )
+                }
+            }
+            DelayedTimerOperation::Timeout => {
+                // SAFETY: callbacks and context stay live through the drive.
+                unsafe {
+                    kiln_realm_set_timeout(
+                        30.0,
+                        Some(fired),
+                        Some(no_drop),
+                        context,
+                        &raw mut timing.id,
+                    )
+                }
+            }
+            DelayedTimerOperation::Rearm => {
+                unreachable!("rearm is scheduled from the first callback")
+            }
+        }
+    }
+    let mut handle = 0;
+    let mut timing = Timing {
+        operation,
+        id: 0,
+        rearmed: false,
+        armed: None,
+        fired: None,
+    };
+    // SAFETY: each writable slot and callback context outlives the corresponding call/drive.
+    assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+    assert_eq!(kiln_realm_use_wall_clock(handle), 0);
+    // SAFETY: the entry receives the live Timing slot and callbacks retain it only until drive.
+    assert_eq!(
+        unsafe { kiln_realm_enter(handle, Some(enter), (&raw mut timing).cast()) },
+        0
+    );
+    let mut host = 0_u8;
+    let mut thrown = 0_u8;
+    // SAFETY: host, thrown, and all callback contexts stay live through the synchronous drive.
+    assert_eq!(
+        unsafe { kiln_realm_drive(handle, (&raw mut host).cast(), (&raw mut thrown).cast()) },
+        0
+    );
+    assert_eq!(kiln_realm_destroy(handle), 0);
+    let elapsed = timing
+        .fired
+        .expect("timer fired")
+        .duration_since(timing.armed.expect("timer armed"));
+    assert!(
+        elapsed >= std::time::Duration::from_millis(30),
+        "30ms timer fired after {elapsed:?}"
+    );
+}
+
+#[test]
+fn wall_clock_timer_arming_measures_delay_after_synchronous_work() {
+    wall_clock_delay_after_synchronous_work(DelayedTimerOperation::Timeout);
+}
+
+#[test]
+fn wall_clock_interval_arming_measures_delay_after_synchronous_work() {
+    wall_clock_delay_after_synchronous_work(DelayedTimerOperation::Interval);
+}
+
+#[test]
+fn wall_clock_timer_refresh_measures_delay_after_synchronous_work() {
+    wall_clock_delay_after_synchronous_work(DelayedTimerOperation::Refresh);
+}
+
+#[test]
+fn wall_clock_timer_rearm_measures_delay_after_synchronous_work() {
+    wall_clock_delay_after_synchronous_work(DelayedTimerOperation::Rearm);
+}
+
 #[test]
 fn wall_clock_realm_reads_the_host_and_fires_timers_on_it() -> Result<(), Box<dyn Error>> {
     let mut handle = 0;
@@ -3563,4 +4320,67 @@ mod realm_ffi {
         assert_eq!(again.close_status, 0);
         assert_eq!(kiln_realm_destroy(second), 0);
     }
+}
+
+#[cfg(feature = "realm-http")]
+#[test]
+fn http_callback_failure_terminates_the_parked_realm_drive() {
+    use kiln_runtime::HttpDispatch;
+
+    struct CallbackState {
+        status: i32,
+        calls: usize,
+    }
+    unsafe extern "C" fn fail_http_event(
+        status: *mut c_void,
+        _event: *const HttpEventView,
+        _host: *mut c_void,
+        _thrown: *mut c_void,
+    ) -> i32 {
+        // The stack status stays alive for the complete synchronous event dispatch.
+        let state = unsafe { &mut *status.cast::<CallbackState>() };
+        state.calls += 1;
+        state.status
+    }
+    unsafe extern "C" fn leave_borrowed_status(_status: *mut c_void) {}
+
+    let realm = Rc::new(NativeRealm::new().expect("create realm"));
+    let mut state = CallbackState {
+        status: -7,
+        calls: 0,
+    };
+    let dispatch = NativeHttpDispatch {
+        realm: Rc::downgrade(&realm),
+        resource: kiln_host_abi::ResourceId::new(1),
+        owner: Rc::new(HttpEventOwner {
+            pointer: (&raw mut state).cast(),
+            run: fail_http_event,
+            drop: leave_borrowed_status,
+        }),
+        whole_requests: false,
+    };
+    let event = kiln_runtime::HttpEvent {
+        // A head event reaches the language without needing a real upgrade transport.
+        kind: kiln_runtime::HttpEventKind::ResponseHead,
+        id: 1,
+        write_fence: 0,
+        keep_alive: false,
+        version_minor: 1,
+        status: 101,
+        method: &[],
+        target: &[],
+        reason: &[],
+        headers: &[],
+        data: &[],
+        message: &[],
+    };
+    assert_eq!(dispatch.event(&event), -7);
+    // Another connection's callback cannot replace the first language failure.
+    state.status = -2;
+    assert_eq!(dispatch.event(&event), -7);
+    assert_eq!(
+        state.calls, 1,
+        "another callback must not overwrite the exception"
+    );
+    assert!(matches!(drive_one_ready_turn(&realm), DriveStep::Done(-7)));
 }

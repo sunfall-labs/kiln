@@ -1,6 +1,6 @@
 // kiln-native: stress=skip
 // Message ports, transfer lists and the structured clone: interpreter and native must agree
-// line for line (issue 14 of .scratch/realms-and-concurrency). The native backend copies plain
+// line for line (issue 14 of docs/issues/realms-and-concurrency). The native backend copies plain
 // data in one call (`__kilnCloneData`) and falls back to the shared TypeScript clone for
 // anything else; the interpreter always takes the TypeScript clone, so every line here that
 // clones plain data is also a check that the two paths agree.

@@ -1,6 +1,6 @@
 // kiln-builtins: node:fs implementation (Phase 5.2, ADR 0005)
 
-import { FileHandle, open as openPromise } from "node:fs/promises";
+import { FileHandle, open as openPromise, readdir as readdirPromise } from "node:fs/promises";
 
 const nativeModule =
   typeof process !== "undefined"
@@ -136,6 +136,7 @@ export const stat = makeCallback(statSync);
 export const lstat = makeCallback(lstatSync);
 export const realpath = makeCallback(realpathSync);
 export const readFile = makeCallback(readFileSync);
+export const readdir = makeCallback(readdirSync);
 export const writeFile = makeCallback(writeFileSync);
 export const unlink = makeCallback(unlinkSync);
 // Descriptor callbacks run in a later turn. The host keeps the descriptor table; these adapters
@@ -205,7 +206,7 @@ export const promises: any = {
   lstat: nativePromises?.lstat || unmaterialized("lstat"),
   mkdir: nativePromises?.mkdir || unmaterialized("mkdir"),
   mkdtemp: nativePromises?.mkdtemp || unmaterialized("mkdtemp"),
-  readdir: nativePromises?.readdir || unmaterialized("readdir"),
+  readdir: nativePromises?.readdir || readdirPromise,
   readFile: nativePromises?.readFile || unmaterialized("readFile"),
   readlink: nativePromises?.readlink || unmaterialized("readlink"),
   realpath: nativePromises?.realpath || unmaterialized("realpath"),
@@ -387,6 +388,7 @@ const fsNamespace = {
   readFile,
   readFileSync,
   readSync,
+  readdir,
   readdirSync,
   readlinkSync,
   realpath,

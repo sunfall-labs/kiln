@@ -101,6 +101,43 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
             current = kiln_c99_object_prototype_read(current);
         }
     }
+    if (target.tag == KILN_VALUE_FUNCTION &&
+        !(receiver.tag == target.tag && receiver.bits == target.bits) &&
+        name.tag == KILN_VALUE_STRING) {
+        /* A class constructor's [[Prototype]] is another constructor. When an inherited static
+         * accessor is found there, [[Get]] must still call it with the original derived
+         * constructor as receiver. The ordinary function reader starts a fresh read at each
+         * constructor in the chain, which loses that receiver (for example, an inherited
+         * `static get constraints() { return this.min; }`). Walk only to find accessors here;
+         * data reads and missing names continue through the normal authoritative reader below. */
+        kiln_value current = target;
+        size_t steps;
+        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+            kiln_value store;
+            kiln_value parent;
+            kiln_property property;
+            if (current.tag != KILN_VALUE_FUNCTION ||
+                kiln_c99_callable_store(current, &store, 0) != KILN_C99_OK ||
+                store.tag != KILN_VALUE_OBJECT) {
+                break;
+            }
+            if (kiln_c99_property_read_own_value(store, (const kiln_string *)name.ptr,
+                                                 NULL, &property)) {
+                if (property.accessor && property.getter.tag != KILN_VALUE_UNDEFINED) {
+                    return kiln_c99_call(host, out, property.getter, receiver, NULL, 0,
+                                         depth, thrown);
+                }
+                if (property.accessor) {
+                    KILN_C99_ABSENT("an accessor with no getter, whose read is undefined by "
+                                    "definition", out);
+                }
+                break;
+            }
+            parent = kiln_c99_object_prototype_read(store);
+            if (parent.tag != KILN_VALUE_FUNCTION) break;
+            current = parent;
+        }
+    }
     /* The keyed fast path is for ordinary objects: elemented targets
      * (arrays above all) read through `get_computed`, which is also what
      * this function did for every target before the headed-key migration
@@ -162,6 +199,86 @@ static int kiln_c99_set_with_receiver(kiln_host *host, kiln_value target, kiln_v
     }
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_set_with_receiver(host, target, key, value, receiver, strict, depth, thrown);
+    }
+    /* OrdinarySetWithOwnDescriptor keeps the original receiver. Callable targets have a
+     * separate property store, and a proxy receiver must observe GetOwnProperty/DefineOwnProperty
+     * rather than receiving a write directly in the target's store. */
+    if (kiln_c99_is_callable(target) || receiver.tag == KILN_VALUE_PROXY) {
+        kiln_value name = kiln_c99_property_key(key);
+        kiln_value descriptor = kiln_c99_undefined();
+        kiln_value field = kiln_c99_undefined();
+        kiln_value definition = kiln_c99_undefined();
+        int found = 0, present = 0, accepted = 0;
+        if (name.tag != KILN_VALUE_STRING)
+            KILN_C99_REFUSE("a receiver write key with no property spelling");
+        const kiln_string *view = (const kiln_string *)name.ptr;
+        int status = kiln_c99_describe_property_key(host, target, view, NULL,
+                                                   &descriptor, &found, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (!found) {
+            kiln_value parent = kiln_c99_undefined();
+            status = kiln_c99_invoke_method(host, &parent,
+                KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF, kiln_c99_undefined(),
+                &target, 1, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (parent.tag != KILN_VALUE_NULL && parent.tag != KILN_VALUE_UNDEFINED) {
+                if (depth >= KILN_C99_MAX_PROTOTYPE_DEPTH)
+                    KILN_C99_REFUSE("a receiver write exceeded the prototype depth limit");
+                return kiln_c99_set_with_receiver(host, parent, key, value, receiver,
+                                                  strict, depth + 1, thrown);
+            }
+        } else {
+            status = kiln_c99_descriptor_field(host, descriptor, "set", &field,
+                                               &present, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (present) {
+                if (field.tag == KILN_VALUE_UNDEFINED)
+                    return strict ? kiln_c99_throw_read_only_key(thrown, view) : KILN_C99_OK;
+                kiln_value ignored;
+                return kiln_c99_call(host, &ignored, field, receiver, &value, 1, depth, thrown);
+            }
+            status = kiln_c99_get(host, descriptor, "writable", 8, &field, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!kiln_c99_truthy(field))
+                return strict ? kiln_c99_throw_read_only_key(thrown, view) : KILN_C99_OK;
+        }
+        if (!kiln_c99_is_reference(receiver) && receiver.tag != KILN_VALUE_DATE)
+            return strict ? kiln_c99_throw_cannot_set(thrown, receiver) : KILN_C99_OK;
+        status = kiln_c99_describe_property_key(host, receiver, view, NULL,
+                                               &descriptor, &found, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (found) {
+            status = kiln_c99_descriptor_field(host, descriptor, "set", &field,
+                                               &present, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (present)
+                return strict ? kiln_c99_throw_read_only_key(thrown, view) : KILN_C99_OK;
+            status = kiln_c99_get(host, descriptor, "writable", 8, &field, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!kiln_c99_truthy(field))
+                return strict ? kiln_c99_throw_read_only_key(thrown, view) : KILN_C99_OK;
+        }
+        status = kiln_c99_new_object(&definition);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(host, definition, "value", 5, value, depth, thrown);
+        if (!found && status == KILN_C99_OK)
+            status = kiln_c99_put(host, definition, "writable", 8, kiln_c99_boolean(1), depth, thrown);
+        if (!found && status == KILN_C99_OK)
+            status = kiln_c99_put(host, definition, "enumerable", 10, kiln_c99_boolean(1), depth, thrown);
+        if (!found && status == KILN_C99_OK)
+            status = kiln_c99_put(host, definition, "configurable", 12, kiln_c99_boolean(1), depth, thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_reflect_define_property(host, receiver, key, definition,
+                                                     &accepted, depth, thrown);
+        kiln_c99_gc_keep_alive(&target);
+        kiln_c99_gc_keep_alive(&receiver);
+        kiln_c99_gc_keep_alive(&key);
+        kiln_c99_gc_keep_alive(&name);
+        kiln_c99_gc_keep_alive(&value);
+        kiln_c99_gc_keep_alive(&descriptor);
+        kiln_c99_gc_keep_alive(&definition);
+        if (status != KILN_C99_OK) return status;
+        return !accepted && strict ? kiln_c99_throw_read_only_key(thrown, view) : KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_OBJECT) {
         kiln_value name = kiln_c99_property_key(key);
@@ -376,32 +493,177 @@ static int kiln_c99_proxy_describe(kiln_host *host, kiln_value proxy, kiln_value
     }
 }
 
+static int kiln_c99_proxy_target_extensible(kiln_value target, int *out) {
+    kiln_value store;
+    int status;
+    if (target.tag == KILN_VALUE_OBJECT) {
+        kiln_object *object = kiln_c99_object_of(target);
+        *out = !object->module_namespace && !object->not_extensible && !object->frozen;
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(target);
+        *out = !array->not_extensible && !array->frozen;
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        status = kiln_c99_function_store(target, &store);
+    } else {
+        kiln_value *exotic = kiln_c99_exotic_store(target);
+        if (exotic != NULL) {
+            if (exotic->tag != KILN_VALUE_OBJECT) {
+                *out = 1;
+                return KILN_C99_OK;
+            }
+            store = *exotic;
+            status = KILN_C99_OK;
+        } else {
+            status = kiln_c99_definition_store(target, &store);
+        }
+    }
+    if (status != KILN_C99_OK) return status;
+    if (store.tag != KILN_VALUE_OBJECT) {
+        KILN_C99_REFUSE("Proxy defineProperty invariant needs target extensibility");
+    }
+    *out = !kiln_c99_object_of(store)->not_extensible && !kiln_c99_object_of(store)->frozen;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_proxy_same_value(kiln_value left, kiln_value right) {
+    if (left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER) {
+        double a = kiln_c99_as_number(left);
+        double b = kiln_c99_as_number(right);
+        return (isnan(a) && isnan(b)) || (a == b && (a != 0.0 || signbit(a) == signbit(b)));
+    }
+    return kiln_c99_strict_equal(left, right);
+}
+
+static int kiln_c99_proxy_define_invariant(kiln_host *host, kiln_value target, kiln_value key,
+                                           kiln_c99_property_descriptor *requested, int depth,
+                                           kiln_value *thrown) {
+    kiln_value name = kiln_c99_property_key(key);
+    kiln_value own_descriptor;
+    const kiln_string *view;
+    const kiln_string *canonical = kiln_c99_property_ikey(key);
+    kiln_c99_property_descriptor current;
+    int found = 0;
+    int extensible = 0;
+    int status;
+    if (name.tag != KILN_VALUE_STRING) {
+        KILN_C99_REFUSE("Proxy defineProperty invariant needs a string-backed key");
+    }
+    view = (const kiln_string *)name.ptr;
+    status = kiln_c99_describe_property_key(host, target, view, canonical, &own_descriptor,
+                                            &found, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_proxy_target_extensible(target, &extensible);
+    if (status != KILN_C99_OK) return status;
+    if (!found) {
+        if (!extensible) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Proxy defineProperty trap cannot add to a non-extensible target");
+        }
+        if (requested->has_configurable && !kiln_c99_truthy(requested->configurable)) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Proxy defineProperty trap cannot add a non-configurable property");
+        }
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_to_property_descriptor(host, own_descriptor, &current, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    int current_configurable = current.has_configurable && kiln_c99_truthy(current.configurable);
+    int requested_accessor = requested->has_getter || requested->has_setter;
+    int requested_data = requested->has_value || requested->has_writable;
+    int current_accessor = current.has_getter || current.has_setter;
+    int current_data = current.has_value || current.has_writable;
+    if (current_configurable) {
+        return requested->has_configurable && !kiln_c99_truthy(requested->configurable)
+                   ? kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                          "Proxy defineProperty trap cannot make a configurable target property non-configurable")
+                   : KILN_C99_OK;
+    }
+    if ((requested->has_configurable && kiln_c99_truthy(requested->configurable)) ||
+        (requested->has_enumerable &&
+         kiln_c99_truthy(requested->enumerable) != kiln_c99_truthy(current.enumerable)) ||
+        (requested_accessor && current_data) || (requested_data && current_accessor)) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Proxy defineProperty trap reported an incompatible non-configurable property");
+    }
+    if (!requested_accessor && !requested_data) return KILN_C99_OK;
+    if (requested_data) {
+        int current_writable = current.has_writable && kiln_c99_truthy(current.writable);
+        if (!current_writable &&
+            ((requested->has_writable && kiln_c99_truthy(requested->writable)) ||
+             (requested->has_value && !kiln_c99_proxy_same_value(requested->value,
+                                                                  current.value)))) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Proxy defineProperty trap changed a locked data property");
+        }
+        if (current_writable && requested->has_writable &&
+            !kiln_c99_truthy(requested->writable)) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Proxy defineProperty trap cannot report a writable target as non-writable");
+        }
+    } else {
+        if ((requested->has_getter &&
+             !kiln_c99_proxy_same_value(requested->getter, current.getter)) ||
+            (requested->has_setter &&
+             !kiln_c99_proxy_same_value(requested->setter, current.setter))) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Proxy defineProperty trap changed a locked accessor property");
+        }
+    }
+    (void)extensible;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_proxy_define(kiln_host *host, kiln_value proxy, kiln_value key,
-                                 kiln_value descriptor, int depth, kiln_value *thrown) {
+                                 kiln_value descriptor, int depth, kiln_value *thrown,
+                                 int *refusal) {
     kiln_value trap;
     kiln_value inner = kiln_c99_proxy_of(proxy)->target;
     kiln_value handler = kiln_c99_proxy_of(proxy)->handler;
-    int status = kiln_c99_proxy_trap(host, proxy, "defineProperty", &trap, depth, thrown);
+    kiln_c99_property_descriptor parsed;
+    int status = kiln_c99_to_property_descriptor(host, descriptor, &parsed, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    /* ToPropertyDescriptor runs before the proxy's revocation check and trap lookup. */
+    status = kiln_c99_proxy_trap(host, proxy, "defineProperty", &trap, depth, thrown);
     if (status != KILN_C99_OK) {
         return status;
     }
     if (trap.tag == KILN_VALUE_UNDEFINED) {
         kiln_value name = kiln_c99_property_key(key);
+        kiln_value snapshot;
         if (name.tag != KILN_VALUE_STRING) {
             KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                             "slot");
         }
-        return kiln_c99_define_property_key(host, inner, (const kiln_string *)name.ptr,
-                                            (const kiln_string *)name.ptr, descriptor, depth,
-                                            thrown);
+        status = kiln_c99_from_property_descriptor(&parsed, &snapshot);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_define_property_key_answer(host, inner, (const kiln_string *)name.ptr,
+                                                   (const kiln_string *)name.ptr, snapshot,
+                                                   depth, thrown, refusal, NULL);
     }
     {
+        kiln_value snapshot;
         kiln_value arguments[3];
         kiln_value ignored;
+        status = kiln_c99_from_property_descriptor(&parsed, &snapshot);
+        if (status != KILN_C99_OK) return status;
         arguments[0] = inner;
         arguments[1] = key;
-        arguments[2] = descriptor;
-        return kiln_c99_call(host, &ignored, trap, handler, arguments, 3, depth, thrown);
+        arguments[2] = snapshot;
+        status = kiln_c99_call(host, &ignored, trap, handler, arguments, 3, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (!kiln_c99_truthy(ignored)) {
+            if (refusal != NULL) {
+                *refusal = 1;
+                return KILN_C99_OK;
+            }
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "proxy defineProperty trap refused the definition");
+        }
+        return kiln_c99_proxy_define_invariant(host, inner, key, &parsed, depth, thrown);
     }
 }
 

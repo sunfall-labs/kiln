@@ -14,10 +14,16 @@ import { EventEmitter } from "node:events";
 
 const G = globalThis as any;
 
-// The ports, the clone and the runtime operations, from the bootstrap that owns them. Absent
-// outside Node mode, where the realm has no web messaging globals.
-const internals: any =
-  typeof G.MessagePort === "function" ? G.MessagePort[Symbol.for("kiln.messagePort")] : undefined;
+// The ports, the clone and the runtime operations, from the bootstrap that owns them, through the
+// realm's engine-private object (readable only while this module initializes). Absent outside
+// Node mode, where the realm has no web messaging globals.
+const enginePrivate: any = G.__kilnPrivate;
+const internals: any = enginePrivate?.messagePort;
+// Whether kiln's extensions are installed: the actor entry below exists only then.
+const kilnExtensions: boolean = enginePrivate?.extensions === true;
+// Open only while `enginePrivate.spawnActorWorker` constructs a Worker for kiln:actors.
+let actorEntryOpen = false;
+const ACTOR_WORKER_ENTRY = "kiln:actors/worker";
 
 // `kiln_runtime::workers` operation numbers and message kinds (the bootstrap's own list).
 const OP_CHANNEL = 1, OP_CLOSE = 4, OP_ENQUEUE = 6, OP_SPAWN = 9, OP_TERMINATE = 10, OP_REAP = 13;
@@ -149,8 +155,10 @@ function stringList(value: any, name: string): string[] {
 // against the working directory), or a `file:` URL.
 function scriptPath(filename: any): string {
   if (typeof filename === "string") {
-    // Engine-owned actor entry: it is a linked virtual module rather than a file on disk.
-    if (filename === "kiln:actors/worker") return filename;
+    // Engine-owned actor entry: it is a linked virtual module rather than a file on disk. Only
+    // kiln:actors may name it (through `enginePrivate.spawnActorWorker`); to a program it is a
+    // string that is not a path, which node refuses the same way.
+    if (filename === ACTOR_WORKER_ENTRY && actorEntryOpen) return filename;
     if (filename.startsWith("file:")) return scriptPath(new URL(filename));
     if (filename.startsWith("/") || filename.startsWith("./") || filename.startsWith("../") ||
         (filename.length > 2 && filename[1] === ":" && (filename[2] === "\\" || filename[2] === "/"))) {
@@ -353,10 +361,22 @@ export class Worker extends EventEmitter {
     return this.#exited ? -1 : this.#threadId;
   }
 
-  // The actor mailbox uses the worker's own channel. The host knows the peer of this
-  // endpoint as WorkerContext.spec.port and can authenticate the receiving realm.
-  [Symbol.for("kiln.actor.senderEndpoint")](): number {
-    return internals.portEndpoint(this.#port);
+  static {
+    if (kilnExtensions) {
+      // The actor mailbox uses the worker's own channel. The host knows the peer of this
+      // endpoint as WorkerContext.spec.port and can authenticate the receiving realm. Reached
+      // by kiln:actors through the engine-private object, never as a member of the class.
+      enginePrivate.senderEndpoint = (worker: Worker): number => internals.portEndpoint(worker.#port);
+      enginePrivate.spawnActorWorker = (entry: string, options: any): Worker => {
+        if (entry !== ACTOR_WORKER_ENTRY) throw new TypeError("not an actor worker entry");
+        actorEntryOpen = true;
+        try {
+          return new Worker(entry, options);
+        } finally {
+          actorEntryOpen = false;
+        }
+      };
+    }
   }
 
   get resourceLimits(): any {
@@ -395,8 +415,8 @@ export class Worker extends EventEmitter {
 }
 
 // The structured clone's own marks (crates/kiln-builtins/src/structured_clone.ts), reached through
-// the symbol the bootstrap hangs them on: this module is not part of that script.
-const cloneInternals: any = (globalThis as any).structuredClone?.[Symbol.for("kiln.structuredClone")];
+// the engine-private object the bootstrap publishes them on: this module is not part of that script.
+const cloneInternals: any = enginePrivate?.structuredClone;
 
 /// A marked object in a transfer list is a DataCloneError; cloned, it is still copied.
 export function markAsUntransferable(obj: any): void {
@@ -426,8 +446,8 @@ export function postMessageToThread(_threadId: any, _value: any, _transferList?:
 // Take the oldest message a port has not yet dispatched, wrapped, as Node does, whether or not
 // the port has been started -- from this realm's queue or, for a port whose other end is in
 // another realm, from the runtime's. The port's queue is private to `MessagePort`
-// (web_events_streams.ts), which hands this module its `receive` through the same kind of
-// symbol-keyed internals the structured clone uses.
+// (web_events_streams.ts), which hands this module its `receive` through the same engine-private
+// object the structured clone uses.
 export function receiveMessageOnPort(port: any): any {
   if (internals === undefined || !(port instanceof MessagePort)) {
     const error: any = new TypeError('The "port" argument must be a MessagePort instance');

@@ -254,8 +254,12 @@ pub(crate) fn check_source_types(
         .parent()
         .into_iter()
         .flat_map(|parent| parent.ancestors())
-        .map(|parent| parent.join("tsconfig.json").to_string_lossy().into_owned())
-        .find(|path| snapshot.auxiliary_files.contains_key(path));
+        .find_map(|parent| {
+            ["tsconfig.json", "tsconfig.jsonc"]
+                .into_iter()
+                .map(|name| parent.join(name).to_string_lossy().into_owned())
+                .find(|path| snapshot.auxiliary_files.contains_key(path))
+        });
     let current_directory = config_path
         .as_deref()
         .and_then(|path| std::path::Path::new(path).parent())
@@ -298,7 +302,7 @@ fn uploaded_package_root(
 /// still share the source view, graph cache and conformance catalog. Each channel has its own
 /// staging transaction and a full-size request stack, just like a daemon connection.
 pub struct LocalClient {
-    sender: Option<mpsc::Sender<(Request, mpsc::SyncSender<Response>)>>,
+    sender: Option<mpsc::Sender<(Request, mpsc::SyncSender<Response>, bool)>>,
     serving: Option<JoinHandle<()>>,
     state: Arc<Mutex<DaemonState<MemoEngine>>>,
     tests: Arc<crate::testing::ConformanceCoordinator>,
@@ -325,7 +329,7 @@ impl LocalClient {
         state: Arc<Mutex<DaemonState<MemoEngine>>>,
         tests: Arc<crate::testing::ConformanceCoordinator>,
     ) -> io::Result<Self> {
-        let (sender, receiver) = mpsc::channel::<(Request, mpsc::SyncSender<Response>)>();
+        let (sender, receiver) = mpsc::channel::<(Request, mpsc::SyncSender<Response>, bool)>();
         let lane_state = Arc::clone(&state);
         let lane_tests = Arc::clone(&tests);
         let serving = thread::Builder::new()
@@ -333,7 +337,17 @@ impl LocalClient {
             .spawn(move || {
                 let mut pending = None;
                 let mut next_sync_id = 0;
-                while let Ok((request, reply)) = receiver.recv() {
+                while let Ok((request, reply, inherit_native)) = receiver.recv() {
+                    let _inherit_native =
+                        inherit_native.then(crate::stream::install_inherit_native_output);
+                    let streaming = crate::stream::wants_stream(&request).then(|| {
+                        let frames = reply.clone();
+                        crate::stream::install(crate::stream::OutputSink::new(Box::new(
+                            move |stream, text| {
+                                let _ = frames.send(Response::Output { stream, text });
+                            },
+                        )))
+                    });
                     let (response, next) = handle(
                         &lane_state,
                         &lane_tests,
@@ -341,6 +355,7 @@ impl LocalClient {
                         &mut next_sync_id,
                         request,
                     );
+                    drop(streaming);
                     let _ = reply.send(response);
                     if next != Next::Continue {
                         break;
@@ -356,15 +371,49 @@ impl LocalClient {
     }
 
     pub fn request(&mut self, request: Request) -> io::Result<Response> {
+        self.request_streaming(request, &mut |_, _| {})
+    }
+
+    /// As [`Self::request`], passing the program's output to `on_output` as it arrives when the
+    /// request sets `stream_output`; the answer then carries empty `stdout`/`stderr`.
+    pub fn request_streaming(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+    ) -> io::Result<Response> {
+        self.request_with_output_mode(request, on_output, false)
+    }
+
+    /// As [`Self::request_streaming`], but asks native execution to inherit this process's
+    /// stdout/stderr descriptors instead of transporting chunks. Used only by `--one-shot`.
+    pub fn request_native_inheriting(&mut self, request: Request) -> io::Result<Response> {
+        self.request_with_output_mode(request, &mut |_, _| {}, true)
+    }
+
+    fn request_with_output_mode(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(kiln_proto::OutputStream, &str),
+        inherit_native: bool,
+    ) -> io::Result<Response> {
         let (reply, answer) = mpsc::sync_channel(1);
         self.sender
             .as_ref()
             .ok_or_else(|| io::Error::new(ErrorKind::BrokenPipe, "local engine is closed"))?
-            .send((request, reply))
+            .send((request, reply, inherit_native))
             .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "local engine stopped"))?;
-        answer.recv().map_err(|_| {
-            io::Error::new(ErrorKind::UnexpectedEof, "local engine dropped its answer")
-        })
+        loop {
+            match answer.recv() {
+                Ok(Response::Output { stream, text }) => on_output(stream, &text),
+                Ok(response) => return Ok(response),
+                Err(_) => {
+                    return Err(io::Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "local engine dropped its answer",
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -590,13 +639,27 @@ fn serve_connection<E: QueryEngine>(
         };
 
         let (response, next) = match serde_json::from_str::<Request>(&frame) {
-            Ok(request) => handle(
-                state,
-                &shared.tests,
-                &mut pending,
-                &mut next_sync_id,
-                request,
-            ),
+            Ok(request) => {
+                // Held across the request: output frames go out on this socket while the
+                // program runs, ahead of the one answer written below.
+                let _streaming = crate::stream::wants_stream(&request)
+                    .then(|| writer.try_clone().ok())
+                    .flatten()
+                    .map(|mut frames| {
+                        crate::stream::install(crate::stream::OutputSink::new(Box::new(
+                            move |stream, text| {
+                                let _ = respond(&mut frames, &Response::Output { stream, text });
+                            },
+                        )))
+                    });
+                handle(
+                    state,
+                    &shared.tests,
+                    &mut pending,
+                    &mut next_sync_id,
+                    request,
+                )
+            }
             // Line framing resynchronises on its own, so a garbled request costs one response,
             // not the connection.
             Err(error) => (
@@ -948,9 +1011,43 @@ fn handle<E: QueryEngine>(
             project_root,
             args,
             node,
+            wall_clock,
             steps,
             source_view,
-        } => handle_run(state, path, project_root, args, node, steps, source_view),
+            stream_output: _,
+        } => handle_run(
+            state,
+            path,
+            project_root,
+            args,
+            node,
+            wall_clock,
+            steps,
+            source_view,
+        ),
+        Request::NodeRun {
+            path,
+            project_root,
+            args,
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+            wall_clock,
+            steps,
+            source_view,
+            stream_output: _,
+        } => handle_node_run(
+            state,
+            path,
+            project_root,
+            args,
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+            wall_clock,
+            steps,
+            source_view,
+        ),
         Request::TestInventory { root } => {
             run_without_engine_lock(|| match tests.inventory(&root) {
                 Ok(tests) => Response::TestInventory(tests),
@@ -1101,10 +1198,12 @@ fn handle<E: QueryEngine>(
             args: _,
             profile,
             node,
+            wall_clock,
             source_view,
             static_link,
             pgo_generate,
             pgo_use,
+            stream_output: _,
         } => {
             let prepared = match prepare_native_snapshot(
                 state,
@@ -1127,6 +1226,7 @@ fn handle<E: QueryEngine>(
                         project_root,
                         profile,
                         node,
+                        wall_clock,
                         static_link,
                         pgo_gen,
                         pgo_u,
@@ -1172,6 +1272,7 @@ fn handle_run<E: QueryEngine>(
     project_root: String,
     args: Vec<String>,
     node: bool,
+    wall_clock: bool,
     steps: StepBudget,
     source_view: SourceView,
 ) -> (Response, Next) {
@@ -1273,6 +1374,9 @@ fn handle_run<E: QueryEngine>(
                 graph: Ok(graph),
                 path,
                 args,
+                exec_argv: Vec::new(),
+                disallow_string_code_generation: false,
+                has_preloads: false,
                 file,
                 revision,
                 overlay,
@@ -1325,6 +1429,9 @@ fn handle_run<E: QueryEngine>(
                         graph: Ok(graph),
                         path,
                         args,
+                        exec_argv: Vec::new(),
+                        disallow_string_code_generation: false,
+                        has_preloads: false,
                         file,
                         revision,
                         overlay,
@@ -1338,6 +1445,9 @@ fn handle_run<E: QueryEngine>(
                         graph: Err(error),
                         path,
                         args,
+                        exec_argv: Vec::new(),
+                        disallow_string_code_generation: false,
+                        has_preloads: false,
                         file,
                         revision,
                         overlay: std::collections::HashMap::new(),
@@ -1346,7 +1456,71 @@ fn handle_run<E: QueryEngine>(
             }
         }
     };
-    run_without_engine_lock(|| execute_prepared_run(prepared, node, steps))
+    run_without_engine_lock(|| execute_prepared_run(prepared, node, wall_clock, steps))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_node_run<E: QueryEngine>(
+    state: &Mutex<DaemonState<E>>,
+    path: String,
+    project_root: String,
+    args: Vec<String>,
+    preloads: Vec<String>,
+    exec_argv: Vec<String>,
+    disallow_string_code_generation: bool,
+    wall_clock: bool,
+    steps: StepBudget,
+    source_view: SourceView,
+) -> (Response, Next) {
+    let prepared = {
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.source_view != source_view {
+            return (
+                Response::StaleSourceView {
+                    current: guard.source_view,
+                },
+                Next::Continue,
+            );
+        }
+        let revision = guard.engine.revision().0;
+        let resolutions = guard.resolutions.clone();
+        match panic::catch_unwind(AssertUnwindSafe(|| {
+            let DaemonState {
+                engine,
+                graph_cache,
+                ..
+            } = &mut *guard;
+            crate::dispatch::prepare_run_with_launch_options(
+                engine,
+                Some(graph_cache),
+                path,
+                args,
+                project_root,
+                resolutions.as_ref(),
+                true,
+                preloads,
+                exec_argv,
+                disallow_string_code_generation,
+            )
+        })) {
+            Ok(Ok(prepared)) if guard.engine.revision().0 == revision => prepared,
+            Ok(Ok(_)) => {
+                match next_source_view(guard.source_view) {
+                    Ok(view) => guard.source_view = view,
+                    Err(message) => return (Response::Error { message }, Next::Continue),
+                }
+                return (
+                    Response::StaleSourceView {
+                        current: guard.source_view,
+                    },
+                    Next::Continue,
+                );
+            }
+            Ok(Err(message)) => return (Response::Error { message }, Next::Continue),
+            Err(payload) => return (internal_error(&*payload), Next::Continue),
+        }
+    };
+    run_without_engine_lock(|| execute_prepared_run(prepared, true, wall_clock, steps))
 }
 
 /// Prepare a native build against one exact engine snapshot, compile without the lock, and

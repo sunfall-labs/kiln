@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 3 of the parallel built-ins (.scratch/parallel-builtins issue 08): callbacks that build
+// Tier 3 of the parallel built-ins (docs/issues/parallel-builtins issue 08): callbacks that build
 // objects -- literals, `{ ...r, total }`, members that overwrite a spread one, values whose kind
 // varies (a slot's double bit is part of its shape), computed keys, nested literals and arrays --
 // run on the pool in worker arenas and must answer exactly what `map` answers: the same values

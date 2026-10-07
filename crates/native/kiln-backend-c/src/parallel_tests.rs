@@ -96,11 +96,15 @@ fn one_site(callback: Option<FunctionProto>, extra: usize, constants: Constants)
     Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: constants.0,
         code,
         local_count: 0,
         functions: callback.into_iter().collect(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     }
 }
 
@@ -360,11 +364,15 @@ fn tier_1_a_capture_written_once_is_parallel_and_one_written_twice_is_not() {
         let program = Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: constants.0,
             code,
             local_count: 1,
             functions: vec![callback],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         };
         let records = sites(&program, EmissionPolicy::default());
         assert_eq!(records.len(), 1, "{records:?}");
@@ -475,13 +483,13 @@ fn lower(expr: &Expr, constants: &mut Constants, code: &mut Vec<Instruction>) {
             code.push(Instruction::Binary(*op));
         }
         Expr::Math1(f, e) => {
-            code.push(Instruction::LoadBuiltin(Builtin::Math));
+            code.push(Instruction::LoadIntrinsicBuiltin(Builtin::Math));
             lower(e, constants, code);
             let name = constants.string(f);
             code.push(Instruction::CallMethod { name, argc: 1 });
         }
         Expr::Math2(f, a, b) => {
-            code.push(Instruction::LoadBuiltin(Builtin::Math));
+            code.push(Instruction::LoadIntrinsicBuiltin(Builtin::Math));
             lower(a, constants, code);
             lower(b, constants, code);
             let name = constants.string(f);
@@ -640,11 +648,15 @@ fn compare_with(
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: constants.0,
         code,
         local_count: 3,
         functions,
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit_with_policy(&program, policy).expect("emits");
     let records = SiteRecord::parse_all(&generated.source);
@@ -949,11 +961,15 @@ fn family_site(
     Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: constants.0,
         code,
         local_count: 0,
         functions: callbacks,
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     }
 }
 
@@ -1180,11 +1196,15 @@ fn tier_2_reads_run_in_the_pool_and_match_the_sequential_methods() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: constants.0,
         code,
         local_count: 1,
         functions: vec![product(), product(), positive(), positive()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit_with_policy(&program, EmissionPolicy::default()).expect("emits");
     let records = SiteRecord::parse_all(&generated.source);
@@ -1337,11 +1357,15 @@ fn tier_3_builds_run_in_worker_arenas_and_match_the_sequential_methods() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: constants.0,
         code,
         local_count: 1,
         functions: vec![joined(), joined(), enriched, read(s), read(q)],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit_with_policy(&program, EmissionPolicy::default()).expect("emits");
     // Both sites sit at the same (empty) source position, so their records are one.
@@ -1424,7 +1448,7 @@ fn tier_4_pure_calls_run_in_the_pool_and_match_the_sequential_methods() {
                     name: split,
                     argc: 1,
                 },
-                Instruction::LoadBuiltin(Builtin::Number),
+                Instruction::LoadIntrinsicBuiltin(Builtin::Number),
                 Instruction::CallMethod { name: map, argc: 1 },
                 Instruction::Const(bar),
                 Instruction::CallMethod {
@@ -1501,11 +1525,15 @@ fn tier_4_pure_calls_run_in_the_pool_and_match_the_sequential_methods() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: constants.0,
         code,
         local_count: 1,
         functions: vec![parse(), parse(), shout(), shout(), upper_case],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit_with_policy(&program, EmissionPolicy::default()).expect("emits");
     let records = SiteRecord::parse_all(&generated.source);

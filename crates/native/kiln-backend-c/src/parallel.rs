@@ -815,7 +815,7 @@ impl Proof<'_> {
                     | GraphOp::CheckTdz { .. } => None,
                     // `Math` is a value; every other built-in is a placeholder, held to its uses.
                     GraphOp::LoadBuiltin(_) => None,
-                    GraphOp::Unary { op, .. } => matches!(op, UnaryOp::TypeOf)
+                    GraphOp::Unary { op, .. } => matches!(op, UnaryOp::TypeOf | UnaryOp::ToString)
                         .then(|| Refusal::with(Reason::UnsupportedOperation, format!("{op:?}"))),
                     GraphOp::Binary { op, .. } => {
                         matches!(op, kiln_ir::BinaryOp::In | kiln_ir::BinaryOp::InstanceOf)
@@ -880,13 +880,17 @@ impl Proof<'_> {
                         }
                     }
                     GraphOp::GetComputed { .. } => None,
-                    GraphOp::SetProperty { name, .. } | GraphOp::SetPropertyStrict { name, .. } => {
+                    GraphOp::SetProperty { name, .. }
+                    | GraphOp::SetPropertyStrict { name, .. }
+                    | GraphOp::DefineOwnProperty { name, .. } => {
                         Some(match constant_name(program, *name) {
                             Some(n) => Refusal::with(Reason::WritesProperty, n),
                             None => Refusal::new(Reason::WritesProperty),
                         })
                     }
-                    GraphOp::SetComputed { .. } | GraphOp::SetComputedStrict { .. } => {
+                    GraphOp::SetComputed { .. }
+                    | GraphOp::SetComputedStrict { .. }
+                    | GraphOp::DefineOwnComputed { .. } => {
                         Some(Refusal::new(Reason::WritesProperty))
                     }
                     // Tier 3: literals the worker builds in its arena, as the sequential literal
@@ -966,6 +970,13 @@ impl Proof<'_> {
                     GraphOp::LoadCell(_) | GraphOp::StoreCell { .. } => {
                         Some(Refusal::with(Reason::Allocates, "a cell"))
                     }
+                    GraphOp::CallMethod {
+                        prepared_callee: Some(_),
+                        ..
+                    } => Some(Refusal::with(
+                        Reason::CallsImpure,
+                        "a method whose callee is saved before arguments",
+                    )),
                     GraphOp::CallMethod {
                         object, name, args, ..
                     } => {
@@ -1841,15 +1852,17 @@ pub fn parallel_verdict(
                     None => Refusal::new(Reason::ReadsProperty),
                 }),
                 GraphOp::GetComputed { .. } => Some(Refusal::new(Reason::ReadsProperty)),
-                GraphOp::SetProperty { name, .. } | GraphOp::SetPropertyStrict { name, .. } => {
+                GraphOp::SetProperty { name, .. }
+                | GraphOp::SetPropertyStrict { name, .. }
+                | GraphOp::DefineOwnProperty { name, .. } => {
                     Some(match constant_name(program, *name) {
                         Some(n) => Refusal::with(Reason::WritesProperty, n),
                         None => Refusal::new(Reason::WritesProperty),
                     })
                 }
-                GraphOp::SetComputed { .. } | GraphOp::SetComputedStrict { .. } => {
-                    Some(Refusal::new(Reason::WritesProperty))
-                }
+                GraphOp::SetComputed { .. }
+                | GraphOp::SetComputedStrict { .. }
+                | GraphOp::DefineOwnComputed { .. } => Some(Refusal::new(Reason::WritesProperty)),
                 GraphOp::NewArray { .. }
                 | GraphOp::NewObject { .. }
                 | GraphOp::MakeFunction { .. }
@@ -2352,6 +2365,9 @@ mod tests {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![
                 Constant::Number(1.0f64.to_bits()),
                 Constant::String("sqrt".into()),
@@ -2365,6 +2381,7 @@ mod tests {
             local_count: 0,
             functions: vec![proto.clone()],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         }
     }
 
@@ -2433,21 +2450,21 @@ mod tests {
     #[test]
     fn rule_3_allowlisted_math_qualifies_and_other_math_does_not() {
         let sqrt = vec![
-            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Math),
             Instruction::LoadLocal(0),
             Instruction::CallMethod { name: 1, argc: 1 },
             Instruction::Return,
         ];
         assert!(safe(proto(sqrt, 1)));
         let sin = vec![
-            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Math),
             Instruction::LoadLocal(0),
             Instruction::CallMethod { name: 2, argc: 1 },
             Instruction::Return,
         ];
         assert!(safe(proto(sin, 1)));
         let random = vec![
-            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Math),
             Instruction::CallMethod { name: 5, argc: 0 },
             Instruction::Return,
         ];
@@ -2672,7 +2689,7 @@ mod tests {
     #[test]
     fn reason_calls() {
         let random = vec![
-            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Math),
             Instruction::CallMethod { name: 5, argc: 0 },
             Instruction::Return,
         ];
@@ -3003,7 +3020,7 @@ mod tests {
                 vec![
                     Instruction::LoadLocal(0),
                     Instruction::GetProperty(4),
-                    Instruction::LoadBuiltin(Builtin::String),
+                    Instruction::LoadIntrinsicBuiltin(Builtin::String),
                     Instruction::LoadLocal(0),
                     Instruction::GetProperty(4),
                     Instruction::Call { argc: 1 },
@@ -3022,7 +3039,7 @@ mod tests {
             heap(
                 proto(
                     vec![
-                        Instruction::LoadBuiltin(Builtin::String),
+                        Instruction::LoadIntrinsicBuiltin(Builtin::String),
                         Instruction::Return
                     ],
                     1
@@ -3203,6 +3220,9 @@ mod tests {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: constants
                 .iter()
                 .map(|c| Constant::String((*c).into()))
@@ -3211,6 +3231,7 @@ mod tests {
             local_count: 0,
             functions,
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         }
     }
 
@@ -3270,7 +3291,7 @@ mod tests {
                     Instruction::CallMethod { name: 0, argc: 0 },
                     Instruction::Const(2),
                     Instruction::CallMethod { name: 1, argc: 1 },
-                    Instruction::LoadBuiltin(Builtin::Number),
+                    Instruction::LoadIntrinsicBuiltin(Builtin::Number),
                     Instruction::CallMethod { name: 3, argc: 1 },
                     Instruction::Return,
                 ],
@@ -3307,13 +3328,13 @@ mod tests {
             (Reason::CallsImpure, Some(".push()"))
         );
         let random = refused(vec![
-            Instruction::LoadBuiltin(Builtin::Math),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Math),
             Instruction::CallMethod { name: 1, argc: 0 },
             Instruction::Return,
         ]);
         assert_eq!(random.detail.as_deref(), Some("Math.random"));
         let now = refused(vec![
-            Instruction::LoadBuiltin(Builtin::Date),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Date),
             Instruction::CallMethod { name: 2, argc: 0 },
             Instruction::Return,
         ]);
@@ -3323,7 +3344,7 @@ mod tests {
         );
         // A pure global passed anywhere but as a callback is a value the clone never makes.
         let passed = refused(vec![
-            Instruction::LoadBuiltin(Builtin::Number),
+            Instruction::LoadIntrinsicBuiltin(Builtin::Number),
             Instruction::Return,
         ]);
         assert_eq!(passed.reason, Reason::UnsupportedOperation);
@@ -3543,10 +3564,10 @@ mod tests {
     fn tier_4_a_key_comparator_may_call_a_pure_global() {
         // `(a, b) => parseInt(a) - parseInt(b)`: a key, read from each side the same way.
         let code = vec![
-            Instruction::LoadBuiltin(Builtin::ParseInt),
+            Instruction::LoadIntrinsicBuiltin(Builtin::ParseInt),
             Instruction::LoadLocal(0),
             Instruction::Call { argc: 1 },
-            Instruction::LoadBuiltin(Builtin::ParseInt),
+            Instruction::LoadIntrinsicBuiltin(Builtin::ParseInt),
             Instruction::LoadLocal(1),
             Instruction::Call { argc: 1 },
             Instruction::Binary(BinaryOp::Subtract),
@@ -3562,10 +3583,10 @@ mod tests {
         // A call to anything else is not a key.
         let other = proto(
             vec![
-                Instruction::LoadBuiltin(Builtin::Date),
+                Instruction::LoadIntrinsicBuiltin(Builtin::Date),
                 Instruction::LoadLocal(0),
                 Instruction::Call { argc: 1 },
-                Instruction::LoadBuiltin(Builtin::Date),
+                Instruction::LoadIntrinsicBuiltin(Builtin::Date),
                 Instruction::LoadLocal(1),
                 Instruction::Call { argc: 1 },
                 Instruction::Binary(BinaryOp::Subtract),

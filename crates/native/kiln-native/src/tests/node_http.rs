@@ -132,16 +132,35 @@ const server = http.createServer((request, response) => {
 });
 server.listen(0, "127.0.0.1", () => {
   const request = http.request({ host: "127.0.0.1", port: server.address().port, path: "/" }, (response) => {
+    if (!request.socket || request.connection !== request.socket) throw new Error("client request socket");
+    if (response.socket !== request.socket || response.connection !== request.socket) throw new Error("client response socket");
+    if (socketEvents !== 1) throw new Error("client socket event count");
     response.on("data", () => {});
     response.on("end", () => {});
   });
+  let socketEvents = 0;
+  request.on("error", (error) => console.log("client request error event", error.code));
+  request.on("socket", (socket) => {
+    socketEvents++;
+    if (request.socket !== socket || request.connection !== socket) throw new Error("client socket event identity");
+    if (!socket.connecting) throw new Error("client socket event must precede TCP connect");
+    socket.on("connect", () => console.log("client TCP connect event"));
+    console.log("client socket event", request.socket === socket);
+    console.log("client write after end", request.write("late", (error) => {
+      console.log("client write callback", error.code);
+    }));
+  });
+  if (request.socket !== null || request.connection !== null) throw new Error("client socket before connect");
   request.end();
 });
 "#,
     ) else {
         return;
     };
-    assert_eq!(output, "200 false false false\n201 true false\ntrue true\n");
+    assert_eq!(
+        output,
+        "client socket event true\nclient write after end false\nclient write callback ERR_STREAM_WRITE_AFTER_END\nclient request error event ERR_STREAM_WRITE_AFTER_END\nclient TCP connect event\n200 false false false\n201 true false\ntrue true\n"
+    );
 }
 
 #[test]
@@ -272,6 +291,7 @@ fn native_node_net_source_graph_builds_through_the_production_frontend() {
         &entry,
         r#"import { createServer } from "node:net";
 const server = createServer((socket) => {
+  socket.setEncoding("utf8");
   socket.on("data", (chunk) => {
     console.log(chunk);
     socket.end();
@@ -388,10 +408,12 @@ const socket = connect({port}, "127.0.0.1", () => {{
   if (socket.readyState !== "open") throw new Error("socket was not open");
   socket.end("final bytes");
   if (socket.readyState !== "readOnly") throw new Error("socket was not read-only");
+  console.log("write after end", socket.write("late", (error) => console.log("write callback", error.code)));
 }});
 let reply = "";
 socket.setEncoding("utf8");
 socket.on("data", chunk => reply += chunk);
+socket.on("error", error => console.log("write error event", error.code));
 socket.on("end", () => {{}});
 socket.on("close", () => {{
   if (socket.readyState !== "closed") throw new Error("socket was not closed");
@@ -429,7 +451,10 @@ socket.on("close", () => {{
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"reply\n");
+    assert_eq!(
+        output.stdout,
+        b"write after end false\nwrite callback ERR_STREAM_WRITE_AFTER_END\nwrite error event ERR_STREAM_WRITE_AFTER_END\nreply\n"
+    );
 }
 
 #[test]
@@ -976,9 +1001,19 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
     let stdout = child.stdout.take().expect("capture server stdout");
     let mut stdout = std::io::BufReader::new(stdout);
     let mut listening = String::new();
-    stdout
+    let read = stdout
         .read_line(&mut listening)
         .expect("read delayed-close listening port");
+    if read == 0 {
+        let output = child
+            .wait_with_output()
+            .expect("reap delayed-close server before listen");
+        panic!(
+            "delayed-close server exited before listening: status={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let port: u16 = listening
         .trim()
         .parse()

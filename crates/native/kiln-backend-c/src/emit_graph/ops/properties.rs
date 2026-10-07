@@ -5,6 +5,10 @@ use crate::graph::{GraphOp, ValueId, resolve_const_string};
 use kiln_ir::Constant;
 use std::fmt::Write;
 
+fn prepared_method_property(vid: ValueId, ctx: &OpContext) -> bool {
+    ctx.prepared_method_properties.contains(&vid)
+}
+
 /// `GraphOp::GetProperty { object, name, .. }`, moved out of `emit_graph_op`'s match verbatim.
 pub(super) fn emit_get_property(
     output: &mut String,
@@ -29,6 +33,23 @@ pub(super) fn emit_get_property(
         .get(&vid)
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
+    if prepared_method_property(vid, ctx) {
+        let key_str = match program.constants.get(*name as usize) {
+            Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+            _ => String::new(),
+        };
+        let operation = crate::string::c_string(&format!("GetProperty({key_str})"));
+        let operation = &operation[1..operation.len() - 1];
+        let check = status_check(diagnostic_site, pc, operation, unwind);
+        let source = crate::diagnostic_source(diagnostic_site);
+        writeln!(
+            output,
+            "    {{ static kiln_c99_site site = {{0}}; int status = kiln_c99_val_prepare_method_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, {source}, (size_t){pc}, \"{operation}\", &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}",
+            o = object.0,
+        )
+        .unwrap();
+        return;
+    }
     if let Some(&root) = graph.scalar_alias_map.get(object)
         && let Some(scalar_obj) = graph.scalar_objects.get(&root)
     {
@@ -231,7 +252,7 @@ pub(super) fn emit_get_property(
                          void *ptr = KILN_VAL_PTR(v{o}); \
                          if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_COLLECTION) {{ \
                              const kiln_collection *col = (const kiln_collection *)ptr; \
-                             if (!col->is_weak) {{ \
+                             if (kiln_c99_collection_intrinsic_method_allowed(col, \"size\", sizeof(\"size\") - 1)) {{ \
                                  {size_int_stmt}{size_double_stmt}{size_box_stmt} \
                                  handled = 1; \
                              }} \
@@ -242,11 +263,10 @@ pub(super) fn emit_get_property(
     } else {
         String::new()
     };
-    // A read of `this`: the function's receiver-shape cache answers first, one indexed
-    // load and no compare, because the shape was matched once at entry. The boxed
-    // clone, whose slow path is the one that learns, fills the row afterwards.
-    // A read of `this`: the function's receiver-shape cache answers with one indexed
-    // load when the receiver's shape has a row, which was filled whole from the shape.
+    // A receiver row is valid only while `this` still has the shape it had at entry.
+    // Calls can delete or redefine properties, which materializes the object as a
+    // dictionary while leaving its old slots allocated. Keep the row fast path guarded
+    // by that original shape; otherwise fall through to the ordinary property site.
     let is_typed_entry = matches!(ctx.kind, EntryKind::Typed { .. });
     let (receiver_tier, receiver_learn) = match (this_site, self_index) {
         (Some(_), Some(_)) if ctx.this_copy.is_some() => {
@@ -259,12 +279,16 @@ pub(super) fn emit_get_property(
                     String::new()
                 };
                 (
-                    format!("if (recv_row != NULL) {{ d{v} = d{prev};{box_stmt} handled = 1; }} "),
+                    format!(
+                        "if (recv_row != NULL && recv_obj->shape == recv_shape) {{ d{v} = d{prev};{box_stmt} handled = 1; }} "
+                    ),
                     String::new(),
                 )
             } else {
                 (
-                    format!("if (recv_row != NULL) {{ v{v} = v{prev}; handled = 1; }} "),
+                    format!(
+                        "if (recv_row != NULL && recv_obj->shape == recv_shape) {{ v{v} = v{prev}; handled = 1; }} "
+                    ),
                     String::new(),
                 )
             }
@@ -272,26 +296,21 @@ pub(super) fn emit_get_property(
         (Some(i), Some(_)) => {
             let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
             if is_typed_entry && typed {
-                let box_stmt_inline = if need_box {
-                    format!(" v{v} = recv_obj->inline_slots[recv_row[{i}]];")
-                } else {
-                    String::new()
-                };
-                let box_stmt_heap = if need_box {
+                let box_stmt = if need_box {
                     format!(" v{v} = recv_obj->slots[recv_row[{i}]];")
                 } else {
                     String::new()
                 };
                 (
                     format!(
-                        "if (recv_row != NULL) {{ if (recv_row[{i}] < KILN_C99_INLINE_SLOTS) {{ memcpy(&d{v}, &recv_obj->inline_slots[recv_row[{i}]], sizeof(double));{box_stmt_inline} }} else {{ memcpy(&d{v}, &recv_obj->slots[recv_row[{i}]], sizeof(double));{box_stmt_heap} }} handled = 1; }} "
+                        "if (recv_row != NULL && recv_obj->shape == recv_shape) {{ memcpy(&d{v}, &recv_obj->slots[recv_row[{i}]], sizeof(double));{box_stmt} handled = 1; }} "
                     ),
                     String::new(),
                 )
             } else {
                 (
                     format!(
-                        "if (recv_row != NULL) {{ v{v} = recv_row[{i}] < KILN_C99_INLINE_SLOTS ? recv_obj->inline_slots[recv_row[{i}]] : recv_obj->slots[recv_row[{i}]]; handled = 1; }} "
+                        "if (recv_row != NULL && recv_obj->shape == recv_shape) {{ v{v} = recv_obj->slots[recv_row[{i}]]; handled = 1; }} "
                     ),
                     String::new(),
                 )
@@ -302,6 +321,10 @@ pub(super) fn emit_get_property(
     if is_typed_entry && this_site.is_some() {
         let prev = ctx.this_copy.map(|c| c.0);
         let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+        let slow_read = format!(
+            "{{ static kiln_c99_site fallback_site = {{0}}; int status = kiln_c99_val_read_property_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &fallback_site, &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}",
+            o = object.0,
+        );
         let int_sync = if typed_int {
             format!(" i{v} = (int64_t)d{v};")
         } else {
@@ -309,38 +332,33 @@ pub(super) fn emit_get_property(
         };
         match (this_site, prev) {
             (Some(_), Some(prev_vid)) => {
-                let box_stmt = if need_box {
-                    format!(" v{v} = v{prev_vid};")
-                } else {
-                    String::new()
-                };
                 if typed {
-                    writeln!(output, "    d{v} = d{prev_vid};{box_stmt}{int_sync}").unwrap();
+                    let box_stmt = if need_box {
+                        format!(" v{v} = v{prev_vid};")
+                    } else {
+                        String::new()
+                    };
+                    writeln!(output, "    if (KILN_UNLIKELY(recv_obj->shape != recv_shape)) goto kiln_refusal; d{v} = d{prev_vid};{box_stmt}{int_sync}").unwrap();
                 } else {
-                    writeln!(output, "    v{v} = v{prev_vid};{int_sync}").unwrap();
+                    writeln!(output, "    if (recv_obj->shape == recv_shape) v{v} = v{prev_vid}; else {slow_read}").unwrap();
                 }
             }
             (Some(col_idx), None) => {
                 if typed {
-                    let box_stmt_inline = if need_box {
-                        format!(" v{v} = recv_obj->inline_slots[recv_row[{col_idx}]];")
-                    } else {
-                        String::new()
-                    };
-                    let box_stmt_heap = if need_box {
+                    let box_stmt = if need_box {
                         format!(" v{v} = recv_obj->slots[recv_row[{col_idx}]];")
                     } else {
                         String::new()
                     };
                     writeln!(
                         output,
-                        "    if (recv_row[{col_idx}] < KILN_C99_INLINE_SLOTS) {{ memcpy(&d{v}, &recv_obj->inline_slots[recv_row[{col_idx}]], sizeof(double));{box_stmt_inline} }} else {{ memcpy(&d{v}, &recv_obj->slots[recv_row[{col_idx}]], sizeof(double));{box_stmt_heap} }}{int_sync}"
+                        "    if (KILN_UNLIKELY(recv_obj->shape != recv_shape)) goto kiln_refusal; memcpy(&d{v}, &recv_obj->slots[recv_row[{col_idx}]], sizeof(double));{box_stmt}{int_sync}"
                     )
                     .unwrap();
                 } else {
                     writeln!(
                         output,
-                        "    v{v} = recv_row[{col_idx}] < KILN_C99_INLINE_SLOTS ? recv_obj->inline_slots[recv_row[{col_idx}]] : recv_obj->slots[recv_row[{col_idx}]];{int_sync}"
+                        "    if (recv_obj->shape == recv_shape) v{v} = recv_obj->slots[recv_row[{col_idx}]]; else {slow_read}"
                     )
                     .unwrap();
                 }
@@ -630,6 +648,46 @@ pub(super) fn emit_set_property(
                 typed_sync = typed_sync,
             )
             .unwrap();
+}
+
+pub(super) fn emit_define_own_property(
+    output: &mut String,
+    vid: ValueId,
+    object: &ValueId,
+    name: &u32,
+    value: &ValueId,
+    ctx: &OpContext,
+) {
+    let (pc, label) = ctx
+        .origins
+        .get(&vid)
+        .map(|origin| (origin.pc, origin.label.as_str()))
+        .unwrap_or((0, "Op"));
+    let check = status_check(ctx.diagnostic_site, pc, label, ctx.unwind);
+    writeln!(output,
+        "    {{ int status = kiln_c99_create_data_property(host, kiln_val_to_boundary(v{}), kiln_c99_value(KILN_VALUE_STRING, 0, (const char *){}_key_{}, {}_key_{}->unit_len), kiln_val_to_boundary(v{}), depth, thrown); {} v{} = v{}; }}",
+        object.0, ctx.symbol, name, ctx.symbol, name, value.0, check, vid.0, value.0)
+        .unwrap();
+}
+
+pub(super) fn emit_define_own_computed(
+    output: &mut String,
+    vid: ValueId,
+    object: &ValueId,
+    key: &ValueId,
+    value: &ValueId,
+    ctx: &OpContext,
+) {
+    let (pc, label) = ctx
+        .origins
+        .get(&vid)
+        .map(|origin| (origin.pc, origin.label.as_str()))
+        .unwrap_or((0, "Op"));
+    let check = status_check(ctx.diagnostic_site, pc, label, ctx.unwind);
+    writeln!(output,
+        "    {{ int status = kiln_c99_create_data_property(host, kiln_val_to_boundary(v{}), kiln_val_to_boundary(v{}), kiln_val_to_boundary(v{}), depth, thrown); {} v{} = v{}; }}",
+        object.0, key.0, value.0, check, vid.0, value.0)
+        .unwrap();
 }
 
 /// `GraphOp::GetComputed { object, key, .. }`, moved out of `emit_graph_op`'s match verbatim.

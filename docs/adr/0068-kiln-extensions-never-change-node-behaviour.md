@@ -42,12 +42,65 @@ behave differently from Node.**
 4. **On by default, with one switch to remove them all.** `kiln build --no-kiln-extensions` for a
    binary, and `KILN_EXTENSIONS=0` at run time for either engine, install exactly Node's surface.
    The switch is for the rare program that audits the built-ins; nobody should need it otherwise.
-5. **One definition.** The engines own the extension. A package that also offers it
-   (`@kiln/concurrency`) defines its fallback only when the method is absent, so under kiln there
-   are never two definitions competing.
+5. **One definition.** The engines own the extension. A package that also offers it defines its
+   fallback only when the method is absent, so under kiln there are never two definitions
+   competing. (Since 2026-10-02 no kiln package offers one: `@kiln/concurrency` is removed, and
+   `@kiln/types` only declares the engine's members.)
 6. **Proven, not argued.** Test262, `conformance/thirdparty` and the deploy corpus
    (`.scratch/deploy-with-kiln/`) run with extensions installed and must stay identical to Node. A
    regression an extension causes fails the gate like any other divergence.
+
+### 2026-10-02 amendment: one name per module, Node's modules exactly Node's
+
+**Names.** Every module kiln adds is `kiln:<library>` (and `kiln:<library>/<subpath>`), as Node's
+are `node:<name>` (ADR 0074 §1 gives the reasons). No package re-exports one under a second name;
+`@kiln/concurrency` (a second name for `kiln:actors`) and `@kiln/effect` were removed for that.
+Editors get every `kiln:` module's types, and the parallel collection methods', from one package,
+`@kiln/types`, generated from the engine's sources by `scripts/gen-kiln-types.sh`, the way
+`@types/node` describes `node:*`.
+
+**A `node:` module is Node's and nothing else.** `node:process` (and bare `process`) is the global
+`process`: its default export is that object and its named exports are its own enumerable
+members, so `import { on } from "node:process"` fails at link time exactly as in Node. kiln's
+process API (`run`) is `kiln:process`, never a member of `process` or a name in Node's namespace.
+`process.cwd`, `exit`, `kill`, `nextTick`, `hrtime` and `getBuiltinModule` are enumerable own
+properties and the emitter methods inherited, as in Node; host hooks are not enumerable.
+
+**One virtual path per module.** A builtin's virtual path carries its scheme --
+`.kiln/builtins/<scheme>/<name>.builtin`, so `.kiln/builtins/node/process.builtin` and
+`.kiln/builtins/kiln/process.builtin` -- and the path names exactly one specifier
+(`ModuleSpecifier::virtual_path` and its inverse, `builtin`). Before, `node:process` and
+`kiln:process` shared a path.
+
+## Amendment 2026-10-02: modules, globals and private channels
+
+Rule 4's switch removes every kiln extension, and an audit found four places it did not:
+
+- **Modules.** With extensions off, every `kiln:` module refuses, internal ones included, with one
+  error in both engines and for static and dynamic imports alike: a `TypeError` naming the module
+  (`kiln:actors requires enabled Kiln extensions`; `kiln:actors/core` and `kiln:actors/worker` name
+  their owner). The refusal is the module's own first statement, so nothing about it is engine
+  specific. `kiln:actors/core` and `kiln:actors/worker` are engine-internal: only an engine builtin
+  may import them (the resolver and the interpreter's dynamic loader refuse any other importer with
+  `` `kiln:actors/core` is internal to kiln:actors ``), and `new Worker("kiln:actors/worker")` from a
+  program is a `ERR_WORKER_PATH` like any string that is not a path.
+- **Globals.** `Kiln` and `Bun` are declared extensions (`owner: "globalThis"`), installed only
+  when extensions are, and non-enumerable.
+- **Private channels.** Nothing the engine passes between its own modules is a property a program
+  can find. There is one channel, a realm-private object, `__kilnPrivate`. The bootstrap captures it
+  from the global object and deletes the name before any program line runs; each builtin module
+  can read `globalThis.__kilnPrivate` only while its own top-level code runs, in a window the
+  engine opens and closes around that code (native: a read overlay and a per-realm GC-rooted slot;
+  interpreter: one global property added and removed again). It carries `extensions`, the
+  engine's operations that exist only with extensions (`share`, `sharedIs`, `hostProcessStart`,
+  `hostProcessCancel`), and what bootstrap pieces publish for modules (`messagePort`,
+  `structuredClone`, `senderEndpoint`, `spawnActorWorker`). No `Symbol.for("kiln...")` key remains
+  on any built-in, and a program cannot forge an actor mark, which is an unregistered symbol.
+- `KILN_ENGINE_PRIVATE_FOR_TESTS=1` leaves the name readable. It exists for the conformance probes
+  that drive the actor protocol directly (forged requests, a patched `workerOp`, a stranger binding
+  a mailbox) and is off in both engines unless whoever launches the process sets it -- node's own
+  test suite reaches its internals the same way, with `--expose-internals`. An environment
+  variable is the launcher's choice, never the program's, so it widens nothing a program can do.
 
 ## Consequences
 

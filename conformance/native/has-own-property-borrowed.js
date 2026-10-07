@@ -74,6 +74,13 @@ both("weakmap absent", new WeakMap(), "anything");
 both("promise absent", Promise.resolve(1), "anything");
 both("date absent", new Date(0), "anything");
 both("generator absent", counting(), "next");
+both("generator inherited iterator", counting(), Symbol.iterator);
+both("async generator inherited next", (async function* () {})(), "next");
+both("map inherited get", new Map(), "get");
+both("weakmap inherited has", new WeakMap(), "has");
+const generatorWithOwn = counting();
+Object.defineProperty(generatorWithOwn, "next", { value: undefined, configurable: true });
+both("generator own undefined", generatorWithOwn, "next");
 both("map toStringTag", new Map(), Symbol.toStringTag);
 
 // Primitives go through `ToObject`, and the wrapper owns nothing: `description` and `toFixed` are

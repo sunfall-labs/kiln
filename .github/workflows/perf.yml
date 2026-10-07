@@ -63,6 +63,8 @@ jobs:
         with:
           key: clean-build
           cache-targets: "false"
+      # kiln-host-gui's Linux widget backend links GTK 4 (ADR 0074), and the workspace builds it.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev
       - run: bash scripts/ci-rebuild-timing.sh clean
       # §12 asks for `cargo build --timings` to be inspected regularly, which means it has to
       # be somewhere you can click on. Uploaded even on failure: a build that just got slow
@@ -89,6 +91,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rebuilds
+      # kiln-host-gui's Linux widget backend links GTK 4 (ADR 0074), and the workspace builds it.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev
       - run: bash scripts/ci-rebuild-timing.sh incremental
       - if: always()
         uses: actions/upload-artifact@v4

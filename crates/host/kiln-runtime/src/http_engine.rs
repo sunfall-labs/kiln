@@ -10,27 +10,29 @@
 //! the language never observes a callback from inside another.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::future::Future;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::{Body as _, Frame, Incoming};
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
-use hyper::service::service_fn;
+use hyper::service::{Service, service_fn};
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto;
 use kiln_host_abi::ResourceId;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::Notify;
 
-use crate::HttpCloseMode;
 use crate::http_body::{BodyEvent, BodySink, ResponseBody, ResponseBodyDriver};
 use crate::node_stream::WriteDisposition;
+use crate::{HttpCloseMode, UpgradeWriteReceipt};
 
 fn configured_http3() -> bool {
     static FROM_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -82,6 +84,340 @@ pub trait HostIo: AsyncRead + AsyncWrite + Unpin {}
 
 impl<T: AsyncRead + AsyncWrite + Unpin> HostIo for T {}
 
+const HTTP2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// Replays only the bounded protocol-sniff bytes before delegating to the original transport.
+/// This mirrors hyper-util's version detector without introducing HTTP framing logic, while
+/// allowing the ordinary Hyper path to retain the bytes it already consumed.
+struct PrefixIo<T> {
+    inner: T,
+    prefix: Vec<u8>,
+    offset: usize,
+    defer_eof_once: bool,
+    eof_seen: bool,
+    eof_deferral_started: bool,
+    eof_deferral_complete: Option<Rc<Cell<bool>>>,
+    node_fin_response_complete: Option<Rc<Cell<bool>>>,
+    peer_fin_pending: Option<Rc<Cell<bool>>>,
+    node_fin_notified: bool,
+    peer_fin: Option<Rc<Notify>>,
+}
+
+impl<T> PrefixIo<T> {
+    fn new(inner: T, prefix: Vec<u8>) -> Self {
+        Self {
+            inner,
+            prefix,
+            offset: 0,
+            defer_eof_once: false,
+            eof_seen: false,
+            eof_deferral_started: false,
+            eof_deferral_complete: None,
+            node_fin_response_complete: None,
+            peer_fin_pending: None,
+            node_fin_notified: false,
+            peer_fin: None,
+        }
+    }
+
+    fn defer_eof_once(&mut self) {
+        self.defer_eof_once = true;
+        self.eof_deferral_complete = Some(Rc::new(Cell::new(false)));
+    }
+
+    fn note_eof(&mut self) {
+        self.eof_seen = true;
+    }
+
+    fn apply_node_fin_policy(
+        &mut self,
+        response_complete: Rc<Cell<bool>>,
+        peer_fin_pending: Rc<Cell<bool>>,
+    ) {
+        self.node_fin_response_complete = Some(response_complete);
+        if self.eof_seen {
+            peer_fin_pending.set(true);
+        }
+        self.peer_fin_pending = Some(peer_fin_pending);
+    }
+
+    fn set_peer_fin_notify(&mut self, peer_fin: Rc<Notify>) {
+        self.peer_fin = Some(peer_fin);
+    }
+
+    fn poll_after_eof_yield(&mut self) -> Poll<std::io::Result<()>> {
+        if self
+            .node_fin_response_complete
+            .as_ref()
+            .is_some_and(|complete| complete.get())
+        {
+            trace!("HTTP/1 peer FIN after completed response");
+            if !self.node_fin_notified {
+                self.node_fin_notified = true;
+                if let Some(peer_fin) = &self.peer_fin {
+                    peer_fin.notify_one();
+                }
+            }
+            // Keep Hyper from treating a request FIN as an incomplete response while the
+            // connection driver performs a graceful close after the already-finished reply.
+            Poll::Pending
+        } else {
+            trace!("HTTP/1 peer FIN aborted unfinished response");
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "peer ended the request before the response completed",
+            )))
+        }
+    }
+
+    fn schedule_eof_deferral(&mut self, cx: &Context<'_>) {
+        if self.eof_deferral_started {
+            return;
+        }
+        self.eof_deferral_started = true;
+        let complete = Rc::clone(
+            self.eof_deferral_complete
+                .as_ref()
+                .expect("EOF deferral state is installed with the policy"),
+        );
+        let waker = cx.waker().clone();
+        tokio::task::spawn_local(async move {
+            tokio::task::yield_now().await;
+            complete.set(true);
+            waker.wake();
+        });
+    }
+
+    fn into_parts(self) -> (T, Vec<u8>) {
+        (self.inner, self.prefix[self.offset..].to_vec())
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for PrefixIo<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.offset < self.prefix.len() {
+            let length = (self.prefix.len() - self.offset).min(buffer.remaining());
+            let end = self.offset + length;
+            buffer.put_slice(&self.prefix[self.offset..end]);
+            self.offset = end;
+            return Poll::Ready(Ok(()));
+        }
+        if self.defer_eof_once && self.eof_seen {
+            self.schedule_eof_deferral(cx);
+            if !self
+                .eof_deferral_complete
+                .as_ref()
+                .is_some_and(|complete| complete.get())
+            {
+                return Poll::Pending;
+            }
+            return self.poll_after_eof_yield();
+        }
+        if buffer.remaining() == 0 {
+            return Pin::new(&mut self.inner).poll_read(cx, buffer);
+        }
+        let filled_before = buffer.filled().len();
+        match Pin::new(&mut self.inner).poll_read(cx, buffer) {
+            Poll::Ready(Ok(())) if buffer.filled().len() == filled_before => {
+                trace!("HTTP/1 transport observed EOF");
+                self.eof_seen = true;
+                if self.defer_eof_once {
+                    if let Some(pending) = &self.peer_fin_pending {
+                        pending.set(true);
+                    }
+                    self.schedule_eof_deferral(cx);
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+            result => result,
+        }
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for PrefixIo<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, bytes)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+async fn detect_server_protocol(
+    mut io: Box<dyn HostIo>,
+) -> std::io::Result<(bool, PrefixIo<Box<dyn HostIo>>)> {
+    let mut prefix = Vec::with_capacity(HTTP2_PREFACE.len());
+    let mut is_http2 = true;
+    let mut saw_eof = false;
+    while prefix.len() < HTTP2_PREFACE.len() {
+        let before = prefix.len();
+        let mut bytes = [0u8; 24];
+        let capacity = HTTP2_PREFACE.len() - before;
+        let length = io.read(&mut bytes[..capacity]).await?;
+        if length == 0 {
+            is_http2 = false;
+            saw_eof = true;
+            break;
+        }
+        prefix.extend_from_slice(&bytes[..length]);
+        if prefix[before..] != HTTP2_PREFACE[before..before + length] {
+            is_http2 = false;
+            break;
+        }
+    }
+    let mut replay = PrefixIo::new(io, prefix);
+    if saw_eof {
+        replay.note_eof();
+    }
+    Ok((is_http2, replay))
+}
+
+/// A byte stream Hyper released after an HTTP/1 protocol upgrade. `head` contains bytes Hyper
+/// had already read beyond the HTTP request/response header; callers deliver it exactly once
+/// before starting ordinary socket reads.
+pub struct UpgradeTransport {
+    pub transport: HostTransport,
+    pub head: Vec<u8>,
+    /// Bytes written after the 101 response head while Hyper still owned the stream. The host
+    /// installs these as a prefix so they precede every later raw-socket write.
+    pub pending_write: Vec<u8>,
+    /// Callback fences in raw-stream byte order. Offsets are relative to `pending_write`.
+    pub write_fences: Vec<UpgradeWriteFenceBoundary>,
+    /// Completes when the host has written `pending_write`, allowing the engine to publish
+    /// `Drain` only after those bytes have left the user-space queue.
+    pub write_completion: Arc<UpgradeWriteCompletion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpgradeWriteFenceBoundary {
+    pub fence: u64,
+    pub offset: usize,
+}
+
+#[derive(Clone)]
+struct UpgradeWriteFailure {
+    kind: std::io::ErrorKind,
+    message: String,
+}
+
+/// Completion for the first raw-protocol write queued before Hyper released the stream. This
+/// state is shared with the host writer; readers never wait on it, preserving full-duplex I/O.
+pub struct UpgradeWriteCompletion {
+    result: Mutex<Option<Result<(), UpgradeWriteFailure>>>,
+    fences: Mutex<HashMap<u64, Option<Result<(), UpgradeWriteFailure>>>>,
+    notify: Notify,
+}
+
+impl UpgradeWriteCompletion {
+    fn pending() -> Arc<Self> {
+        Arc::new(Self {
+            result: Mutex::new(None),
+            fences: Mutex::new(HashMap::default()),
+            notify: Notify::new(),
+        })
+    }
+
+    fn register_fence(&self, fence: u64) {
+        if let Ok(mut fences) = self.fences.lock() {
+            fences.entry(fence).or_insert(None);
+        }
+    }
+
+    pub(crate) fn complete_fence(&self, fence: u64, result: std::io::Result<()>) {
+        let result = result.map_err(|error| UpgradeWriteFailure {
+            kind: error.kind(),
+            message: error.to_string(),
+        });
+        if let Ok(mut fences) = self.fences.lock()
+            && let Some(slot) = fences.get_mut(&fence)
+            && slot.is_none()
+        {
+            *slot = Some(result.clone());
+            self.notify.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn wait_fence(&self, fence: u64) -> std::io::Result<()> {
+        loop {
+            let notified = self.notify.notified();
+            let result = self
+                .fences
+                .lock()
+                .ok()
+                .and_then(|fences| fences.get(&fence).cloned().flatten());
+            if let Some(result) = result {
+                return result
+                    .map_err(|failure| std::io::Error::new(failure.kind, failure.message));
+            }
+            notified.await;
+        }
+    }
+
+    fn fence_result(&self, fence: u64) -> Option<std::io::Result<()>> {
+        self.fences
+            .lock()
+            .ok()
+            .and_then(|fences| fences.get(&fence).cloned().flatten())
+            .map(|result| {
+                result.map_err(|failure| std::io::Error::new(failure.kind, failure.message))
+            })
+    }
+
+    pub(crate) fn complete(&self, result: std::io::Result<()>) {
+        let result = result.map_err(|error| UpgradeWriteFailure {
+            kind: error.kind(),
+            message: error.to_string(),
+        });
+        if let Ok(mut slot) = self.result.lock()
+            && slot.is_none()
+        {
+            *slot = Some(result);
+            if let Some(Err(failure)) = slot.as_ref() {
+                if let Ok(mut fences) = self.fences.lock() {
+                    for result in fences.values_mut() {
+                        if result.is_none() {
+                            *result = Some(Err(failure.clone()));
+                        }
+                    }
+                }
+            }
+            self.notify.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn wait(&self) -> std::io::Result<()> {
+        loop {
+            let notified = self.notify.notified();
+            if let Some(result) = self.result.lock().ok().and_then(|slot| slot.clone()) {
+                return result
+                    .map_err(|failure| std::io::Error::new(failure.kind, failure.message));
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) fn completed() -> Arc<Self> {
+        let completion = Self::pending();
+        completion.complete(Ok(()));
+        completion
+    }
+}
+
 impl std::fmt::Debug for HostTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("HostTransport")
@@ -95,6 +431,8 @@ pub struct HttpEvent<'a> {
     pub kind: HttpEventKind,
     /// The request the event belongs to; zero for a connection-level event.
     pub id: u64,
+    /// Upgrade-write append sequence for `UpgradeWriteComplete`, otherwise zero.
+    pub write_fence: u64,
     /// `RequestHead`: the peer asked to keep the connection open. `ResponseEnd`: the connection
     /// can carry another request, which is the Agent's reuse decision.
     pub keep_alive: bool,
@@ -116,6 +454,19 @@ pub struct HttpEvent<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpEventKind {
     RequestHead,
+    /// An HTTP/1 request with an Upgrade header. The language receives it before sending the
+    /// 101 response so it can write the protocol handshake through `write_upgrade`. `data` is
+    /// empty: Hyper exposes bytes it read beyond the request head only after the response
+    /// transfers the connection, and those bytes are then delivered once as the socket's first
+    /// `data` event on `UpgradeReady`.
+    UpgradeRequest,
+    /// The HTTP parser has transferred an accepted upgrade transport back to the host. `data`
+    /// contains bytes Hyper had already read beyond the request head.
+    UpgradeReady,
+    /// One `socket.write` append reached its physical write boundary.
+    UpgradeWriteComplete,
+    /// An HTTP client received a 101 and owns the raw upgraded stream after this event.
+    UpgradeResponse,
     RequestData,
     RequestEnd,
     /// The body the language is writing (a response, or a client request) took a queued chunk.
@@ -134,6 +485,7 @@ impl HttpEvent<'static> {
         Self {
             kind,
             id,
+            write_fence: 0,
             keep_alive: false,
             version_minor: 0,
             status: 0,
@@ -204,6 +556,7 @@ impl Dispatcher {
         self.dispatch.started();
     }
 
+    #[cfg(test)]
     pub(crate) fn set_failed(&self, failed: bool) {
         self.failed.set(failed);
     }
@@ -308,6 +661,7 @@ pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefau
 /// `Rc` so a finished connection can retire itself.
 pub struct HttpServerEngine {
     connections: Rc<RefCell<HashMap<ResourceId, ServerConnection>>>,
+    upgraded: Rc<RefCell<HashMap<ResourceId, UpgradeTransport>>>,
     http3: bool,
 }
 
@@ -321,8 +675,53 @@ impl HttpServerEngine {
     pub fn with_http3(http3: bool) -> Self {
         Self {
             connections: Rc::new(RefCell::new(HashMap::default())),
+            upgraded: Rc::new(RefCell::new(HashMap::default())),
             http3,
         }
+    }
+
+    /// Queue bytes written by a Node `upgrade` listener while Hyper still owns the connection.
+    /// The first complete HTTP response head commits the 101; following bytes are sent over the
+    /// transport after Hyper hands it back.
+    pub fn write_upgrade(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: &[u8],
+    ) -> Option<UpgradeWriteReceipt> {
+        let shared = self.connections.borrow().get(&resource)?.shared.clone();
+        let writes = shared.upgrade_writes.borrow().get(&id)?.clone();
+        let Some((completed, fence)) = writes.append(data) else {
+            return None;
+        };
+        if let Some((status, headers)) = completed {
+            let mut flattened = Vec::new();
+            flatten_header_map(&headers, &mut flattened);
+            if !self.start_response(resource, id, status, &flattened, 16 * 1024)
+                || self
+                    .end_response_bytes(resource, id, Bytes::new())
+                    .is_none()
+            {
+                return None;
+            }
+        }
+        let ready = writes.pending_bytes() < UpgradeWrite::HIGH_WATER_MARK;
+        if !ready {
+            writes.drain_needed.set(true);
+        }
+        Some(UpgradeWriteReceipt {
+            disposition: WriteDisposition {
+                ready,
+                submit_now: true,
+            },
+            fence,
+        })
+    }
+
+    /// Take the raw stream after an upgrade was accepted. This removes the protocol task's
+    /// ownership; the host must adopt it under the same resource before publishing `UpgradeReady`.
+    pub fn take_upgrade(&mut self, resource: ResourceId) -> Option<UpgradeTransport> {
+        self.upgraded.borrow_mut().remove(&resource)
     }
 }
 
@@ -341,10 +740,140 @@ pub(crate) struct ConnectionShared {
     url_scratch: RefCell<Vec<u8>>,
     shutdown: Notify,
     closing: Cell<bool>,
+    node_fin_response_complete: Rc<Cell<bool>>,
+    /// A peer FIN has been observed but its request/connection close event has not yet
+    /// reached the language. Keep the host drive alive while the deferred EOF turn runs.
+    peer_fin_pending: Rc<Cell<bool>>,
+    peer_fin: Rc<Notify>,
     /// An abort has been requested and its `Closed` has not been published yet. Counted as
     /// work in flight so a drive does not return before the language hears it.
     abort_pending: Cell<bool>,
     http3: bool,
+    upgrade_accepted: Cell<bool>,
+    upgrade_request_id: Cell<u64>,
+    upgrade_writes: RefCell<HashMap<u64, Rc<UpgradeWrite>>>,
+}
+
+struct UpgradeWrite {
+    raw_head: RefCell<Vec<u8>>,
+    trailing: RefCell<Vec<u8>>,
+    parsed: Cell<bool>,
+    drain_needed: Cell<bool>,
+    completion: Arc<UpgradeWriteCompletion>,
+    total_received: Cell<usize>,
+    header_end: Cell<Option<usize>>,
+    next_fence: Cell<u64>,
+    fences: RefCell<Vec<UpgradeWriteFenceBoundary>>,
+    published_fences: RefCell<HashSet<u64>>,
+}
+
+impl UpgradeWrite {
+    const MAX_BUFFERED_BYTES: usize = 1024 * 1024;
+    const HIGH_WATER_MARK: usize = 16 * 1024;
+
+    fn new() -> Self {
+        Self {
+            raw_head: RefCell::new(Vec::with_capacity(1024)),
+            trailing: RefCell::new(Vec::new()),
+            parsed: Cell::new(false),
+            drain_needed: Cell::new(false),
+            completion: UpgradeWriteCompletion::pending(),
+            total_received: Cell::new(0),
+            header_end: Cell::new(None),
+            next_fence: Cell::new(1),
+            fences: RefCell::new(Vec::new()),
+            published_fences: RefCell::new(HashSet::new()),
+        }
+    }
+
+    fn append(&self, data: &[u8]) -> Option<(Option<(u16, HeaderMap)>, u64)> {
+        if self.pending_bytes().checked_add(data.len())? > Self::MAX_BUFFERED_BYTES {
+            return None;
+        }
+        let end_offset = self.total_received.get().checked_add(data.len())?;
+        if self.parsed.get() {
+            self.trailing.borrow_mut().extend_from_slice(data);
+        } else {
+            let mut raw = self.raw_head.borrow_mut();
+            raw.extend_from_slice(data);
+            let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+                if raw.len() > 64 * 1024 {
+                    return None;
+                }
+                self.total_received.set(end_offset);
+                return Some((None, self.register_fence(end_offset)));
+            };
+            let end = end + 4;
+            if end > 64 * 1024 {
+                return None;
+            }
+            let (status, headers) = parse_upgrade_response_head(&raw[..end])?;
+            let trailing = raw[end..].to_vec();
+            raw.clear();
+            self.parsed.set(true);
+            self.header_end.set(Some(end));
+            self.trailing.borrow_mut().extend_from_slice(&trailing);
+            self.total_received.set(end_offset);
+            return Some((Some((status, headers)), self.register_fence(end_offset)));
+        }
+        self.total_received.set(end_offset);
+        Some((None, self.register_fence(end_offset)))
+    }
+
+    fn register_fence(&self, offset: usize) -> u64 {
+        let fence = self.next_fence.get();
+        self.next_fence.set(fence.saturating_add(1));
+        self.fences
+            .borrow_mut()
+            .push(UpgradeWriteFenceBoundary { fence, offset });
+        self.completion.register_fence(fence);
+        fence
+    }
+
+    fn fences_for_transport(&self) -> (Vec<u64>, Vec<UpgradeWriteFenceBoundary>) {
+        let header_end = self.header_end.get().unwrap_or(0);
+        let mut header = Vec::new();
+        let mut trailing = Vec::new();
+        // Keep the original boundaries and append order until the connection task retires.
+        // Abort cleanup may need to publish any fence the task had not delivered yet.
+        for mut boundary in self.fences.borrow().iter().copied() {
+            if boundary.offset <= header_end {
+                header.push(boundary.fence);
+            } else {
+                boundary.offset -= header_end;
+                trailing.push(boundary);
+            }
+        }
+        (header, trailing)
+    }
+
+    fn fence_order(&self) -> Vec<u64> {
+        self.fences
+            .borrow()
+            .iter()
+            .map(|boundary| boundary.fence)
+            .collect()
+    }
+
+    fn claim_fence(&self, fence: u64) -> bool {
+        self.published_fences.borrow_mut().insert(fence)
+    }
+
+    fn unpublished_fences(&self) -> Vec<u64> {
+        let published = self.published_fences.borrow();
+        self.fence_order()
+            .into_iter()
+            .filter(|fence| !published.contains(fence))
+            .collect()
+    }
+
+    fn take_trailing(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.trailing.borrow_mut())
+    }
+
+    fn pending_bytes(&self) -> usize {
+        self.raw_head.borrow().len() + self.trailing.borrow().len()
+    }
 }
 
 impl ConnectionShared {
@@ -363,6 +892,36 @@ impl ConnectionShared {
 
     fn flush_deferred(&self) -> bool {
         self.dispatcher.flush_deferred()
+    }
+}
+
+/// Publish one append completion exactly once. The claim is recorded before calling language
+/// code, since a callback can reenter `close(Abort)` and take over the remaining fences.
+fn publish_upgrade_fence(
+    shared: &ConnectionShared,
+    id: u64,
+    writes: &UpgradeWrite,
+    fence: u64,
+) -> bool {
+    let Some(result) = writes.completion.fence_result(fence) else {
+        return true;
+    };
+    if !writes.claim_fence(fence) {
+        return true;
+    }
+    match result {
+        Ok(()) => shared.dispatch(&HttpEvent {
+            write_fence: fence,
+            ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, id)
+        }),
+        Err(error) => {
+            let message = error.to_string();
+            shared.dispatch(&HttpEvent {
+                write_fence: fence,
+                message: message.as_bytes(),
+                ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, id)
+            })
+        }
     }
 }
 
@@ -638,7 +1197,7 @@ impl ResponseSlot {
     fn end(&self, shared: &Rc<ConnectionShared>, id: u64, data: Bytes) -> Option<WriteDisposition> {
         let mut inner = self.inner.borrow_mut();
         let head_request = inner.head_request;
-        match &mut inner.state {
+        let result = match &mut inner.state {
             SlotState::Parked {
                 status, headers, ..
             } => {
@@ -701,7 +1260,11 @@ impl ResponseSlot {
                 ..
             }
             | SlotState::Finished => None,
+        };
+        if result.is_some() {
+            shared.node_fin_response_complete.set(true);
         }
+        result
     }
 }
 
@@ -805,16 +1368,24 @@ impl HttpServerEngine {
             url_scratch: RefCell::new(Vec::with_capacity(128)),
             shutdown: Notify::new(),
             closing: Cell::new(false),
+            node_fin_response_complete: Rc::new(Cell::new(false)),
+            peer_fin_pending: Rc::new(Cell::new(false)),
+            peer_fin: Rc::new(Notify::new()),
             abort_pending: Cell::new(false),
             http3: self.http3,
+            upgrade_accepted: Cell::new(false),
+            upgrade_request_id: Cell::new(0),
+            upgrade_writes: RefCell::new(HashMap::default()),
         });
         trace!("{resource:?} attach half_close={allow_half_close}");
         let table = Rc::clone(&self.connections);
+        let upgraded = Rc::clone(&self.upgraded);
         let task = tokio::task::spawn_local(serve(
             transport,
             allow_half_close,
             Rc::clone(&shared),
             table,
+            upgraded,
         ));
         self.connections
             .borrow_mut()
@@ -974,11 +1545,53 @@ impl HttpServerEngine {
                 // The abort takes effect at the task's next poll; until `Closed` has been
                 // published the connection counts as in flight, and it is published from a
                 // task, never from inside the caller's own call.
-                shared.abort_pending.set(true);
-                shared.dispatcher.set_failed(false);
+                if shared.abort_pending.replace(true) {
+                    return true;
+                }
                 let table = Rc::clone(&self.connections);
                 tokio::task::spawn_local(async move {
-                    let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+                    let writes: Vec<(u64, Rc<UpgradeWrite>)> = {
+                        let mut pending = shared.upgrade_writes.borrow_mut();
+                        let mut writes = pending.drain().collect::<Vec<_>>();
+                        writes.sort_by_key(|(id, _)| *id);
+                        writes
+                    };
+                    for (id, writes) in writes {
+                        writes.completion.complete(Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "HTTP connection aborted during protocol upgrade",
+                        )));
+                        for fence in writes.unpublished_fences() {
+                            if shared.dispatcher.failed() {
+                                break;
+                            }
+                            if !writes.claim_fence(fence) {
+                                continue;
+                            }
+                            let Some(result) = writes.completion.fence_result(fence) else {
+                                continue;
+                            };
+                            match result {
+                                Ok(()) => {
+                                    let _ = shared.dispatch(&HttpEvent {
+                                        write_fence: fence,
+                                        ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, id)
+                                    });
+                                }
+                                Err(error) => {
+                                    let message = error.to_string();
+                                    let _ = shared.dispatch(&HttpEvent {
+                                        write_fence: fence,
+                                        message: message.as_bytes(),
+                                        ..HttpEvent::bare(HttpEventKind::UpgradeWriteComplete, id)
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    if !shared.dispatcher.failed() {
+                        let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+                    }
                     shared.abort_pending.set(false);
                     table.borrow_mut().remove(&shared.resource);
                 });
@@ -1008,6 +1621,7 @@ impl HttpServerEngine {
             .map(|connection| {
                 connection.shared.requests.borrow().len()
                     + usize::from(connection.shared.abort_pending.get())
+                    + usize::from(connection.shared.peer_fin_pending.get())
             })
             .sum()
     }
@@ -1086,41 +1700,242 @@ impl crate::node_stream::PipeTarget for ResponseSlotPipeTarget {
     }
 }
 
+fn server_service(
+    shared: Rc<ConnectionShared>,
+) -> impl Service<
+    Request<Incoming>,
+    Response = Response<EngineBody>,
+    Error = std::convert::Infallible,
+    Future = Pin<Box<dyn Future<Output = Result<Response<EngineBody>, std::convert::Infallible>>>>,
+> + Unpin {
+    let next_id = Cell::new(1_u64);
+    service_fn(move |request: Request<Incoming>| {
+        let id = next_id.get();
+        next_id.set(id.wrapping_add(1).max(1));
+        let shared = Rc::clone(&shared);
+        Box::pin(
+            async move { Ok::<_, std::convert::Infallible>(handle(shared, id, request).await) },
+        )
+            as Pin<Box<dyn Future<Output = Result<Response<EngineBody>, std::convert::Infallible>>>>
+    })
+}
+
 async fn serve(
     transport: HostTransport,
     allow_half_close: bool,
     shared: Rc<ConnectionShared>,
     table: Rc<RefCell<HashMap<ResourceId, ServerConnection>>>,
+    upgraded: Rc<RefCell<HashMap<ResourceId, UpgradeTransport>>>,
 ) {
     shared.dispatcher.started();
-    let next_id = Cell::new(1_u64);
-    let service_shared = Rc::clone(&shared);
-    let service = service_fn(move |request: Request<Incoming>| {
-        let id = next_id.get();
-        next_id.set(id.wrapping_add(1).max(1));
-        let shared = Rc::clone(&service_shared);
-        async move { Ok::<_, std::convert::Infallible>(handle(shared, id, request).await) }
-    });
-    let mut builder = auto::Builder::new(LocalExecutor);
-    builder.http1().auto_date_header(false);
-    builder.http1().pipeline_flush(true);
-    // Node's http.Server always allows a half-open socket: a client may shut its write side
-    // after the request and still receive the response. With the socket in Hyper's hands the
-    // EOF is seen at once, so refusing half-close would drop every such response before it is
-    // written (the bridged engine only surfaced the EOF a round trip later). The option a
-    // program passes still selects raw-socket behaviour elsewhere; HTTP keeps Node's rule.
-    let _ = allow_half_close;
-    builder.http1().half_close(true);
-    let mut connection = Box::pin(builder.serve_connection(TokioIo::new(transport.0), service));
-    let result = tokio::select! {
-        biased;
-        result = &mut connection => result,
-        _ = shared.dispatcher.pump() => connection.await,
-        _ = shared.shutdown.notified() => {
-            connection.as_mut().graceful_shutdown();
-            connection.await
+    let sniff = detect_server_protocol(transport.0);
+    tokio::pin!(sniff);
+    let mut pump_done = false;
+    let (is_http2, mut io) = loop {
+        tokio::select! {
+            result = &mut sniff => match result {
+                Ok(protocol) => break protocol,
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = shared.dispatch(&HttpEvent {
+                        message: message.as_bytes(),
+                        ..HttpEvent::bare(HttpEventKind::Error, 0)
+                    });
+                    let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+                    table.borrow_mut().remove(&shared.resource);
+                    return;
+                }
+            },
+            _ = shared.dispatcher.pump(), if !pump_done => { pump_done = true; },
+            _ = shared.shutdown.notified() => {
+                let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+                table.borrow_mut().remove(&shared.resource);
+                return;
+            }
         }
     };
+    // Node dispatches a complete request from the socket's data event before processing the
+    // subsequent end event. Hyper can observe EOF in the same poll that parsed the request,
+    // before it polls the lazy service future. Give that future one ordinary poll turn first
+    // when half-close is disabled; later EOF still closes an unfinished response.
+    if !is_http2 && !allow_half_close {
+        io.defer_eof_once();
+        io.apply_node_fin_policy(
+            Rc::clone(&shared.node_fin_response_complete),
+            Rc::clone(&shared.peer_fin_pending),
+        );
+        io.set_peer_fin_notify(Rc::clone(&shared.peer_fin));
+    }
+    let service = server_service(Rc::clone(&shared));
+    let mut transferred = false;
+    let result = if is_http2 {
+        let builder = auto::Builder::new(LocalExecutor).http2_only();
+        let mut connection = Box::pin(builder.serve_connection(TokioIo::new(io), service));
+        let result = tokio::select! {
+            biased;
+            result = &mut connection => result,
+            _ = shared.dispatcher.pump(), if !pump_done => connection.await,
+            _ = shared.shutdown.notified() => {
+                connection.as_mut().graceful_shutdown();
+                connection.await
+            }
+        };
+        result.map_err(|error| error.to_string())
+    } else {
+        let mut builder = hyper::server::conn::http1::Builder::new();
+        builder.auto_date_header(false);
+        // Hyper's pipeline batching skips flushing while its read buffer is nonempty.
+        // On an upgrade those bytes belong to the next protocol: they never drain through
+        // HTTP, and into_parts discards the unflushed HTTP output. Keep ordinary flushing
+        // so every response is on the wire before handing the transport to the upgrade.
+        builder.pipeline_flush(false);
+        // The transport enforces Node's default FIN policy after giving an already-parsed
+        // request one scheduler turn. Keep Hyper's half-close behavior configurable so a
+        // completed synchronous response can flush before the driver closes gracefully.
+        builder.half_close(allow_half_close);
+        let mut connection = builder.serve_connection(TokioIo::new(io), service);
+        enum H1Progress {
+            Complete(Result<(), hyper::Error>),
+            Pump,
+            Shutdown,
+            PeerFin,
+        }
+        let mut graceful = false;
+        let result = loop {
+            let progress = tokio::select! {
+                biased;
+                result = std::future::poll_fn(|cx| connection.poll_without_shutdown(cx)) => H1Progress::Complete(result),
+                _ = shared.dispatcher.pump(), if !pump_done => H1Progress::Pump,
+                _ = shared.peer_fin.notified(), if !graceful => H1Progress::PeerFin,
+                _ = shared.shutdown.notified(), if !graceful => H1Progress::Shutdown,
+            };
+            match progress {
+                H1Progress::Complete(result) => break result,
+                H1Progress::Pump => {
+                    pump_done = true;
+                }
+                H1Progress::Shutdown => {
+                    Pin::new(&mut connection).graceful_shutdown();
+                    graceful = true;
+                }
+                H1Progress::PeerFin => {
+                    Pin::new(&mut connection).graceful_shutdown();
+                    graceful = true;
+                }
+            }
+        };
+        if result.is_ok() && shared.upgrade_accepted.get() {
+            let parts = connection.into_parts();
+            let (raw, remaining_prefix) = parts.io.into_inner().into_parts();
+            let mut head = parts.read_buf.to_vec();
+            head.extend_from_slice(&remaining_prefix);
+            let request_id = shared.upgrade_request_id.get();
+            let writes = shared.upgrade_writes.borrow().get(&request_id).cloned();
+            let pending_write = writes
+                .as_ref()
+                .map_or_else(Vec::new, |writes| writes.take_trailing());
+            let (header_fences, write_fences) = writes.as_ref().map_or_else(
+                || (Vec::new(), Vec::new()),
+                |writes| writes.fences_for_transport(),
+            );
+            let mut fence_order = header_fences.clone();
+            fence_order.extend(write_fences.iter().map(|boundary| boundary.fence));
+            let write_completion = writes
+                .as_ref()
+                .map_or_else(UpgradeWriteCompletion::completed, |writes| {
+                    Arc::clone(&writes.completion)
+                });
+            upgraded.borrow_mut().insert(
+                shared.resource,
+                UpgradeTransport {
+                    transport: HostTransport(raw),
+                    head: head.clone(),
+                    pending_write,
+                    write_fences,
+                    write_completion: Arc::clone(&write_completion),
+                },
+            );
+            // Hyper has completed the 101 response before releasing this connection, so writes
+            // whose append ends in the response head have reached their physical boundary.
+            for fence in &header_fences {
+                write_completion.complete_fence(*fence, Ok(()));
+            }
+            let upgrade_dispatched = shared.dispatch(&HttpEvent {
+                id: request_id,
+                data: &head,
+                ..HttpEvent::bare(HttpEventKind::UpgradeReady, request_id)
+            });
+            if !upgrade_dispatched {
+                if let Some(transfer) = upgraded.borrow_mut().remove(&shared.resource) {
+                    transfer.write_completion.complete(Err(std::io::Error::new(
+                        std::io::ErrorKind::NotConnected,
+                        "HTTP upgrade dispatch failed before transport adoption",
+                    )));
+                } else {
+                    transferred = true;
+                }
+            } else {
+                for fence in fence_order {
+                    let _ = write_completion.wait_fence(fence).await;
+                    // Abort cleanup takes over any completion not yet delivered.
+                    if shared.abort_pending.get() || shared.dispatcher.failed() {
+                        break;
+                    }
+                    if let Some(writes) = &writes
+                        && !publish_upgrade_fence(&shared, request_id, writes, fence)
+                    {
+                        break;
+                    }
+                }
+                if !shared.abort_pending.get() && !shared.dispatcher.failed() {
+                    match write_completion.wait().await {
+                        Ok(())
+                            if writes
+                                .as_ref()
+                                .is_some_and(|writes| writes.drain_needed.get()) =>
+                        {
+                            let _ =
+                                shared.dispatch(&HttpEvent::bare(HttpEventKind::Drain, request_id));
+                        }
+                        Ok(()) => {}
+                        Err(error) => {
+                            let message = error.to_string();
+                            let _ = shared.dispatch(&HttpEvent {
+                                message: message.as_bytes(),
+                                ..HttpEvent::bare(HttpEventKind::Error, request_id)
+                            });
+                        }
+                    }
+                }
+                transferred = true;
+            }
+        }
+        result.map_err(|error| error.to_string())
+    };
+    let failed_writes = if !transferred {
+        shared
+            .upgrade_writes
+            .borrow_mut()
+            .remove(&shared.upgrade_request_id.get())
+    } else {
+        None
+    };
+    if let Some(writes) = failed_writes {
+        let message = result
+            .as_ref()
+            .err()
+            .cloned()
+            .unwrap_or_else(|| "HTTP upgrade did not transfer its stream".to_owned());
+        writes.completion.complete(Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            message.clone(),
+        )));
+        for fence in writes.fence_order() {
+            if !publish_upgrade_fence(&shared, shared.upgrade_request_id.get(), &writes, fence) {
+                break;
+            }
+        }
+    }
     trace!(
         "{:?} connection future ended: {:?}",
         shared.resource,
@@ -1135,7 +1950,16 @@ async fn serve(
         let _ = shared.dispatch(&event);
     }
     let _ = shared.flush_deferred();
-    let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+    if !transferred && !shared.dispatcher.failed() {
+        let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
+    }
+    if transferred {
+        shared
+            .upgrade_writes
+            .borrow_mut()
+            .remove(&shared.upgrade_request_id.get());
+    }
+    shared.peer_fin_pending.set(false);
     table.borrow_mut().remove(&shared.resource);
 }
 
@@ -1160,6 +1984,32 @@ fn keep_alive_requested(parts: &hyper::http::request::Parts) -> bool {
     }
 }
 
+fn parse_upgrade_response_head(bytes: &[u8]) -> Option<(u16, HeaderMap)> {
+    let mut lines = bytes.split(|byte| *byte == b'\n');
+    let status_line = lines.next()?.strip_suffix(b"\r")?;
+    let mut status_parts = status_line.splitn(3, |byte| *byte == b' ');
+    let version = status_parts.next()?;
+    if version != b"HTTP/1.0" && version != b"HTTP/1.1" {
+        return None;
+    }
+    let status = std::str::from_utf8(status_parts.next()?)
+        .ok()?
+        .parse::<u16>()
+        .ok()?;
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        let line = line.strip_suffix(b"\r")?;
+        if line.is_empty() {
+            break;
+        }
+        let colon = line.iter().position(|byte| *byte == b':')?;
+        let name = HeaderName::from_bytes(&line[..colon]).ok()?;
+        let value = HeaderValue::from_bytes(line[colon + 1..].trim_ascii()).ok()?;
+        headers.append(name, value);
+    }
+    Some((status, headers))
+}
+
 async fn handle(
     shared: Rc<ConnectionShared>,
     id: u64,
@@ -1169,9 +2019,29 @@ async fn handle(
     let (parts, mut body) = request.into_parts();
     let http_10 = parts.version == hyper::Version::HTTP_10;
     let head_request = parts.method == hyper::Method::HEAD;
+    let is_upgrade = parts.headers.contains_key(hyper::header::UPGRADE)
+        && parts
+            .headers
+            .get(hyper::header::CONNECTION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(',')
+                    .any(|candidate| candidate.trim().eq_ignore_ascii_case("upgrade"))
+            });
+    // Hyper provides the authoritative post-header bytes when it completes the 101 transfer.
+    // Until then the listener receives an empty `head`; those preserved bytes are emitted as
+    // the socket's first data event immediately after the listener returns.
+    let upgrade_head = [0u8; 0];
     let keep_alive = keep_alive_requested(&parts);
     let slot = Rc::new(ResponseSlot::new(head_request));
     shared.requests.borrow_mut().insert(id, Rc::clone(&slot));
+    if is_upgrade {
+        shared
+            .upgrade_writes
+            .borrow_mut()
+            .insert(id, Rc::new(UpgradeWrite::new()));
+    }
 
     // An origin-form target is the path and query Hyper already holds; anything else (an
     // absolute-form target from a proxy client) is rendered once.
@@ -1185,7 +2055,8 @@ async fn handle(
     };
     // A language that takes requests whole gets the body with the head, so the body is read
     // before anything is dispatched. A request that declares no body (every GET) costs nothing.
-    let whole = shared.dispatcher.whole_requests();
+    let whole = shared.dispatcher.whole_requests() && !is_upgrade;
+    shared.node_fin_response_complete.set(false);
     let whole_body = if whole && !body.is_end_stream() {
         match (&mut body).collect().await {
             Ok(collected) => collected.to_bytes(),
@@ -1228,8 +2099,19 @@ async fn handle(
             method: parts.method.as_str().as_bytes(),
             target,
             headers: &scratch,
-            data: &whole_body,
-            ..HttpEvent::bare(HttpEventKind::RequestHead, id)
+            data: if is_upgrade {
+                &upgrade_head[..]
+            } else {
+                &whole_body
+            },
+            ..HttpEvent::bare(
+                if is_upgrade {
+                    HttpEventKind::UpgradeRequest
+                } else {
+                    HttpEventKind::RequestHead
+                },
+                id,
+            )
         };
         shared.dispatch(&head)
     };
@@ -1282,7 +2164,7 @@ async fn handle(
         };
         (response, Some(pump))
     } else {
-        if dispatched && !whole {
+        if dispatched && !whole && !is_upgrade {
             let mut failed = false;
             while let Some(frame) = body.frame().await {
                 match frame {
@@ -1336,6 +2218,12 @@ async fn handle(
         mut headers,
         body,
     } = response;
+    if is_upgrade && status == hyper::StatusCode::SWITCHING_PROTOCOLS.as_u16() {
+        shared.upgrade_accepted.set(true);
+        shared.upgrade_request_id.set(id);
+    } else if is_upgrade {
+        shared.upgrade_writes.borrow_mut().remove(&id);
+    }
     let is_http2 = parts.version == hyper::Version::HTTP_2;
     let close_delimited = http_10
         && !head_request
@@ -1473,7 +2361,267 @@ pub(crate) fn flatten_header_map(headers: &HeaderMap, into: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{HostResource, Reactor, RealmHostProvider, ResourceInfo, ResourceKind, TokioHost};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct CountWrites(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl tokio::io::AsyncRead for CountWrites {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl tokio::io::AsyncWrite for CountWrites {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn pre_cancelled_upgrade_completion_does_not_poll_prefix_writer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let reactor = Reactor::shared_wall().expect("runtime builds");
+        let local = tokio::task::LocalSet::new();
+        let writes = std::sync::Arc::new(AtomicUsize::new(0));
+        let writer_polls = std::sync::Arc::clone(&writes);
+        local.block_on(&reactor.runtime, async move {
+            let resource = ResourceId::new(73);
+            let info = ResourceInfo {
+                id: resource,
+                kind: ResourceKind::TcpStream,
+                address: Some("127.0.0.1".into()),
+                port: Some(80),
+            };
+            let mut host = TokioHost::new();
+            host.resources.insert(
+                resource,
+                HostResource::TcpTaken {
+                    info,
+                    referenced: true,
+                    restore_referenced: true,
+                },
+            );
+            let completion = UpgradeWriteCompletion::pending();
+            completion.register_fence(1);
+            completion.complete(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "aborted before prefix writer started",
+            )));
+            assert!(RealmHostProvider::adopt_upgrade_transport(
+                &mut host,
+                resource,
+                HostTransport(Box::new(CountWrites(std::sync::Arc::clone(&writer_polls)))),
+                b"prefix".to_vec(),
+                vec![UpgradeWriteFenceBoundary {
+                    fence: 1,
+                    offset: 6,
+                }],
+                completion,
+            ));
+
+            tokio::task::yield_now().await;
+            assert_eq!(writes.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn upgrade_write_fences_preserve_order_and_fail_pending_waiters_once() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let completion = UpgradeWriteCompletion::pending();
+            completion.register_fence(1);
+            completion.register_fence(2);
+
+            // A later physical write cannot satisfy an earlier append's callback.
+            completion.complete_fence(2, Ok(()));
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(1),
+                    completion.wait_fence(1),
+                )
+                .await
+                .is_err()
+            );
+
+            completion.complete_fence(1, Ok(()));
+            assert!(completion.wait_fence(1).await.is_ok());
+            assert!(completion.wait_fence(2).await.is_ok());
+
+            let cancelled = UpgradeWriteCompletion::pending();
+            cancelled.register_fence(3);
+            cancelled.register_fence(4);
+            cancelled.complete_fence(3, Ok(()));
+            cancelled.complete(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "prefix writer cancelled",
+            )));
+
+            // Cancellation leaves already-flushed callbacks successful and releases every
+            // outstanding waiter with the same failure.
+            assert!(cancelled.wait_fence(3).await.is_ok());
+            assert_eq!(
+                cancelled.wait_fence(4).await.unwrap_err().kind(),
+                std::io::ErrorKind::Interrupted,
+            );
+            assert_eq!(
+                cancelled.wait().await.unwrap_err().kind(),
+                std::io::ErrorKind::Interrupted,
+            );
+        });
+    }
+
+    struct FenceRecorder {
+        events: RefCell<Vec<(HttpEventKind, u64, u64, Vec<u8>)>>,
+        on_fence: RefCell<Option<Box<dyn Fn()>>>,
+    }
+
+    impl HttpDispatch for FenceRecorder {
+        fn event(&self, event: &HttpEvent<'_>) -> i32 {
+            self.events.borrow_mut().push((
+                event.kind,
+                event.id,
+                event.write_fence,
+                event.message.to_vec(),
+            ));
+            if event.kind == HttpEventKind::UpgradeWriteComplete
+                && let Some(callback) = self.on_fence.borrow().as_ref()
+            {
+                callback();
+            }
+            0
+        }
+
+        fn checkpoint(&self) -> i32 {
+            0
+        }
+    }
+
+    #[test]
+    fn abort_publishes_each_upgrade_fence_once_before_closed() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let (_client, server) = tokio::io::duplex(64);
+            let resource = ResourceId::new(71);
+            let dispatch = Rc::new(FenceRecorder {
+                events: RefCell::new(Vec::new()),
+                on_fence: RefCell::new(None),
+            });
+            let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+            assert!(engine.borrow_mut().attach(
+                resource,
+                HostTransport(Box::new(server)),
+                false,
+                dispatch.clone(),
+            ));
+
+            let shared = Rc::clone(&engine.borrow().connections.borrow()[&resource].shared);
+            let writes = Rc::new(UpgradeWrite::new());
+            let successful = writes.register_fence(0);
+            let pending = writes.register_fence(8);
+            writes.completion.complete_fence(successful, Ok(()));
+            assert_eq!(
+                writes.fences_for_transport(),
+                (
+                    vec![successful],
+                    vec![UpgradeWriteFenceBoundary {
+                        fence: pending,
+                        offset: 8,
+                    }],
+                ),
+            );
+            shared.upgrade_request_id.set(99);
+            shared.upgrade_writes.borrow_mut().insert(99, writes);
+
+            // Closing reentrantly from the first completion callback must not schedule a
+            // second cleanup or duplicate the remaining append completions.
+            let engine_weak = Rc::downgrade(&engine);
+            *dispatch.on_fence.borrow_mut() = Some(Box::new(move || {
+                if let Some(engine) = engine_weak.upgrade() {
+                    assert!(engine.borrow_mut().close(resource, HttpCloseMode::Abort));
+                }
+            }));
+            assert!(engine.borrow_mut().close(resource, HttpCloseMode::Abort));
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+                if engine.borrow().open_connections() == 0 {
+                    break;
+                }
+            }
+            assert_eq!(engine.borrow().open_connections(), 0);
+            assert_eq!(
+                &*dispatch.events.borrow(),
+                &[
+                    (
+                        HttpEventKind::UpgradeWriteComplete,
+                        99,
+                        successful,
+                        Vec::new()
+                    ),
+                    (
+                        HttpEventKind::UpgradeWriteComplete,
+                        99,
+                        pending,
+                        b"HTTP connection aborted during protocol upgrade".to_vec(),
+                    ),
+                    (HttpEventKind::Closed, 0, 0, Vec::new()),
+                ],
+            );
+        });
+    }
+
+    #[test]
+    fn abort_does_not_clear_a_latched_language_failure() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let (_client, server) = tokio::io::duplex(64);
+            let resource = ResourceId::new(72);
+            let dispatch = Rc::new(FenceRecorder {
+                events: RefCell::new(Vec::new()),
+                on_fence: RefCell::new(None),
+            });
+            let mut engine = HttpServerEngine::default();
+            assert!(engine.attach(
+                resource,
+                HostTransport(Box::new(server)),
+                false,
+                dispatch.clone(),
+            ));
+            let shared = Rc::clone(&engine.connections.borrow()[&resource].shared);
+            shared.dispatcher.set_failed(true);
+            let writes = Rc::new(UpgradeWrite::new());
+            writes.register_fence(0);
+            shared.upgrade_writes.borrow_mut().insert(99, writes);
+
+            assert!(engine.close(resource, HttpCloseMode::Abort));
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+                if engine.open_connections() == 0 {
+                    break;
+                }
+            }
+            assert_eq!(engine.open_connections(), 0);
+            assert!(dispatch.events.borrow().is_empty());
+        });
+    }
 
     struct Recording {
         events: RefCell<Vec<(HttpEventKind, u64, Vec<u8>)>>,
@@ -1578,6 +2726,79 @@ mod tests {
         fn whole_requests(&self) -> bool {
             true
         }
+    }
+
+    struct PipelinedUpgrade {
+        engine: Rc<RefCell<HttpServerEngine>>,
+        resource: ResourceId,
+        head: RefCell<Vec<u8>>,
+    }
+
+    impl HttpDispatch for PipelinedUpgrade {
+        fn event(&self, event: &HttpEvent<'_>) -> i32 {
+            match event.kind {
+                HttpEventKind::RequestEnd => {
+                    let mut engine = self.engine.borrow_mut();
+                    assert!(engine.start_response(self.resource, event.id, 200, b"", 1024));
+                    engine.end_response(self.resource, event.id, b"ok").unwrap();
+                }
+                HttpEventKind::UpgradeRequest => {
+                    let response = b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: kiln-probe\r\n\r\n\x00\xa5\xff";
+                    assert!(
+                        self.engine
+                            .borrow_mut()
+                            .write_upgrade(self.resource, event.id, response,)
+                            .is_some()
+                    );
+                }
+                HttpEventKind::UpgradeReady => {
+                    self.head.borrow_mut().extend_from_slice(event.data);
+                    let transfer = self
+                        .engine
+                        .borrow_mut()
+                        .take_upgrade(self.resource)
+                        .unwrap();
+                    tokio::task::spawn_local(async move {
+                        let mut io = transfer.transport.0;
+                        let result = io.write_all(&transfer.pending_write).await;
+                        transfer.write_completion.complete(result);
+                        io.shutdown().await.unwrap();
+                    });
+                }
+                _ => {}
+            }
+            0
+        }
+
+        fn checkpoint(&self) -> i32 {
+            0
+        }
+    }
+
+    #[test]
+    fn pipelined_upgrade_flushes_http_responses_before_raw_transport_handoff() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                let (mut client, server) = tokio::io::duplex(1 << 16);
+                let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+                let resource = ResourceId::new(19);
+                let dispatch = Rc::new(PipelinedUpgrade {
+                    engine: Rc::clone(&engine), resource, head: RefCell::new(Vec::new()),
+                });
+                assert!(engine.borrow_mut().attach(
+                    resource, HostTransport(Box::new(server)), false, dispatch.clone(),
+                ));
+                client.write_all(b"GET /ordinary HTTP/1.1\r\nHost: localhost\r\n\r\nGET /upgrade HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: kiln-probe\r\n\r\n\x00\xa5\xff").await.unwrap();
+                let mut received = Vec::new();
+                client.read_to_end(&mut received).await.unwrap();
+                let ordinary = received.windows(12).position(|bytes| bytes == b"HTTP/1.1 200").expect("ordinary response");
+                let switching = received.windows(12).position(|bytes| bytes == b"HTTP/1.1 101").expect("upgrade response");
+                assert!(ordinary < switching);
+                assert!(received.ends_with(b"\x00\xa5\xff"));
+                assert_eq!(&*dispatch.head.borrow(), b"\x00\xa5\xff");
+            }).await.expect("pipelined upgrade completes");
+        });
     }
 
     #[test]

@@ -31,6 +31,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             stack: Vec::new(),
             locals,
             function: None,
+            method_name: None,
             suspended: false,
             handlers: Vec::new(),
             arguments: Vec::new(),
@@ -49,7 +50,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             suspended_awaiting: false,
             suspended_delegate: None,
             global_objects: vec![None],
+            timer_prototypes: Vec::new(),
+            regexp_legacy_captures: vec![std::array::from_fn(|_| StringUnits::default())],
             process_object: None,
+            pending_stdio: [String::new(), String::new()],
             intrinsics: Rc::new(Intrinsics::default()),
             native_depth: 0,
             frames: Vec::new(),
@@ -68,25 +72,33 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             symbol_serial: 0,
             realm: Realm::new(),
             clock_capability: capabilities.clock,
+            host_clock_origin_ms: None,
             timezone,
             default_locale,
             source_compiler: execution.source_compiler(),
             realm_bootstrap: execution.realm_bootstrap(),
             module_loader: execution.module_loader(),
+            string_code_generation_allowed: execution.string_code_generation_allowed(),
             worker_host: execution.worker_host(),
             in_worker: kiln_runtime::workers::current().is_some(),
             module_path: None,
+            module_generation: 0,
+            module_generation_owner: None,
             host_realms: execution.host_realms(),
             host_agents: execution.host_agents(),
             argv: execution.argv().to_vec(),
+            exec_argv: execution.exec_argv().to_vec(),
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
+            active_node_server_objects: std::collections::HashMap::new(),
+            active_node_socket_objects: std::collections::HashMap::new(),
             http_client_requests: std::collections::BTreeMap::new(),
             next_http_client_request_id: 1,
             module_realm: None,
             async_host: None,
             http_runtime: None,
+            http_client_host: None,
             commonjs_loader: None,
             caught: None,
             fd_table: fs::VirtualFdTable::new(),
@@ -95,6 +107,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             module_suspension: None,
             module_completion: None,
             self_bindings: Vec::new(),
+            readonly_cells: Rc::new(RefCell::new(crate::vm::ReadonlyCellRegistry::default())),
             self_namespaces: Vec::new(),
             symbol_registry: Vec::new(),
             symbols: Vec::new(),
@@ -105,8 +118,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             },
             entropy,
             closures: Vec::new(),
-            dynamic_modules: std::collections::HashMap::new(),
-            dynamic_namespaces: std::collections::HashMap::new(),
+            closures_prune_at: 0,
+            module_map: SharedModuleMap::default(),
             limits,
         })
     }
@@ -123,20 +136,28 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     ) -> Result<f64, ExecutionError> {
         match capability {
             ClockCapability::Virtual => Ok(self.with_realm(kiln_runtime::Realm::now_milliseconds)),
-            ClockCapability::Host => self
-                .host
-                .call(HostOp::ClockNow, &[])
-                .map_err(|error| ExecutionError::Host {
-                    instruction,
-                    message: error.to_string(),
-                })?
-                .as_number()
-                .filter(|milliseconds| milliseconds.is_finite())
-                .ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "HostOp::ClockNow must return finite epoch milliseconds".to_owned(),
-                }),
+            ClockCapability::Host => host_clock_milliseconds(self.host, instruction),
         }
+    }
+
+    /// Advance timer scheduling to elapsed host time at an interpreter event-loop boundary.
+    /// Civil time remains an epoch reading through `Date.now`; the scheduler keeps a run-relative
+    /// monotonic clock, matching the native wall-clock realm without changing virtual executions.
+    pub(super) fn advance_host_scheduler_clock(
+        &mut self,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let Some(origin) = self
+            .host_clock_origin_ms
+            .as_ref()
+            .and_then(|origin| origin.get())
+        else {
+            return Ok(());
+        };
+        let now_ms = host_clock_milliseconds(self.host, instruction)?;
+        let elapsed = kiln_runtime::duration_from_milliseconds((now_ms - origin).max(0.0));
+        self.with_realm_mut(|realm| realm.advance_to(elapsed));
+        Ok(())
     }
 
     pub(super) fn entropy_word(&mut self, instruction: usize) -> Result<u64, ExecutionError> {
@@ -192,6 +213,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     /// not `Drop` and why [`execute_reclaiming`] is its only caller: `execute_module` hands live
     /// functions to the next module in the graph, and clearing those would hollow out an export.
     pub(super) fn release_cycles(&mut self) {
+        self.gc_module_map().borrow_mut().weak_ref_keepalive.clear();
         for weak in self.closures.drain(..) {
             let Some(closure) = weak.upgrade() else {
                 continue;
@@ -205,7 +227,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         // The built-in store is a realm root too, and one that can hold anything: a program
         // that writes a closure onto `Array.prototype` puts a whole object graph in here.
         // Dropped rather than emptied slot by slot, because nothing points *into* it.
-        self.intrinsics.entries.borrow_mut().clear();
+        self.intrinsics.clear_entries();
         // The realm's own roots. `globalThis.globalThis` is the global object itself, so the
         // realm is a cycle on its own and survives the machine that built it -- taking with it
         // everything the program hung off the global object.
@@ -219,6 +241,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             .into_iter()
             .flatten()
             .chain(self.intrinsics.take_error_prototypes())
+            .chain(self.intrinsics.take_error_stack_accessors())
             .chain(self.intrinsics.take_unscopables())
         {
             if let Value::Object(object) = root {
@@ -226,4 +249,21 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
         }
     }
+}
+
+pub(crate) fn host_clock_milliseconds<H: HostOps + ?Sized>(
+    host: &mut H,
+    instruction: usize,
+) -> Result<f64, ExecutionError> {
+    host.call(HostOp::ClockNow, &[])
+        .map_err(|error| ExecutionError::Host {
+            instruction,
+            message: error.to_string(),
+        })?
+        .as_number()
+        .filter(|milliseconds| milliseconds.is_finite())
+        .ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "HostOp::ClockNow must return finite epoch milliseconds".to_owned(),
+        })
 }

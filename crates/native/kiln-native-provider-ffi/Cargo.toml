@@ -33,22 +33,33 @@ temporal = ["dep:kiln-temporal"]
 json = ["dep:kiln-json"]
 # ICU4X segmentation behind the scalar provider ABI. The JavaScript-visible facade stays compiled
 # source; this feature supplies only the boundary engine it cannot implement cheaply itself.
-intl = ["dep:kiln-intl"]
+intl = ["dep:kiln-intl", "dep:kiln-json", "kiln-intl/timezone_database"]
 # Parallel chunks and stable sort use the realm scheduler's lanes and ready queue.
 parallel = ["realm"]
 # Dynamic calls and same-thread callback closures for the native `node:ffi` capability. libffi is
 # linked into the one provider archive, never into compiler crates or generated application units.
 ffi = ["dep:libc", "dep:libffi"]
+# The host GUI bridge (ADR 0074): the `kiln_gui_*` operations `kiln:gui` reaches through the same
+# dynamic-call engine, linked into this one archive so a GUI program is a single Rust runtime and
+# a single allocator, and resolved by name through `kiln_ffi_open("kiln:host-gui")` rather than a
+# `dlopen` of a file that has to be found next to the program.
+gui = ["ffi", "dep:kiln-host-gui"]
 
 [dependencies]
 kiln-native-provider-contract = { workspace = true }
 kiln-number-core = { workspace = true }
+kiln-key-core = { workspace = true }
+kiln-webcrypto = { workspace = true }
+kiln-compression = { workspace = true }
+kiln-date-core = { workspace = true }
 kiln-host-abi = { workspace = true }
 hashbrown = { version = "0.16.1", default-features = false, features = ["equivalent"] }
 kiln-string = { workspace = true }
+kiln-regexp = { workspace = true }
 kiln-shared-graph = { workspace = true }
 kiln-node-path = { workspace = true }
 kiln-url = { workspace = true }
+kiln-encoding = { workspace = true }
 # Path-only (not workspace-inherited): Cargo forbids `default-features` on an inherited
 # edge, and this edge must default off so the slim `--no-default-features` build does
 # not unify `kiln-runtime/http` back on through the dependency's own defaults. Every
@@ -61,6 +72,7 @@ kiln-json = { workspace = true, optional = true }
 kiln-intl = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 libffi = { workspace = true, optional = true }
+kiln-host-gui = { workspace = true, optional = true }
 # The regexp engine's allocation-only shape. The interpreter links the same crate, which is the
 # whole point: two engines running one implementation cannot disagree about a backreference.
 regress = { version = "0.12", default-features = false, features = [

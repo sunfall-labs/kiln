@@ -179,3 +179,39 @@ for (const attempt of [
   try { attempt(); console.log("no throw"); }
   catch (error: any) { console.log(error.constructor.name); }
 }
+
+// Float16 accessors are the DataView counterpart to the existing Float16Array conversion.
+const half = new DataView(new ArrayBuffer(8));
+for (const value of [1.5, -0, 65504, 1e-8, NaN, Infinity]) {
+  (half as any).setFloat16(0, value, true);
+  const read = (half as any).getFloat16(0, true);
+  console.log(Number.isNaN(read) ? "NaN" : Object.is(read, -0) ? "-0" : read);
+}
+console.log(DataView.prototype.getFloat16.name, DataView.prototype.getFloat16.length,
+  DataView.prototype.setFloat16.name, DataView.prototype.setFloat16.length);
+for (const accessor of [DataView.prototype.getFloat16, DataView.prototype.setFloat16]) {
+  try { new (accessor as any)(); console.log("constructible"); }
+  catch (error: any) { console.log(error.constructor.name); }
+}
+
+// Brand validation precedes coercion; after a valid brand, offsets and values are converted in
+// order, including for detached views. Nested calls also exercise the bootstrap's shared scratch.
+const float16Order: string[] = [];
+const float16Offset = { valueOf(): number { float16Order.push("offset"); return 0; } };
+const float16Value = { valueOf(): number {
+  float16Order.push("value");
+  (half as any).setFloat16(2, 2.5, true);
+  return 1.5;
+} };
+(half as any).setFloat16(float16Offset, float16Value, true);
+console.log(float16Order.join(","), (half as any).getFloat16(0, true), (half as any).getFloat16(2, true));
+float16Order.length = 0;
+try { DataView.prototype.getFloat16.call({}, float16Offset); }
+catch (error: any) { console.log(error.constructor.name, float16Order.length); }
+try { DataView.prototype.setFloat16.call({}, float16Offset, float16Value); }
+catch (error: any) { console.log(error.constructor.name, float16Order.length); }
+const detachedHalfBuffer = new ArrayBuffer(2);
+const detachedHalf = new DataView(detachedHalfBuffer);
+structuredClone(detachedHalfBuffer, { transfer: [detachedHalfBuffer] });
+try { (detachedHalf as any).setFloat16(float16Offset, float16Value, true); }
+catch (error: any) { console.log(float16Order.slice(-2).join(","), error.constructor.name); }

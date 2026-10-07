@@ -14,7 +14,7 @@ use kiln_runtime::{
 #[cfg(feature = "realm-http")]
 use kiln_runtime::{
     HttpCloseMode,
-    node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
+    node_http_agent::{AgentCancellation, AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
 };
 use kiln_string::StringUnits;
 use std::cell::{Cell, RefCell};
@@ -81,6 +81,14 @@ const HTTP_EVENT_ERROR: u32 = 9;
 #[cfg(feature = "realm-http")]
 const HTTP_EVENT_CLOSED: u32 = 10;
 #[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_REQUEST: u32 = 11;
+#[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_READY: u32 = 12;
+#[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_RESPONSE: u32 = 13;
+#[cfg(feature = "realm-http")]
+const HTTP_EVENT_UPGRADE_WRITE_COMPLETE: u32 = 14;
+#[cfg(feature = "realm-http")]
 const HTTP_AGENT_CONNECT: i32 = 1;
 #[cfg(feature = "realm-http")]
 const HTTP_AGENT_REUSE: i32 = 2;
@@ -115,6 +123,8 @@ pub struct HttpEventView {
     pub headers_len: u64,
     pub data: *const u8,
     pub data_len: u64,
+    /// Nonzero only for `UPGRADE_WRITE_COMPLETE`; pairs an append with its flush callback.
+    pub write_fence: u64,
 }
 
 #[repr(C)]
@@ -158,6 +168,7 @@ pub struct CompletionView {
     pub stderr_len: u64,
     pub exit_code: i32,
     pub signal: i32,
+    /// Kind-specific scalar on success; positive OS errno (zero if absent) on failure.
     pub value_u64: u64,
     pub resource: u64,
     pub resource_kind: u32,
@@ -573,6 +584,7 @@ impl CompletionPayload {
                 payload.stderr = output.stderr;
                 payload.exit_code = output.exit_code.unwrap_or(i32::MIN);
                 payload.signal = output.signal.unwrap_or(i32::MIN);
+                payload.value_u64 = output.pid.map_or(u64::MAX, u64::from);
                 payload
             }
             Ok(AsyncHostValue::FileStat(stat)) => {
@@ -616,14 +628,22 @@ impl CompletionPayload {
                 payload
             }
             Ok(AsyncHostValue::DirEntries(_)) => Self::empty(request, sequence, VALUE_DIR_ENTRIES),
-            Err(error) => Self::error(
-                request,
-                sequence,
-                &error.code,
-                &error.syscall,
-                error.path.as_deref(),
-                &error.message,
-            ),
+            Err(error) => {
+                let mut payload = Self::error(
+                    request,
+                    sequence,
+                    &error.code,
+                    &error.syscall,
+                    error.path.as_deref(),
+                    &error.message,
+                );
+                // On failure this scalar carries a positive OS errno, or zero when absent.
+                payload.value_u64 = error
+                    .os_errno
+                    .filter(|errno| *errno > 0)
+                    .map_or(0, |errno| errno as u64);
+                payload
+            }
         }
     }
 
@@ -711,7 +731,7 @@ struct CompletionWork {
     continuation: Option<AsyncContinuation>,
     payload: CompletionPayload,
     cancelled: Rc<RefCell<HashSet<RequestId>>>,
-    queued: Rc<RefCell<HashSet<RequestId>>>,
+    queued: Rc<RefCell<HashMap<RequestId, Option<ResourceId>>>>,
 }
 
 unsafe extern "C" fn run_completion(
@@ -768,7 +788,19 @@ struct ScheduledWait {
     timer_armed: Rc<Cell<bool>>,
     virtual_delay: Option<Duration>,
     advanced: bool,
+    /// Real-time ticks this wait has survived with its timer armed and no wake. Virtual time
+    /// may jump to the deadline only after the I/O driver has had several of them to deliver
+    /// a completion that is already on its way (see `VIRTUAL_QUIET_TICKS`).
+    quiet_ticks: u32,
 }
+
+/// How many bounded real ticks (about a millisecond each) a virtual-clock realm that is parked on
+/// a timer and on real host work must see pass without a wake before its clock jumps to the
+/// timer. The jump says "nothing can make progress", and for a socket that is a claim about the
+/// kernel, which one poll of a current-thread reactor cannot make: a loopback connect or accept
+/// registered this turn is usually still in flight, and an 8 s guard timer would otherwise fire
+/// before the connection it guards was ever accepted.
+const VIRTUAL_QUIET_TICKS: u32 = 2;
 
 /// Reasons a scheduled realm must keep its current OS lane. These are deliberately lifetime
 /// pins: an operation can leave a callback or Tokio task reachable after the submitting turn,
@@ -789,16 +821,26 @@ struct NativeRealm {
     http_connections: RefCell<HashMap<kiln_host_abi::ResourceId, NativeHttpConnection>>,
     #[cfg(feature = "realm-http")]
     next_http_client_request_id: Cell<u64>,
+    /// First language failure raised by an HTTP task while the realm drive is parked.
+    #[cfg(feature = "realm-http")]
+    http_callback_failure: Cell<i32>,
     cancelled: Rc<RefCell<HashSet<RequestId>>>,
-    queued: Rc<RefCell<HashSet<RequestId>>>,
+    queued: Rc<RefCell<HashMap<RequestId, Option<ResourceId>>>>,
     symbols: RefCell<hashbrown::HashMap<StringUnits, u64, std::collections::hash_map::RandomState>>,
     symbol_keys: RefCell<HashMap<u64, StringUnits>>,
     callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
     value_slots: RefCell<HashMap<u32, Box<[u64; 4]>>>,
+    /// Parsed asymmetric keys belong to this realm and are discarded with it. Handles are opaque
+    /// integers; generated code never receives a Rust pointer or a copy of private components.
+    crypto_keys: RefCell<HashMap<u64, kiln_key_core::ImportedKey>>,
+    next_crypto_key: Cell<u64>,
     /// The command line this realm's launcher was started with, copied out of `main`'s
     /// `argv` before the realm is entered. Each element is its own allocation so that a
     /// pointer handed to generated C stays put for as long as the realm holds the vector.
     argv: RefCell<Vec<Box<[u8]>>>,
+    /// Whether this realm may compile source supplied as a string (ECMAScript host policy).
+    /// Source modules already part of its program graph do not consult this flag.
+    string_code_generation: Cell<bool>,
     entropy: Cell<Option<(u64, u64)>>,
     entered: Cell<bool>,
     diagnostic: RefCell<RealmDiagnostic>,
@@ -828,6 +870,11 @@ struct NativeRealm {
     affinity: Cell<u32>,
     /// Program identity, children and exit state follow this realm across scheduler lanes.
     worker_scope: Rc<RefCell<kiln_runtime::workers::RealmScopeState>>,
+    /// Whether this realm can still cause a wake in another without being woken itself. A
+    /// worker shares its liveness with the worker protocol, which counts it from the moment
+    /// it is spawned; any other realm joins when its first turn runs. Virtual time never
+    /// jumps while another realm is active (ADR 0012, ADR 0070).
+    liveness: std::cell::OnceCell<Arc<kiln_runtime::workers::Liveness>>,
     /// The realm's `node:ffi` libraries, prepared functions and callback closures (ADR 0070):
     /// released at teardown before the heap their callbacks name is torn down.
     #[cfg(feature = "ffi")]
@@ -872,9 +919,8 @@ impl NativeClock {
     }
 }
 
-/// A turn boundary for the realm's clock: a wall-clock realm reads the host now, so timers
-/// armed by the callbacks that follow measure from this instant, as Node's loop time does.
-/// A virtual realm's clock is not touched.
+/// Refresh the realm queue at a turn boundary or a timer call site. Wall-clock deadlines
+/// measure from this instant; a virtual realm's clock is not touched.
 fn tick_clock(realm: &NativeRealm) {
     if let Some(now) = realm.clock.get().reading()
         && let Ok(mut work) = realm.work.try_borrow_mut()
@@ -1254,6 +1300,16 @@ impl Drop for CallableStore {
 }
 
 impl NativeRealm {
+    #[cfg(feature = "realm-http")]
+    fn record_http_callback_failure(&self, status: i32) {
+        if status != 0 {
+            if self.http_callback_failure.get() == 0 {
+                self.http_callback_failure.set(status);
+            }
+            self.runtime.state.borrow().wake_drive();
+        }
+    }
+
     fn pin(&self, reason: u32) {
         self.affinity.set(self.affinity.get() | reason);
     }
@@ -1287,15 +1343,20 @@ impl NativeRealm {
             http_connections: RefCell::new(HashMap::new()),
             #[cfg(feature = "realm-http")]
             next_http_client_request_id: Cell::new(1),
+            #[cfg(feature = "realm-http")]
+            http_callback_failure: Cell::new(0),
             cancelled: Rc::new(RefCell::new(HashSet::new())),
-            queued: Rc::new(RefCell::new(HashSet::new())),
+            queued: Rc::new(RefCell::new(HashMap::new())),
             symbols: RefCell::new(hashbrown::HashMap::with_hasher(
                 std::collections::hash_map::RandomState::new(),
             )),
             symbol_keys: RefCell::new(HashMap::new()),
             callable_stores: RefCell::new(HashMap::new()),
             value_slots: RefCell::new(HashMap::new()),
+            crypto_keys: RefCell::new(HashMap::new()),
+            next_crypto_key: Cell::new(1),
             argv: RefCell::new(Vec::new()),
+            string_code_generation: Cell::new(true),
             entropy: Cell::new(None),
             entered: Cell::new(false),
             diagnostic: RefCell::new(RealmDiagnostic::default()),
@@ -1307,6 +1368,7 @@ impl NativeRealm {
             dedicated_gate: RefCell::new(None),
             dedicated_registration: RefCell::new(None),
             affinity: Cell::new(0),
+            liveness: std::cell::OnceCell::new(),
             worker_scope: Rc::new(RefCell::new(
                 kiln_runtime::workers::RealmScopeState::capture_current(),
             )),
@@ -1613,6 +1675,34 @@ fn active_realm() -> Option<Rc<NativeRealm>> {
     ACTIVE_REALM_RC.with(|slot| slot.borrow().clone())
 }
 
+pub(crate) fn active_crypto_key_insert(key: kiln_key_core::ImportedKey) -> Option<u64> {
+    let realm = active_realm()?;
+    let handle = realm.next_crypto_key.get();
+    let next = handle.checked_add(1)?;
+    realm.crypto_keys.try_borrow_mut().ok()?.insert(handle, key);
+    realm.next_crypto_key.set(next);
+    Some(handle)
+}
+
+pub(crate) fn with_active_crypto_key<R>(
+    handle: u64,
+    use_key: impl FnOnce(&kiln_key_core::ImportedKey) -> R,
+) -> Option<R> {
+    let realm = active_realm()?;
+    let keys = realm.crypto_keys.try_borrow().ok()?;
+    keys.get(&handle).map(use_key)
+}
+
+pub(crate) fn active_crypto_key_remove(handle: u64) {
+    if let Some(realm) = active_realm()
+        && let Ok(mut keys) = realm.crypto_keys.try_borrow_mut()
+    {
+        // Finalization is idempotent: a pending callback can outlive disposal of the realm that
+        // owned its handle, and repeated delivery must never release a later key.
+        keys.remove(&handle);
+    }
+}
+
 pub(crate) fn active_clock_is_virtual() -> bool {
     active_realm().is_some_and(|realm| matches!(realm.clock.get(), NativeClock::Virtual))
 }
@@ -1814,6 +1904,7 @@ fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
     // held across an await here.
     realm.drive_context.set((host, thrown));
     let status = realm.runtime.executor().block_on(drive_async(realm));
+    drive_ended(realm);
     realm
         .drive_context
         .set((std::ptr::null_mut(), std::ptr::null_mut()));
@@ -1831,6 +1922,9 @@ fn drive_scheduled(
 ) -> ScheduledStep {
     realm.drive_context.set((host, thrown));
     let step = drive_scheduled_inner(realm, waker);
+    if matches!(step, ScheduledStep::Done(_)) {
+        drive_ended(realm);
+    }
     realm
         .drive_context
         .set((std::ptr::null_mut(), std::ptr::null_mut()));
@@ -1853,6 +1947,15 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
         if wait.wake.get().is_none()
             && !wait.advanced
             && wait.timer_armed.get()
+            && !realm.virtual_clock_held(wait.virtual_delay)
+            && wait.virtual_delay.is_some()
+            && wait.quiet_ticks < VIRTUAL_QUIET_TICKS
+        {
+            wait.quiet_ticks += 1;
+        } else if wait.wake.get().is_none()
+            && !wait.advanced
+            && wait.timer_armed.get()
+            && !realm.virtual_clock_held(wait.virtual_delay)
             && let Some(delay) = wait.virtual_delay
         {
             // The waiter has polled its timer after the preceding yield. Advancing earlier
@@ -1940,6 +2043,7 @@ fn drive_scheduled_inner(realm: &NativeRealm, waker: &Waker) -> ScheduledStep {
                 timer_armed,
                 virtual_delay,
                 advanced: false,
+                quiet_ticks: 0,
             }));
             realm.runtime.executor().poll_local_once(waker);
             if virtual_delay.is_some() {
@@ -1972,7 +2076,31 @@ async fn drive_async(realm: &NativeRealm) -> i32 {
                 }
                 let delay = introspect_park(realm, delay);
                 let parked = reclaim::park();
-                let wake = kiln_runtime::wait_for_turn(signal, delay).await;
+                // A GUI on this thread owns the OS run loop (ADR 0074): park inside it, so
+                // its events, the next timer and completions all end the wait without polling.
+                let hook = kiln_runtime::park_hook()
+                    .filter(|_| matches!(realm.clock.get(), NativeClock::Wall { .. }));
+                let wake = match hook {
+                    Some(hook) => {
+                        let state = &realm.runtime.state;
+                        kiln_runtime::wait_for_turn_in(hook, signal, delay, || {
+                            state.borrow().needs_io_driver()
+                        })
+                        .await
+                    }
+                    None if matches!(realm.clock.get(), NativeClock::Virtual) => {
+                        let liveness = Arc::clone(realm.liveness());
+                        let io_pending = realm.runtime.state.borrow().needs_io_driver();
+                        kiln_runtime::wait_for_turn_quiescent(
+                            signal,
+                            delay,
+                            move || liveness.others_hold(delay),
+                            io_pending,
+                        )
+                        .await
+                    }
+                    None => kiln_runtime::wait_for_turn(signal, delay).await,
+                };
                 drop(parked);
                 if yield_first
                     && wake == kiln_runtime::DriveWake::Timer
@@ -2001,6 +2129,56 @@ enum DriveStep {
     Done(i32),
 }
 
+impl NativeRealm {
+    fn liveness(&self) -> &Arc<kiln_runtime::workers::Liveness> {
+        self.liveness.get_or_init(|| {
+            kiln_runtime::workers::current_liveness()
+                .unwrap_or_else(kiln_runtime::workers::Liveness::new_active)
+        })
+    }
+
+    /// Whether a virtual clock must hold still because another realm has runnable work.
+    fn virtual_clock_held(&self, delay: Option<std::time::Duration>) -> bool {
+        matches!(self.clock.get(), NativeClock::Virtual) && self.liveness().others_hold(delay)
+    }
+}
+
+/// The drive has returned its status. A top-level realm has nothing left to cause a wake, so it
+/// goes idle. A worker does not: between here and `workers::complete_worker` it still tears down
+/// (children, realm state) and only then queues the `exit` and closes the ports its parent is
+/// parked on, and a parent's virtual clock that saw it idle in that window would jump to its next
+/// timer first. `complete_worker` ends the worker's liveness once those messages are queued.
+fn drive_ended(realm: &NativeRealm) {
+    if kiln_runtime::workers::current_liveness().is_none() {
+        realm.liveness().set_idle();
+    }
+}
+
+/// Mark this realm idle because it is about to park, unless its parent has asked it to stop.
+///
+/// `terminate()` raises the flag and then marks the worker active (`workers::terminate`), so a
+/// virtual clock elsewhere stays held until the worker has ended. A worker mid-turn when that
+/// happens would otherwise go idle here, on its way to park, and undo it: the parent's parked
+/// clock could then jump to its next timer before the worker's next turn processed the stop.
+/// Checking the flag after going idle closes the race in either order. Returns `true` when the
+/// realm must not park; it is active again and the next turn ends it.
+fn park_idle(realm: &NativeRealm, timer: Option<std::time::Duration>) -> bool {
+    // A virtual realm parked on a timer is idle but not inert: that timer may post a message or
+    // close a port, so it is published before going idle for other realms' clocks to respect.
+    realm
+        .liveness()
+        .publish_timer(timer.filter(|_| matches!(realm.clock.get(), NativeClock::Virtual)));
+    realm.liveness().set_idle();
+    // A wake sent to this realm (a post, a close, a notify) marked it active when it was sent,
+    // but a wake that landed before `set_idle` above was undone by it: the realm must run that
+    // turn, not park on it. The check follows going idle, so no wake falls between the two.
+    if kiln_runtime::workers::terminate_requested() || realm.liveness().wake_pending() {
+        realm.liveness().set_active();
+        return true;
+    }
+    false
+}
+
 fn run_one_timer(realm: &NativeRealm) -> i32 {
     let timer = take_next_timer(realm);
     if let Some(WorkItem::Timer { work, .. }) = timer {
@@ -2012,6 +2190,15 @@ fn run_one_timer(realm: &NativeRealm) -> i32 {
 }
 
 fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
+    // HTTP tasks enter generated code while this drive is parked. Propagate their language
+    // failure before another collection or callback can overwrite the drive's thrown slot.
+    #[cfg(feature = "realm-http")]
+    if realm.http_callback_failure.get() != 0 {
+        return DriveStep::Done(realm.http_callback_failure.get());
+    }
+    // This turn sees every wake sent so far; one sent from here on keeps `park_idle` honest.
+    realm.liveness().clear_wake();
+    realm.liveness().set_active();
     // A turn boundary: no generated frame is on this thread's stack.
     reclaim::quiescent();
     if let Some(gate) = realm.dedicated_gate.borrow().clone() {
@@ -2075,7 +2262,7 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
         // this drive, so a ready turn never reports it.
         Some(RuntimeTurn::Protocol) | None => {}
     }
-    let (referenced, pending, in_flight, deadline, now, signal) = {
+    let (referenced, pending, in_flight, deadline, timers_alive, now, signal) = {
         let runtime = realm.runtime.state.borrow();
         let mut work = realm.work.borrow_mut();
         (
@@ -2083,6 +2270,7 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
             runtime.has_pending_host_work(),
             runtime.requests_in_flight(),
             work.next_timer_deadline(),
+            work.has_referenced_timers(),
             work.now(),
             runtime.completion_signal(),
         )
@@ -2092,6 +2280,13 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
             "[kiln-drive] referenced={referenced} pending={pending} in_flight={in_flight} deadline={deadline:?} host={}",
             realm.runtime.state.borrow().describe_host_work(),
         );
+    }
+    // The loop is over once nothing referenced is left: no timer that keeps it alive, no
+    // completion that can arrive, no request in flight. An unreferenced timer, due or not, does
+    // not hold it open and does not move the virtual clock; while something else does keep it
+    // open, it runs in its turn like any other.
+    if !timers_alive && !(referenced && pending) && in_flight == 0 {
+        return DriveStep::Done(0);
     }
     // A timer that is already due runs now. It is not a wait case: under load the
     // completion signal always has a permit, and a select that prefers it would let a
@@ -2121,10 +2316,27 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
             let Some(signal) = signal else {
                 return DriveStep::Done(RUNTIME_ERROR);
             };
+            if park_idle(realm, None) {
+                return DriveStep::Ready;
+            }
             return DriveStep::Parked {
                 signal,
                 delay: Some(deadline.saturating_sub(now)),
                 yield_first: false,
+            };
+        }
+        // Another realm with runnable work may post before this one's timer: wait, with the
+        // clock held, until it parks or wakes this realm (`wait_for_turn_quiescent`).
+        if realm.virtual_clock_held(Some(deadline.saturating_sub(now)))
+            && let Some(signal) = signal
+        {
+            if park_idle(realm, Some(deadline.saturating_sub(now))) {
+                return DriveStep::Ready;
+            }
+            return DriveStep::Parked {
+                signal,
+                delay: Some(deadline.saturating_sub(now)),
+                yield_first: true,
             };
         }
         let status = run_one_timer(realm);
@@ -2137,6 +2349,9 @@ fn drive_one_ready_turn(realm: &NativeRealm) -> DriveStep {
     let Some(signal) = signal else {
         return DriveStep::Done(RUNTIME_ERROR);
     };
+    if park_idle(realm, deadline.map(|deadline| deadline.saturating_sub(now))) {
+        return DriveStep::Ready;
+    }
     // A wall-clock timer wake may be an introspection poll rather than the deadline. A
     // virtual timer wake consumes one timer after the executor returns from its wait.
     DriveStep::Parked {
@@ -2199,7 +2414,18 @@ fn route_completion(realm: &NativeRealm, completion: kiln_host_abi::Completion) 
         cancelled: Rc::clone(&realm.cancelled),
         queued: Rc::clone(&realm.queued),
     });
-    realm.queued.borrow_mut().insert(completion.request);
+    // Resource creation remains owned by the completion until its language callback starts.
+    // A same-turn callback can cancel another completion already queued by the provider.
+    let owned_resource = (completion_work.payload.status == 0
+        && matches!(
+            completion_work.payload.value_kind,
+            VALUE_RESOURCE | VALUE_ACCEPTED_STREAM
+        ))
+    .then(|| ResourceId::new(completion_work.payload.resource));
+    realm
+        .queued
+        .borrow_mut()
+        .insert(completion.request, owned_resource);
     let pointer = Box::into_raw(completion_work).cast::<c_void>();
     let Some(work) = NativeMicrotask::with_roots(
         pointer,
@@ -2236,6 +2462,14 @@ pub unsafe extern "C" fn kiln_realm_create(out: *mut u64) -> i32 {
         let Ok(realm) = created else {
             return RUNTIME_ERROR;
         };
+        // A top-level realm has no worker record: register its liveness on its own thread so a
+        // port post or notify into it marks it active when sent, as for a worker. A realm on a
+        // shared lane shares its thread, so it registers nothing.
+        if dedicated && kiln_runtime::workers::current_liveness().is_none() {
+            kiln_runtime::workers::set_main_liveness(Some(Arc::clone(realm.liveness())));
+        } else if kiln_runtime::workers::current_liveness().is_none() {
+            kiln_runtime::workers::set_main_liveness(None);
+        }
         let Ok(handle) = NEXT_REALM.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
             next.checked_add(1)
         }) else {
@@ -2548,6 +2782,192 @@ pub unsafe extern "C" fn kiln_url_set(
         unsafe { spill(record.as_bytes(), out, capacity, out_len) }
     })
 }
+
+/// `TextDecoder`'s label check, answered by `kiln-encoding` -- the owner the interpreter calls
+/// directly (ADR 0060). `label` is the constructor's argument as UTF-8; the answer is the
+/// canonical lowercase name the `encoding` attribute reports. A label naming no encoding
+/// answers `TEXT_LABEL_INVALID` -- the `RangeError` -- and spills the message to throw.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_text_decoder_label(
+    label: *const u8,
+    label_len: u64,
+    out: *mut u8,
+    capacity: u64,
+    out_len: *mut u64,
+) -> i32 {
+    ffi(|| {
+        let Some(label) = (unsafe { borrowed_str(label, label_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        match kiln_encoding::canonical_name(label) {
+            Ok(name) => unsafe { spill(name.as_bytes(), out, capacity, out_len) },
+            Err(error) => {
+                let status = unsafe { spill(error.message().as_bytes(), out, capacity, out_len) };
+                if status == 0 {
+                    TEXT_LABEL_INVALID
+                } else {
+                    status
+                }
+            }
+        }
+    })
+}
+
+/// `TextDecoder.prototype.decode`: `bytes` decoded as the encoding `name` (the decoder's
+/// `encoding` attribute) into UTF-8. `flags` carries `kiln_encoding::FLAG_FATAL` and
+/// `FLAG_IGNORE_BOM`. A `fatal` decoder given bytes that are not valid answers
+/// `TEXT_DATA_INVALID` -- the `TypeError` -- and spills the message to throw.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_text_decode(
+    name: *const u8,
+    name_len: u64,
+    bytes: *const u8,
+    bytes_len: u64,
+    flags: u32,
+    out: *mut u8,
+    capacity: u64,
+    out_len: *mut u64,
+) -> i32 {
+    ffi(|| {
+        let Some(name) = (unsafe { borrowed_str(name, name_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(bytes_len) = usize::try_from(bytes_len) else {
+            return INVALID_ARGUMENT;
+        };
+        let bytes = if bytes.is_null() {
+            if bytes_len != 0 {
+                return INVALID_ARGUMENT;
+            }
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(bytes, bytes_len) }
+        };
+        let fatal = flags & kiln_encoding::FLAG_FATAL != 0;
+        let ignore_bom = flags & kiln_encoding::FLAG_IGNORE_BOM != 0;
+        match kiln_encoding::decode(name, bytes, fatal, ignore_bom) {
+            Ok(text) => unsafe { spill(text.as_bytes(), out, capacity, out_len) },
+            Err(error) => {
+                let status = unsafe { spill(error.message().as_bytes(), out, capacity, out_len) };
+                if status == 0 {
+                    TEXT_DATA_INVALID
+                } else {
+                    status
+                }
+            }
+        }
+    })
+}
+
+/// Construct one owned incremental decoder. `flags` carries `FLAG_FATAL` and `FLAG_IGNORE_BOM`;
+/// the caller releases the returned opaque state with `kiln_text_decoder_state_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_text_decoder_state_create(
+    label: *const u8,
+    label_len: u64,
+    flags: u32,
+    out_state: *mut *mut c_void,
+    out: *mut u8,
+    capacity: u64,
+    out_len: *mut u64,
+) -> i32 {
+    ffi(|| {
+        if out_state.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Some(label) = (unsafe { borrowed_str(label, label_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let decoder = match kiln_encoding::StreamingDecoder::new(
+            label,
+            flags & kiln_encoding::FLAG_FATAL != 0,
+            flags & kiln_encoding::FLAG_IGNORE_BOM != 0,
+        ) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                let status = unsafe { spill(error.message().as_bytes(), out, capacity, out_len) };
+                return if status == 0 {
+                    TEXT_LABEL_INVALID
+                } else {
+                    status
+                };
+            }
+        };
+        unsafe { *out_state = Box::into_raw(Box::new(decoder)).cast() };
+        if !out_len.is_null() {
+            unsafe { *out_len = 0 };
+        }
+        0
+    })
+}
+
+/// Decode one segment on a state returned by `kiln_text_decoder_state_create`. Nonzero `stream`
+/// keeps incomplete byte and legacy encoding state for the next call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_text_decoder_state_decode(
+    state: *mut c_void,
+    bytes: *const u8,
+    bytes_len: u64,
+    stream: u32,
+    out: *mut u8,
+    capacity: u64,
+    out_len: *mut u64,
+) -> i32 {
+    ffi(|| {
+        if state.is_null() || out_len.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Ok(bytes_len) = usize::try_from(bytes_len) else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(capacity_usize) = usize::try_from(capacity) else {
+            return INVALID_ARGUMENT;
+        };
+        let bytes = if bytes.is_null() {
+            if bytes_len != 0 {
+                return INVALID_ARGUMENT;
+            }
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(bytes, bytes_len) }
+        };
+        let decoder = unsafe { &mut *state.cast::<kiln_encoding::StreamingDecoder>() };
+        let Some(required) = decoder.max_output_buffer_length(bytes_len) else {
+            return INVALID_ARGUMENT;
+        };
+        if out.is_null() || capacity_usize < required {
+            // A safe upper bound is returned without feeding `bytes`, making a larger-buffer
+            // retry transactional even when the decoder has pending bytes from earlier chunks.
+            unsafe { *out_len = required as u64 };
+            return INVALID_ARGUMENT;
+        }
+        match decoder.decode(bytes, stream != 0) {
+            Ok(text) => unsafe { spill(text.as_bytes(), out, capacity, out_len) },
+            Err(error) => {
+                let status = unsafe { spill(error.message().as_bytes(), out, capacity, out_len) };
+                if status == 0 {
+                    TEXT_DATA_INVALID
+                } else {
+                    status
+                }
+            }
+        }
+    })
+}
+
+/// # Safety
+/// `state` must be null or a pointer returned exactly once by `kiln_text_decoder_state_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_text_decoder_state_free(state: *mut c_void) {
+    if !state.is_null() {
+        drop(unsafe { Box::from_raw(state.cast::<kiln_encoding::StreamingDecoder>()) });
+    }
+}
+
+/// The status a `TextDecoder` export answers for a label that names no encoding (`RangeError`).
+pub const TEXT_LABEL_INVALID: i32 = 3;
+/// The status `kiln_text_decode` answers for invalid input under `fatal` (`TypeError`).
+pub const TEXT_DATA_INVALID: i32 = 4;
 
 /// `String.prototype.toUpperCase` / `toLowerCase` beyond ASCII: the full Unicode mapping,
 /// which is Rust's own (`char::to_uppercase`, including the one-to-many cases -- `ß` to
@@ -3253,6 +3673,42 @@ pub unsafe extern "C" fn kiln_realm_set_argv(
             copied.push(bytes.to_vec().into_boxed_slice());
         }
         *realm.argv.borrow_mut() = copied;
+        0
+    })
+}
+
+/// Sets whether this realm may evaluate dynamically supplied source strings.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_realm_set_string_code_generation(handle: u64, allowed: i32) -> i32 {
+    ffi(|| {
+        let Some(realm) = realm(handle) else {
+            return INVALID_ARGUMENT;
+        };
+        let value = match allowed {
+            0 => false,
+            1 => true,
+            _ => return INVALID_ARGUMENT,
+        };
+        if realm.entered.get() {
+            return INVALID_ARGUMENT;
+        }
+        realm.string_code_generation.set(value);
+        0
+    })
+}
+
+/// Reads the string-code-generation policy for the currently active realm.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_string_code_generation_allowed(out_allowed: *mut i32) -> i32 {
+    ffi(|| {
+        if out_allowed.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the private ABI caller provides one writable integer.
+        unsafe { out_allowed.write(i32::from(realm.string_code_generation.get())) };
         0
     })
 }
@@ -4097,7 +4553,22 @@ pub unsafe extern "C" fn kiln_realm_cancel_request(handle: u64, request: u64) ->
             return RUNTIME_ERROR;
         };
         let removed = realm.continuations.borrow_mut().remove(&request).is_some();
-        let queued = realm.queued.borrow().contains(&request);
+        let (queued, owned_resource) = {
+            let mut queued = realm.queued.borrow_mut();
+            match queued.get_mut(&request) {
+                Some(resource) => (true, resource.take()),
+                None => (false, None),
+            }
+        };
+        if let Some(resource) = owned_resource {
+            let Some(mut runtime) = realm.runtime.state_mut() else {
+                return RUNTIME_ERROR;
+            };
+            // The host has already handed this completion to our queue, so cancelling the
+            // original request cannot close its undelivered resource. Retire that ownership
+            // here; ordinary ResourceState queries never own the resource they describe.
+            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
+        }
         if canceled || removed || queued {
             realm.cancelled.borrow_mut().insert(request);
             0
@@ -4117,6 +4588,49 @@ pub unsafe extern "C" fn kiln_realm_cancel_active_request(request: u64) -> i32 {
     let handle = ACTIVE_REALM.with(Cell::get);
     // SAFETY: the active-handle wrapper performs the same identity validation.
     unsafe { kiln_realm_cancel_request(handle, request) }
+}
+
+/// Cancel unfinished work without suppressing an already-completed language callback.
+/// Returns 1 for cancelled work, 2 for an intact ready completion, and 0 for an unknown request.
+/// Unlike ordinary cancellation, this primitive never retires a completion-owned resource.
+///
+/// # Safety
+/// `request` must be an identity previously returned to this active realm.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_cancel_active_request_if_pending(request: u64) -> i32 {
+    ffi(|| {
+        let handle = ACTIVE_REALM.with(Cell::get);
+        let Some(realm) = active_handle(handle) else {
+            return INVALID_ARGUMENT;
+        };
+        let request = RequestId::new(request);
+        if realm.queued.borrow().contains_key(&request)
+            && !realm.cancelled.borrow().contains(&request)
+        {
+            return 2;
+        }
+        let Some(outcome) = realm
+            .runtime
+            .state_mut()
+            .map(|mut state| state.cancel_host_op_if_pending(request))
+        else {
+            return RUNTIME_ERROR;
+        };
+        match outcome {
+            kiln_host_abi::PendingCancellation::CompletionReady => 2,
+            kiln_host_abi::PendingCancellation::Cancelled => {
+                realm.continuations.borrow_mut().remove(&request);
+                1
+            }
+            kiln_host_abi::PendingCancellation::Unknown => {
+                if realm.continuations.borrow().contains_key(&request) {
+                    RUNTIME_ERROR
+                } else {
+                    0
+                }
+            }
+        }
+    })
 }
 
 /// Runs every queued next-tick job, promise job and host completion. This is the checkpoint
@@ -4190,12 +4704,53 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         let Some(realm) = self.realm.upgrade() else {
             return INVALID_ARGUMENT;
         };
+        if realm.http_callback_failure.get() != 0 {
+            return realm.http_callback_failure.get();
+        }
         // The engine calls the language while the drive is parked (offline, see `reclaim`).
         let _online = reclaim::online();
         tick_clock(&realm);
         let (host, thrown) = realm.drive_context.get();
+        if event.kind == HttpEventKind::UpgradeReady {
+            let adopted = realm
+                .runtime
+                .state
+                .borrow_mut()
+                .adopt_server_upgrade(self.resource);
+            if !adopted {
+                realm
+                    .runtime
+                    .state
+                    .borrow_mut()
+                    .retire_http_connection(self.resource);
+                realm.http_connections.borrow_mut().remove(&self.resource);
+                return INVALID_ARGUMENT;
+            }
+            realm.http_connections.borrow_mut().remove(&self.resource);
+        }
+        if event.kind == HttpEventKind::UpgradeResponse {
+            let adopted = realm
+                .runtime
+                .state
+                .borrow_mut()
+                .adopt_client_upgrade(self.resource);
+            if !adopted {
+                realm
+                    .runtime
+                    .state
+                    .borrow_mut()
+                    .retire_http_connection(self.resource);
+                realm.http_connections.borrow_mut().remove(&self.resource);
+                return INVALID_ARGUMENT;
+            }
+            realm.http_connections.borrow_mut().remove(&self.resource);
+        }
         let kind = match event.kind {
             HttpEventKind::RequestHead => HTTP_EVENT_REQUEST_HEAD,
+            HttpEventKind::UpgradeRequest => HTTP_EVENT_UPGRADE_REQUEST,
+            HttpEventKind::UpgradeReady => HTTP_EVENT_UPGRADE_READY,
+            HttpEventKind::UpgradeWriteComplete => HTTP_EVENT_UPGRADE_WRITE_COMPLETE,
+            HttpEventKind::UpgradeResponse => HTTP_EVENT_UPGRADE_RESPONSE,
             HttpEventKind::RequestData => HTTP_EVENT_REQUEST_DATA,
             HttpEventKind::RequestEnd => HTTP_EVENT_REQUEST_END,
             HttpEventKind::Drain => HTTP_EVENT_DRAIN,
@@ -4216,11 +4771,16 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
             event.reason
         });
         let (headers, headers_len) = event_bytes(event.headers);
-        let (data, data_len) = event_bytes(if event.kind == HttpEventKind::Error {
-            event.message
-        } else {
-            event.data
-        });
+        let (data, data_len) = event_bytes(
+            if matches!(
+                event.kind,
+                HttpEventKind::Error | HttpEventKind::UpgradeWriteComplete
+            ) {
+                event.message
+            } else {
+                event.data
+            },
+        );
         let view = HttpEventView {
             kind,
             flags: u32::from(event.keep_alive),
@@ -4238,10 +4798,12 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
             headers_len,
             data,
             data_len,
+            write_fence: event.write_fence,
         };
         // SAFETY: the engine keeps every span live for this synchronous call, and the
         // owner's adapter allocation lives until the connection is removed below.
         let status = unsafe { (self.owner.run)(self.owner.pointer, &raw const view, host, thrown) };
+        realm.record_http_callback_failure(status);
         if matches!(
             event.kind,
             HttpEventKind::Finish
@@ -4273,11 +4835,16 @@ impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         let Some(realm) = self.realm.upgrade() else {
             return INVALID_ARGUMENT;
         };
+        if realm.http_callback_failure.get() != 0 {
+            return realm.http_callback_failure.get();
+        }
         if !realm_has_queued_work(&realm) {
             return 0;
         }
         let _online = reclaim::online();
-        drain_realm_queues(&realm)
+        let status = drain_realm_queues(&realm);
+        realm.record_http_callback_failure(status);
+        status
     }
 
     fn whole_requests(&self) -> bool {
@@ -4495,6 +5062,93 @@ pub unsafe extern "C" fn kiln_realm_http_agent_connected_active(
             ResourceId::new(resource),
             request,
         ))
+    })
+}
+
+#[cfg(feature = "realm-http")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_http_agent_connect_failed_active(
+    host: *const u8,
+    host_len: u64,
+    port: u16,
+    failed_request: u64,
+    out_request: *mut u64,
+) -> i32 {
+    ffi(|| {
+        let (Some(realm), Some(out_request)) = (active_realm(), unsafe { out_request.as_mut() })
+        else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(mut runtime) = realm.runtime.state_mut() else {
+            return RUNTIME_ERROR;
+        };
+        let Some(host) = (unsafe { borrowed_bytes(host, host_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(host) = std::str::from_utf8(host) else {
+            return INVALID_ARGUMENT;
+        };
+        *out_request = 0;
+        match runtime.client_connection_failed(&HttpOrigin::http(host, port), failed_request) {
+            AgentFailure::Empty => 0,
+            AgentFailure::Connect { request } => {
+                *out_request = request;
+                1
+            }
+        }
+    })
+}
+
+#[cfg(feature = "realm-http")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_http_agent_cancel_connect_active(
+    host: *const u8,
+    host_len: u64,
+    port: u16,
+    request: u64,
+    out_request: *mut u64,
+) -> i32 {
+    ffi(|| {
+        let (Some(realm), Some(out_request)) = (active_realm(), unsafe { out_request.as_mut() })
+        else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(mut runtime) = realm.runtime.state_mut() else {
+            return RUNTIME_ERROR;
+        };
+        let Some(host) = (unsafe { borrowed_bytes(host, host_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(host) = std::str::from_utf8(host) else {
+            return INVALID_ARGUMENT;
+        };
+        *out_request = 0;
+        match runtime.cancel_client_connection(&HttpOrigin::http(host, port), request) {
+            AgentCancellation::Missing => 0,
+            AgentCancellation::Waiting => 1,
+            AgentCancellation::Connecting { next: None } => 2,
+            AgentCancellation::Connecting { next: Some(next) } => {
+                *out_request = next;
+                3
+            }
+        }
+    })
+}
+
+#[cfg(feature = "realm-http")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_http_agent_can_retain_active(
+    resource: u64,
+    reusable: i32,
+) -> i32 {
+    ffi(|| {
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(runtime) = realm.runtime.state_mut() else {
+            return RUNTIME_ERROR;
+        };
+        i32::from(runtime.client_connection_can_retain(ResourceId::new(resource), reusable != 0))
     })
 }
 
@@ -4726,10 +5380,74 @@ pub unsafe extern "C" fn kiln_realm_http_response_end_active(
     write_http_response(resource, id, data, data_len, true)
 }
 
+#[cfg(feature = "realm-http")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_http_upgrade_write_active(
+    resource: u64,
+    id: u64,
+    data: *const u8,
+    data_len: u64,
+) -> i32 {
+    ffi(|| {
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(mut runtime) = realm.runtime.state_mut() else {
+            return RUNTIME_ERROR;
+        };
+        let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(receipt) =
+            runtime
+                .http_server()
+                .write_upgrade(kiln_host_abi::ResourceId::new(resource), id, data)
+        else {
+            return RUNTIME_ERROR;
+        };
+        i32::from(!receipt.disposition.ready)
+    })
+}
+
+/// Additive upgrade-write entry point that returns the fence completed when this append has
+/// actually reached the upgraded transport. The legacy entry point remains ABI-stable.
+#[cfg(feature = "realm-http")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_http_upgrade_write_active_with_fence(
+    resource: u64,
+    id: u64,
+    data: *const u8,
+    data_len: u64,
+    out_fence: *mut u64,
+) -> i32 {
+    ffi(|| {
+        if out_fence.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(mut runtime) = realm.runtime.state_mut() else {
+            return RUNTIME_ERROR;
+        };
+        let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let Some(receipt) =
+            runtime
+                .http_server()
+                .write_upgrade(kiln_host_abi::ResourceId::new(resource), id, data)
+        else {
+            return RUNTIME_ERROR;
+        };
+        unsafe { *out_fence = receipt.fence };
+        i32::from(!receipt.disposition.ready)
+    })
+}
+
 /// Linkable HTTP stubs for archives built without `realm-http`.
 ///
-/// Every symbol the provider ABI registry names must still link (PROVIDER_EXPORTS keeps
-/// its 99 entries and PROVIDER_ABI_VERSION stays 37), so each entry point keeps its exact
+/// Every symbol the provider ABI registry names must still link, so each entry point keeps its exact
 /// signature and answers invalid-argument. The stubs are unreachable in an HTTP-free
 /// graph: generated adapters only call them after a successful attach, and every attach
 /// fails without the engines. Enforcement of that "no HTTP calls" invariant belongs to a
@@ -4758,6 +5476,9 @@ mod http_stubs {
     http_stub!(kiln_realm_http_agent_acquire_active(host: *const u8, host_len: u64, port: u16, request: u64, out_resource: *mut u64) -> i32);
     http_stub!(kiln_realm_http_client_owner_active(resource: u64, out_owner: *mut *mut c_void) -> i32);
     http_stub!(kiln_realm_http_agent_connected_active(host: *const u8, host_len: u64, port: u16, resource: u64, request: u64) -> i32);
+    http_stub!(kiln_realm_http_agent_connect_failed_active(host: *const u8, host_len: u64, port: u16, failed_request: u64, out_request: *mut u64) -> i32);
+    http_stub!(kiln_realm_http_agent_cancel_connect_active(host: *const u8, host_len: u64, port: u16, request: u64, out_request: *mut u64) -> i32);
+    http_stub!(kiln_realm_http_agent_can_retain_active(resource: u64, reusable: i32) -> i32);
     http_stub!(kiln_realm_http_agent_release_active(resource: u64, reusable: i32, out_request: *mut u64) -> i32);
     http_stub!(kiln_realm_http_client_start_active(resource: u64, id: u64, request: *const HttpRequestView, high_water_mark: u64) -> i32);
     http_stub!(kiln_realm_http_client_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
@@ -4765,6 +5486,8 @@ mod http_stubs {
     http_stub!(kiln_realm_http_response_start_active(resource: u64, id: u64, response: *const HttpResponseView, high_water_mark: u64) -> i32);
     http_stub!(kiln_realm_http_response_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
     http_stub!(kiln_realm_http_response_end_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+    http_stub!(kiln_realm_http_upgrade_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+    http_stub!(kiln_realm_http_upgrade_write_active_with_fence(resource: u64, id: u64, data: *const u8, data_len: u64, out_fence: *mut u64) -> i32);
 }
 
 #[cfg(not(feature = "realm-http"))]
@@ -4793,6 +5516,11 @@ fn arm(
         let Some(realm) = active_realm() else {
             return INVALID_ARGUMENT;
         };
+        // Timers measure from their call site, including after synchronous work inside a turn.
+        // Immediates and I/O do not need a fresh deadline; virtual clocks remain unchanged.
+        if matches!(arm, Arm::Timeout(_) | Arm::Interval(_)) {
+            tick_clock(&realm);
+        }
         let Ok(mut queue) = realm.work.try_borrow_mut() else {
             return RUNTIME_ERROR;
         };
@@ -4908,6 +5636,89 @@ pub extern "C" fn kiln_realm_clear_timer(id: u64) -> i32 {
             return RUNTIME_ERROR;
         };
         queue.clear_timeout(TimerId::new(id));
+        0
+    })
+}
+
+/// Marks a timeout, interval, immediate or I/O callback on the active Realm as referenced (it
+/// keeps the loop alive, node's default) or not (`timer.unref()`). Unknown identities are a
+/// no-op: a timer that already ran or was cleared has nothing left to keep alive.
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_realm_set_timer_ref(id: u64, referenced: i32) -> i32 {
+    ffi(|| {
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        let Ok(mut queue) = realm.work.try_borrow_mut() else {
+            return RUNTIME_ERROR;
+        };
+        queue.set_timer_referenced(TimerId::new(id), referenced != 0);
+        0
+    })
+}
+
+/// Restarts a timeout or interval on the active Realm as `Timeout.prototype.refresh()` does: the
+/// same identity, callback, arguments, referenced state and delay, measured from the Realm's
+/// current (virtual) time. Answers 1 when it restarted a timer that is still pending, and 0 when
+/// there is none under `id` (it already ran, or was cleared): the caller decides whether a
+/// finished one is armed again (`kiln_realm_rearm_timeout`).
+#[unsafe(no_mangle)]
+pub extern "C" fn kiln_realm_refresh_timer(id: u64) -> i32 {
+    ffi(|| {
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        tick_clock(&realm);
+        let Ok(mut queue) = realm.work.try_borrow_mut() else {
+            return RUNTIME_ERROR;
+        };
+        i32::from(queue.refresh_timer(TimerId::new(id)))
+    })
+}
+
+/// Arms a timeout under the identity `id` of one that already ran, so a `Timeout` that fired can
+/// restart as node's `refresh()` does and `clearTimeout(id)` still finds it. Answers 0 when it
+/// took `work` (the realm now owns it, as `kiln_realm_set_timeout`'s), and 1 when it did not --
+/// the identity is still pending, or was cleared -- and the caller keeps `work`.
+///
+/// # Safety
+///
+/// `work` must satisfy the callback ownership contract when the answer is 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_realm_rearm_timeout(
+    id: u64,
+    delay_ms: f64,
+    run: Option<RunWork>,
+    drop: Option<DropWork>,
+    work: *mut c_void,
+) -> i32 {
+    ffi(|| {
+        let Some(realm) = active_realm() else {
+            return INVALID_ARGUMENT;
+        };
+        tick_clock(&realm);
+        let Ok(mut queue) = realm.work.try_borrow_mut() else {
+            return RUNTIME_ERROR;
+        };
+        let id = TimerId::new(id);
+        if !queue.is_rearmable(id) {
+            return 1;
+        }
+        let Some(work) = NativeWork::new(work, run, drop, false) else {
+            return INVALID_ARGUMENT;
+        };
+        let (delay, warning) = queue.node_timer_delay(Some(delay_ms));
+        if let Some(warning) = warning {
+            use std::io::Write as _;
+            let _ = std::io::stderr().write_all(warning.as_bytes());
+        }
+        queue.rearm_timeout(id, delay, work);
+        std::mem::drop(queue);
+        if let Some(realm) = active_realm()
+            && let Ok(state) = realm.runtime.state.try_borrow()
+        {
+            state.wake_drive();
+        }
         0
     })
 }
@@ -6357,6 +7168,21 @@ macro_rules! assert_provider_export {
         (realm, kiln_url_set, url_set) => {
             const _: unsafe extern "C" fn(*const u8, u64, u32, *const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_url_set;
         };
+        (realm, kiln_text_decoder_label, text_decoder_label) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_text_decoder_label;
+        };
+        (realm, kiln_text_decode, text_decode) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *const u8, u64, u32, *mut u8, u64, *mut u64) -> i32 = kiln_text_decode;
+        };
+        (realm, kiln_text_decoder_state_create, text_decoder_state_create) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u32, *mut *mut c_void, *mut u8, u64, *mut u64) -> i32 = kiln_text_decoder_state_create;
+        };
+        (realm, kiln_text_decoder_state_decode, text_decoder_state_decode) => {
+            const _: unsafe extern "C" fn(*mut c_void, *const u8, u64, u32, *mut u8, u64, *mut u64) -> i32 = kiln_text_decoder_state_decode;
+        };
+        (realm, kiln_text_decoder_state_free, text_decoder_state_free) => {
+            const _: unsafe extern "C" fn(*mut c_void) = kiln_text_decoder_state_free;
+        };
         (realm, kiln_string_case, string_case) => {
             const _: unsafe extern "C" fn(*const u16, u64, u32, *mut u16, u64, *mut u64) -> i32 = kiln_string_case;
         };
@@ -6376,6 +7202,12 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_realm_set_argv, realm_set_argv) => {
             const _: unsafe extern "C" fn(u64, u64, *const *const c_char) -> i32 = kiln_realm_set_argv;
+        };
+        (realm, kiln_realm_set_string_code_generation, realm_set_string_code_generation) => {
+            const _: extern "C" fn(u64, i32) -> i32 = kiln_realm_set_string_code_generation;
+        };
+        (realm, kiln_realm_string_code_generation_allowed, realm_string_code_generation_allowed) => {
+            const _: unsafe extern "C" fn(*mut i32) -> i32 = kiln_realm_string_code_generation_allowed;
         };
         (realm, kiln_realm_argv_count, realm_argv_count) => {
             const _: unsafe extern "C" fn(*mut u64) -> i32 = kiln_realm_argv_count;
@@ -6427,6 +7259,9 @@ macro_rules! assert_provider_export {
         };
         (realm, kiln_shared_graph_build, shared_graph_build) => {
             const _: unsafe extern "C" fn(u64, Option<shared_graph::SourceInspect>, Option<shared_graph::SourceUnit>, *mut c_void, *mut shared_graph::SharedBuildResult) -> i32 = shared_graph::kiln_shared_graph_build;
+        };
+        (realm, kiln_shared_graph_refusal, shared_graph_build) => {
+            const _: unsafe extern "C" fn(u32, *mut *const u8) -> i32 = shared_graph::kiln_shared_graph_refusal;
         };
         (realm, kiln_realm_run_pinned, realm_run_pinned) => {
             const _: unsafe extern "C" fn(u64, Option<PinnedRun>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_pinned;
@@ -6513,6 +7348,15 @@ macro_rules! assert_provider_export {
         (realm, kiln_realm_clear_timer, realm_clear_timer) => {
             const _: extern "C" fn(u64) -> i32 = kiln_realm_clear_timer;
         };
+        (realm, kiln_realm_set_timer_ref, realm_set_timer_ref) => {
+            const _: extern "C" fn(u64, i32) -> i32 = kiln_realm_set_timer_ref;
+        };
+        (realm, kiln_realm_refresh_timer, realm_clear_timer) => {
+            const _: extern "C" fn(u64) -> i32 = kiln_realm_refresh_timer;
+        };
+        (realm, kiln_realm_rearm_timeout, realm_rearm_timer) => {
+            const _: unsafe extern "C" fn(u64, f64, Option<RunWork>, Option<DropWork>, *mut c_void) -> i32 = kiln_realm_rearm_timeout;
+        };
         (realm, kiln_realm_drive, realm_drive) => {
             const _: unsafe extern "C" fn(u64, *mut c_void, *mut c_void) -> i32 = kiln_realm_drive;
         };
@@ -6537,6 +7381,9 @@ macro_rules! assert_provider_export {
         (realm, kiln_realm_cancel_active_request, realm_cancel_active_request) => {
             const _: unsafe extern "C" fn(u64) -> i32 = kiln_realm_cancel_active_request;
         };
+        (realm, kiln_realm_cancel_active_request_if_pending, realm_cancel_active_request_if_pending) => {
+            const _: unsafe extern "C" fn(u64) -> i32 = kiln_realm_cancel_active_request_if_pending;
+        };
         (realm, $name:ident, realm_http_attach) => {
             const _: unsafe extern "C" fn(u64, Option<RunHttpEvent>, Option<DropWork>, *mut c_void) -> i32 = $name;
         };
@@ -6558,6 +7405,15 @@ macro_rules! assert_provider_export {
         (realm, kiln_realm_http_agent_connected_active, realm_http_agent_connected) => {
             const _: unsafe extern "C" fn(*const u8, u64, u16, u64, u64) -> i32 = kiln_realm_http_agent_connected_active;
         };
+        (realm, kiln_realm_http_agent_connect_failed_active, realm_http_agent_connect_failed) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u16, u64, *mut u64) -> i32 = kiln_realm_http_agent_connect_failed_active;
+        };
+        (realm, kiln_realm_http_agent_cancel_connect_active, realm_http_agent_cancel_connect) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u16, u64, *mut u64) -> i32 = kiln_realm_http_agent_cancel_connect_active;
+        };
+        (realm, kiln_realm_http_agent_can_retain_active, realm_http_agent_can_retain) => {
+            const _: unsafe extern "C" fn(u64, i32) -> i32 = kiln_realm_http_agent_can_retain_active;
+        };
         (realm, kiln_realm_http_agent_release_active, realm_http_agent_release) => {
             const _: unsafe extern "C" fn(u64, i32, *mut u64) -> i32 = kiln_realm_http_agent_release_active;
         };
@@ -6572,6 +7428,9 @@ macro_rules! assert_provider_export {
         };
         (realm, $name:ident, realm_http_response_write) => {
             const _: unsafe extern "C" fn(u64, u64, *const u8, u64) -> i32 = $name;
+        };
+        (realm, kiln_realm_http_upgrade_write_active_with_fence, realm_http_upgrade_write_fence) => {
+            const _: unsafe extern "C" fn(u64, u64, *const u8, u64, *mut u64) -> i32 = kiln_realm_http_upgrade_write_active_with_fence;
         };
         (realm, kiln_node_fs_read_file_sync, node_fs_read_file_sync) => {
             const _: unsafe extern "C" fn(*const u8, u64, *mut *mut u8, *mut u64, *mut i32) -> i32 = kiln_node_fs_read_file_sync;

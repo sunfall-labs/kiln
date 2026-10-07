@@ -1,0 +1,14 @@
+const matched = /(\S+)|(.)/.exec('hello');
+const { 0: whole, 1: token, 2: whitespace } = matched;
+console.log(whole, token, whitespace);
+const dense = ['a', 'b'];
+console.log(dense['0'], dense['1']);
+const sparse = new Array(2);
+Array.prototype[1] = 'inherited';
+const { 1: inherited, 0: missing } = sparse;
+console.log(inherited, missing, sparse[1]);
+delete Array.prototype[1];
+
+const assigned = Object.assign([], [3, 4], { '2': 5 });
+console.log(assigned.length, JSON.stringify(assigned), assigned[0], assigned['2']);
+console.log(Reflect.set(assigned, '3', 6), assigned.length, assigned[3]);

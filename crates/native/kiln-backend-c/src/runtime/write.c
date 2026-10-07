@@ -231,15 +231,28 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                 return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr, NULL,
                                         out, depth, thrown);
             }
-            return key.tag == KILN_VALUE_STRING
-                       ? kiln_c99_get_key(host, target, (const kiln_string *)key.ptr, NULL, out,
-                                          depth, thrown)
-                       : KILN_C99_INVALID_ARGUMENT;
+            /* Arrays still have ordinary named properties. A computed key such as `undefined`,
+             * `null`, or a boolean is a valid property key after ToPropertyKey; rejecting it
+             * here made `array[undefined]` fail even though the same access on an ordinary
+             * object correctly reads the property named "undefined". */
+            {
+                kiln_value text = kiln_c99_property_key(key);
+                if (text.tag != KILN_VALUE_STRING) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr,
+                                        kiln_c99_property_ikey(key), out, depth, thrown);
+            }
         }
-        *out = (size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE
-                   ? kiln_val_to_boundary(array->elements[(size_t)index])
-                   : kiln_c99_undefined();
-        return KILN_C99_OK;
+        if ((size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE) {
+            *out = kiln_val_to_boundary(array->elements[(size_t)index]);
+            return KILN_C99_OK;
+        }
+        /* Missing elements must still observe subclass and Array.prototype indices. */
+        kiln_value name = kiln_c99_property_key(key);
+        if (name.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        return kiln_c99_get_key(host, target, (const kiln_string *)name.ptr, NULL,
+                                out, depth, thrown);
     }
     if (target.tag == KILN_VALUE_STRING && index >= 0.0) {
         kiln_c99_utf16_iter iterator = {target.ptr, target.len, 0, 0, 0};
@@ -309,6 +322,13 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
             return reduced;
         }
     }
+    if (target.tag == KILN_VALUE_PROXY && key.tag == KILN_VALUE_STRING &&
+        (((const kiln_string *)(uintptr_t)key.bits)->flags & KILN_STRING_PRIVATE_KEY)) {
+        kiln_value private_store;
+        int status = kiln_c99_proxy_private_store(target, 1, &private_store);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_set_computed_mode(host, private_store, key, value, strict, depth, thrown);
+    }
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_set(host, target, key, value, strict, depth, thrown);
     }
@@ -318,6 +338,41 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
         size_t slot = (size_t)index;
         size_t fill;
         int status;
+        /* A materialized index descriptor owns the [[Set]] decision before the dense element
+         * path. Accessor setters observe the array as `this`; writable data descriptors update
+         * both their reflected record and dense value so ordinary fast readers remain coherent. */
+        if (array->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_value text = kiln_c99_property_key(key);
+            if (text.tag == KILN_VALUE_STRING) {
+                const kiln_string *view = (const kiln_string *)text.ptr;
+                const kiln_string *stable = kiln_c99_property_ikey(key);
+                kiln_property property;
+                if (stable == NULL) stable = kiln_c99_intern_key(view);
+                if (stable == NULL) return KILN_C99_OUT_OF_MEMORY;
+                if (kiln_c99_property_read_own_value(array->properties, view, stable,
+                                                     &property)) {
+                    if (property.accessor) {
+                        kiln_value ignored;
+                        if (property.setter.tag == KILN_VALUE_UNDEFINED)
+                            return strict ? kiln_c99_throw_read_only_key(thrown, view)
+                                          : KILN_C99_OK;
+                        return kiln_c99_call(host, &ignored, property.setter, target, &value, 1,
+                                             depth, thrown);
+                    }
+                    if (!property.writable) {
+                        return strict ? kiln_c99_throw_read_only_key(thrown, view)
+                                      : KILN_C99_OK;
+                    }
+                    {
+                        int found = 0;
+                        status = kiln_c99_property_storage_assign_existing(
+                            host, target, kiln_c99_object_of(array->properties), view, stable,
+                            value, strict, depth, thrown, &found);
+                        if (status != KILN_C99_OK || !found) return status;
+                    }
+                }
+            }
+        }
         if (array->frozen) {
             kiln_value text = kiln_c99_property_key(key);
             return strict && text.tag == KILN_VALUE_STRING
@@ -410,6 +465,11 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
     kiln_value current = target;
     size_t steps;
     const kiln_string *stable = canonical;
+    /* Whether the receiver refuses a property it does not already have: a write that would
+     * *create* one -- the name is nowhere on the chain, or only an inherited writable data
+     * property has it -- is `OrdinarySet`'s `CreateDataProperty` on the receiver, which a
+     * non-extensible (sealed, frozen, `preventExtensions`) object refuses. */
+    int receiver_closed = 0;
     if (key == NULL) return 0;
     if (stable == NULL) {
         stable = kiln_c99_intern_key(key);
@@ -418,12 +478,26 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
 
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (kiln_c99_same_name_key(key, "prototype")) {
-            if (closure->is_class) return 0;
-            return kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT ||
-                   !kiln_c99_object_of(kiln_c99_closure_store(closure))->frozen;
+        if ((kiln_c99_same_name_key(key, "name") ||
+             kiln_c99_same_name_key(key, "length")) &&
+            !kiln_c99_store_has(kiln_c99_closure_store(closure), key, stable)) {
+            return 0;
+        }
+        if (kiln_c99_same_name_key(key, "prototype") &&
+            kiln_c99_function_owns_prototype(closure)) {
+            return kiln_c99_function_prototype_writable(closure);
         }
         current = kiln_c99_closure_store(closure);
+    } else if (target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_BUILTIN ||
+               target.tag == KILN_VALUE_BOUND ||
+               target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        int status = kiln_c99_callable_store(target, &current, 0);
+        if (status != KILN_C99_OK) return 0;
+        if ((kiln_c99_same_name_key(key, "name") ||
+             kiln_c99_same_name_key(key, "length")) &&
+            !kiln_c99_store_has(current, key, stable)) {
+            return 0;
+        }
     } else if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(target);
         if (array->frozen) {
@@ -436,20 +510,37 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
          * a)` then reported false and dropped the element, which is how a vue reactive effect
          * stopped seeing `push`: vue's array instrumentation forwards through the set trap with
          * `Reflect.set`, so the refusal swallowed the write and the dependency never fired. */
-        if (kiln_c99_same_name_key(key, "length") || kiln_c99_key_index_key(key) >= 0.0) {
-            return 1;
+        if (kiln_c99_same_name_key(key, "length")) return 1;
+        if (kiln_c99_key_index_key(key) >= 0.0) {
+            size_t slot = (size_t)kiln_c99_key_index_key(key);
+            return !array->not_extensible ||
+                   (slot < array->count && array->elements[slot] != KILN_VAL_HOLE);
         }
+        receiver_closed = array->not_extensible;
         current = array->properties;
+    } else if (target.tag == KILN_VALUE_TYPED_ARRAY) {
+        /* Integer-indexed writes are handled by the view itself. A non-index key belongs to
+         * its ordinary own-property store, created lazily by the write path below. */
+        if (kiln_c99_key_index_key(key) >= 0.0) return 1;
+        current = kiln_c99_typed_array_of(target)->properties;
+    } else if (target.tag == KILN_VALUE_GENERATOR) {
+        current = kiln_c99_generator_of(target)->properties;
+    } else if (target.tag == KILN_VALUE_REGEXP) {
+        kiln_regexp *regexp = kiln_c99_regexp_of(target);
+        if (kiln_c99_same_name_key(key, "lastIndex")) return regexp->last_index_writable;
+        current = regexp->properties;
     }
 
     if (current.tag != KILN_VALUE_OBJECT) {
         /* Having no property table yet is not a refusal: a function and an array both grow one
          * on their first named write. Only a value with nowhere at all to put a property -- a
          * primitive, or an object-like tag this backend has no store for -- answers no. */
-        if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_ARRAY) {
-            return 1;
+        if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_ARRAY ||
+            target.tag == KILN_VALUE_TYPED_ARRAY || target.tag == KILN_VALUE_GENERATOR ||
+            target.tag == KILN_VALUE_REGEXP) {
+            return !receiver_closed;
         }
-        return target.tag == KILN_VALUE_REGEXP && kiln_c99_same_name_key(key, "lastIndex");
+        return 0;
     }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         kiln_object *object = kiln_c99_object_of(current);
@@ -460,18 +551,21 @@ static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string 
         if (steps == 0 && object->frozen) {
             return 0;
         }
+        if (steps == 0 && object->not_extensible) receiver_closed = 1;
         if (kiln_c99_property_read_own_value(current, key, stable, &property)) {
             if (property.accessor) {
                 return property.setter.tag != KILN_VALUE_UNDEFINED;
             }
-            return property.writable;
+            /* Only the receiver's own writable property takes the value in place; an
+             * inherited one means creating an own property, which a closed receiver refuses. */
+            return property.writable && (steps == 0 || !receiver_closed);
         }
         if (object->prototype.tag != KILN_VALUE_OBJECT) {
             break;
         }
         current = object->prototype;
     }
-    return 1;
+    return !receiver_closed;
 }
 
 static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_t key_len) {
@@ -535,45 +629,17 @@ static int kiln_c99_reflect_define_property(kiln_host *host, kiln_value target,
                                             kiln_value key, kiln_value descriptor,
                                             int *accepted, int depth,
                                             kiln_value *thrown) {
-    if (target.tag == KILN_VALUE_PROXY) {
-        kiln_value trap;
-        kiln_value inner = kiln_c99_proxy_of(target)->target;
-        kiln_value handler = kiln_c99_proxy_of(target)->handler;
-        int status = kiln_c99_proxy_trap(host, target, "defineProperty", &trap, depth, thrown);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        if (trap.tag == KILN_VALUE_UNDEFINED) {
-            return kiln_c99_reflect_define_property(host, inner, key, descriptor, accepted, depth,
-                                                    thrown);
-        }
-        {
-            kiln_value arguments[3];
-            kiln_value answered;
-            arguments[0] = inner;
-            arguments[1] = key;
-            arguments[2] = descriptor;
-            status = kiln_c99_call(host, &answered, trap, handler, arguments, 3, depth, thrown);
-            if (status == KILN_C99_OK) {
-                *accepted = kiln_c99_truthy(answered);
-            }
-            return status;
-        }
-    }
     kiln_value text = kiln_c99_property_key(key);
     if (text.tag != KILN_VALUE_STRING) {
         KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol slot");
     }
     const kiln_string *name_key = (const kiln_string *)text.ptr;
-    int status =
-        kiln_c99_define_property_key(host, target, name_key, NULL, descriptor, depth, thrown);
+    int refused = 0;
+    int status = kiln_c99_define_property_key_answer(host, target, name_key,
+                                                     kiln_c99_property_ikey(key), descriptor,
+                                                     depth, thrown, &refused, NULL);
     if (status == KILN_C99_OK) {
-        *accepted = 1;
-        return KILN_C99_OK;
-    }
-    if (status == KILN_C99_CONTROL_ERROR && thrown != NULL && thrown->tag != KILN_VALUE_UNDEFINED) {
-        *thrown = kiln_c99_undefined();
-        *accepted = 0;
+        *accepted = !refused;
         return KILN_C99_OK;
     }
     *accepted = 0;
@@ -672,7 +738,15 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     fallback_dict:
         kiln_c99_ensure_dictionary(object);
     }
-    status = kiln_c99_own_slot_key(target, (const kiln_string *)text.ptr, NULL, &slot);
+    /* `text` carries the internal spelling used to display the key, while `ikey` carries the
+     * property identity. Keeping the latter matters when a shaped object falls back to its
+     * dictionary for a symbol key: interning the spelling as an ordinary string would create a
+     * second, enumerable string property beside the symbol. */
+    const kiln_string *canonical = key.tag == KILN_VALUE_SYMBOL
+                                       ? kiln_c99_property_ikey(key)
+                                       : NULL;
+    if (key.tag == KILN_VALUE_SYMBOL && canonical == NULL) return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_c99_own_slot_key(target, (const kiln_string *)text.ptr, canonical, &slot);
     if (status != KILN_C99_OK) {
         return status;
     }

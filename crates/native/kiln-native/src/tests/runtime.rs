@@ -69,7 +69,7 @@ fn native_unhandled_top_level_rejection_exits_with_a_live_handle() {
         let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_when_launchable()
             .expect("spawn fixture");
         let started = Instant::now();
         let status = loop {
@@ -140,8 +140,10 @@ fn native_unsettled_top_level_await_warns_and_exits_13() {
             },
         )
         .expect("fixture builds");
-    let output = Command::new(&report.output).output().expect("run fixture");
-    // Node's answer, and the interpreter's (issue 09 of `.scratch/full-runtime`): the warning
+    let output = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run fixture");
+    // Node's answer, and the interpreter's (issue 09 of `docs/issues/full-runtime`): the warning
     // and status 13, which is the one status `main` does not fold to 1.
     assert_eq!(output.status.code(), Some(13));
     assert_eq!(output.stdout, b"before\n");
@@ -183,6 +185,47 @@ scheduleFactory(41);
         return;
     };
     assert_eq!(output, "41,42:2:41\n");
+}
+
+#[test]
+fn native_release_date_setters_preserve_actual_optional_arguments() {
+    let source = r#"
+const omitted = new Date(Date.UTC(2024, 6, 15));
+omitted.setUTCFullYear(2025);
+const present = new Date(Date.UTC(2024, 6, 15));
+present.setUTCFullYear(2025, 11, 25);
+const explicitUndefined = new Date(Date.UTC(2024, 6, 15));
+explicitUndefined.setUTCFullYear(2025, undefined, 25);
+const called = new Date(Date.UTC(2024, 6, 15));
+Date.prototype.setUTCFullYear.call(called, 2025, 11, 25);
+const reflected = new Date(Date.UTC(2024, 6, 15));
+Reflect.apply(Date.prototype.setUTCFullYear, reflected, [2025, 11, 25]);
+const hours = new Date(Date.UTC(2024, 2, 15, 23));
+hours.setUTCHours(23, 59, 59, 999);
+console.log([
+  omitted.toISOString(),
+  present.toISOString(),
+  Number.isNaN(explicitUndefined.getTime()),
+  called.toISOString(),
+  reflected.toISOString(),
+  hours.toISOString(),
+].join("\n"));
+"#;
+    let Some(output) = run_native_release_fixture("native-release-date-setter-arguments", source)
+    else {
+        return;
+    };
+    assert_eq!(
+        output,
+        concat!(
+            "2025-07-15T00:00:00.000Z\n",
+            "2025-12-25T00:00:00.000Z\n",
+            "true\n",
+            "2025-12-25T00:00:00.000Z\n",
+            "2025-12-25T00:00:00.000Z\n",
+            "2024-03-15T23:59:59.999Z\n",
+        )
+    );
 }
 
 #[test]
@@ -873,6 +916,69 @@ fn native_runtime_unsupported_builtin_is_deferred_and_excluded() {
 }
 
 #[test]
+fn runtime_alias_targets_remain_linked_without_eager_evaluation() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-runtime-alias-liveness");
+    let entry = root.path.join("main.ts");
+    fs::write(
+        root.path.join("package.json"),
+        r#"{"type":"module","sideEffects":false}"#,
+    )
+    .expect("write side-effect metadata");
+    fs::write(
+        root.path.join("tsconfig.json"),
+        r#"{"compilerOptions":{"baseUrl":".","paths":{"runtime/*":["src/*.ts"]}}}"#,
+    )
+    .expect("write project path alias");
+    fs::create_dir_all(root.path.join("src")).expect("create source directory");
+    fs::write(
+        root.path.join("src/compiler.ts"),
+        "import { runtime } from './runtime.ts'; export const generated = () => \"import { runtime } from 'runtime/runtime';\";",
+    )
+    .expect("write runtime-generated source");
+    let target = root.path.join("src/runtime.ts");
+    fs::write(&target, "export const runtime = 42;").expect("write runtime target");
+    fs::write(
+        &entry,
+        "import { generated } from './src/compiler.ts'; console.log(generated());",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph");
+    assert!(graph.runtime_package_aliases().iter().any(|alias| {
+        alias.specifier == "runtime/runtime" && alias.target == fs::canonicalize(&target).unwrap()
+    }));
+    let plan = native_graph_plan(&graph).expect("plan graph");
+    let canonical_target = fs::canonicalize(target).unwrap();
+    assert!(
+        !plan.excluded.contains(&canonical_target),
+        "resolver-approved runtime aliases need their target linked"
+    );
+    assert!(plan.runtime_alias_live.contains(&canonical_target));
+    let mut demand = kiln_liveness::executable_demand(
+        &graph,
+        &selection_options_with_exclusions(&NativeProfile::Dev, &plan.excluded),
+    )
+    .expect("select static entry");
+    assert!(!demand.live.contains(&canonical_target));
+    include_runtime_aliases_in_demand(&graph, &mut demand, &plan.runtime_alias_live);
+    assert!(demand.live.contains(&canonical_target));
+    assert_eq!(demand.slots[&canonical_target].len(), 1);
+    let (reduced, _) = graph.reduce_to_live(&demand).unwrap();
+    assert!(
+        reduced.runtime_package_aliases().iter().any(|alias| {
+            alias.specifier == "runtime/runtime" && alias.target == canonical_target
+        })
+    );
+}
+
+#[test]
 fn native_runtime_failures_keep_distinct_captured_bases() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -1121,7 +1227,19 @@ fn native_static_top_level_await_resolves_before_entry() {
             },
         )
         .expect("static top-level await graph builds and runs");
-    assert_eq!(report.stdout, b"42\n");
+    assert_eq!(
+        report.exit_code,
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    assert_eq!(
+        report.stdout,
+        b"42\n",
+        "exit={:?} stderr={}",
+        report.exit_code,
+        String::from_utf8_lossy(&report.stderr)
+    );
 }
 
 #[test]
@@ -1142,6 +1260,9 @@ fn a_second_build_reuses_every_material_artifact_and_runs() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String("native".into()),
             Constant::Number(42.0_f64.to_bits()),
@@ -1158,6 +1279,7 @@ fn a_second_build_reuses_every_material_artifact_and_runs() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let first = builder
@@ -1217,11 +1339,15 @@ fn owned_result_scalar_api_copies_strings_and_is_idempotent() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("left\0right".into())],
         code: vec![Instruction::Const(0), Instruction::Return],
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let report = builder
         .build_shared_library(
@@ -1304,7 +1430,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run owned-result host");
+    let output = command
+        .output_when_launchable()
+        .expect("run owned-result host");
     assert!(
         output.status.success(),
         "owned-result host failed with {:?}: {}",
@@ -1350,6 +1478,9 @@ fn owned_result_scalar_api_rejects_malformed_host_strings() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![
             Instruction::HostCall {
@@ -1361,6 +1492,7 @@ fn owned_result_scalar_api_rejects_malformed_host_strings() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
         .build_shared_library(
@@ -1397,7 +1529,7 @@ static int malformed_call(void *context, uint16_t operation, uint16_t argc,
 }}
 
 int main(void) {{
-    kiln_host host = {{malformed_call, NULL}};
+    kiln_host host = {{malformed_call, NULL, NULL}};
     const kiln_module_api_v2 *api = {api_symbol}();
     kiln_result_v2 *owned = NULL;
     if (api == NULL) return 1;
@@ -1432,7 +1564,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run malformed-host scalar host");
+    let output = command
+        .output_when_launchable()
+        .expect("run malformed-host scalar host");
     assert!(
         output.status.success(),
         "malformed-host scalar failed: {}",
@@ -1667,6 +1801,9 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("now".into())],
         code: vec![
             Instruction::LoadBuiltin(kiln_ir::Builtin::Date),
@@ -1676,6 +1813,7 @@ fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let deterministic = builder
@@ -1788,6 +1926,9 @@ fn native_entropy_policy_is_reproducible_or_explicitly_host_backed() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("random".into())],
         code: vec![
             Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
@@ -1797,6 +1938,7 @@ fn native_entropy_policy_is_reproducible_or_explicitly_host_backed() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let run = |name: &str, entropy: NativeEntropyPolicy| {
         builder
@@ -1928,6 +2070,60 @@ setTimeout(() => console.log(events.join("|")), 0);
 }
 
 #[test]
+fn native_direct_typed_call_keeps_its_result_live_after_return() {
+    let Some(output) = run_native_release_fixture(
+        "native-direct-typed-call-result-live",
+        "function increment(value) { return value + 1; }\nfunction read() { const result = increment(41); return result + 1; }\nconsole.log(read());\n",
+    ) else {
+        return;
+    };
+    assert_eq!(output, "43\n");
+}
+
+#[test]
+fn native_direct_typed_self_call_retains_the_closure_for_its_frame() {
+    let Some(output) = run_native_release_fixture(
+        "native-direct-typed-self-call-frame",
+        "function sum(value) { if (value <= 0) return 0; return value + sum(value - 1); }\nconsole.log(sum(5));\n",
+    ) else {
+        return;
+    };
+    assert_eq!(output, "15\n");
+}
+
+#[test]
+fn native_direct_typed_call_failure_keeps_callee_attribution() {
+    let Some(stderr) = run_native_failure_fixture(
+        "native-direct-typed-call-failure-attribution",
+        "function inner(value) { if (value < 0) { const bad = {}; bad(); } return value + 1; }\nfunction outer() { return inner(-1); }\nouter();\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("detail=non-callable callee kind"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("function=inner"), "{stderr}");
+    assert!(!stderr.contains("function=outer"), "{stderr}");
+}
+
+#[test]
+fn native_direct_typed_successful_call_does_not_reuse_stale_failure_status() {
+    let Some(stderr) = run_native_failure_fixture(
+        "native-successful-typed-call-stale-status",
+        "function maybe(value) { if (value < 0) throw new Error('first failure'); return value + 1; }\nfunction increment(value) { return value + 1; }\nfunction outer() { try { maybe(-1); } catch (_) {} increment(4); const bad = {}; bad(); }\nouter();\n",
+    ) else {
+        return;
+    };
+    assert!(
+        stderr.contains("detail=non-callable callee kind"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("function=outer"), "{stderr}");
+    assert!(!stderr.contains("function=increment"), "{stderr}");
+}
+
+#[test]
 fn native_await_promise_resolve_emits_guard_for_microtasks_shape() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -1964,14 +2160,22 @@ export async function microtasks() {
         .source
         .find("kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_PROMISE_PROTOTYPE, \"constructor\") && KILN_VAL_IS_BUILTIN")
         .expect("Promise.resolve await guard emitted");
-    let guard = &emitted.source[guard_start..guard_start + 300];
+    let handled_end = emitted.source[guard_start..]
+        .find("handled = 1;")
+        .map(|offset| guard_start + offset + "handled = 1;".len())
+        .expect("guarded await path handles its result");
+    let guard = &emitted.source[guard_start..handled_end];
     assert!(guard.contains("KILN_VAL_IS_NUMBER(v"), "{guard}");
+    assert!(
+        guard.contains("KILN_C99_METHOD_PROMISE_RESOLVE"),
+        "prepared await fusion checks the saved callee's identity: {guard}"
+    );
     assert!(guard.contains("handled = 1;"), "{guard}");
 }
 
 /// Realms issue 20: a typed method entry that inlines `Math.sqrt` is entered only after its call
-/// site asks about that one member -- not about every built-in -- and the entry, which reaches
-/// nothing, does not ask again (under `KILN_IC_CHECK` it checks its caller did).
+/// site asks about that one member. Reading the mutable `Math` global can itself invoke an
+/// accessor, so the entry checks the member again after that read and keeps its boxed fallback.
 #[test]
 fn typed_entry_call_sites_ask_about_the_members_the_entry_inlines() {
     use kiln_module_resolver::NodeRuntimeResolver;
@@ -2015,8 +2219,8 @@ console.log(s);
     let body = &source[source.find(definition).expect("definition in source")..];
     let body = &body[..body.find("\n}\n").expect("typed entry ends")];
     assert!(
-        body.contains(&format!("KILN_C99_TYPED_RELIES_CHECK({sqrt})")),
-        "the entry leaves the check to its callers: {body}"
+        body.contains(&format!("if (KILN_LIKELY({sqrt}))")),
+        "the entry checks after its observable global read: {body}"
     );
     assert!(
         !body.contains("kiln_c99_builtins_unmodified()"),
@@ -2081,21 +2285,73 @@ run();
 }
 
 #[test]
-fn native_await_promise_resolve_keeps_prototype_define_property_refusal() {
-    let Some(error) = run_native_failure_fixture(
-        "native-await-promise-resolve-prototype-define-property",
+fn native_prepared_calls_keep_the_callee_read_before_argument_effects() {
+    let Some(output) = run_native_release_fixture(
+        "native-prepared-call-callee-before-arguments",
         r#"
-Object.defineProperty(Promise.prototype, "constructor", {
-  get() { return Promise; }
+let replacementResolveCalls = 0;
+let resolveArgumentCalls = 0;
+function replaceResolve() {
+  resolveArgumentCalls++;
+  Promise.resolve = function () { replacementResolveCalls += 1; return "replacement"; };
+  return 41;
+}
+async function awaitValue() {
+  return await Promise.resolve(replaceResolve());
+}
+
+const originalSqrt = Math.sqrt;
+let replacementSqrtCalls = 0;
+let sqrtArgumentCoercions = 0;
+function replaceSqrtAndReturnNumber() {
+  sqrtArgumentCoercions++;
+  Math.sqrt = function () { replacementSqrtCalls += 1; return -1; };
+  return 3;
+}
+class Point {
+  constructor(value) { this.value = value; }
+  distance() { return Math.sqrt(this.value); }
+}
+const points = [];
+for (let i = 0; i < 1000; i++) points.push(new Point(i));
+for (let i = 0; i < points.length; i++) points[i].distance();
+// Coercion changes the public property after the method read. This call must still invoke the
+// previously captured callee.
+points[0].value = { valueOf: replaceSqrtAndReturnNumber };
+
+Promise.resolve(awaitValue()).then(value => {
+  const distance = points[0].distance();
+  console.log(`${value}|${distance}|${resolveArgumentCalls}|${replacementResolveCalls}|${sqrtArgumentCoercions}|${replacementSqrtCalls}|${Math.sqrt === originalSqrt}`);
 });
 "#,
     ) else {
         return;
     };
-    assert!(
-        error.contains("property definition on a value with no property store"),
-        "{error}"
-    );
+    assert_eq!(output, "41|1.7320508075688772|1|0|1|0|false\n");
+}
+
+#[test]
+fn native_await_promise_resolve_honors_prototype_define_property() {
+    let Some(output) = run_native_release_fixture(
+        "native-await-promise-resolve-prototype-define-property",
+        r#"
+Object.defineProperty(Promise.prototype, "constructor", {
+  get() { return Promise; }
+});
+async function run() {
+  const events = [];
+  events.push("before");
+  const value = await Promise.resolve(7);
+  events.push(`after:${value}`);
+  setTimeout(() => console.log(events.join("|")), 0);
+}
+run();
+console.log("outside");
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(output, "outside\nbefore|after:7\n");
 }
 
 #[test]

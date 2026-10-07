@@ -289,6 +289,15 @@ pub(super) fn emit_unary_boxed(
 
     let x = value.0;
     let code = unary_code(*op);
+    if *op == UnaryOp::ToString {
+        let check = status_check(diagnostic_site, pc, label, unwind);
+        writeln!(
+            output,
+            "    {{ kiln_value ans; int status = kiln_c99_unary_checked({code}, host, kiln_val_to_boundary(v{x}), &ans, depth, thrown); {check} v{v} = kiln_val_from_boundary(ans); }}"
+        )
+        .unwrap();
+        return;
+    }
     if ctx.plan.generic_only && !matches!(op, UnaryOp::Void | UnaryOp::Not | UnaryOp::TypeOf) {
         let check = status_check(diagnostic_site, pc, label, unwind);
         if scalar_proto {

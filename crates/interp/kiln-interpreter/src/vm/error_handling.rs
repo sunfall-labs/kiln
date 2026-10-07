@@ -1,10 +1,54 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn stack_function_name(closure: &Closure) -> Option<String> {
+        closure
+            .properties
+            .borrow()
+            .get_own("name")
+            .and_then(|value| match value {
+                Value::String(name) if !name.is_empty() => Some(name.to_lossy_string()),
+                _ => None,
+            })
+            .or_else(|| {
+                closure
+                    .name
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                closure
+                    .inferred_name
+                    .as_ref()
+                    .filter(|name| !name.is_empty())
+                    .map(|name| name.to_lossy_string())
+            })
+    }
+
+    fn error_stack_frame_limit(&self) -> Option<usize> {
+        let constructor = Value::Native(Native::Error(ErrorKind::Error), self.current_realm);
+        let identity = intrinsic_key(&constructor)?;
+        let entries = self.intrinsics.entries.borrow();
+        let index = self.intrinsics.entry_position(&entries, identity)?;
+        let value = entries.get(index)?.1.get_own("stackTraceLimit")?;
+        let Value::Number(limit) = value else {
+            return None;
+        };
+        if limit.is_nan() || *limit <= 0.0 {
+            return Some(0);
+        }
+        Some(if limit.is_infinite() || *limit >= usize::MAX as f64 {
+            usize::MAX
+        } else {
+            limit.floor() as usize
+        })
+    }
+
     /// Resume a generator, recovering what it threw rather than unwinding past this point.
     pub(super) fn resume_catching(
         &mut self,
-        generator: &Rc<RefCell<GeneratorState>>,
+        generator: &Rc<GeneratorData>,
         resume: Resume,
         instruction: usize,
     ) -> Result<Result<(Value, bool), Value>, ExecutionError> {
@@ -44,8 +88,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if let (Value::Native(Native::ReturnSignal, _), Some(value)) = (&caught, returning)
                 {
                     let mut state = generator.borrow_mut();
-                    state.done = true;
-                    state.returning = None;
+                    state.complete();
                     drop(state);
                     return Ok(Ok((value, true)));
                 }
@@ -54,8 +97,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Err(ExecutionError::GeneratorReturned) => {
                 let mut state = generator.borrow_mut();
-                state.done = true;
-                state.returning = None;
+                state.complete();
                 drop(state);
                 Ok(Ok((returning.unwrap_or(Value::Undefined), true)))
             }
@@ -132,51 +174,133 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .collect()
     }
 
-    /// V8-compatible stack capture over Kiln's logical frames.
-    ///
-    /// Kiln does not retain source-map locations in the VM, so CallSites deliberately use one
-    /// deterministic virtual filename and zero locations. Their function names are real: they
-    /// come from the same closures used by uncaught-error traces.
+    /// Private frame snapshot primitive used by the public TypeScript CallSite facade.
     pub(super) fn capture_stack_trace(
         &mut self,
         arguments: &[Value],
-        instruction: usize,
+        _instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let target = arguments.first().cloned().unwrap_or(Value::Undefined);
-        let Value::Object(target_object) = &target else {
+        let registered_accessors = self.intrinsics.error_stack_accessors(self.current_realm);
+        if matches!(&target, Value::Native(Native::Error(ErrorKind::Error), _))
+            && arguments.len() >= 5
+            && matches!(arguments.get(3), Some(Value::Object(_)))
+            && matches!(arguments.get(4), Some(Value::Object(_)))
+        {
+            if let (Some(getter), Some(setter), Some(brand_token)) =
+                (arguments.get(1), arguments.get(2), arguments.get(4))
+            {
+                self.intrinsics.register_error_stack_accessors(
+                    self.current_realm,
+                    ErrorStackAccessors {
+                        getter: getter.clone(),
+                        setter: setter.clone(),
+                        brand_token: brand_token.clone(),
+                    },
+                );
+            }
+            return Ok(Value::Undefined);
+        }
+        if let Some(token) = registered_accessors
+            .as_ref()
+            .map(|value| &value.brand_token)
+            && arguments
+                .get(2)
+                .is_some_and(|candidate| strict_equal(candidate, token))
+        {
+            return Ok(Value::Boolean(matches!(
+                &target,
+                Value::Object(object) if object.borrow().error_brand
+            )));
+        }
+        if matches!(arguments.get(2), Some(Value::Boolean(true))) {
+            return Ok(match &target {
+                Value::Object(object) if object.borrow().error_brand => object
+                    .borrow()
+                    .error_stack_frames
+                    .clone()
+                    .unwrap_or(Value::Undefined),
+                _ => Value::Undefined,
+            });
+        }
+        if !is_object_type(&target) {
             return Err(ExecutionError::TypeErrorMessage {
                 message: "invalid argument to Error.captureStackTrace".to_owned(),
             });
-        };
-        let mut names = self.trace();
-        // The capture helper itself is a native call rather than a JavaScript frame. V8's
-        // constructorOpt removes frames through the named constructor; approximating that rule
-        // by dropping the first matching name keeps library helper frames out deterministically.
-        if let Some(Value::Function(constructor)) = arguments.get(1)
-            && let Some(name) = constructor.name.as_deref()
-            && let Some(index) = names.iter().position(|candidate| candidate == name)
-        {
-            names.drain(..=index);
         }
-        let sites = Value::Array(ArrayData::new(
-            names.into_iter().map(call_site_object).collect(),
-        ));
-        let error_constructor = Value::Native(Native::Error(ErrorKind::Error), RealmId::PRIMARY);
-        let prepare = self.read_property(&error_constructor, "prepareStackTrace", instruction)?;
-        let stack = if is_callable(&prepare) {
-            self.call_value(
-                &prepare,
-                error_constructor,
-                vec![target.clone(), sites],
-                instruction,
-            )?
-        } else {
-            Value::String("Error".to_owned().into())
-        };
-        target_object
-            .borrow_mut()
-            .set_non_enumerable("stack", stack);
-        Ok(Value::Undefined)
+        if let Some(constructor) = arguments.get(1)
+            && !matches!(constructor, Value::Undefined)
+            && !is_callable(constructor)
+        {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "invalid constructorOpt to Error.captureStackTrace".to_owned(),
+            });
+        }
+        let mut frames = Vec::with_capacity(self.frames.len());
+        // This primitive is called by the public TypeScript `Error.captureStackTrace`
+        // facade. Like the native frame-snapshot primitive, omit that implementation
+        // frame so the first CallSite is the caller of the facade.
+        frames.extend(self.frames.iter().rev().map(|frame| {
+            let span = frame
+                .function
+                .as_ref()
+                .and_then(|closure| frame.program.functions.get(closure.function as usize))
+                .map(|proto| proto.span);
+            let site = frame
+                .program
+                .debug_call_site(span, frame.instruction.saturating_sub(1));
+            (
+                frame.function.clone(),
+                frame.method_name.clone(),
+                frame.module_path.as_deref().unwrap_or("<kiln>").to_owned(),
+                site.map(|site| (site.line, site.column)),
+            )
+        }));
+        // The primitive receives no public JavaScript CallSite objects. The facade is built in
+        // errors.ts from these copied metadata records and cannot keep VM frames alive.
+        if let Some(Value::Function(constructor)) = arguments.get(1)
+            && let Some(index) = frames.iter().position(|frame| {
+                frame
+                    .0
+                    .as_ref()
+                    .is_some_and(|candidate| Rc::ptr_eq(candidate, constructor))
+            })
+        {
+            frames.drain(..=index);
+        }
+        Ok(Value::Array(ArrayData::new(
+            frames
+                .into_iter()
+                .map(|(frame, method_name, file_name, location)| {
+                    ordinary_object([
+                        ("fileName".to_owned(), Value::String(file_name.into())),
+                        (
+                            "functionName".to_owned(),
+                            frame
+                                .and_then(|closure| Self::stack_function_name(closure.as_ref()))
+                                .or_else(|| method_name.as_ref().map(|name| name.to_lossy_string()))
+                                .map_or(Value::Undefined, |name| Value::String(name.into())),
+                        ),
+                        (
+                            "methodName".to_owned(),
+                            method_name.map_or(Value::Undefined, Value::String),
+                        ),
+                        ("instruction".to_owned(), Value::Number(0.0)),
+                        (
+                            "lineNumber".to_owned(),
+                            location
+                                .map_or(Value::Undefined, |(line, _)| Value::Number(line as f64)),
+                        ),
+                        (
+                            "columnNumber".to_owned(),
+                            location.map_or(Value::Undefined, |(_, column)| {
+                                Value::Number(column as f64)
+                            }),
+                        ),
+                    ])
+                })
+                .collect(),
+        )))
     }
 
     pub(super) fn throw_error(
@@ -240,6 +364,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::Object(object) = &error {
             let mut object = object.borrow_mut();
             object.set_prototype(prototype);
+            if let Some(accessors) = self.intrinsics.error_stack_accessors(self.current_realm) {
+                object.properties.insert(
+                    0,
+                    Slot {
+                        key: "stack".into(),
+                        symbol: false,
+                        internal: false,
+                        property: Property::Accessor {
+                            get: Some(accessors.getter),
+                            set: Some(accessors.setter),
+                        },
+                        attributes: Attributes {
+                            writable: false,
+                            enumerable: false,
+                            configurable: true,
+                        },
+                    },
+                );
+            }
             // Recorded where the error was *made*, not where it was reported: a rejection
             // surfaces after the stack that produced it is gone, and that is exactly the case
             // where a trace is worth having.
@@ -252,6 +395,67 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .collect(),
                 )),
             );
+            let stack_frames = self.error_stack_frame_limit().map(|limit| {
+                let snapshot = |function: Option<&Rc<Closure>>,
+                                method_name: Option<&StringUnits>,
+                                program: &Program,
+                                path: Option<&str>,
+                                instruction: usize| {
+                    let span = function
+                        .and_then(|closure| program.functions.get(closure.function as usize))
+                        .map(|proto| proto.span);
+                    let site = program.debug_call_site(span, instruction);
+                    ordinary_object([
+                        (
+                            "fileName".to_owned(),
+                            Value::String(path.unwrap_or("<kiln>").into()),
+                        ),
+                        (
+                            "functionName".to_owned(),
+                            function
+                                .and_then(|closure| Self::stack_function_name(closure.as_ref()))
+                                .or_else(|| method_name.map(|name| name.to_lossy_string()))
+                                .map_or(Value::Undefined, |name| Value::String(name.into())),
+                        ),
+                        (
+                            "methodName".to_owned(),
+                            method_name
+                                .map_or(Value::Undefined, |name| Value::String(name.clone())),
+                        ),
+                        ("instruction".to_owned(), Value::Number(instruction as f64)),
+                        (
+                            "lineNumber".to_owned(),
+                            site.map_or(Value::Undefined, |site| Value::Number(site.line as f64)),
+                        ),
+                        (
+                            "columnNumber".to_owned(),
+                            site.map_or(Value::Undefined, |site| Value::Number(site.column as f64)),
+                        ),
+                    ])
+                };
+                let mut frames = Vec::new();
+                if self.function.is_some() {
+                    frames.push(snapshot(
+                        self.function.as_ref(),
+                        self.method_name.as_ref(),
+                        &self.program,
+                        self.module_path.as_deref(),
+                        self.instruction.saturating_sub(1),
+                    ));
+                }
+                for frame in self.frames.iter().rev() {
+                    frames.push(snapshot(
+                        frame.function.as_ref(),
+                        frame.method_name.as_ref(),
+                        &frame.program,
+                        frame.module_path.as_deref(),
+                        frame.instruction.saturating_sub(1),
+                    ));
+                }
+                frames.truncate(limit);
+                Value::Array(ArrayData::new(frames))
+            });
+            object.error_stack_frames = stack_frames;
         }
         error
     }

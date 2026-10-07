@@ -52,12 +52,6 @@ static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)stable, stable->unit_len);
 }
 
-static int kiln_c99_store_has(kiln_value store, const kiln_string *key,
-                              const kiln_string *ikey) {
-    kiln_property property;
-    return store.tag == KILN_VALUE_OBJECT &&
-           kiln_c99_property_read_own_value(store, key, ikey, &property);
-}
 
 /* Resolve a constructor's species through its actual prototype chain. Accessors receive
  * the constructor that started the read, including an inherited intrinsic accessor. */
@@ -136,18 +130,93 @@ static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
     return KILN_C99_OK;
 }
 
+/* Accessors installed on a native prototype must observe the original receiver, not the hidden
+ * property-store object. Data members can use the ordinary projection above; Map/Set.size is the
+ * first native accessor whose TypeScript getter needs its instance's internal collection slot. */
+static int kiln_c99_prototype_store_read_with_receiver(
+    kiln_host *host, uint64_t prototype, kiln_value receiver, const kiln_string *key,
+    const kiln_string *ikey, kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    kiln_value store;
+    kiln_property property;
+    int status = kiln_c99_callable_store(kiln_c99_builtin(prototype), &store, 0);
+    *found = 0;
+    if (status != KILN_C99_OK || store.tag != KILN_VALUE_OBJECT) return status;
+    if (!kiln_c99_property_read_own_value(store, key, ikey, &property)) return KILN_C99_OK;
+    *found = 1;
+    if (!property.accessor) return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
+    if (property.getter.tag == KILN_VALUE_UNDEFINED) {
+        KILN_C99_ABSENT("an own accessor descriptor whose getter is undefined", out);
+    }
+    return kiln_c99_call(host, out, property.getter, receiver, NULL, 0, depth, thrown);
+}
+
+/* A builtin's intrinsic members are resolved by the readers below, but a program may relink the
+ * callable object itself. Before reporting an intrinsic absence, consult that explicit parent
+ * with the builtin as receiver, so accessors and inherited members observe the real [[Get]]. */
+static int kiln_c99_builtin_custom_prototype_read_with_receiver(
+    kiln_host *host, kiln_value target, kiln_value receiver, const kiln_string *key,
+    const kiln_string *ikey, kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    kiln_value store;
+    kiln_value prototype;
+    int present = 0;
+    int status = kiln_c99_callable_store(target, &store, 0);
+    *found = 0;
+    if (status != KILN_C99_OK || store.tag != KILN_VALUE_OBJECT) return status;
+    prototype = kiln_c99_object_prototype_read(store);
+    if (prototype.tag == KILN_VALUE_UNDEFINED || prototype.tag == KILN_VALUE_NULL) {
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_has_property_key(host, prototype, key, ikey, &present, depth, thrown);
+    if (status != KILN_C99_OK || !present) return status;
+    *found = 1;
+    return kiln_c99_get_with_receiver(host, prototype, kiln_c99_key_value(key, NULL), receiver,
+                                      out, depth, thrown);
+}
+
+static int kiln_c99_builtin_custom_prototype_read(
+    kiln_host *host, kiln_value target, const kiln_string *key, const kiln_string *ikey,
+    kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    return kiln_c99_builtin_custom_prototype_read_with_receiver(
+        host, target, target, key, ikey, out, depth, thrown, found);
+}
+
+/* The Array prototype's mutable parent replaces its implicit Object.prototype link. Once that
+ * parent is explicit, it owns the remainder of lookup even when the requested member is absent;
+ * call Get directly so a Proxy parent observes `get` without a spurious `has` trap. */
+static int kiln_c99_array_custom_parent_read(
+    kiln_host *host, kiln_value receiver, const kiln_string *key, const kiln_string *ikey,
+    kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    kiln_value store;
+    kiln_value parent;
+    int status = kiln_c99_callable_store(
+        kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE), &store, 0);
+    *found = 0;
+    if (status != KILN_C99_OK || store.tag != KILN_VALUE_OBJECT) return status;
+    parent = kiln_c99_object_prototype_read(store);
+    if (parent.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    *found = 1;
+    if (parent.tag == KILN_VALUE_NULL) {
+        KILN_C99_ABSENT("Array.prototype has a null custom parent, so no inherited property exists",
+                        out);
+    }
+    return kiln_c99_get_with_receiver(host, parent, kiln_c99_key_value(key, NULL), receiver,
+                                      out, depth, thrown);
+}
+
 /* Issue 30: a receiver whose members come from a method table -- a string's `trim`, an array's
  * `join`, a number's `toFixed` -- inherits them from a prototype built-in, and a member the program
  * wrote onto that built-in (`String.prototype.trim = f`) shadows the table's, exactly as it does
  * in the language. So before a table answers, the prototype's store is asked -- only once the
- * program has written onto it (`kiln_c99_program_wrote_builtin`), which in a realm that has never
+ * realm has written onto it (including the shared bootstrap), which in a realm that has never
  * written onto a built-in is one compare. */
 static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
                                            const kiln_string *key, const kiln_string *ikey,
                                            kiln_value *out, int depth, kiln_value *thrown,
                                            int *found) {
     *found = 0;
-    if (KILN_LIKELY(!kiln_c99_program_wrote_builtin((uint32_t)prototype))) return KILN_C99_OK;
+    const kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
+    if (heap != NULL && !kiln_c99_realm_marked_builtin(heap, (uint32_t)prototype))
+        return KILN_C99_OK;
     return kiln_c99_prototype_store_read(host, prototype, key, ikey, out, depth, thrown, found);
 }
 #define KILN_C99_WRITTEN_MEMBER_FIRST(prototype)                                                   \
@@ -409,6 +478,25 @@ done:
     return status;
 }
 
+/* A namespace property's stored value is its live export cell. Resolve it at the point the
+ * namespace descriptor is encountered, including when that namespace is an ordinary object's
+ * prototype. This keeps direct and inherited reads on the same TDZ path. */
+static int kiln_c99_namespace_cell_read(kiln_value value, kiln_value *out,
+                                         kiln_value *thrown) {
+    kiln_val *cell;
+    int status;
+    if (value.tag != KILN_VALUE_CELL) {
+        *out = value;
+        return KILN_C99_OK;
+    }
+    cell = kiln_c99_cell_of(value);
+    if (cell == NULL) KILN_C99_REFUSE("namespace export cell has no storage");
+    status = kiln_c99_val_check_tdz(*cell, thrown);
+    if (status != KILN_C99_OK) return status;
+    *out = kiln_val_to_boundary(*cell);
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
                                  const kiln_string *ikey, kiln_value *out, int depth,
                                  kiln_value *thrown) {
@@ -474,13 +562,21 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     case KILN_VALUE_OBJECT: {
         kiln_value current = target;
         kiln_value getter;
+        uint64_t property_key_hash = 0;
+        int property_key_hash_valid = 0;
         size_t steps;
         int walk;
+        /* The lookup spelling and its key domain remain fixed throughout this prototype walk;
+         * every dictionary sidecar therefore probes with this same hash. */
         /* Canonicalized once for the whole walk (ADR 0047), unless a compiled site already holds
          * the canonical pointer. NULL is a spelling the realm has never stored, so no level of
          * the chain can hold it and the walk is not made at all -- unless the check mode is on,
          * which wants every level's scan run by bytes. */
-        if (ikey == NULL) ikey = kiln_c99_interned_key(key);
+        if (ikey == NULL) {
+            ikey = kiln_c99_interned_key_with_hash_in(kiln_c99_gc_heap(), key,
+                                                       &property_key_hash);
+            property_key_hash_valid = 1;
+        }
         walk = ikey != NULL || kiln_c99_keys_checked() || kiln_c99_key_index_key(key) >= 0.0 ||
                (kiln_c99_gc_heap() != NULL && kiln_c99_gc_heap()->foreign_dictionary_keys);
         /* Own properties first, then the chain. Iterative and bounded rather than recursive:
@@ -493,6 +589,33 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 current = kiln_c99_closure_store(kiln_c99_closure_of(current));
             }
             if (current.tag != KILN_VALUE_OBJECT) {
+                /* A boxed primitive's [[Prototype]] is represented by its prototype builtin.
+                 * If that builtin has a user-installed accessor, the accessor is found in the
+                 * builtin's own store, but [[Get]] must still use the original boxed object as
+                 * its receiver. Resolve that store here before recursing into the builtin's
+                 * normal member lookup, which intentionally uses the builtin itself as receiver
+                 * when it is the direct target. */
+                if (current.tag == KILN_VALUE_BUILTIN) {
+                    int found = 0;
+                    int status = kiln_c99_prototype_store_read_with_receiver(
+                        host, current.bits, target, key, ikey, out, depth, thrown, &found);
+                    if (status != KILN_C99_OK || found) return status;
+                    /* AggregateError.prototype inherits Error.prototype. The former is a
+                     * builtin-backed prototype, so that link is not represented by an ordinary
+                     * object [[Prototype]] edge. Preserve the receiver while consulting the
+                     * Error prototype's bootstrap-installed properties, then provide its
+                     * intrinsic toString method when no override exists. */
+                    if (current.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE) {
+                        status = kiln_c99_prototype_store_read_with_receiver(
+                            host, KILN_C99_BUILTIN_ERROR_PROTOTYPE, target, key, ikey,
+                            out, depth, thrown, &found);
+                        if (status != KILN_C99_OK || found) return status;
+                        if (kiln_c99_same_name_key(key, "toString")) {
+                            *out = kiln_c99_method(KILN_C99_METHOD_ERROR_TO_STRING);
+                            return KILN_C99_OK;
+                        }
+                    }
+                }
                 if (current.tag != KILN_VALUE_UNDEFINED && current.tag != KILN_VALUE_NULL) {
                     return kiln_c99_get_key(host, current, key, ikey, out, depth, thrown);
                 }
@@ -501,7 +624,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             getter = kiln_c99_undefined();
             {
                 kiln_property property;
-                if (!kiln_c99_property_read_own_value(current, key, ikey, &property)) {
+                if (!kiln_c99_property_read_own_value_with_hash(
+                        current, key, ikey, &property_key_hash, &property_key_hash_valid,
+                        &property)) {
                     current = kiln_c99_object_prototype_read(current);
                     continue;
                 }
@@ -511,6 +636,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     KILN_C99_REFUSE("a member this backend declares and has not implemented");
                 }
                 if (!property.accessor) {
+                    if (current.tag == KILN_VALUE_OBJECT &&
+                        kiln_c99_object_of(current)->module_namespace) {
+                        return kiln_c99_namespace_cell_read(property.value, out, thrown);
+                    }
                     *out = property.value;
                     return KILN_C99_OK;
                 }
@@ -625,6 +754,20 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     }
     case KILN_VALUE_FUNCTION: {
         kiln_closure *closure = kiln_c99_closure_of(target);
+        if ((kiln_c99_same_name_key(key, "name") ||
+             kiln_c99_same_name_key(key, "length")) &&
+            kiln_c99_store_has(kiln_c99_closure_store(closure), key, ikey)) {
+            /* `name` and `length` begin as closure metadata, but both are configurable own
+             * properties. A program can redefine either in the callable's store, and reads must
+             * then observe that descriptor just like any other own property. The store is only
+             * where the descriptor lives: an accessor still receives the callable that was
+             * read, not this internal storage object. */
+            kiln_value store = kiln_c99_closure_store(closure);
+            kiln_value property_key = kiln_c99_key_value(key, &ikey);
+            if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            return kiln_c99_get_with_receiver(host, store, property_key, target, out, depth,
+                                              thrown);
+        }
         if (kiln_c99_same_name_key(key, "prototype") &&
             !closure->arrow &&
             (!closure->asynchronous || closure->async_generator) &&
@@ -645,64 +788,30 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         if (kiln_c99_store_has(kiln_c99_closure_store(closure), key, ikey)) {
             /* An assigned property wins, exactly as an own property shadows an
-             * inherited one -- which is what `Function.prototype.call` is. */
-            return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out,
-                                    depth, thrown);
+             * inherited one -- which is what `Function.prototype.call` is. Its descriptor is
+             * stored separately from the callable, but an accessor's receiver remains the
+             * callable itself. */
+            kiln_value store = kiln_c99_closure_store(closure);
+            kiln_value property_key = kiln_c99_key_value(key, &ikey);
+            if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            return kiln_c99_get_with_receiver(host, store, property_key, target, out, depth,
+                                              thrown);
         }
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
-        {
-            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
-                                                &intrinsic_len);
-            uint64_t callable = kiln_c99_callable_method(intrinsic_key, intrinsic_len);
-            if (callable != 0) {
-                *out = kiln_c99_method(callable);
-                return KILN_C99_OK;
-            }
-        }
-        /* `f.constructor === Function`, which is how a program asks what it is holding. The
-         * bound and method paths already answered this; a plain function did not. */
-        if (kiln_c99_same_name_key(key, "constructor")) {
-            *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
-            return KILN_C99_OK;
-        }
-        /* ...and the `Object.prototype` members a program borrows, which the builtin path below
-         * already answers and this one never did.
-         *
-         * `valueOf` is here and `toString` is not, which is the whole of the distinction once
-         * written as "toString and valueOf would shadow what a constructor answers". Only
-         * `toString` would: `Object.prototype.toString` gives `[object Function]`, which is worse
-         * than refusing, and a callable answers that name for itself through
-         * `kiln_c99_callable_method`. `Object.prototype.valueOf` hands back the receiver, so it
-         * shadows nothing -- `ToPrimitive` gets a non-primitive from it and falls through to
-         * `toString` exactly as it does for a plain object. */
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
-        {
-            uint64_t borrowed =
-                kiln_c99_same_name_key(key, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
-                : kiln_c99_same_name_key(key, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
-                : kiln_c99_same_name_key(key, "propertyIsEnumerable")
-                    ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
-                : kiln_c99_same_name_key(key, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
-                    : 0;
-            if (borrowed != 0) {
-                *out = kiln_c99_method(borrowed);
-                return KILN_C99_OK;
-            }
-        }
-        /* Own members were answered above; what `Function.prototype` carries in its store comes
-         * next, before the name is called absent. */
-        {
-            int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
-                                                       key, ikey, out, depth, thrown, &found);
-            if (status != KILN_C99_OK || found) return status;
-        }
-        if (kiln_c99_closure_store(closure).tag != KILN_VALUE_OBJECT) {
-            KILN_C99_ABSENT("a callable with no property store, so it has no own member to "
-                            "answer",
+        kiln_value store = kiln_c99_closure_store(closure);
+        kiln_value parent = store.tag == KILN_VALUE_OBJECT
+                                ? kiln_c99_object_prototype_read(store)
+                                : kiln_c99_undefined();
+        if (parent.tag == KILN_VALUE_UNDEFINED)
+            parent = kiln_c99_function_kind_prototype(closure);
+        if (parent.tag == KILN_VALUE_NULL) {
+            KILN_C99_ABSENT("an explicit null [[Prototype]] ends inherited lookup, so the \
+                            name is absent by the language's property lookup rule",
                             out);
         }
-        return kiln_c99_get_key(host, kiln_c99_closure_store(closure), key, ikey, out, depth, thrown);
+        kiln_value property_key = kiln_c99_key_value(key, &ikey);
+        if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+        return kiln_c99_get_with_receiver(host, parent, property_key, target, out, depth,
+                                          thrown);
     }
 #if KILN_RETAIN_GROUP_TEMPORAL
     case KILN_VALUE_TEMPORAL: {
@@ -823,7 +932,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
 #endif
     case KILN_VALUE_REGEXP: {
         kiln_regexp *regexp = kiln_c99_regexp_of(target);
+        int found = 0;
         size_t index;
+        int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+        if (status != KILN_C99_OK || found) return status;
         /* The flag letters, in the order the specification lists their accessors. */
         static const char known[] = "dgimsuvy";
         static const char *const names[] = {"hasIndices", "global",  "ignoreCase", "multiline",
@@ -875,7 +987,20 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
-        KILN_C99_REFUSE("a RegExp.prototype member this backend has not implemented");
+        /* RegExp instances are ordinary objects after their own slots and RegExp.prototype.
+         * In particular an unknown name such as `length` is a real absent property, which code
+         * like kind-of tests directly; refusing it breaks the ordinary `=== undefined` branch. */
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
+        {
+            int found;
+            int status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+                                                                  intrinsic_len, out, depth,
+                                                                  thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        KILN_C99_ABSENT("not an own RegExp slot, RegExp.prototype member, or Object.prototype "
+                        "member; the checked stores and method tables are complete",
+                        out);
     }
     case KILN_VALUE_ARRAY_BUFFER:
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
@@ -970,6 +1095,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             return KILN_C99_OK;
         }
         {
+            int found;
+            int status = kiln_c99_prototype_store_read_with_receiver(
+                host, KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE, target, key, ikey,
+                out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        {
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
             /* One range, shared with the prototype table and with `in`, so a read and a presence
@@ -1002,6 +1134,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     }
     case KILN_VALUE_TYPED_ARRAY: {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        if (view->properties.tag == KILN_VALUE_OBJECT) {
+            int found;
+            int own_status = kiln_c99_store_get_key(host, target, key, ikey, out, depth,
+                                                    thrown, &found);
+            if (own_status != KILN_C99_OK || found) return own_status;
+        }
         if (kiln_c99_same_name_key(key, "@@toStringTag")) {
             const char *name = view->is_buffer ? "Uint8Array" : kiln_c99_typed_name(view->kind);
             *out = kiln_c99_copy_text(name, strlen(name));
@@ -1079,17 +1217,37 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     }
     case KILN_VALUE_ARRAY: {
         uint64_t code;
-        if (kiln_c99_same_name_key(key, "constructor")) {
-            if (kiln_c99_array_of(target)->properties.tag != KILN_VALUE_UNDEFINED) {
-                int found;
-                int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
-                if (status != KILN_C99_OK || found) return status;
-            }
-            *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY);
+        double element_index = kiln_c99_key_index_key(key);
+        kiln_array *elements = kiln_c99_array_of(target);
+        /* Non-default index descriptors live beside named properties. Consult them before the
+         * dense element vector so accessors run with the array as their original receiver and
+         * non-default data descriptors share the same value/attribute record with reflection. */
+        if (element_index >= 0.0 && elements->properties.tag == KILN_VALUE_OBJECT) {
+            int found = 0;
+            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
+                                                &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        /* Fixed names and numeric destructuring keys use ordinary Get too. Holes continue
+         * through the prototype lookup below instead of hiding inherited index properties. */
+        if (element_index >= 0.0 && element_index < (double)elements->count &&
+            elements->elements[(size_t)element_index] != KILN_VAL_HOLE) {
+            *out = kiln_val_to_boundary(elements->elements[(size_t)element_index]);
             return KILN_C99_OK;
         }
         if (kiln_c99_same_name_key(key, "length")) {
             *out = kiln_c99_number((double)kiln_c99_array_of(target)->count);
+            return KILN_C99_OK;
+        }
+        /* Own members and a subclass prototype precede the intrinsic tables even when the
+         * program has never modified Array.prototype. Site-less method reads use this path. */
+        if (kiln_c99_array_of(target)->properties.tag != KILN_VALUE_UNDEFINED) {
+            int found;
+            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
+        if (kiln_c99_same_name_key(key, "constructor")) {
+            *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY);
             return KILN_C99_OK;
         }
         /* `for...of` asks for this and then drives `next`, where spread walks the array
@@ -1102,15 +1260,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         if (kiln_c99_same_name_key(key, "@@unscopables")) {
             return kiln_c99_get_array_unscopables(out);
-        }
-        if (KILN_UNLIKELY(kiln_c99_builtin_store_epoch != 0) &&
-            kiln_c99_array_of(target)->properties.tag != KILN_VALUE_UNDEFINED &&
-            kiln_c99_program_wrote_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE)) {
-            /* The array's own store (and a subclass prototype on its chain) sits in front of the
-             * written prototype member it would otherwise shadow. */
-            int found;
-            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
-            if (status != KILN_C99_OK || found) return status;
         }
         KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_ARRAY_PROTOTYPE);
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
@@ -1174,6 +1323,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
+        {
+            /* `Array.prototype` can itself inherit through a Proxy. Table and own-store lookups
+             * above cover the default chain; continue OrdinaryGet through a custom parent only
+             * after those answers miss, and retain the original array as the receiver. */
+            int found = 0;
+            int status = kiln_c99_array_custom_parent_read(
+                host, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         if (kiln_c99_same_name_key(key, "toLocaleString")) {
             *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING);
             return KILN_C99_OK;
@@ -1227,8 +1385,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         uint64_t code;
         /* `length` is the string's own; every other name here is String.prototype's, where a
          * member the program wrote comes first. */
-        if (KILN_UNLIKELY(kiln_c99_builtin_store_epoch != 0) &&
-            !kiln_c99_same_name_key(key, "length")) {
+        if (!kiln_c99_same_name_key(key, "length")) {
             KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_STRING_PROTOTYPE);
         }
         if (kiln_c99_same_name_key(key, "@@iterator")) {
@@ -1279,6 +1436,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                         "ones that are",
                         out);
     }
+    case KILN_VALUE_TIMER: {
+        /* An ordinary object: its own store, made on first use, and `Timeout.prototype` behind
+         * it. */
+        int found;
+        int status = kiln_c99_timer_materialize(target);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+        if (status != KILN_C99_OK || found) return status;
+        KILN_C99_ABSENT("not a member of the timer's store or Timeout.prototype", out);
+    }
     case KILN_VALUE_PROMISE: {
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         {
@@ -1315,9 +1482,27 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         kiln_collection *collection = kiln_c99_collection_of(target);
         uint64_t code;
+        /* A Map/Set subclass has an ordinary prototype in front of the native collection
+         * surface. Consult the instance store and that chain first, including for names the
+         * built-in also defines: `class LRU extends Map { get(key) { ... } }` must call its
+         * method, and an own `size` getter must override the native accessor. Previously the
+         * native `size`, `constructor`, and method rows returned before the chain was examined,
+         * silently making subclasses behave like plain Maps. */
+        {
+            int found;
+            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
+                                                &found);
+            if (status != KILN_C99_OK || found) return status;
+        }
         /* A weak collection has no `size` at all, so its name falls through to the absent
          * answer below rather than stopping the program. */
         if (!collection->is_weak && kiln_c99_same_name_key(key, "size")) {
+            int found;
+            uint64_t prototype = collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE
+                                                    : KILN_C99_BUILTIN_SET_PROTOTYPE;
+            int status = kiln_c99_prototype_store_read_with_receiver(
+                host, prototype, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
             *out = kiln_c99_number((double)collection->live);
             return KILN_C99_OK;
         }
@@ -1403,6 +1588,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         return KILN_C99_OK;
     }
     case KILN_VALUE_DATE: {
+        int found;
+        int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+        if (status != KILN_C99_OK || found) return status;
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_DATE);
@@ -1432,13 +1620,50 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         KILN_C99_REFUSE("a Date.prototype member this backend has not implemented");
     }
     case KILN_VALUE_GENERATOR: {
+        kiln_generator *frame = kiln_c99_generator_of(target);
+        int found;
+        int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+        if (status != KILN_C99_OK || found) return status;
+        kiln_value function_prototype = frame->prototype;
+        if (frame->properties.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_object_of(frame->properties)->prototype.tag != KILN_VALUE_UNDEFINED) {
+            function_prototype = kiln_c99_object_of(frame->properties)->prototype;
+        }
+        size_t generator_kind = frame->async_generator ? 1 : 0;
+        kiln_value shared_prototype = kiln_c99_realm()->generator_object_prototypes[generator_kind];
+        if (shared_prototype.tag == KILN_VALUE_OBJECT &&
+            function_prototype.tag == KILN_VALUE_OBJECT) {
+            /* Once the TypeScript-owned iterator prototype exists, its ordinary [[Get]] is
+             * authoritative. Do not probe membership first: a proxy can observe that extra
+             * operation, and accessors must receive the generator as `this`. */
+            kiln_value property_key = kiln_c99_key_value(key, &ikey);
+            if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            return kiln_c99_get_with_receiver(host, function_prototype, property_key,
+                                              target, out, depth, thrown);
+        }
+        if (shared_prototype.tag == KILN_VALUE_OBJECT &&
+            function_prototype.tag == KILN_VALUE_NULL) {
+            KILN_C99_ABSENT("a generator instance with an explicit null prototype has no \
+                             inherited properties",
+                            out);
+        }
+        if (function_prototype.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_has_property_key(host, function_prototype, key, ikey, &found,
+                                               depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (found)
+                return kiln_c99_get_key(host, function_prototype, key, ikey, out, depth,
+                                        thrown);
+        }
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         uint64_t code;
         if (kiln_c99_same_name_key(key, "@@asyncIterator")) {
             /* Only an async generator has one, and answering for a sync one would make
              * `for await` take the wrong loop. */
             if (!kiln_c99_generator_of(target)->async_generator) {
-                KILN_C99_REFUSE("@@asyncIterator on a synchronous generator");
+                KILN_C99_ABSENT("a synchronous generator has no @@asyncIterator method; only an "
+                                "async generator defines it",
+                                out);
             }
             *out = kiln_c99_method(KILN_C99_METHOD_GENERATOR_SELF);
             return KILN_C99_OK;
@@ -1465,6 +1690,69 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         uint64_t callable;
         kiln_value store;
         int stored;
+        if (target.tag == KILN_VALUE_BOUND) {
+            /* A bound function's own store and mutable [[Prototype]] are its ordinary property
+             * authority. Check them before the synthetic Function.prototype method shortcuts
+             * below, so an own `call` or a subclass prototype's `constructor` can shadow the
+             * inherited Function members. */
+            kiln_bound *bound = (kiln_bound *)(uintptr_t)target.bits;
+            stored = kiln_c99_callable_store(target, &store, 0);
+            if (stored != KILN_C99_OK) return stored;
+            if (kiln_c99_store_has(store, key, ikey)) {
+                kiln_value property_key = kiln_c99_key_value(key, &ikey);
+                if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+                return kiln_c99_get_with_receiver(host, store, property_key, target, out,
+                                                  depth, thrown);
+            }
+            if (kiln_c99_same_name_key(key, "name")) {
+                kiln_value inner;
+                int status = kiln_c99_get(host, bound->target, "name", 4, &inner, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                *out = kiln_c99_concat(kiln_c99_copy_text("bound ", 6), inner);
+                return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+            }
+            if (kiln_c99_same_name_key(key, "length")) {
+                kiln_value inner;
+                double remaining;
+                int status = kiln_c99_get(host, bound->target, "length", 6, &inner, depth,
+                                          thrown);
+                if (status != KILN_C99_OK) return status;
+                remaining = kiln_c99_as_number(inner) - (double)bound->count;
+                *out = kiln_c99_number(remaining > 0.0 ? remaining : 0.0);
+                return KILN_C99_OK;
+            }
+            /* The actual [[Prototype]] supplies inherited methods, including the default
+             * Function.prototype constructor and any program-defined overrides. */
+            kiln_value parent;
+            int status = kiln_c99_invoke_method(host, &parent,
+                                                KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
+                                                kiln_c99_undefined(), &target, 1,
+                                                depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (parent.tag == KILN_VALUE_NULL) {
+                KILN_C99_ABSENT("the bound function own store has no matching property and its "
+                                "explicit null prototype ends the lookup", out);
+            }
+            kiln_value property_key = kiln_c99_key_value(key, &ikey);
+            if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            return kiln_c99_get_with_receiver(host, parent, property_key, target, out,
+                                              depth, thrown);
+        }
+        stored = kiln_c99_callable_store(target, &store, 0);
+        if (stored != KILN_C99_OK) return stored;
+        {
+            int found = 0;
+            stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            if (stored != KILN_C99_OK || found) return stored;
+        }
+        /* Only registered native constructors synthesize an own prototype. Other methods
+         * continue through ordinary inherited lookup, which also observes user-defined slots. */
+        if (target.tag == KILN_VALUE_METHOD && kiln_c99_same_name_key(key, "prototype") &&
+            kiln_c99_is_constructor(target)) {
+            return kiln_c99_callable_prototype(target, out);
+        }
+        /* Non-bound synthetic callable values inherit the Function constructor unless a
+         * specialized branch below provides another surface. */
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
             return KILN_C99_OK;
@@ -1499,70 +1787,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 return KILN_C99_OK;
             }
         }
-        if (target.tag == KILN_VALUE_BOUND) {
-            /* `bind` reports the arity still to be supplied and prefixes the name it wrapped,
-             * which is what makes a stack trace through one readable. Both are derived from the
-             * target rather than stored, so binding a bound function composes. */
-            kiln_bound *bound = (kiln_bound *)(uintptr_t)target.bits;
-            stored = kiln_c99_callable_store(target, &store, 0);
-            if (stored != KILN_C99_OK) return stored;
-            if (kiln_c99_store_has(store, key, ikey))
-                return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-            if (kiln_c99_same_name_key(key, "name")) {
-                kiln_value inner;
-                int status = kiln_c99_get(host, bound->target, "name", 4, &inner, depth, thrown);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                *out = kiln_c99_concat(kiln_c99_copy_text("bound ", 6), inner);
-                return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
-            }
-            if (kiln_c99_same_name_key(key, "length")) {
-                kiln_value inner;
-                double remaining;
-                int status = kiln_c99_get(host, bound->target, "length", 6, &inner, depth,
-                                          thrown);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                remaining = kiln_c99_as_number(inner) - (double)bound->count;
-                *out = kiln_c99_number(remaining > 0.0 ? remaining : 0.0);
-                return KILN_C99_OK;
-            }
-            if (kiln_c99_same_name_key(key, "prototype")) {
-                /* BoundFunctionCreate defines no `prototype`, so the name is inherited from the
-                 * bound function's [[Prototype]], which is its target's: a derived class's parent
-                 * answers with its own, `Function.prototype` with nothing. Refusing here stopped
-                 * `class U extends f.bind() {}` where the language throws a TypeError (issue 28). */
-                kiln_value parent;
-                int found = 0;
-                int status = kiln_c99_invoke_method(host, &parent,
-                                                    KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
-                                                    kiln_c99_undefined(), &target, 1,
-                                                    depth, thrown);
-                if (status != KILN_C99_OK) return status;
-                if (parent.tag == KILN_VALUE_BUILTIN &&
-                    parent.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) {
-                    status = kiln_c99_prototype_store_read(host,
-                                                           KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
-                                                           key, ikey, out, depth, thrown, &found);
-                    if (status != KILN_C99_OK || found) return status;
-                }
-                if (parent.tag == KILN_VALUE_NULL ||
-                    (parent.tag == KILN_VALUE_BUILTIN &&
-                     parent.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE)) {
-                    KILN_C99_ABSENT("a bound function owns no `prototype` (BoundFunctionCreate "
-                                    "defines none), and neither a null [[Prototype]] nor "
-                                    "`Function.prototype` without one in its store has it",
-                                    out);
-                }
-                return kiln_c99_get_key(host, parent, key, ikey, out, depth, thrown);
-            }
-            int found = 0;
-            stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
-            if (stored != KILN_C99_OK || found) return stored;
-            KILN_C99_REFUSE("a member of a bound function other than name and length");
-        }
         if (target.tag == KILN_VALUE_METHOD &&
             target.bits == KILN_C99_METHOD_PROCESS_HRTIME &&
             kiln_c99_same_name_key(key, "bigint")) {
@@ -1582,13 +1806,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_LISTENER_COUNT);
             return KILN_C99_OK;
         }
-        if (target.tag == KILN_VALUE_METHOD && kiln_c99_same_name_key(key, "prototype")) {
-            return kiln_c99_callable_prototype(target, out);
+        if (target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+            if (kiln_c99_same_name_key(key, "name")) {
+                *out = kiln_c99_copy_text("require", 7);
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name_key(key, "length")) {
+                *out = kiln_c99_number(1.0);
+                return KILN_C99_OK;
+            }
         }
-        stored = kiln_c99_callable_store(target, &store, 0);
-        if (stored != KILN_C99_OK) return stored;
-        if (kiln_c99_store_has(store, key, ikey))
-            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
         /* `parseInt.name`. A method has no other property worth answering, and a wrong answer
          * here reads as a missing function three frames later. */
         if (kiln_c99_same_name_key(key, "name")) {
@@ -1597,15 +1824,50 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                   : kiln_c99_copy_text(method, strlen(method));
             return KILN_C99_OK;
         }
-        KILN_C99_REFUSE("a member of a native method other than name");
+        if (kiln_c99_same_name_key(key, "length")) {
+            uint32_t length = kiln_c99_method_declared_length(target.bits);
+            if (length != UINT32_MAX) {
+                *out = kiln_c99_number((double)length);
+                return KILN_C99_OK;
+            }
+            KILN_C99_REFUSE("the declared length of this native method is not in the arity authority");
+        }
+        /* The own slots above are synthetic (name/length and supported prototype); whatever the
+         * program added to Function.prototype is inherited by every native function as well. */
+        {
+            int found;
+            int status = kiln_c99_prototype_store_read(host,
+                                                       KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
+                                                       key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+            /* Native callables inherit Object.prototype through Function.prototype too. */
+            status = kiln_c99_prototype_store_read(host,
+                                                  KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                  key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
+            uint64_t inherited = kiln_c99_namespace_method(
+                KILN_C99_BUILTIN_OBJECT_PROTOTYPE, intrinsic_key, intrinsic_len);
+            if (inherited != 0) {
+                *out = kiln_c99_method(inherited);
+                return KILN_C99_OK;
+            }
+        }
+        KILN_C99_ABSENT("not the native method's name, supported length or constructor prototype, "
+                        "nor a property in its own or callable-prototype stores",
+                        out);
     }
     case KILN_VALUE_BUILTIN: {
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         kiln_value store;
         int stored = kiln_c99_callable_store(target, &store, 0);
         if (stored != KILN_C99_OK) return stored;
-        if (kiln_c99_store_has(store, key, ikey))
-            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
+        {
+            int found = 0;
+            stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            if (stored != KILN_C99_OK || found) return stored;
+        }
         /* `Temporal` first, because the namespace tables below are keyed by method name and every
          * name here is a *value*: `Temporal.PlainDate` is a constructor, not a function to call. */
 #if KILN_RETAIN_GROUP_TEMPORAL
@@ -1799,6 +2061,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * way a program asks what kind of error it caught. A namespace is not a constructor and
          * has no name to give. */
         if (kiln_c99_same_name_key(key, "constructor")) {
+            if (target.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY);
+                return KILN_C99_OK;
+            }
             /* A prototype table names its own constructor, which is how `[].constructor` and
              * `Array.prototype.constructor` reach the same value. */
             static const struct {
@@ -1853,6 +2119,42 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         {
             kiln_typed_kind typed_kind;
             if (kiln_c99_builtin_typed_kind(target.bits, &typed_kind)) {
+                if (kiln_c99_same_name_key(key, "from") ||
+                    kiln_c99_same_name_key(key, "of") ||
+                    kiln_c99_same_name_key(key, "@@species")) {
+                    int found = 0;
+                    int status = kiln_c99_builtin_custom_prototype_read(
+                        host, target, key, ikey, out, depth, thrown, &found);
+                    if (status != KILN_C99_OK || found) return status;
+                    /* These statics are inherited through the constructor's current
+                     * [[Prototype]]. The intrinsic fallback below is valid only while that
+                     * link is the default implicit one; after Object.setPrototypeOf, a missing
+                     * member on the replacement chain is genuinely absent. */
+                    {
+                        kiln_value store;
+                        if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
+                            store.tag == KILN_VALUE_OBJECT) {
+                            kiln_value parent = kiln_c99_object_prototype_read(store);
+                            if (parent.tag != KILN_VALUE_UNDEFINED &&
+                                !(parent.tag == KILN_VALUE_BUILTIN &&
+                                  parent.bits == KILN_C99_BUILTIN_TYPED_ARRAY)) {
+                                KILN_C99_ABSENT("not in the current typed-array constructor prototype chain",
+                                                out);
+                            }
+                        }
+                    }
+                }
+                if (kiln_c99_same_name_key(key, "from") ||
+                    kiln_c99_same_name_key(key, "of") ||
+                    kiln_c99_same_name_key(key, "@@species")) {
+                    /* An implicit default parent has no constructor store to traverse. Its
+                     * shared bootstrap methods still shadow the intrinsic fallback below. */
+                    int found = 0;
+                    int status = kiln_c99_prototype_store_read_with_receiver(
+                        host, KILN_C99_BUILTIN_TYPED_ARRAY, target, key, ikey,
+                        out, depth, thrown, &found);
+                    if (status != KILN_C99_OK || found) return status;
+                }
                 if (kiln_c99_same_name_key(key, "BYTES_PER_ELEMENT")) {
                     *out = kiln_c99_number((double)kiln_c99_typed_width(typed_kind));
                     return KILN_C99_OK;
@@ -1895,7 +2197,29 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 return KILN_C99_OK;
             }
         }
+        if (target.bits == KILN_C99_BUILTIN_DATE_PROTOTYPE &&
+            !kiln_c99_is_symbol_key(intrinsic_key, intrinsic_len)) {
+            if (kiln_c99_is_date_member(intrinsic_key, intrinsic_len)) {
+                KILN_C99_REFUSE("a Date.prototype locale member this backend has not implemented");
+            }
+            /* date.ts installs every other Date.prototype member into this prototype's own
+             * store, checked above. A remaining spelling such as the nonstandard
+             * `getUTCTime` read by @date-fns/utc is genuinely absent. */
+            KILN_C99_ABSENT("not a Date.prototype member; date.ts installs the complete supported \
+                            Date.prototype surface", out);
+        }
         if (kiln_c99_same_name_key(key, "prototype")) {
+            if (target.bits == KILN_C99_BUILTIN_TYPED_ARRAY ||
+                target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER ||
+                target.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER) {
+                uint64_t prototype = target.bits == KILN_C99_BUILTIN_TYPED_ARRAY
+                    ? KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE
+                    : target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER
+                        ? KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE
+                        : KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE;
+                *out = kiln_c99_builtin(prototype);
+                return KILN_C99_OK;
+            }
             kiln_value store;
             if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
                 kiln_c99_store_has(store, key, ikey))
@@ -1943,10 +2267,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 }
             }
             if (kiln_c99_error_name(target.bits) != NULL) {
-                *out = kiln_c99_builtin(target.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR
-                                            ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
-                                            : KILN_C99_BUILTIN_ERROR_PROTOTYPE);
-                return KILN_C99_OK;
+                return kiln_c99_error_prototype(target.bits, out);
             }
             {
                 kiln_typed_kind typed_kind;
@@ -2005,6 +2326,28 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
+        if (target.bits == KILN_C99_BUILTIN_SET &&
+            !kiln_c99_is_symbol_key(intrinsic_key, intrinsic_len)) {
+            /* Set's constructor has no ordinary string-named statics beyond name, length and
+             * prototype (handled above). In particular, feature tests such as kind-of's
+             * `Set.isBuffer` must receive undefined instead of a backend refusal. */
+            int found = 0;
+            int status = kiln_c99_builtin_custom_prototype_read(
+                host, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+            KILN_C99_ABSENT("Set constructor has no other string-named statics", out);
+        }
+        if (target.bits == KILN_C99_BUILTIN_BIGINT &&
+            !kiln_c99_is_symbol_key(intrinsic_key, intrinsic_len)) {
+            /* BigInt's only ordinary string statics are asIntN and asUintN, handled through the
+             * shared surface above. Other names such as the feature probe BigInt.isBuffer are
+             * absent by the complete constructor definition. */
+            int found = 0;
+            int status = kiln_c99_builtin_custom_prototype_read(
+                host, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
+            KILN_C99_ABSENT("BigInt constructor has no other string-named statics", out);
+        }
         {
             /* An absent name on a table-driven built-in is `undefined`, exactly as it is on an
              * object the program built: `Object.nope` is not a gap here, it is what the language
@@ -2017,7 +2360,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * refusing; that is the honest answer for a question we cannot yet ask. */
             int owned = 0;
             (void)kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned);
-            if (owned && !kiln_c99_backlog_names(kiln_c99_builtin_owner_name(target.bits), intrinsic_key, intrinsic_len)) {
+            if ((owned || kiln_c99_has_surface(target.bits)) &&
+                !kiln_c99_backlog_names(kiln_c99_builtin_owner_name(target.bits), intrinsic_key, intrinsic_len)) {
+                int found = 0;
+                int status = kiln_c99_builtin_custom_prototype_read(
+                    host, target, key, ikey, out, depth, thrown, &found);
+                if (status != KILN_C99_OK || found) return status;
                 KILN_C99_ABSENT("not a member of this built-in; BUILTIN_SURFACE and "
                                 "BUILTIN_SURFACE_BACKLOG hold every one that is",
                                 out);
@@ -2029,6 +2377,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                 out);
             }
             if (target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE) {
+                {
+                    int found;
+                    int status = kiln_c99_prototype_store_read(
+                        host, target.bits, key, ikey, out, depth, thrown, &found);
+                    if (status != KILN_C99_OK || found) return status;
+                }
                 if (kiln_c99_same_name_key(key, "slice")) {
                     *out = kiln_c99_method(KILN_C99_METHOD_SLICE);
                     return KILN_C99_OK;
@@ -2093,12 +2447,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     kiln_c99_same_name_key(key, "unicode") ||
                     kiln_c99_same_name_key(key, "unicodeSets") ||
                     kiln_c99_same_name_key(key, "sticky") ||
+                    kiln_c99_same_name_key(key, "@@toStringTag") ||
                     kiln_c99_same_name_key(key, "name"))) ||
                 (target.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE &&
                     kiln_c99_same_name_key(key, "name")) ||
                 (target.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE &&
                     kiln_c99_same_name_key(key, "name"))) {
-                KILN_C99_ABSENT("not a member of this prototype: prototype is an object without a name", out);
+                KILN_C99_ABSENT("not a member of this prototype: unnamed prototype or absent RegExp tag", out);
             }
             if (target.bits == KILN_C99_BUILTIN_SET_PROTOTYPE && kiln_c99_same_name_key(key, "size")) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
@@ -2130,7 +2485,24 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 *out = kiln_c99_null();
                 return KILN_C99_OK;
             }
-
+            if (target.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE) {
+                /* Its TypeScript-installed extensions and Object.prototype members have already
+                 * been read above, as have the methods returned by the shared iterator table.
+                 * This prototype is a distinct node in Array/String/Map/Set iterator chains; a
+                 * name absent from that authority is an ordinary absent property (not a missing
+                 * method on a table-driven built-in). Keep the authority check explicit so a
+                 * future helper added to the table cannot silently fall through here. */
+                if (kiln_c99_iterator_prototype_method(intrinsic_key, intrinsic_len) != 0) {
+                    KILN_C99_REFUSE("an Iterator.prototype table member not returned by its method lookup");
+                }
+                KILN_C99_ABSENT("not an Iterator.prototype member: absent from the shared helper table and installed store", out);
+            }
+        }
+        {
+            int found = 0;
+            int status = kiln_c99_builtin_custom_prototype_read(
+                host, target, key, ikey, out, depth, thrown, &found);
+            if (status != KILN_C99_OK || found) return status;
         }
         KILN_C99_REFUSE("a member the language puts on this built-in and this backend has not "
                         "built");
@@ -2259,7 +2631,17 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
                             kiln_value *thrown) {
     int status;
     if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
-    if (kiln_c99_kiln_shared_hook_read(target, key, out)) return KILN_C99_OK;
+    if (target.tag == KILN_VALUE_PROXY && (key->flags & KILN_STRING_PRIVATE_KEY)) {
+        kiln_value private_store;
+        status = kiln_c99_proxy_private_store(target, 0, &private_store);
+        if (status != KILN_C99_OK) return status;
+        if (private_store.tag != KILN_VALUE_OBJECT) {
+            *out = private_store;
+            return KILN_C99_OK;
+        }
+        return kiln_c99_get_key(host, private_store, key, ikey, out, depth, thrown);
+    }
+    if (kiln_c99_private_hook_read(target, key, out)) return KILN_C99_OK;
     if (kiln_c99_is_node_hidden_key_key(key)) {
         KILN_C99_ABSENT("a hidden runtime slot, which no program names", out);
     }
@@ -2269,6 +2651,13 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
         return kiln_c99_proxy_get(host, target, key_value, target, out, depth, thrown);
     }
     status = kiln_c99_get_own_kind(host, target, key, ikey, out, depth, thrown);
+    /* Namespace descriptors retain their export cell instead of copying its value. This makes
+     * reads observe later writes and lets the same object be published before a cyclic module is
+     * evaluated. */
+    if (status == KILN_C99_OK && target.tag == KILN_VALUE_OBJECT &&
+        kiln_c99_object_of(target)->module_namespace && out->tag == KILN_VALUE_CELL) {
+        return kiln_c99_namespace_cell_read(*out, out, thrown);
+    }
     if (status == KILN_C99_CONTROL_ERROR && kiln_c99_key_is_program_symbol(key)) {
         /* `Boolean[Symbol.for("immer-draftable")]`, which a bundled `immer` reads off every
          * value's constructor. A built-in carries a program's symbol only through the store the
@@ -2361,7 +2750,7 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object,
     }
     if (object->prototype.tag == KILN_VALUE_OBJECT) {
         const kiln_object *parent = kiln_c99_object_of(object->prototype);
-        if (parent->sealed != NULL) return 0;
+        if (parent->sealed != NULL || parent->module_namespace) return 0;
         for (index = 0; index < parent->count && parent->properties != NULL; ++index) {
             if (kiln_c99_same_key_view(&parent->properties[index], key)) {
                 kiln_c99_site_set_dictionary(site, 0, kiln_c99_site_encode_dictionary_index(index));
@@ -2384,13 +2773,15 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                              kiln_value *thrown, kiln_c99_site *site) {
     int status;
     if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
-    if (kiln_c99_kiln_shared_hook_read(target, key, out)) return KILN_C99_OK;
+    if (kiln_c99_private_hook_read(target, key, out)) return KILN_C99_OK;
     if (site == NULL || target.tag != KILN_VALUE_OBJECT) {
         return kiln_c99_get_key(host, target, key, canonical, out, depth, thrown);
     }
     {
         const kiln_object *object = kiln_c99_object_of(target);
-        if (object->sealed != NULL)
+        /* Namespace slots hold live binding cells. Ordinary dictionary hits return a slot's
+         * raw payload; the namespace read must unwrap it and enforce the temporal dead zone. */
+        if (object->sealed != NULL || object->module_namespace)
             return kiln_c99_get_key(host, target, key, canonical, out, depth, thrown);
         if (object->shape != NULL) {
             const kiln_c99_pic_entry *entry = kiln_c99_site_entry(site, object->shape);
@@ -2416,7 +2807,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                 kiln_value current = object->prototype;
                 while (current.tag == KILN_VALUE_OBJECT) {
                     const kiln_object *proto_obj = kiln_c99_object_of(current);
-                    if (proto_obj->sealed != NULL) goto generic;
+                    if (proto_obj->sealed != NULL || proto_obj->module_namespace) goto generic;
                     if (proto_obj->shape != NULL) {
                         uint32_t proto_slot;
                         if (canonical != NULL &&
@@ -2455,7 +2846,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const kiln_stri
                    !kiln_c99_same_key_view(&object->properties[index], key)) ++index;
             if (index == object->count) {
                 const kiln_object *parent = kiln_c99_object_of(object->prototype);
-                if (parent->sealed != NULL) goto generic;
+                if (parent->sealed != NULL || parent->module_namespace) goto generic;
                 uint32_t at = kiln_c99_site_decode_dictionary_index(kiln_c99_site_proto(site));
                 if (parent->properties != NULL && at < parent->count &&
                     kiln_c99_same_key_view(&parent->properties[at], key) &&

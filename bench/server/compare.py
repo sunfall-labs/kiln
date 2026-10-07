@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run paired HTTP measurements with auditable metadata and owned processes."""
 from __future__ import annotations
-import hashlib, json, os, shutil, signal, socket, subprocess, sys, tempfile, time, urllib.request
+import hashlib, json, os, shutil, signal, socket, statistics, subprocess, sys, tempfile, time, urllib.request
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -55,8 +55,9 @@ def wait_ready(port: int, process: subprocess.Popen[bytes], timeout: float = 5.0
     raise RuntimeError(f"server did not answer on port {port} within {timeout:g}s")
 
 def runtime_command(runtime: str, variant: dict[str, Path], workload: str, sources: Path) -> list[str]:
-    script = sources / ("serve.mjs" if workload == "hello" else "app.mjs")
-    if runtime == "kiln": return [str(variant["hello" if workload == "hello" else "app"])]
+    simple_server = workload in ("hello", "pipeline")
+    script = sources / ("serve.mjs" if simple_server else "app.mjs")
+    if runtime == "kiln": return [str(variant["hello" if simple_server else "app"])]
     if runtime == "node": return ["node", str(script)]
     if runtime == "bun": return ["bun", "run", str(script)]
     if runtime == "deno": return ["deno", "run", "--allow-net", "--quiet", str(script)]
@@ -136,6 +137,15 @@ def positive_setting(name: str, default: str) -> int:
     if value <= 0: raise ValueError(f"{name} must be a positive integer")
     return value
 
+def paired_variant_order(variants: list[tuple[str, dict[str, Path]]], pass_number: int) -> list[tuple[str, dict[str, Path]]]:
+    """Alternate A/B order between passes to avoid a fixed warmup/order advantage."""
+    return variants if pass_number % 2 else list(reversed(variants))
+
+def runtime_variant_order(variants: list[tuple[str, dict[str, Path]]], runtime: str, pass_number: int) -> list[tuple[str, dict[str, Path]]]:
+    if runtime == "kiln":
+        return paired_variant_order(variants, pass_number)
+    return [variants[-1]]
+
 def main() -> int:
     if len(sys.argv) not in (3, 6) or (len(sys.argv) == 6 and sys.argv[3] != "--baseline"):
         print("usage: compare.sh <candidate-hello> <candidate-app> [--baseline <hello> <app>]", file=sys.stderr); return 2
@@ -152,6 +162,8 @@ def main() -> int:
     runtimes = os.environ.get("RUNTIMES", "kiln node bun deno").split()
     workloads = os.environ.get("WORKLOADS", "hello mixed static-file json-echo-1k json-echo-64k chunked-stream large-upload connection-churn fs-small-reads fs-large-read fs-stat-storm").split()
     if not runtimes or not workloads: raise ValueError("RUNTIMES and WORKLOADS must each contain at least one value")
+    node_client = shutil.which("node")
+    if node_client is None: raise ValueError("node is required as the HTTP load client")
     result_root = Path(os.environ.get("RESULTS_DIR", ROOT / ".scratch" / f"server-compare-{int(time.time())}-{os.getpid()}"))
     result_root.mkdir(parents=True, exist_ok=False)
     with tempfile.TemporaryDirectory(prefix="kiln-server-sources-") as temporary:
@@ -163,20 +175,35 @@ def main() -> int:
             "serve_source_sha256": sha256(HERE / "serve.mjs"), "app_source_sha256": sha256(HERE / "app.mjs"),
             "transformed_serve_source_sha256": sha256(sources / "serve.mjs"), "transformed_app_source_sha256": sha256(sources / "app.mjs"),
             "driver_source_sha256": sha256(HERE / "drive.mjs"), "drive_mix_source_sha256": sha256(HERE / "drive-mix.mjs"),
+            "drive_pipeline_source_sha256": sha256(HERE / "drive-pipeline.mjs"),
+            "load_client": {"runtime": "node", "executable": node_client,
+                            "version": runtime_version("node", candidate)},
             "variants": {label: {kind: sha256(path) for kind, path in paths.items()} for label, paths in variants},
             "runtime_versions": {runtime: runtime_version(runtime, candidate) for runtime in runtimes if runtime == "kiln" or shutil.which(runtime)},
             "passes": passes, "processes": processes, "connections": connections, "duration_ms": duration,
             "port": port, "runtimes": runtimes, "workloads": workloads,
+            "variant_order_by_pass": {
+                str(pass_number): {
+                    runtime: [label for label, _ in runtime_variant_order(variants, runtime, pass_number)]
+                    for runtime in runtimes
+                }
+                for pass_number in range(1, passes + 1)
+            },
         }
         (result_root / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+        paired_kiln_results: dict[tuple[int, str, str], dict] = {}
         for pass_number in range(1, passes + 1):
             for workload in workloads:
-                driver = HERE / ("drive-mix.mjs" if workload == "mixed" else "drive.mjs")
+                driver = HERE / (
+                    "drive-mix.mjs" if workload == "mixed" else
+                    "drive-pipeline.mjs" if workload == "pipeline" else
+                    "drive.mjs"
+                )
                 for runtime in runtimes:
                     if runtime != "kiln" and shutil.which(runtime) is None:
                         print(f"pass={pass_number} workload={workload:<18} runtime={runtime:<4} skipped (not on PATH)"); continue
                     if not port_free(port): raise RuntimeError(f"port {port} is already occupied")
-                    active_variants = variants if runtime == "kiln" else [variants[-1]]
+                    active_variants = runtime_variant_order(variants, runtime, pass_number)
                     for label, variant in active_variants:
                         if not port_free(port): raise RuntimeError(f"port {port} is already occupied before {label}")
                         run_dir = result_root / f"pass-{pass_number}-{label}-{runtime}-{workload}"; run_dir.mkdir()
@@ -186,18 +213,81 @@ def main() -> int:
                         try:
                             wait_ready(port, process)
                             reports = run_clients(driver, duration, connections, port, workload, processes,
-                                                  max(10.0, duration / 1000 + 5.0), output_dir=run_dir)
+                                                  max(10.0, duration / 1000 + 5.0), node_bin=node_client,
+                                                  output_dir=run_dir)
                             for index, (report, stderr, status) in enumerate(reports, 1):
                                 (run_dir / f"client-{index}.json").write_text(json.dumps(report, indent=2) + "\n")
                                 if stderr: (run_dir / f"client-{index}.stderr").write_text(stderr)
                                 if status != 0 or report.get("errors", 0) or report.get("wrong", 0): raise RuntimeError(f"client validation failed: {report}")
+                                if workload == "pipeline":
+                                    depth = report.get("pipeline_depth")
+                                    requests = report.get("requests", 0)
+                                    if depth != 8 or requests <= 0 or requests % depth != 0:
+                                        raise RuntimeError(f"pipeline client did not complete whole 8-request batches: {report}")
                             aggregate = {"pass": pass_number, "label": label, "runtime": runtime, "workload": workload,
                                          "reports": [row[0] for row in reports], "rps": sum(row[0]["rps"] for row in reports)}
                             (run_dir / "aggregate.json").write_text(json.dumps(aggregate, indent=2) + "\n")
+                            if runtime == "kiln" and len(variants) == 2:
+                                key = (pass_number, workload, label)
+                                if key in paired_kiln_results:
+                                    raise RuntimeError(f"duplicate paired kiln result: {key}")
+                                paired_kiln_results[key] = aggregate
                             print(json.dumps(aggregate, separators=(",", ":")))
                         finally:
                             stop_process(process); stdout_file.close(); stderr_file.close()
                             if not port_free(port): raise RuntimeError(f"owned server left port {port} occupied")
+        if len(variants) == 2 and "kiln" in runtimes:
+            labels = {label for label, _ in variants}
+            if labels != {"baseline", "candidate"}:
+                raise RuntimeError(f"paired kiln summary requires baseline/candidate labels, found {sorted(labels)}")
+            summary: dict[str, dict] = {}
+            for workload in workloads:
+                pass_rows = []
+                baseline_rps = []
+                candidate_rps = []
+                baseline_p50 = []
+                candidate_p50 = []
+                baseline_p99 = []
+                candidate_p99 = []
+                for pass_number in range(1, passes + 1):
+                    baseline = paired_kiln_results.get((pass_number, workload, "baseline"))
+                    candidate_row = paired_kiln_results.get((pass_number, workload, "candidate"))
+                    if baseline is None or candidate_row is None:
+                        raise RuntimeError(f"missing paired kiln result: pass={pass_number} workload={workload}")
+                    baseline_rate = baseline["rps"]
+                    candidate_rate = candidate_row["rps"]
+                    if baseline_rate <= 0 or candidate_rate <= 0:
+                        raise RuntimeError(f"paired kiln result has no throughput: pass={pass_number} workload={workload}")
+                    baseline_client_p50 = statistics.median(row["p50_ms"] for row in baseline["reports"])
+                    candidate_client_p50 = statistics.median(row["p50_ms"] for row in candidate_row["reports"])
+                    baseline_client_p99 = statistics.median(row["p99_ms"] for row in baseline["reports"])
+                    candidate_client_p99 = statistics.median(row["p99_ms"] for row in candidate_row["reports"])
+                    baseline_rps.append(baseline_rate)
+                    candidate_rps.append(candidate_rate)
+                    baseline_p50.append(baseline_client_p50)
+                    candidate_p50.append(candidate_client_p50)
+                    baseline_p99.append(baseline_client_p99)
+                    candidate_p99.append(candidate_client_p99)
+                    pass_rows.append({
+                        "pass": pass_number,
+                        "baseline_rps": baseline_rate,
+                        "candidate_rps": candidate_rate,
+                        "candidate_over_baseline_rps": candidate_rate / baseline_rate,
+                    })
+                summary[workload] = {
+                    "passes": pass_rows,
+                    "median_candidate_over_baseline_rps": statistics.median(
+                        row["candidate_over_baseline_rps"] for row in pass_rows),
+                    "baseline_median_rps": statistics.median(baseline_rps),
+                    "candidate_median_rps": statistics.median(candidate_rps),
+                    "baseline_median_client_p50_ms": statistics.median(baseline_p50),
+                    "candidate_median_client_p50_ms": statistics.median(candidate_p50),
+                    "baseline_median_client_p99_ms": statistics.median(baseline_p99),
+                    "candidate_median_client_p99_ms": statistics.median(candidate_p99),
+                }
+            paired_summary = {"runtime": "kiln", "workloads": summary}
+            (result_root / "paired-summary.json").write_text(json.dumps(paired_summary, indent=2) + "\n")
+            print(json.dumps({"paired_summary": paired_summary}, separators=(",", ":")))
     return 0
 
 if __name__ == "__main__":

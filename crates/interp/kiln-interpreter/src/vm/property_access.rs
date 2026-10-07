@@ -1,6 +1,14 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn inherited_native_property(&self, target: &Value, name: &str) -> Value {
+        match self.intrinsics.prototype_override(target) {
+            Some(Value::Null) => Value::Undefined,
+            Some(prototype) => self.property(&prototype, name),
+            None => native_inherited_property(&self.intrinsics, target, name),
+        }
+    }
+
     /// Resolve a VM-managed property without invoking a program-defined accessor.
     pub(super) fn property(&self, target: &Value, name: &str) -> Value {
         // Every intrinsic kind answers `constructor` with the built-in that makes it. Handled
@@ -231,7 +239,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Overridden::Held(Property::Accessor { .. }, _) => Value::Undefined,
                 // Deleted, so the read carries on *up* the chain rather than back into the
                 // table that still has the answer the program removed.
-                Overridden::Absent => native_inherited_property(&self.intrinsics, target, name),
+                Overridden::Absent => self.inherited_native_property(target, name),
                 // An error constructor's `prototype` is a per-realm object rather than a table
                 // entry, so `native.property` has nothing to answer with and the read used to
                 // walk on up to `Function.prototype` and come back `undefined`. Only the named
@@ -260,13 +268,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         _ if string_exotic(target, name).is_some() => {
                             string_exotic(target, name).unwrap_or(Value::Undefined)
                         }
-                        Some(Value::Undefined) => {
-                            native_inherited_property(&self.intrinsics, target, name)
-                        }
+                        Some(Value::Undefined) => self.inherited_native_property(target, name),
                         Some(found) => found,
-                        None => identity_property(target, name).unwrap_or_else(|| {
-                            native_inherited_property(&self.intrinsics, target, name)
-                        }),
+                        None => identity_property(target, name)
+                            .unwrap_or_else(|| self.inherited_native_property(target, name)),
                     }
                 }
             },
@@ -295,9 +300,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // No fallback for `name` or `length`: both are stored on the closure, and
                     // answering them from the proto as well would resurrect one a program had
                     // just deleted -- which is precisely the observation `configurable: true`
-                    // promises it can make.
+                    // promises it can make. `Function.prototype` is only the implicit
+                    // [[Prototype]] of a fresh closure. Once a program sets an explicit
+                    // [[Prototype]] (including `null`), a miss must stop there instead of
+                    // leaking the intrinsic function methods back into the lookup.
                     .unwrap_or_else(|| {
-                        function_property(&self.intrinsics, name, value_realm(target))
+                        if closure.properties.borrow().prototype().is_some() {
+                            Value::Undefined
+                        } else {
+                            function_property(&self.intrinsics, name, value_realm(target))
+                        }
                     })
             }
             // A bound function reports the arity still to be supplied and the name of what it
@@ -314,10 +326,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .get(name)
                 .or_else(|| identity_property(target, name))
                 .unwrap_or_else(|| {
-                    if name == "prototype" {
-                        return self.property(&prototype_of(&bound.target), name);
+                    let parent = prototype_of(target);
+                    if matches!(parent, Value::Null) {
+                        Value::Undefined
+                    } else {
+                        self.property(&parent, name)
                     }
-                    function_property(&self.intrinsics, name, value_realm(target))
                 }),
             // A wrapped function answers from its own store first -- which is where the `name`
             // and `length` copied off the target live -- and from `Function.prototype`
@@ -359,6 +373,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Function(closure) if name == "prototype" && has_prototype_property(closure) => {
                 prototype_object(closure)
             }
+            // Arrows and async functions do not start with the constructor-only intrinsic slot,
+            // but a program may add an ordinary own `prototype` property to them.
+            Value::Function(closure) if name == "prototype" => closure
+                .properties
+                .borrow()
+                .get(name)
+                .unwrap_or(Value::Undefined),
             // `length` is not an ordinary property of an array: it is derived, and writing it
             // truncates. Reading it is all the corpus needs so far.
             Value::Array(items) if name == "length" => Value::Number(items.length() as f64),
@@ -373,9 +394,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // receiver is supplied by `CallMethod`, not captured here.
             // Strings expose `length` and the iterator. `length` is UTF-16 code units, which is
             // what JavaScript counts, and is not the same as either bytes or characters.
-            Value::String(text) if name == "length" => {
-                Value::Number(text.encode_utf16().count() as f64)
-            }
+            Value::String(text) if name == "length" => Value::Number(text.unit_len() as f64),
             Value::String(_) => match table_step(
                 &self.intrinsics,
                 PrototypeTable::String,

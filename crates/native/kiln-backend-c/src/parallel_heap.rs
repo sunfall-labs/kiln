@@ -689,6 +689,7 @@ pub fn emit_heap_clone(
                             numeric("kiln_c99_val_unary_fast(5, kiln_c99_val_from_double(a))")
                         }
                         UnaryOp::TypeOf => unreachable!("the verdict refuses typeof"),
+                        UnaryOp::ToString => unreachable!("the verdict refuses abstract ToString"),
                     };
                     writeln!(output, "{line}").unwrap();
                 }

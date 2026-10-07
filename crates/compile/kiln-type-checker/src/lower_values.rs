@@ -206,6 +206,33 @@ impl<'a, 's> Lower<'a, 's> {
                 k::Literal::BigInt(digits) => b::ExprKind::BigInt(self.atom(digits)),
             },
             E::This => b::ExprKind::This,
+            E::InlineLiteralEval {
+                callee, argument, ..
+            } => {
+                // This is a frontend optimization of the source spelling `eval("...")`. The
+                // checker should see the original call, not type-check the string contents as
+                // code or treat the optimization as an adapter gap.
+                let callee = self.expr(callee);
+                let argument = self.expr(argument);
+                let args = self.file.list(&[argument]);
+                let call = self.file.add_call(b::Call {
+                    callee,
+                    args,
+                    type_args: b::IdList::EMPTY,
+                    close_pos: span.end.saturating_sub(1),
+                    chain: b::Chain::No,
+                    template: b::ExprId::NONE,
+                });
+                b::ExprKind::Call(call)
+            }
+            E::GlobalObject => {
+                self.error(span, "compiler-generated global object expression");
+                b::ExprKind::Missing
+            }
+            E::ProcessObject => {
+                self.error(span, "compiler-generated process capability expression");
+                b::ExprKind::Missing
+            }
             E::SuperCall { arguments } => {
                 let args = self.args(arguments, span);
                 let callee = self

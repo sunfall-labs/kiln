@@ -563,6 +563,93 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         }
     }
 
+    /* String padding has two observable short circuits: ToLength(targetLength) happens first,
+     * and the filler is not converted at all when the receiver already meets that length. Keep
+     * this ahead of the shared argument preparation below so an unused filler cannot run user
+     * code (or throw), and so an object target uses the language's ToNumber path. */
+    if (code == KILN_C99_METHOD_PAD_START || code == KILN_C99_METHOD_PAD_END) {
+        double target = 0.0;
+        size_t wanted;
+        size_t count = receiver_string->unit_len;
+        static const uint16_t space[] = {0x20};
+        const uint16_t *filler = space;
+        size_t filler_count = 1;
+        uint16_t *filler_units = NULL;
+        int status = KILN_C99_OK;
+
+        if (argc > 0) {
+            status = kiln_c99_to_number_checked(host, args[0], &target, depth, thrown);
+            kiln_c99_gc_keep_alive(&receiver);
+            if (status != KILN_C99_OK) return status;
+        }
+        if (isnan(target) || target <= 0.0) {
+            target = 0.0;
+        } else if (!isfinite(target) || target >= 9007199254740991.0) {
+            /* ToLength clamps to 2^53 - 1. The implementation's maximum string length is a
+             * later check: filler conversion (and the empty-filler fast return) precedes it. */
+            target = 9007199254740991.0;
+        } else {
+            target = trunc(target);
+        }
+        if (target <= (double)count) {
+            *result = receiver;
+            kiln_c99_gc_keep_alive(&receiver);
+            return KILN_C99_OK;
+        }
+        if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
+            kiln_value filler_value;
+            status = kiln_c99_to_text_argument(host, args[1], &filler_value, depth, thrown);
+            kiln_c99_gc_keep_alive(&receiver);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_to_units(filler_value, &filler_units, &filler_count);
+            kiln_c99_gc_keep_alive(&filler_value);
+            if (status != KILN_C99_OK) {
+                free(filler_units);
+                return status;
+            }
+            filler = filler_units;
+        }
+        if (filler_count == 0) {
+            free(filler_units);
+            *result = receiver;
+            kiln_c99_gc_keep_alive(&receiver);
+            return KILN_C99_OK;
+        }
+        /* The string header stores a uint32_t unit length. Apply that implementation limit only
+         * after ToLength, receiver short-circuiting, and filler ToString have all run. */
+        if (target > (double)UINT32_MAX || target >= (double)SIZE_MAX ||
+            target > (double)(SIZE_MAX / sizeof(uint16_t))) {
+            free(filler_units);
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "Invalid string length");
+        }
+        wanted = (size_t)target;
+        {
+            uint16_t *padded = (uint16_t *)malloc(wanted * sizeof *padded);
+            size_t fill = wanted - count;
+            size_t index;
+            if (padded == NULL) {
+                free(filler_units);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (index = 0; index < fill; ++index) {
+                padded[code == KILN_C99_METHOD_PAD_START ? index : count + index] =
+                    filler[index % filler_count];
+            }
+            for (index = 0; index < count; ++index) {
+                padded[code == KILN_C99_METHOD_PAD_START ? fill + index : index] =
+                    kiln_string_unit_at(receiver_string, index);
+            }
+            *result = kiln_c99_from_units(padded, wanted);
+            free(padded);
+            free(filler_units);
+            kiln_c99_gc_keep_alive(&receiver);
+            if (result->tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+            kiln_c99_gc_keep_alive(result);
+        }
+        return KILN_C99_OK;
+    }
+
     if (code == KILN_C99_METHOD_STRING_CODE_POINT_AT) {
         double position = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
         if (position != position) position = 0.0;
@@ -891,7 +978,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
     }
     /* Most of these take a string argument, and converting it once here keeps each case short.
      * A case that does not want one simply ignores it. */
-    if (argc > 0) {
+    if (argc > 0 && code != KILN_C99_METHOD_STRING_CONCAT) {
         kiln_value shown = kiln_c99_text(args[0]);
         if (shown.tag == KILN_VALUE_STRING) {
             status = kiln_c99_to_units(shown, &needle, &needle_count);
@@ -1257,48 +1344,6 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         }
         break;
     }
-    case KILN_C99_METHOD_PAD_START:
-    case KILN_C99_METHOD_PAD_END: {
-        double target = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
-        static const uint16_t space[] = {0x20};
-        const uint16_t *filler = space;
-        size_t filler_count = 1;
-        if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
-            kiln_value shown = kiln_c99_text(args[1]);
-            free(needle);
-            needle = NULL;
-            needle_count = 0;
-            if (shown.tag != KILN_VALUE_STRING ||
-                kiln_c99_to_units(shown, &needle, &needle_count) != KILN_C99_OK) {
-                status = kiln_c99_refuse("string padding was given a filler with no text form");
-                break;
-            }
-            filler = needle;
-            filler_count = needle_count;
-        }
-        if (!(target > (double)count) || filler_count == 0) {
-            *result = kiln_c99_from_units(units, count);
-        } else {
-            size_t wanted = (size_t)target;
-            uint16_t *padded = (uint16_t *)malloc(wanted * sizeof *padded);
-            size_t fill = wanted - count;
-            size_t index;
-            if (padded == NULL) {
-                status = KILN_C99_OUT_OF_MEMORY;
-                break;
-            }
-            for (index = 0; index < fill; ++index) {
-                padded[code == KILN_C99_METHOD_PAD_START ? index : count + index] =
-                    filler[index % filler_count];
-            }
-            for (index = 0; index < count; ++index) {
-                padded[code == KILN_C99_METHOD_PAD_START ? fill + index : index] = units[index];
-            }
-            *result = kiln_c99_from_units(padded, wanted);
-            free(padded);
-        }
-        break;
-    }
     case KILN_C99_METHOD_TO_UPPER_CASE:
     case KILN_C99_METHOD_TO_LOWER_CASE: {
         size_t index;
@@ -1375,7 +1420,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
             int64_t ranges[2];
             ranges[0] = (int64_t)at;
             ranges[1] = (int64_t)at + (int64_t)needle_count;
-            if (kiln_c99_text_append_string(&built, head) != KILN_C99_OK ||
+            if (kiln_c99_text_append_js_string(&built, head) != KILN_C99_OK ||
                 kiln_c99_expand_replacement(&built, replacement, replacement_count, units, count,
                                             ranges, 1, NULL) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
@@ -1394,7 +1439,7 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                     break;
                 }
                 carried = kiln_c99_from_units(units + from, 1);
-                if (kiln_c99_text_append_string(&built, carried) != KILN_C99_OK) {
+                if (kiln_c99_text_append_js_string(&built, carried) != KILN_C99_OK) {
                     status = KILN_C99_OUT_OF_MEMORY;
                     break;
                 }
@@ -1403,32 +1448,58 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         }
         if (status == KILN_C99_OK) {
             kiln_value rest = kiln_c99_from_units(units + from, count - from);
-            if (kiln_c99_text_append_string(&built, rest) != KILN_C99_OK) {
+            if (kiln_c99_text_append_js_string(&built, rest) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else {
-                *result = kiln_c99_text_value(&built);
+                *result = kiln_c99_text_preserving_surrogates_value(&built);
             }
         }
         free(replacement);
         break;
     }
     case KILN_C99_METHOD_STRING_CONCAT: {
-        kiln_text built = {NULL, 0, 0};
+        /* `units` is already the receiver's exact UTF-16 representation. Transfer its owned
+         * buffer into the builder rather than converting/allocating the receiver a second time. */
+        uint16_t *joined = units;
+        size_t joined_count = count;
+        size_t joined_capacity = count;
         size_t index;
-        if (kiln_c99_text_append_string(&built, receiver) != KILN_C99_OK) {
-            status = KILN_C99_OUT_OF_MEMORY;
-        }
+        uint16_t *part = NULL;
+        size_t part_count = 0;
+        units = NULL;
+        kiln_c99_gc_keep_alive(&receiver);
         for (index = 0; index < argc && status == KILN_C99_OK; ++index) {
-            kiln_value shown = kiln_c99_text(args[index]);
-            if (shown.tag != KILN_VALUE_STRING ||
-                kiln_c99_text_append_string(&built, shown) != KILN_C99_OK) {
-                status = kiln_c99_refuse("String.prototype.concat was given a value with no "
-                                         "text form");
+            kiln_value argument = args[index];
+            kiln_value shown;
+            status = kiln_c99_to_text_argument(host, argument, &shown, depth, thrown);
+            kiln_c99_gc_keep_alive(&argument);
+            kiln_c99_gc_keep_alive(&receiver);
+            if (status != KILN_C99_OK) break;
+            status = kiln_c99_to_units(shown, &part, &part_count);
+            kiln_c99_gc_keep_alive(&shown);
+            if (status != KILN_C99_OK) break;
+            if (part_count > SIZE_MAX - joined_count) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                free(part);
+                part = NULL;
+                break;
             }
+            status = kiln_c99_reserve((void **)&joined, &joined_capacity,
+                                      joined_count + part_count, sizeof *joined);
+            if (status == KILN_C99_OK && part_count != 0) {
+                memcpy(joined + joined_count, part, part_count * sizeof *part);
+                joined_count += part_count;
+            }
+            free(part);
+            part = NULL;
         }
         if (status == KILN_C99_OK) {
-            *result = kiln_c99_text_value(&built);
+            *result = kiln_c99_from_units(joined, joined_count);
+            if (result->tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
         }
+        kiln_c99_gc_keep_alive(&receiver);
+        free(part);
+        free(joined);
         break;
     }
     default:
@@ -1445,6 +1516,7 @@ static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_
                                  size_t count, const int64_t *ranges, size_t groups, int depth,
                                  kiln_value *thrown, kiln_regexp *regexp) {
     kiln_value built;
+    kiln_value input;
     size_t group;
     int status = kiln_c99_new_array(&built);
     for (group = 0; group < groups && status == KILN_C99_OK; ++group) {
@@ -1459,11 +1531,13 @@ static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_
                               thrown);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(host, built, "input", 5, kiln_c99_from_units(units, count), depth,
-                              thrown);
+        input = kiln_c99_from_units(units, count);
+        status = kiln_c99_put(host, built, "input", 5, input, depth, thrown);
     }
     if (status == KILN_C99_OK && regexp != NULL) {
-        status = kiln_c99_match_groups(regexp, kiln_c99_array_of(built), groups);
+        kiln_c99_heap_store_value(kiln_c99_array_of(built),
+                                  &kiln_c99_array_of(built)->match_input, input);
+        status = kiln_c99_match_groups(regexp, kiln_c99_array_of(built));
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_put(host, built, "groups", 6, kiln_c99_array_of(built)->match_groups, depth, thrown);
@@ -1487,8 +1561,7 @@ static int kiln_c99_string_pattern_split(kiln_host *host, kiln_value *result, ki
                                          const kiln_value *args, size_t argc, int depth,
                                          kiln_value *thrown) {
     int status = kiln_c99_string_pattern(host, result, KILN_C99_METHOD_SPLIT, receiver, args,
-                                         argc > 1 ? 1 : argc, depth, thrown);
-    if (status == KILN_C99_OK) kiln_c99_split_limit(*result, args, argc);
+                                         argc, depth, thrown);
     return status;
 }
 
@@ -1504,6 +1577,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     size_t replacement_count = 0;
     size_t from = 0;
     size_t at = 0;
+    uint32_t split_limit = UINT32_MAX;
+    int split_stopped = 0;
     int64_t stack_ranges[64];
     int64_t *ranges = stack_ranges;
     size_t ranges_capacity = sizeof(stack_ranges) / sizeof(stack_ranges[0]);
@@ -1525,6 +1600,44 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         {
             kiln_value made;
             kiln_value forwarded[2];
+            if (code == KILN_C99_METHOD_REPLACE || code == KILN_C99_METHOD_REPLACE_ALL) {
+                /* String.prototype.replace treats a string search value literally. This path
+                 * reaches the regexp walker only so callable replacements can execute in the
+                 * interpreter; quote regexp syntax before using that walker. */
+                uint16_t *needle = NULL;
+                size_t needle_count = 0;
+                uint16_t *quoted = NULL;
+                size_t quoted_count = 0;
+                size_t index;
+                kiln_c99_gc_keep_alive(&source);
+                status = kiln_c99_to_units(source, &needle, &needle_count);
+                if (status != KILN_C99_OK || needle_count > SIZE_MAX / (2 * sizeof(uint16_t))) {
+                    free(needle);
+                    return status == KILN_C99_OK ? KILN_C99_OUT_OF_MEMORY : status;
+                }
+                quoted = (uint16_t *)malloc((needle_count * 2 + 1) * sizeof(uint16_t));
+                if (quoted == NULL) {
+                    free(needle);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                for (index = 0; index < needle_count; ++index) {
+                    uint16_t unit = needle[index];
+                    if (unit == '\\' || unit == '^' || unit == '$' || unit == '.' ||
+                        unit == '*' || unit == '+' || unit == '?' || unit == '(' ||
+                        unit == ')' || unit == '[' || unit == ']' || unit == '{' ||
+                        unit == '}' || unit == '|') {
+                        quoted[quoted_count++] = '\\';
+                    }
+                    quoted[quoted_count++] = unit;
+                }
+                free(needle);
+                source = kiln_c99_from_units(quoted, quoted_count);
+                free(quoted);
+                if (source.tag != KILN_VALUE_STRING) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                kiln_c99_gc_keep_alive(&source);
+            }
             status = kiln_c99_new_regexp(&made, (const kiln_string *)source.ptr,
                                          &kiln_c99_empty_string, thrown);
             if (status != KILN_C99_OK) {
@@ -1537,7 +1650,17 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         }
     }
     every = regexp->global || code == KILN_C99_METHOD_REPLACE_ALL ||
-            code == KILN_C99_METHOD_STRING_MATCH_ALL || code == KILN_C99_METHOD_SPLIT;
+            code == KILN_C99_METHOD_SPLIT;
+    if (code == KILN_C99_METHOD_SPLIT && argc > 1 &&
+        args[1].tag != KILN_VALUE_UNDEFINED) {
+        double number;
+        status = kiln_c99_to_number_checked(host, args[1], &number, depth, thrown);
+        if (status != KILN_C99_OK) {
+            free(units);
+            return status;
+        }
+        split_limit = kiln_c99_to_uint32(number);
+    }
     if (code == KILN_C99_METHOD_STRING_MATCH || code == KILN_C99_METHOD_STRING_MATCH_ALL ||
         code == KILN_C99_METHOD_SPLIT) {
         status = kiln_c99_new_array(&collected);
@@ -1546,13 +1669,19 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             return status;
         }
     }
+    if (code == KILN_C99_METHOD_SPLIT && split_limit == 0) {
+        if (ranges != stack_ranges) free(ranges);
+        free(units);
+        *result = collected;
+        return KILN_C99_OK;
+    }
     if (code == KILN_C99_METHOD_SPLIT && count == 0) {
         /* An empty subject is the one case with no trailing piece: a separator that matches it
          * splits it into nothing, and one that does not leaves it whole. */
         size_t groups = 0;
         int matched = 0;
-        status = kiln_c99_regexp_find(regexp, units, count, 0, ranges,
-                                      ranges_capacity, &groups, &matched);
+        status = kiln_c99_regexp_find(regexp, receiver, units, count, 0, ranges,
+                                      ranges_capacity, &groups, &matched, 1);
         if (status == KILN_C99_OK && !matched) {
             status = kiln_c99_array_push(collected, kiln_c99_from_units(units, 0));
         }
@@ -1562,6 +1691,12 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         free(units);
         *result = collected;
         return status;
+    }
+    if (code == KILN_C99_METHOD_STRING_MATCH_ALL && (regexp->global || regexp->sticky) &&
+        regexp->last_index > 0.0) {
+        /* RegExp.prototype[Symbol.matchAll] clones the matcher at its current ToLength(lastIndex)
+         * cursor. The clone advances while collecting results; the original stays untouched. */
+        at = regexp->last_index > (double)count ? count + 1 : (size_t)regexp->last_index;
     }
     if ((code == KILN_C99_METHOD_REPLACE || code == KILN_C99_METHOD_REPLACE_ALL) &&
         !kiln_c99_is_callable(with)) {
@@ -1575,8 +1710,14 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     for (;;) {
         size_t groups = 0;
         int matched = 0;
-        status = kiln_c99_regexp_find(regexp, units, count, at, ranges,
-                                      ranges_capacity, &groups, &matched);
+        if (code == KILN_C99_METHOD_SPLIT &&
+            kiln_c99_array_of(collected)->count >= (size_t)split_limit) {
+            split_stopped = 1;
+            break;
+        }
+        status = kiln_c99_regexp_find(regexp, receiver, units, count, at, ranges,
+                                      ranges_capacity, &groups, &matched,
+                                      code != KILN_C99_METHOD_STRING_MATCH_ALL);
         if (status != KILN_C99_OK || !matched) {
             break;
         }
@@ -1591,8 +1732,9 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             }
             ranges = new_ranges;
             ranges_capacity = groups * 2;
-            status = kiln_c99_regexp_find(regexp, units, count, at, ranges,
-                                          ranges_capacity, &groups, &matched);
+            status = kiln_c99_regexp_find(regexp, receiver, units, count, at, ranges,
+                                          ranges_capacity, &groups, &matched,
+                                          code != KILN_C99_METHOD_STRING_MATCH_ALL);
             if (status != KILN_C99_OK || !matched) {
                 break;
             }
@@ -1627,6 +1769,9 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             status = kiln_c99_match_result(host, &entry, units, count, ranges, groups, depth,
                                            thrown, regexp);
             if (status == KILN_C99_OK) {
+                status = kiln_c99_regexp_defer_legacy(entry, ranges, groups);
+            }
+            if (status == KILN_C99_OK) {
                 status = kiln_c99_array_push(collected, entry);
             }
         } else if (code == KILN_C99_METHOD_SPLIT) {
@@ -1646,20 +1791,29 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             status = kiln_c99_array_push(collected,
                                          kiln_c99_from_units(units + from,
                                                              (size_t)ranges[0] - from));
+            if (status == KILN_C99_OK &&
+                kiln_c99_array_of(collected)->count >= (size_t)split_limit) {
+                split_stopped = 1;
+            }
             /* A captured group becomes an element of its own, which is what makes
              * `"a1b".split(/(\d)/)` three parts rather than two. */
-            for (group = 1; group < groups && status == KILN_C99_OK; ++group) {
+            for (group = 1; group < groups && status == KILN_C99_OK && !split_stopped; ++group) {
                 status = kiln_c99_array_push(
                     collected, ranges[group * 2] < 0
                                    ? kiln_c99_undefined()
                                    : kiln_c99_from_units(units + (size_t)ranges[group * 2],
                                                          (size_t)(ranges[group * 2 + 1] -
                                                                   ranges[group * 2])));
+                if (status == KILN_C99_OK &&
+                    kiln_c99_array_of(collected)->count >= (size_t)split_limit) {
+                    split_stopped = 1;
+                }
             }
+            if (split_stopped) break;
             from = (size_t)ranges[1];
         } else {
             kiln_value head = kiln_c99_from_units(units + from, (size_t)ranges[0] - from);
-            if (kiln_c99_text_append_string(&built, head) != KILN_C99_OK) {
+            if (kiln_c99_text_append_js_string(&built, head) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else if (kiln_c99_is_callable(with)) {
                 /* The callback is handed the match, then each group, then the index and the whole
@@ -1682,7 +1836,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
                 if (status == KILN_C99_OK) {
                     kiln_value text = kiln_c99_text(produced);
                     status = text.tag == KILN_VALUE_STRING &&
-                                     kiln_c99_text_append_string(&built, text) ==
+                                     kiln_c99_text_append_js_string(&built, text) ==
                                          KILN_C99_OK
                                  ? KILN_C99_OK
                                  : KILN_C99_OUT_OF_MEMORY;
@@ -1701,7 +1855,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             break;
         }
     }
-    if (regexp->global || regexp->sticky) {
+    if ((regexp->global || regexp->sticky) && code != KILN_C99_METHOD_STRING_MATCH_ALL &&
+        code != KILN_C99_METHOD_SPLIT) {
         /* Every one of these leaves the cursor where it found it, which `exec` relies on and
          * `match` deliberately resets. */
         regexp->last_index = 0.0;
@@ -1717,19 +1872,25 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             *result = kiln_c99_array_of(collected)->count == 0 ? kiln_c99_null() : collected;
             break;
         case KILN_C99_METHOD_STRING_MATCH_ALL:
-            status = kiln_c99_new_iterator(result, collected);
+            status = kiln_c99_new_iterator(result, collected, 2);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, *result, "@@regexpMatchAll", 16,
+                                      kiln_c99_boolean(1), 0, NULL);
+            }
             break;
         case KILN_C99_METHOD_SPLIT:
-            status = kiln_c99_array_push(collected,
-                                         kiln_c99_from_units(units + from, count - from));
+            if (!split_stopped && kiln_c99_array_of(collected)->count < (size_t)split_limit) {
+                status = kiln_c99_array_push(collected,
+                                             kiln_c99_from_units(units + from, count - from));
+            }
             *result = collected;
             break;
         default: {
             kiln_value rest = kiln_c99_from_units(units + from, count - from);
-            if (kiln_c99_text_append_string(&built, rest) != KILN_C99_OK) {
+            if (kiln_c99_text_append_js_string(&built, rest) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else {
-                *result = kiln_c99_text_value(&built);
+                *result = kiln_c99_text_preserving_surrogates_value(&built);
             }
             break;
         }

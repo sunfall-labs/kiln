@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// The parallel/sequential differential harness (.scratch/parallel-builtins issue 02), tier 1
+// The parallel/sequential differential harness (docs/issues/parallel-builtins issue 02), tier 1
 // (issue 05): callbacks reading captured bindings the program writes exactly once. The call
 // site reads each once on the realm thread, checks it is a number, and hands it to every chunk.
 // `x => x * rate` with `const rate = 1.2` is issue 05's acceptance case and runs in parallel;

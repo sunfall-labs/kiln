@@ -8,6 +8,13 @@
 
 use std::sync::OnceLock;
 
+mod launch;
+
+pub use launch::{
+    ChildStream, inherit_built_executable, output_built_executable, spawn_built_executable,
+    stream_built_executable,
+};
+
 /// Version of the generated native runtime source and its C ABI.
 pub const NATIVE_RUNTIME_VERSION: u32 = 14;
 
@@ -190,7 +197,7 @@ pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
 pub const EMBEDDING_MODULE_API_VERSION: u32 = 2;
 
 /// Host callback ABI version declared by [`embedding_header`].
-pub const EMBEDDING_HOST_ABI_VERSION: u32 = 4;
+pub const EMBEDDING_HOST_ABI_VERSION: u32 = 8;
 
 /// The operation implemented by [`runtime_source`].
 pub const WRITE_STDOUT_OPERATION: u16 = 1;
@@ -313,6 +320,52 @@ static inline int kiln_string_equals_ascii(const kiln_string *string, const char
     for (index = 0; index < length; ++index)
         if (kiln_string_unit_at(string, index) != (uint8_t)ascii[index]) return 0;
     return 1;
+}
+/* Compare a JavaScript UTF-16 string with an already UTF-8 filesystem path without allocating.
+ * Valid surrogate pairs are encoded as their four-byte scalar; unpaired surrogates cannot equal
+ * a filesystem path represented by UTF-8 bytes. */
+static inline int kiln_string_equals_utf8(const kiln_string *string, const char *utf8,
+                                           size_t length) {
+    size_t unit = 0;
+    size_t byte = 0;
+    if (string == NULL || (utf8 == NULL && length != 0)) return 0;
+    while (unit < string->unit_len) {
+        uint32_t codepoint = kiln_string_unit_at(string, unit++);
+        uint8_t encoded[4];
+        size_t width;
+        if (codepoint >= UINT32_C(0xD800) && codepoint <= UINT32_C(0xDBFF)) {
+            if (unit >= string->unit_len) return 0;
+            uint32_t low = kiln_string_unit_at(string, unit++);
+            if (low < UINT32_C(0xDC00) || low > UINT32_C(0xDFFF)) return 0;
+            codepoint = UINT32_C(0x10000) + ((codepoint - UINT32_C(0xD800)) << 10) +
+                        (low - UINT32_C(0xDC00));
+        } else if (codepoint >= UINT32_C(0xDC00) && codepoint <= UINT32_C(0xDFFF)) {
+            return 0;
+        }
+        if (codepoint < UINT32_C(0x80)) {
+            encoded[0] = (uint8_t)codepoint;
+            width = 1;
+        } else if (codepoint < UINT32_C(0x800)) {
+            encoded[0] = (uint8_t)(UINT32_C(0xC0) | (codepoint >> 6));
+            encoded[1] = (uint8_t)(UINT32_C(0x80) | (codepoint & UINT32_C(0x3F)));
+            width = 2;
+        } else if (codepoint < UINT32_C(0x10000)) {
+            encoded[0] = (uint8_t)(UINT32_C(0xE0) | (codepoint >> 12));
+            encoded[1] = (uint8_t)(UINT32_C(0x80) | ((codepoint >> 6) & UINT32_C(0x3F)));
+            encoded[2] = (uint8_t)(UINT32_C(0x80) | (codepoint & UINT32_C(0x3F)));
+            width = 3;
+        } else {
+            encoded[0] = (uint8_t)(UINT32_C(0xF0) | (codepoint >> 18));
+            encoded[1] = (uint8_t)(UINT32_C(0x80) | ((codepoint >> 12) & UINT32_C(0x3F)));
+            encoded[2] = (uint8_t)(UINT32_C(0x80) | ((codepoint >> 6) & UINT32_C(0x3F)));
+            encoded[3] = (uint8_t)(UINT32_C(0x80) | (codepoint & UINT32_C(0x3F)));
+            width = 4;
+        }
+        if (width > length - byte) return 0;
+        for (size_t i = 0; i < width; ++i)
+            if ((uint8_t)utf8[byte++] != encoded[i]) return 0;
+    }
+    return byte == length;
 }
 static inline int kiln_string_starts_ascii(const kiln_string *string, const char *ascii,
                                            size_t length) {
@@ -515,8 +568,9 @@ const EMBEDDING_HEADER: &str = concat!(
 
 #define KILN_NATIVE_RUNTIME_VERSION 14
 #define KILN_C_ABI_VERSION 1
-#define KILN_HOST_ABI_VERSION 4
+#define KILN_HOST_ABI_VERSION 8
 #define KILN_MODULE_API_VERSION 2
+#define KILN_C99_HOST_MODULE_LOADER UINT16_C(0x7FF1)
 
 #define KILN_C99_OK 0
 #define KILN_C99_INVALID_ARGUMENT (-1)
@@ -559,9 +613,19 @@ enum kiln_value_tag {
  * propagated as KILN_C99_HOST_ERROR. */
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
                                  const kiln_value *arguments, kiln_value *result);
+/* Private module-context slots are part of kiln_host's layout because generated C executables
+ * and embedding hosts pass the same struct. Embedding hosts leave these callbacks null. */
+typedef uint64_t kiln_val;
+typedef struct kiln_c99_unit kiln_c99_unit;
+typedef kiln_val *(*kiln_host_unit_values_fn)(void *module_context,
+                                              const kiln_c99_unit *unit);
 typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
+    void *module_context;
+    void *module_owner;
+    kiln_host_unit_values_fn module_unit_values;
+    uint64_t module_instance_id;
 } kiln_host;
 
 /* An invocation-scoped owned result.  The v2 run function initializes *result to NULL before
@@ -1531,6 +1595,8 @@ mod tests {
         assert!(embedding_header().contains("uint32_t len;"));
         assert!(embedding_header().contains("typedef int (*kiln_host_call_fn)"));
         assert!(embedding_header().contains("typedef struct kiln_host"));
+        assert!(embedding_header().contains("kiln_host_unit_values_fn module_unit_values;"));
+        assert!(embedding_header().contains("uint64_t module_instance_id;"));
         assert!(embedding_header().contains("typedef struct kiln_result_v2 kiln_result_v2;"));
         assert!(embedding_header().contains("typedef struct kiln_module_api_v2"));
         assert!(
@@ -1667,7 +1733,11 @@ int main(void) {
 #include "kiln_module.h"
 
 int main(void) {
-    kiln_host host = {0, 0};
+#ifdef __cplusplus
+    kiln_host host = {};
+#else
+    kiln_host host = {0};
+#endif
     kiln_value result;
     result.tag = 0;
     result.flags = 0;

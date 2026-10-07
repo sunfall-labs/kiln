@@ -2,9 +2,9 @@ use super::*;
 
 /// Build an `Error` instance.
 ///
-/// `stack` is a header line and nothing more. A release build strips unwind tables and
-/// dead-strips symbols, so real frames are not obtainable, and `Error.stackTraceLimit = 0` in V8
-/// produces exactly this shape -- a truthful degenerate case rather than an invented trace.
+/// Frame metadata is retained in an internal slot and formatted lazily by errors.ts. The object
+/// builder therefore installs no own `stack` property, allowing the shared accessor to cache the
+/// formatted string on first read without exposing raw frame records to reflection.
 ///
 /// `cause` follows InstallErrorCause: the property exists when the options object *has* a
 /// `cause` key, including when its value is `undefined`. Testing presence rather than value is
@@ -26,9 +26,6 @@ pub(super) fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
         None | Some(Value::Undefined) => None,
         Some(value) => Some(value.to_display_string()),
     };
-    let message = given.clone().unwrap_or_default();
-
-    let name = kind.name();
     let mut data = ObjectData {
         error_brand: true,
         ..ObjectData::default()
@@ -37,17 +34,6 @@ pub(super) fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     // `{}` and `Object.keys(err)` is empty -- an error is meant to be *read*, not walked, and a
     // program that serialises one is asking for the fields it names rather than all of them.
     //
-    // `stack` is installed first, because that is the order the own keys come out in: the
-    // header is attached by the constructor before the message is, and a program that copies an
-    // error by walking `Object.getOwnPropertyNames` reproduces the order it saw.
-    data.set_non_enumerable(
-        "stack",
-        Value::String(if message.is_empty() {
-            name.to_owned().into()
-        } else {
-            format!("{name}: {message}").into()
-        }),
-    );
     if let Some(message) = given {
         data.set_non_enumerable("message", Value::String(message.into()));
     }
@@ -62,7 +48,7 @@ pub(super) fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     {
         data.set_non_enumerable("cause", cause.clone());
     }
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// The `space` argument of `JSON.stringify`, resolved to the literal indent for one level.
@@ -339,8 +325,7 @@ pub(super) fn json_stringify(
         }
         // A primitive wrapper is serialised as its primitive value, not as an empty object.
         Value::Object(object)
-            if object.borrow().primitive().is_some()
-                && object.borrow().get_own(RAW_JSON_MARK).is_none() =>
+            if object.borrow().primitive().is_some() && object.borrow().raw_json_text.is_none() =>
         {
             let inner = object.borrow().primitive().cloned();
             return match inner {
@@ -352,15 +337,8 @@ pub(super) fn json_stringify(
         }
         // Raw JSON has already been validated. Its units must be emitted verbatim, including
         // unpaired surrogates, because preserving the source text is the purpose of rawJSON.
-        Value::Object(object) if object.borrow().get_own(RAW_JSON_MARK).is_some() => {
-            let raw = object
-                .borrow()
-                .get_own(RAW_JSON_TEXT)
-                .and_then(|value| match value {
-                    Value::String(text) => Some(text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| StringUnits::from("null"));
+        Value::Object(object) if object.borrow().raw_json_text.is_some() => {
+            let raw = object.borrow().raw_json_text.clone().unwrap_or_default();
             Some(raw)
         }
         Value::Object(object) => {
@@ -444,7 +422,7 @@ pub(super) fn json_stringify(
                 data.set_units(&key, item);
             }
             return json_stringify(
-                &Value::Object(Rc::new(RefCell::new(data))),
+                &Value::Object(tracked_object(data)),
                 indent,
                 current,
                 seen,

@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "source_on": "6876c88a3aa8ca477b7248e2d8bb45ad4089c9d7",
+  "source_off": "04e1aae304f1c1a7d8f2f4c4c937ebe037a51283",
+  "control_difference": "Only compile_pattern cacheable=false; same Arc representation and all other source",
+  "timing_kind": "phase wall time including startup; not warmed workload throughput",
+  "warmups_per_binary": 1,
+  "checksum_matches_node": true,
+  "stdout_sha256": "29969be812f77d90121e5f1226eb1e57375c4a3757f97fd297aa99611c88dae7",
+  "pairs": [
+    {
+      "pair": 1,
+      "on_seconds": 0.05136632401263341,
+      "off_seconds": 0.872189728950616
+    },
+    {
+      "pair": 2,
+      "off_seconds": 0.8671818900038488,
+      "on_seconds": 0.051653603033628315
+    },
+    {
+      "pair": 3,
+      "on_seconds": 0.05180513300001621,
+      "off_seconds": 0.8765525560011156
+    },
+    {
+      "pair": 4,
+      "off_seconds": 0.8619892559945583,
+      "on_seconds": 0.051716003043111414
+    },
+    {
+      "pair": 5,
+      "on_seconds": 0.05208614096045494,
+      "off_seconds": 0.8633837440283969
+    }
+  ],
+  "median_on_seconds": 0.051716003043111414,
+  "median_off_seconds": 0.8671818900038488,
+  "off_over_on": 16.768153743067693,
+  "binary_sha256": {
+    "on": "2d91f8f8fa97b30152934e0de855fa0e31e2ab4af371ad3b1a08897ea697ee5e",
+    "off": "f59a27b403b023cfafc1b84ee1d0c58e9193efd39de64c37ba74a677a216b8d9"
+  }
+}

@@ -10,7 +10,7 @@
 
 use std::fmt::Write as _;
 
-use kiln_ir::{Constant, Instruction};
+use kiln_ir::{Constant, EvalAccess, EvalDeclaration, Instruction};
 
 use crate::{
     c_string, diagnostic_source, host_argument_inspection, host_op_code, instruction_diagnostic,
@@ -84,14 +84,25 @@ pub(crate) fn emit_tail_instruction(
             }
         }
         Instruction::CallComputed { argc } => {
-            // Not a `GetComputed` followed by a `Call`: that would discard the receiver, and
-            // `obj[name]()` has to run the method against `obj`. The same reason `CallMethod`
-            // is one instruction rather than two.
+            // The receiver, canonical key and Get result stay together under the arguments. This
+            // preserves both `this` and the language's Get-before-arguments evaluation order.
             let argc = usize::from(*argc);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value key = kiln_val_to_boundary(stack[sp - {argc} - 1]); kiln_value self_value = kiln_val_to_boundary(stack[sp - {argc} - 2]); kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_computed(host, self_value, key, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = kiln_val_from_boundary(call_result); }}",
-                argc + 2
+                "    {{ kiln_val call_result = KILN_VAL_UNDEFINED; int status; kiln_val method = stack[sp - {argc} - 1]; kiln_val self_value = stack[sp - {argc} - 3]; kiln_val key = stack[sp - {argc} - 2]; const kiln_val *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; const kiln_string *method_name = KILN_VAL_IS_STRING(key) ? (const kiln_string *)KILN_VAL_PTR(key) : NULL; if (method_name != NULL && KILN_VAL_IS_CLOSURE(method)) kiln_c99_js_frame_set_method_name(method_name); status = kiln_c99_call_val(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                argc + 3,
+            )
+            .unwrap();
+        }
+        Instruction::HasPrivate { name, brand_key } => {
+            let (Constant::String(_), Constant::String(_)) =
+                (&constants[*name as usize], &constants[*brand_key as usize])
+            else {
+                unreachable!("verification rejects a non-string private name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value receiver = kiln_val_to_boundary(stack[sp - 2]); kiln_value brand = kiln_val_to_boundary(stack[sp - 1]); kiln_string member_key = *{symbol}_constant_{name}; kiln_string brand_key = *{symbol}_constant_{brand_key}; int answer = 0; int status; member_key.flags |= KILN_STRING_PRIVATE_KEY; brand_key.flags |= KILN_STRING_PRIVATE_KEY; status = kiln_c99_private_has(receiver, brand, &member_key, &brand_key, &answer, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= 2; stack[sp++] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}"
             )
             .unwrap();
         }
@@ -230,7 +241,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ static const char kiln_missing_name_{index}[] = {}; static const char kiln_missing_{index}[] = {}; int found = 0; kiln_value val; int status = kiln_c99_global_binding(&val, kiln_missing_name_{index}, {}, &found); if (status != KILN_C99_OK) return status; if (found) {{ stack[sp++] = kiln_val_from_boundary(val); }} else {{ status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }} }}",
+                "    {{ static const char kiln_missing_name_{index}[] = {}; static const char kiln_missing_{index}[] = {}; int found = 0; kiln_value val; int status = kiln_c99_global_binding(host, &val, kiln_missing_name_{index}, {}, &found, depth, thrown); if (status != KILN_C99_OK) return status; if (found) {{ stack[sp++] = kiln_val_from_boundary(val); }} else {{ status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }} }}",
                 c_string(&text.to_scalar_string().unwrap_or_default()),
                 c_string(&format!("{} is not defined", text.to_scalar_string().unwrap_or_default())),
                 text.len(),
@@ -269,7 +280,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(&existing, {symbol}_constant_{name}, &found); if (status != KILN_C99_OK) return status; stack[sp++] = found ? kiln_val_from_boundary(existing) : KILN_VAL_UNDEFINED; }}",
+                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(host, &existing, {symbol}_constant_{name}, &found, depth, thrown); if (status != KILN_C99_OK) return status; stack[sp++] = found ? kiln_val_from_boundary(existing) : KILN_VAL_UNDEFINED; }}",
             )
             .unwrap();
         }
@@ -279,7 +290,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(&existing, {symbol}_constant_{name}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} }}",
+                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(host, &existing, {symbol}_constant_{name}, &found, depth, thrown); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} }}",
                 c_string(&format!("{} is not defined", text.to_scalar_string().unwrap_or_default()))
             )
             .unwrap();
@@ -293,7 +304,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(&existing, {symbol}_constant_{name}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} {{ kiln_value globals; status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode_key(host, globals, {symbol}_constant_{name}, NULL, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} }}",
+                "    {{ kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value existing; int found = 0; int status = kiln_c99_global_binding_key(host, &existing, {symbol}_constant_{name}, &found, depth, thrown); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} {{ kiln_value globals; status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode_key(host, globals, {symbol}_constant_{name}, NULL, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} }}",
                 c_string(&format!("{} is not defined", text.to_scalar_string().unwrap_or_default())),
             )
             .unwrap();
@@ -326,7 +337,7 @@ pub(crate) fn emit_tail_instruction(
             let argc = usize::from(*argc);
             writeln!(
                 output,
-                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; int status = kiln_c99_super_call_val(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
+                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; kiln_val parent = stack[sp - {argc} - 1]; int status = kiln_c99_super_call_val(host, &produced, parent, receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced, parent); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
                 argc + 1
             )
             .unwrap();
@@ -337,7 +348,7 @@ pub(crate) fn emit_tail_instruction(
         Instruction::SuperForward => {
             writeln!(
                 output,
-                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; int status = kiln_c99_super_call_val(host, &produced, stack[sp - 1], receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced); if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
+                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; kiln_val parent = stack[sp - 1]; int status = kiln_c99_super_call_val(host, &produced, parent, receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced, parent); if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
             )
             .unwrap();
         }
@@ -386,8 +397,8 @@ pub(crate) fn emit_tail_instruction(
         // `SetProperty` an object literal's methods lower to.
         // The enumerated sibling of `DefineMethod`: an object literal's members are listed,
         // a class's methods are not.
-        // The shape fast path below is a pure optimisation of the same operation the `else`
-        // branch already implements: `kiln_c99_define_named_fast` only ever reports success
+        // The shape fast path in `spread.c` is a pure optimisation of the same operation the
+        // `else` branch already implements: `kiln_c99_define_named_fast` only ever reports success
         // after actually storing `value`, and every miss (a dictionary-mode, frozen,
         // non-extensible or accessor-bearing target; a non-string key; a function value that
         // still needs `kiln_c99_set_function_name`; `__proto__`; a shape the transition tree
@@ -405,7 +416,7 @@ pub(crate) fn emit_tail_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site kiln_dnp_site = {{0}}; kiln_val kiln_dnp_value = stack[--sp]; kiln_val kiln_dnp_key = stack[--sp]; int kiln_dnp_status; kiln_object *kiln_dnp_obj = KILN_VAL_IS_OBJECT(stack[sp - 1]) ? (kiln_object *)KILN_VAL_PTR(stack[sp - 1]) : NULL; if (kiln_dnp_obj != NULL && kiln_dnp_obj->shape != NULL && kiln_dnp_obj->shape == kiln_c99_slot_key(&kiln_dnp_site.entries[0].shape) && kiln_dnp_site.entries[0].transition_to != NULL && kiln_dnp_site.entries[0].slot < kiln_dnp_obj->slot_capacity && KILN_VAL_IS_STRING(kiln_dnp_key) && !KILN_VAL_IS_CLOSURE(kiln_dnp_value) && !kiln_dnp_obj->frozen && !kiln_dnp_obj->not_extensible && kiln_dnp_obj->accessor_count == 0 && kiln_c99_gc_kind_of_ptr(kiln_dnp_obj) == KILN_GC_OBJECT) {{ kiln_c99_prototype_touched(kiln_dnp_obj); kiln_dnp_obj->slots[kiln_dnp_site.entries[0].slot] = kiln_dnp_value; kiln_dnp_obj->shape = (kiln_shape *)kiln_dnp_site.entries[0].transition_to; }} else if (kiln_c99_define_named_fast(stack[sp - 1], kiln_dnp_key, kiln_dnp_value, &kiln_dnp_status, &kiln_dnp_site)) {{ if (kiln_dnp_status != KILN_C99_OK) {{ {direct_refusal} }} }} else {{ kiln_value method = kiln_val_to_boundary(kiln_dnp_value); kiln_value key = kiln_val_to_boundary(kiln_dnp_key); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} {name_function}if (kiln_c99_define_computed(kiln_val_to_boundary(stack[sp - 1]), name, method) != KILN_C99_OK) {{ {direct_refusal} }} }} }}"
+                "    {{ static kiln_c99_site kiln_dnp_site = {{0}}; kiln_val kiln_dnp_value = stack[--sp]; kiln_val kiln_dnp_key = stack[--sp]; int kiln_dnp_status; if (kiln_c99_define_named_fast(stack[sp - 1], kiln_dnp_key, kiln_dnp_value, &kiln_dnp_status, &kiln_dnp_site)) {{ if (kiln_dnp_status != KILN_C99_OK) {{ {direct_refusal} }} }} else {{ kiln_value method = kiln_val_to_boundary(kiln_dnp_value); kiln_value key = kiln_val_to_boundary(kiln_dnp_key); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} {name_function}if (kiln_c99_define_computed(kiln_val_to_boundary(stack[sp - 1]), key, method) != KILN_C99_OK) {{ {direct_refusal} }} }} }}"
             )
             .unwrap();
         }
@@ -514,7 +525,7 @@ pub(crate) fn emit_tail_instruction(
         Instruction::SuperApply => {
             writeln!(
                 output,
-                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val parent = stack[--sp]; kiln_val call_result = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call_val(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {{ {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, call_result); if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
+                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_val parent = stack[--sp]; kiln_val call_result = KILN_VAL_UNDEFINED; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call_val(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {{ {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, call_result, parent); if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
             )
             .unwrap();
         }
@@ -609,7 +620,7 @@ pub(crate) fn emit_tail_instruction(
         Instruction::LoadTemplateObject(site) => {
             writeln!(
                 output,
-                "    if ({symbol}_template_sites[{site}] == 0) {{ int status = {symbol}_materialize_template_site({site}); if (status != KILN_C99_OK) return status; }} stack[sp++] = {symbol}_template_sites[{site}];"
+                "    if ({symbol}_template_sites[{site}] == 0) {{ int status = {symbol}_materialize_template_site(host, {site}); if (status != KILN_C99_OK) return status; }} stack[sp++] = {symbol}_template_sites[{site}];"
             )
             .unwrap();
         }
@@ -646,6 +657,118 @@ pub(crate) fn emit_tail_instruction(
                 importer = if *compact { "ku_importer".to_owned() } else { c_string(symbol) },
             )
             .unwrap();
+        }
+        Instruction::DirectEval(site) => {
+            let binding_count = site.bindings.len();
+            let array_count = binding_count.max(1);
+            output.push_str("    int status = KILN_C99_OK;\n");
+            writeln!(output, "    {{ const char *eval_names[{array_count}] = {{").unwrap();
+            for binding in &site.bindings {
+                writeln!(output, "        {},", c_string(&binding.name)).unwrap();
+            }
+            if binding_count == 0 {
+                output.push_str("        NULL,\n");
+            }
+            writeln!(
+                output,
+                "    }}; size_t eval_name_lengths[{array_count}] = {{"
+            )
+            .unwrap();
+            for binding in &site.bindings {
+                writeln!(output, "        (size_t){},", binding.name.len()).unwrap();
+            }
+            if binding_count == 0 {
+                output.push_str("        0,\n");
+            }
+            writeln!(
+                output,
+                "    }}; kiln_value eval_binding_values[{array_count}] = {{"
+            )
+            .unwrap();
+            for binding in &site.bindings {
+                let value = match binding.access {
+                    EvalAccess::Cell(slot) => format!("locals[{slot}]"),
+                    EvalAccess::Upvalue(index) => format!("upvalues[{index}]"),
+                };
+                writeln!(output, "        kiln_val_to_boundary({value}),").unwrap();
+            }
+            if binding_count == 0 {
+                output.push_str("        kiln_c99_undefined(),\n");
+            }
+            writeln!(
+                output,
+                "    }}; const unsigned char eval_binding_readonly[{array_count}] = {{"
+            )
+            .unwrap();
+            for binding in &site.bindings {
+                writeln!(
+                    output,
+                    "        {},",
+                    match binding.declaration {
+                        EvalDeclaration::Const => 1,
+                        EvalDeclaration::FunctionName => 2,
+                        EvalDeclaration::Var | EvalDeclaration::Let => 0,
+                    }
+                )
+                .unwrap();
+            }
+            if binding_count == 0 {
+                output.push_str("        0,\n");
+            }
+            output.push_str("    }; kiln_value eval_source = kiln_c99_undefined();\n");
+
+            let fixed_argc = site.argc.map(usize::from);
+            writeln!(
+                output,
+                "    size_t eval_base = sp - (size_t){};",
+                fixed_argc.map_or(2, |argc| argc + 1),
+            )
+            .unwrap();
+            match fixed_argc {
+                Some(argc) => {
+                    if argc > 0 {
+                        output.push_str(
+                            "    eval_source = kiln_val_to_boundary(stack[eval_base + 1]);\n",
+                        );
+                    }
+                    if argc > 1 {
+                        writeln!(output, "    kiln_value eval_args[{argc}] = {{").unwrap();
+                        for index in 0..argc {
+                            writeln!(
+                                output,
+                                "        kiln_val_to_boundary(stack[eval_base + {}]),",
+                                index + 1
+                            )
+                            .unwrap();
+                        }
+                        output.push_str("    };\n");
+                    }
+                    writeln!(output, "    size_t eval_argc = (size_t){argc};").unwrap();
+                    if argc > 1 {
+                        output.push_str("    const kiln_value *eval_call_args = eval_args;\n");
+                    } else if argc == 1 {
+                        output.push_str("    kiln_value eval_args[1] = { eval_source }; const kiln_value *eval_call_args = eval_args;\n");
+                    } else {
+                        output.push_str("    const kiln_value *eval_call_args = NULL;\n");
+                    }
+                }
+                None => {
+                    output.push_str("    kiln_value eval_spread = kiln_val_to_boundary(stack[eval_base + 1]); kiln_array *eval_array = eval_spread.tag == KILN_VALUE_ARRAY ? kiln_c99_array_of(eval_spread) : NULL; if (eval_array == NULL) return KILN_C99_INVALID_ARGUMENT; eval_source = eval_array->count ? kiln_val_to_boundary(eval_array->elements[0] == KILN_VAL_HOLE ? KILN_VAL_UNDEFINED : eval_array->elements[0]) : kiln_c99_undefined();\n");
+                    output.push_str("    size_t eval_argc = eval_array != NULL ? eval_array->count : 0; kiln_value eval_args[eval_argc ? eval_argc : 1]; if (eval_array != NULL) for (size_t eval_i = 0; eval_i < eval_argc; ++eval_i) eval_args[eval_i] = kiln_val_to_boundary(eval_array->elements[eval_i] == KILN_VAL_HOLE ? KILN_VAL_UNDEFINED : eval_array->elements[eval_i]); const kiln_value *eval_call_args = eval_array != NULL ? eval_args : NULL;\n");
+                }
+            }
+            output.push_str("    kiln_value eval_callee = kiln_val_to_boundary(stack[eval_base]); kiln_value eval_result = kiln_c99_undefined(); if (eval_callee.tag != KILN_VALUE_BUILTIN || eval_callee.bits != KILN_C99_BUILTIN_EVAL) { status = kiln_c99_call(host, &eval_result, eval_callee, kiln_c99_undefined(), eval_call_args, eval_argc, depth, thrown); } else if (eval_source.tag != KILN_VALUE_STRING) { eval_result = eval_source; } else { status = kiln_c99_dynamic_eval_expression(host, eval_source, eval_names, eval_name_lengths, eval_binding_values, eval_binding_readonly, (size_t)");
+            write!(output, "{binding_count}").unwrap();
+            write!(
+                output,
+                ", {}, &eval_result, depth, thrown); }} if (status == KILN_C99_THROWN) {{ ",
+                i32::from(site.strict)
+            )
+            .unwrap();
+            output.push_str(unwind);
+            output.push_str(" } if (status != KILN_C99_OK) return status; sp -= ");
+            write!(output, "{}", fixed_argc.map_or(2, |argc| argc + 1)).unwrap();
+            output.push_str("; stack[sp++] = kiln_val_from_boundary(eval_result); }\n");
         }
         other => unreachable!("the graph lowers {other:?} itself; only the tail comes here"),
     }

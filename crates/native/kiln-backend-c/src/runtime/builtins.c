@@ -12,7 +12,6 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_WEAK_REF: return "WeakRef";
     case KILN_C99_BUILTIN_FINALIZATION_REGISTRY: return "FinalizationRegistry";
     case KILN_C99_BUILTIN_SHADOW_REALM: return "ShadowRealm";
-    case KILN_C99_BUILTIN_FLOAT16_ARRAY: return "Float16Array";
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY: return "BigInt64Array";
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: return "BigUint64Array";
     case KILN_C99_BUILTIN_DISPOSABLE_STACK: return "DisposableStack";
@@ -98,7 +97,9 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_UINT32_ARRAY: return "Uint32Array";
     case KILN_C99_BUILTIN_FLOAT32_ARRAY: return "Float32Array";
     case KILN_C99_BUILTIN_FLOAT64_ARRAY: return "Float64Array";
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY: return "Float16Array";
     case KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE: return "TypedArray";
+    case KILN_C99_BUILTIN_TYPED_ARRAY: return "TypedArray";
     case KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE: return "Int8Array";
     case KILN_C99_BUILTIN_UINT8_ARRAY_PROTOTYPE: return "Uint8Array";
     case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY_PROTOTYPE: return "Uint8ClampedArray";
@@ -108,6 +109,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE: return "Uint32Array";
     case KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE: return "Float32Array";
     case KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE: return "Float64Array";
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE: return "Float16Array";
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE: return "BigInt64Array";
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE: return "BigUint64Array";
     case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE: return "SharedArrayBuffer";
@@ -139,6 +141,7 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
     case KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME:
     case KILN_C99_BUILTIN_TEMPORAL_DURATION:
     case KILN_C99_BUILTIN_ITERATOR:
+    case KILN_C99_BUILTIN_TYPED_ARRAY:
         *out = 0.0;
         return 1;
 
@@ -162,7 +165,6 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
     case KILN_C99_BUILTIN_EVAL_ERROR:
     case KILN_C99_BUILTIN_EVAL:
     case KILN_C99_BUILTIN_URL:
-    case KILN_C99_BUILTIN_BUFFER:
     case KILN_C99_BUILTIN_WEAK_REF:
     case KILN_C99_BUILTIN_FINALIZATION_REGISTRY:
     case KILN_C99_BUILTIN_TEMPORAL_INSTANT:
@@ -190,6 +192,8 @@ static int kiln_c99_builtin_length(uint64_t builtin, double *out) {
     case KILN_C99_BUILTIN_FLOAT64_ARRAY:
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY:
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY:
+    /* Node's Buffer constructor takes at least (size, fill, encoding) in its declared signature. */
+    case KILN_C99_BUILTIN_BUFFER:
     /* `SuppressedError(error, suppressed, message)`: three, as node answers; it sat in the
      * two-group beside `AggregateError` and no test read it. */
     case KILN_C99_BUILTIN_SUPPRESSED_ERROR:
@@ -257,10 +261,15 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                     size_t name_len = close - (at + 2);
                     piece = subject;
                     piece_count = 0;
-                    for (group = 1; group < groups; ++group) {
+                    for (group = 0; group < kiln_regexp_named_group_count(regexp->handle); ++group) {
                         unsigned char name[256];
-                        int32_t len = kiln_regexp_group_name(regexp->handle, group, name, sizeof name);
+                        int64_t named_from = -1, named_to = -1;
+                        size_t named_capture = 0;
+                        int32_t len = kiln_regexp_named_group_at(regexp->handle, group, name,
+                                                                 sizeof name, &named_from,
+                                                                 &named_to, &named_capture);
                         size_t k;
+                        (void)named_capture;
                         if (len <= 0) continue;
                         any_named = 1;
                         if ((size_t)len != name_len) continue;
@@ -268,9 +277,9 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                             if (pattern[at + 2 + k] != (uint16_t)name[k]) break;
                         }
                         if (k != name_len) continue;
-                        if (ranges[group * 2] >= 0) {
-                            piece = subject + (size_t)ranges[group * 2];
-                            piece_count = (size_t)(ranges[group * 2 + 1] - ranges[group * 2]);
+                        if (named_from >= 0 && named_to >= named_from) {
+                            piece = subject + (size_t)named_from;
+                            piece_count = (size_t)(named_to - named_from);
                         }
                         break;
                     }
@@ -310,26 +319,14 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
         }
         if (piece != NULL) {
             kiln_value text = kiln_c99_from_units(piece, piece_count);
-            uint8_t *encoded = NULL;
-            size_t encoded_len = 0;
             if (text.tag != KILN_VALUE_STRING ||
-                kiln_c99_string_to_utf8_lossy(text, &encoded, &encoded_len) != KILN_C99_OK ||
-                kiln_c99_text_append(out, (const char *)encoded, encoded_len) != KILN_C99_OK) {
-                free(encoded);
+                kiln_c99_text_append_js_string(out, text) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
-            }
-            free(encoded);
         } else {
             kiln_value text = kiln_c99_from_units(&literal, 1);
-            uint8_t *encoded = NULL;
-            size_t encoded_len = 0;
             if (text.tag != KILN_VALUE_STRING ||
-                kiln_c99_string_to_utf8_lossy(text, &encoded, &encoded_len) != KILN_C99_OK ||
-                kiln_c99_text_append(out, (const char *)encoded, encoded_len) != KILN_C99_OK) {
-                free(encoded);
+                kiln_c99_text_append_js_string(out, text) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
-            }
-            free(encoded);
         }
         at += taken;
     }
@@ -523,10 +520,6 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
  * are non-enumerable, which is what node does and what stops `Object.keys(globalThis)` from being
  * a list of the realm's furniture -- a program's own additions are enumerable, which is the
  * distinction that makes the question worth asking. */
-#define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
-#define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
-#define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
-#define KILN_C99_REALM_SLOT_CONSOLE UINT32_C(4)
 /* The prototype every `node:http` request object links to. A realm slot rather than a static,
  * because a realm owns it and the runtime archive already enumerates these slots as GC roots
  * (ADR 0041) -- and because one identity across translation units is what a prototype is for. */

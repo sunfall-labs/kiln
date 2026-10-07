@@ -311,8 +311,10 @@ impl WarmDaemonFixture {
             .client()?
             .request(&Request::Run {
                 path,
+                stream_output: false,
                 project_root,
                 node: false,
+                wall_clock: false,
                 // The benchmark measures the daemon's answer for a fixed program, which is the
                 // same program every iteration -- a budget could only turn a measurement into a
                 // refusal.
@@ -695,7 +697,7 @@ fn require_node_net_selection(
     summary: &TestSummary,
     expected_cache_hit: bool,
 ) -> Result<(), String> {
-    if summary.discovered == 39
+    if summary.discovered == 40
         && summary.selected == 5
         && summary.passed == 5
         && summary.failed == 0
@@ -706,7 +708,7 @@ fn require_node_net_selection(
         return Ok(());
     }
     Err(format!(
-        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={} discovery_cache_hit={}, expected 39/5/5/0/0/0/{expected_cache_hit}",
+        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={} discovery_cache_hit={}, expected 40/5/5/0/0/0/{expected_cache_hit}",
         summary.discovered,
         summary.selected,
         summary.passed,
@@ -976,7 +978,11 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
             // Assembled as bytecode, so there is no source text its spans could point into.
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number((value as f64).to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -1006,7 +1012,11 @@ fn native_entry_program() -> ModuleProgram {
             // Assembled as bytecode, so there is no source text its spans could point into.
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![
                 Instruction::LoadCell(0),

@@ -24,14 +24,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         mut receiver: Value,
         mut arguments: Vec<Value>,
         instruction: usize,
+        method_name: Option<StringUnits>,
     ) -> Result<Option<Value>, ExecutionError> {
         let mut forwarded_call = false;
-        // Resolve `.call` and `.apply` before entering the final callee. A compiled target
+        // Resolve bound calls, `.call` and `.apply` before entering the final callee. A compiled target
         // pushes a frame whose realm must stay current until that frame returns; entering it
         // through a temporary native-method scope would restore the old realm too early.
-        while let Value::Native(native @ (Native::FunctionCall | Native::FunctionApply), _) =
-            &method
-        {
+        loop {
+            if let Value::Bound(bound) = &method {
+                let mut forwarded = bound.arguments.clone();
+                forwarded.extend(arguments);
+                receiver = bound.this_value.clone();
+                method = bound.target.clone();
+                arguments = forwarded;
+                forwarded_call = true;
+                continue;
+            }
+            let Value::Native(native @ (Native::FunctionCall | Native::FunctionApply), _) = &method
+            else {
+                break;
+            };
             forwarded_call = true;
             let realm = value_realm(&method);
             let (this_value, forwarded) = self.entering(realm, |vm| {
@@ -44,7 +56,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if forwarded_call && matches!(&method, Value::Function(_)) {
             // `call_with_this` records the caller's realm in the saved frame and installs the
             // closure's realm. The run loop restores the saved realm on `Return`.
-            return self.invoke_dispatch(method, receiver, arguments, instruction);
+            return self.invoke_dispatch(method, receiver, arguments, instruction, method_name);
         }
         if forwarded_call {
             // Native built-ins, proxies and bound functions may call into JavaScript before
@@ -56,7 +68,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let realm = value_realm(&method);
         self.entering(realm, |vm| {
-            vm.invoke_dispatch(method, receiver, arguments, instruction)
+            vm.invoke_dispatch(method, receiver, arguments, instruction, method_name)
         })
     }
 
@@ -66,7 +78,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         receiver: Value,
         arguments: Vec<Value>,
         instruction: usize,
+        method_name: Option<StringUnits>,
     ) -> Result<Option<Value>, ExecutionError> {
+        if matches!(
+            &method,
+            Value::Native(
+                Native::AsyncFunctionPrototype
+                    | Native::GeneratorFunctionPrototype
+                    | Native::AsyncGeneratorFunctionPrototype,
+                _
+            )
+        ) {
+            return Err(ExecutionError::NotCallable {
+                instruction,
+                value: method.type_name(),
+            });
+        }
         match method {
             // The same rule as in `call_value`: a mutating array method given a proxy has to
             // write through it, not into a snapshot.
@@ -151,7 +178,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // completion is answered directly. `return` still awaits its argument --
                     // `AsyncGeneratorAwaitReturn` does -- which is observable as a tick and as a
                     // rejection when the argument is a rejected promise.
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     if returning {
                         let target = match sent {
                             Value::Promise(inner) => inner,
@@ -192,7 +219,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // A generator that never started, or that has finished, has no `try` to
                     // catch this: the specification marks it completed and rethrows at the
                     // caller, which is where the value came from.
-                    generator.borrow_mut().done = true;
+                    generator.borrow_mut().complete();
                     self.caught = Some(thrown);
                     return Err(ExecutionError::ThrownAcrossNative);
                 }
@@ -245,7 +272,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     } else {
                         // Never entered, so there is nothing to unwind.
-                        generator.borrow_mut().done = true;
+                        generator.borrow_mut().complete();
                         (sent, true)
                     }
                 } else {
@@ -307,7 +334,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for argument in arguments {
                     self.stack.push(argument);
                 }
-                self.call_with_this(closure, argc as u16, instruction, receiver, None)?;
+                self.call_with_this(
+                    closure,
+                    argc as u16,
+                    instruction,
+                    receiver,
+                    None,
+                    method_name,
+                )?;
                 Ok(None)
             }
             other => Err(ExecutionError::NotCallable {
@@ -355,6 +389,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let native = Native::CollectionGetOrInsert { weak, computed };
+        if weak {
+            validate_weak_map_receiver(receiver)?;
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            if !self.can_be_held_weakly(&key) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Invalid value used as weak map key".to_owned(),
+                });
+            }
+            let key_slot =
+                WeakCollectionKey::new(&key).ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: "Invalid value used as weak map key".to_owned(),
+                })?;
+            let supplied = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+            if computed && !is_callable(&supplied) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "getOrInsertComputed: callbackfn must be a function".to_owned(),
+                });
+            }
+            if let Some(value) = weak_map_value(receiver, &key) {
+                return Ok(value);
+            }
+            let value = if computed {
+                self.call_value(&supplied, Value::Undefined, vec![key.clone()], instruction)?
+            } else {
+                supplied
+            };
+            set_weak_map_value(receiver, &key_slot, value.clone())?;
+            return Ok(value);
+        }
         let (entries, is_map) = require_collection(receiver, native)?;
         let key = canonical_key(arguments.first().cloned().unwrap_or(Value::Undefined));
         if weak && !self.can_be_held_weakly(&key) {
@@ -409,4 +472,184 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             _ => None,
         }
     }
+}
+
+#[cfg(test)]
+mod weak_get_or_insert_tests {
+    use super::*;
+    use kiln_host_abi::{HostError, HostOp};
+
+    struct Host;
+
+    impl HostOps for Host {
+        fn call(
+            &mut self,
+            _operation: HostOp,
+            _arguments: &[HostValue],
+        ) -> Result<HostValue, HostError> {
+            Ok(HostValue::Undefined)
+        }
+    }
+
+    #[test]
+    fn weak_map_receiver_is_checked_before_computed_callback_runs() {
+        let counter = Rc::new(RefCell::new(Value::Number(0.0)));
+        let callback_program = Rc::new(Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
+            constants: vec![Constant::Number(1.0f64.to_bits())],
+            code: Vec::new(),
+            local_count: 0,
+            functions: vec![kiln_ir::FunctionProto {
+                inferred_name: None,
+                span: kiln_ir::Span::default(),
+                prologue_end: 0,
+                asynchronous: false,
+                name: None,
+                arrow: false,
+                generator: false,
+                async_generator: false,
+                is_method: false,
+                is_class: false,
+                parameter_count: 0,
+                declared_length: 0,
+                mapped_arguments: false,
+                local_count: 0,
+                code: vec![
+                    Instruction::LoadUpvalue(0),
+                    Instruction::Const(0),
+                    Instruction::Binary(kiln_ir::BinaryOp::Add),
+                    Instruction::StoreUpvalue(0),
+                    Instruction::LoadUpvalue(0),
+                    Instruction::Return,
+                ],
+                upvalues: Vec::new(),
+                type_annotations: None,
+            }],
+        });
+        let callback = Value::Function(Rc::new(Closure {
+            program: Rc::clone(&callback_program),
+            function: 0,
+            strictness: Rc::new(Strictness::default()),
+            module_path: None,
+            module_generation: 0,
+            module_generation_owner: RefCell::new(None),
+            name: None,
+            inferred_name: None,
+            upvalues: vec![Rc::clone(&counter)],
+            realm: RealmId::PRIMARY,
+            captured_arguments: None,
+            captured_new_target: None,
+            captured_this: None,
+            prototype: RefCell::new(None),
+            properties: RefCell::new(ObjectData::default()),
+        }));
+        let empty_program = Rc::new(Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        });
+        let mut host = Host;
+        let mut vm = Vm::with_entropy_seed(
+            empty_program,
+            Rc::new(Strictness::default()),
+            &mut host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            &RealmCapabilities::default(),
+            ExecutionCapabilities::default(),
+        )
+        .unwrap();
+
+        let result = vm.collection_get_or_insert(
+            true,
+            true,
+            &Value::Undefined,
+            &[
+                Value::Object(tracked_object(ObjectData::default())),
+                callback,
+            ],
+            0,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ExecutionError::TypeErrorMessage { message })
+                if message == "incompatible WeakMap receiver"
+        ));
+        assert!(matches!(*counter.borrow(), Value::Number(0.0)));
+    }
+}
+
+fn weak_map_value(receiver: &Value, key: &Value) -> Option<Value> {
+    let Value::Object(object) = receiver else {
+        return None;
+    };
+    let identity = WeakCollectionKey::new(key)?;
+    let object = object.borrow();
+    if !matches!(object.get_own("@@map"), Some(&Value::Boolean(true)))
+        || object.weak_collection_entries.is_none()
+    {
+        return None;
+    }
+    object
+        .weak_collection_entries
+        .as_ref()?
+        .get(&identity)
+        .cloned()
+}
+
+fn validate_weak_map_receiver(receiver: &Value) -> Result<(), ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "incompatible WeakMap receiver".to_owned(),
+        });
+    };
+    let object = object.borrow();
+    if !matches!(object.get_own("@@map"), Some(&Value::Boolean(true)))
+        || object.weak_collection_entries.is_none()
+    {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "incompatible WeakMap receiver".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn set_weak_map_value(
+    receiver: &Value,
+    weak_key: &WeakCollectionKey,
+    value: Value,
+) -> Result<(), ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "incompatible WeakMap receiver".to_owned(),
+        });
+    };
+    let mut object = object.borrow_mut();
+    if !matches!(object.get_own("@@map"), Some(&Value::Boolean(true))) {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "incompatible WeakMap receiver".to_owned(),
+        });
+    }
+    let Some(entries) = object.weak_collection_entries.as_mut() else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "incompatible WeakMap receiver".to_owned(),
+        });
+    };
+    entries.insert(weak_key.clone(), value);
+    Ok(())
 }

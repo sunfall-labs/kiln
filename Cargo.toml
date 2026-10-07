@@ -22,6 +22,7 @@ kiln-backend-c = { path = "crates/native/kiln-backend-c" }
 kiln-builtin-surface = { path = "crates/semantics/kiln-builtin-surface" }
 kiln-builtins = { path = "crates/semantics/kiln-builtins" }
 kiln-data-formats = { path = "crates/foundation/kiln-data-formats" }
+kiln-date-core = { path = "crates/foundation/kiln-date-core" }
 kiln-db = { path = "crates/compile/kiln-db" }
 kiln-digest = { path = "crates/foundation/kiln-digest" }
 kiln-hir = { path = "crates/syntax/kiln-hir" }
@@ -29,6 +30,7 @@ kiln-host-abi = { path = "crates/foundation/kiln-host-abi" }
 kiln-host-gui = { path = "crates/host/kiln-host-gui" }
 kiln-ir = { path = "crates/compile/kiln-ir" }
 kiln-string = { path = "crates/foundation/kiln-string" }
+kiln-regexp = { path = "crates/semantics/kiln-regexp" }
 kiln-interpreter = { path = "crates/interp/kiln-interpreter" }
 kiln-liveness = { path = "crates/compile/kiln-liveness" }
 kiln-module-graph = { path = "crates/compile/kiln-module-graph" }
@@ -38,6 +40,7 @@ kiln-native-provider-contract = { path = "crates/semantics/kiln-native-provider-
 kiln-native-provider-ffi = { path = "crates/native/kiln-native-provider-ffi" }
 kiln-native-runtime = { path = "crates/native/kiln-native-runtime" }
 kiln-number-core = { path = "crates/foundation/kiln-number-core" }
+kiln-key-core = { path = "crates/foundation/kiln-key-core" }
 kiln-runtime = { path = "crates/host/kiln-runtime" }
 kiln-shared-graph = { path = "crates/host/kiln-shared-graph" }
 kiln-temporal = { path = "crates/semantics/kiln-temporal" }
@@ -46,6 +49,9 @@ kiln-intl = { path = "crates/semantics/kiln-intl" }
 kiln-native-toolchain = { path = "crates/native/kiln-native-toolchain" }
 kiln-node-path = { path = "crates/semantics/kiln-node-path" }
 kiln-url = { path = "crates/semantics/kiln-url" }
+kiln-encoding = { path = "crates/semantics/kiln-encoding" }
+kiln-webcrypto = { path = "crates/semantics/kiln-webcrypto" }
+kiln-compression = { path = "crates/semantics/kiln-compression" }
 kiln-conformance = { path = "crates/tools/kiln-conformance" }
 kiln-proto = { path = "crates/foundation/kiln-proto" }
 kiln-daemon = { path = "crates/tools/kiln-daemon" }
@@ -63,6 +69,7 @@ oxc_ast = { version = "0.147.0", default-features = false }
 oxc_parser = { version = "0.147.0", default-features = false }
 oxc_resolver = { version = "11.24.3", default-features = false }
 oxc_span = { version = "0.147.0", default-features = false }
+oxc_str = { version = "0.147.0", default-features = false }
 oxc_syntax = { version = "0.147.0", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
@@ -79,6 +86,7 @@ regress = { version = "0.12", default-features = false, features = ["backend-pik
 # brings the IANA zone database in so a program that names a zone explicitly gets a real answer;
 # nothing here ever asks the host which zone it is in.
 temporal_rs = { version = "0.2.6", default-features = false, features = ["std", "compiled_data"] }
+timezone_provider = { version = "0.2.6", default-features = false, features = ["tzif"] }
 # The internationalization engine behind `Intl`, linked rather than rewritten for the reason
 # ADR 0025 gives for `regress` and ADR 0029 §4 names ICU4X for: locale negotiation, collation and
 # number spellout are CLDR-shaped, and a second implementation would agree on `en-US` and disagree
@@ -95,6 +103,7 @@ temporal_rs = { version = "0.2.6", default-features = false, features = ["std", 
 # `icu_locale`, which is the CLDR alias and likely-subtags tables that canonicalization needs.
 icu_locale_core = { version = "2.3", default-features = false, features = ["alloc"] }
 icu_locale = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_casemap = { version = "2.3", default-features = false, features = ["compiled_data"] }
 icu_decimal = { version = "2.3", default-features = false, features = ["compiled_data", "alloc"] }
 # `unstable` here is not a nightly switch either: it gates `PluralRulesWithRanges`, the CLDR
 # plural *range* table `Intl.PluralRules.prototype.selectRange` answers from. A range's category is
@@ -160,8 +169,9 @@ annotate-snippets = { version = "0.12", default-features = false, features = ["s
 encoding_rs = { version = "0.8", default-features = false, features = ["alloc"] }
 # WHATWG URL Standard reference implementation in safe Rust (URL/URLSearchParams).
 url = { version = "2.5", default-features = false, features = ["std"] }
-# Compression & decompression (gzip, zlib, deflate) for node:zlib via pure-Rust miniz_oxide backend.
-flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+# Compression & decompression for node:zlib and WHATWG streams; zlib-rs supplies framed gzip
+# support for flate2's incremental API without linking a system zlib.
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend", "zlib-rs"] }
 # Compact arena-backed string interner for property keys and shapes (ADR 0047, ADR 0050)
 lasso = { version = "0.7", default-features = false }
 # Capability-based sandboxed filesystem access (ADR 0029 §5)
@@ -209,6 +219,7 @@ digest = { version = "0.10", default-features = false, features = ["std"] }
 md-5 = { version = "0.10", default-features = false, features = ["std"] }
 sha1 = { version = "0.10", default-features = false, features = ["std"] }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
+hmac = { version = "0.12.1", default-features = false }
 
 [profile.release]
 debug = 1

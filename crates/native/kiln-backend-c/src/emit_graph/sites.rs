@@ -212,7 +212,7 @@ pub(super) fn receiver_prologue(
             )
         };
     format!(
-        "    const uint32_t *recv_row = {init}; const kiln_object *recv_obj = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); if (recv_obj == NULL) __builtin_unreachable(); {lookup}{{ recv_row = kiln_c99_recv_row({shapes_var}, &{slot_var}[0][0], {count}, recv_obj->shape); if (recv_row == NULL && !kiln_c99_recv_refused({refused_var}, recv_obj->shape) && kiln_c99_gc_kind_of_ptr(recv_obj) == KILN_GC_OBJECT) {{ const kiln_string *const recv_keys[{count}] = {{ {} }}; recv_row = kiln_c99_recv_claim({shapes_var}, {refused_var}, &{slot_var}[0][0], {count}, recv_keys, recv_obj, {double_mask}u); }} }} }} (void)recv_row; (void)recv_obj;\n{check_guard}",
+        "    const uint32_t *recv_row = {init}; const kiln_object *recv_obj = NULL; const kiln_shape *recv_shape = NULL; if (KILN_VAL_IS_OBJECT(receiver)) {{ recv_obj = (const kiln_object *)KILN_VAL_PTR(receiver); if (recv_obj == NULL) __builtin_unreachable(); recv_shape = recv_obj->shape; {lookup}{{ recv_row = kiln_c99_recv_row({shapes_var}, &{slot_var}[0][0], {count}, recv_shape); if (recv_row == NULL && !kiln_c99_recv_refused({refused_var}, recv_shape) && kiln_c99_gc_kind_of_ptr(recv_obj) == KILN_GC_OBJECT) {{ const kiln_string *const recv_keys[{count}] = {{ {} }}; recv_row = kiln_c99_recv_claim({shapes_var}, {refused_var}, &{slot_var}[0][0], {count}, recv_keys, recv_obj, {double_mask}u); }} }} }} (void)recv_row; (void)recv_obj; (void)recv_shape;\n{check_guard}",
         keys.join(", ")
     )
 }
@@ -228,6 +228,7 @@ pub(super) fn typed_row_claimer(
     index: usize,
     columns: &[u32],
     double_mask: u32,
+    typed_row_safe: bool,
     linkage: &str,
 ) -> String {
     let keys: Vec<String> = columns
@@ -235,6 +236,11 @@ pub(super) fn typed_row_claimer(
         .map(|name| format!("{symbol}_key_{name}"))
         .collect();
     let count = columns.len();
+    if !typed_row_safe {
+        return format!(
+            "{linkage}const uint32_t *{symbol}_fn_{index}_t_row(const kiln_object *recv_obj) {{ (void)recv_obj; return NULL; }}\n"
+        );
+    }
     format!(
         "{linkage}const uint32_t *{symbol}_fn_{index}_t_row(const kiln_object *recv_obj) {{ const uint32_t *recv_row = kiln_c99_recv_row({symbol}_fn_{index}_typed_recv_shape, &{symbol}_fn_{index}_typed_recv_slot[0][0], {count}, recv_obj->shape); if (recv_row == NULL && !kiln_c99_recv_refused({symbol}_fn_{index}_typed_recv_refused, recv_obj->shape) && kiln_c99_gc_kind_of_ptr(recv_obj) == KILN_GC_OBJECT) {{ const kiln_string *const recv_keys[{count}] = {{ {} }}; recv_row = kiln_c99_recv_claim({symbol}_fn_{index}_typed_recv_shape, {symbol}_fn_{index}_typed_recv_refused, &{symbol}_fn_{index}_typed_recv_slot[0][0], {count}, recv_keys, recv_obj, {double_mask}u); }} return recv_row; }}\n",
         keys.join(", ")
@@ -257,7 +263,13 @@ pub(crate) fn collect_typed_call_sites(
     let mut sites = Vec::new();
     for block in &graph.blocks {
         for (vid, op) in &block.operations {
-            if let GraphOp::CallMethod { name, args, .. } = op {
+            if let GraphOp::CallMethod {
+                name,
+                args,
+                prepared_callee: None,
+                ..
+            } = op
+            {
                 let key = match program.constants.get(*name as usize) {
                     Some(Constant::String(s)) => s,
                     _ => continue,

@@ -82,6 +82,9 @@ pub enum GraphOp {
     },
     /// A name the compiler resolved to something the runtime supplies.
     LoadBuiltin(kiln_ir::Builtin),
+    /// A source-level global builtin binding. Unlike `LoadBuiltin`, the global property is
+    /// mutable and may be an accessor, so this read must remain in execution order.
+    LoadGlobalBuiltin(kiln_ir::Builtin),
     /// The value supplied by a generator caller when a suspension resumes. It has no compile-time
     /// value or type; the C emitter restores it from `frame->sent` at the synthetic resume edge.
     ResumeValue,
@@ -160,6 +163,18 @@ pub enum GraphOp {
         strict: bool,
         site: SiteId,
     },
+    DefineOwnProperty {
+        object: ValueId,
+        name: u32,
+        value: ValueId,
+        site: SiteId,
+    },
+    DefineOwnComputed {
+        object: ValueId,
+        key: ValueId,
+        value: ValueId,
+        site: SiteId,
+    },
 
     // Invocation and Construction
     MakeFunction {
@@ -170,12 +185,19 @@ pub enum GraphOp {
         callee: ValueId,
         args: Vec<ValueId>,
         site: SiteId,
+        line: u32,
+        column: u32,
     },
     CallMethod {
         object: ValueId,
         name: u32,
         args: Vec<ValueId>,
+        /// A property value fetched before the call arguments. When present, call emission must
+        /// invoke this value and must not look up `name` again.
+        prepared_callee: Option<ValueId>,
         site: SiteId,
+        line: u32,
+        column: u32,
     },
     NewArray {
         elements: Vec<ValueId>,
@@ -191,6 +213,8 @@ pub enum GraphOp {
         callee: ValueId,
         args: Vec<ValueId>,
         site: SiteId,
+        line: u32,
+        column: u32,
     },
 
     // Super and Private Members
@@ -212,6 +236,7 @@ impl GraphOp {
             | Self::LoadCell(_)
             | Self::LoadUpvalue(_)
             | Self::LoadBuiltin(_)
+            | Self::LoadGlobalBuiltin(_)
             | Self::ResumeValue
             | Self::CaughtValue
             | Self::MakeCell(_)
@@ -231,12 +256,16 @@ impl GraphOp {
             Self::Binary { left, right, .. } => vec![*left, *right],
             Self::GetProperty { object, .. } => vec![*object],
             Self::SetProperty { object, value, .. }
-            | Self::SetPropertyStrict { object, value, .. } => vec![*object, *value],
+            | Self::SetPropertyStrict { object, value, .. }
+            | Self::DefineOwnProperty { object, value, .. } => vec![*object, *value],
             Self::GetComputed { object, key, .. } => vec![*object, *key],
             Self::SetComputed {
                 object, key, value, ..
             }
             | Self::SetComputedStrict {
+                object, key, value, ..
+            }
+            | Self::DefineOwnComputed {
                 object, key, value, ..
             } => vec![*object, *key, *value],
             Self::Call { callee, args, .. } | Self::New { callee, args, .. } => {
@@ -244,7 +273,13 @@ impl GraphOp {
                     .chain(args.iter().copied())
                     .collect()
             }
-            Self::CallMethod { object, args, .. } => std::iter::once(*object)
+            Self::CallMethod {
+                object,
+                args,
+                prepared_callee,
+                ..
+            } => std::iter::once(*object)
+                .chain(prepared_callee.iter().copied())
                 .chain(args.iter().copied())
                 .collect(),
             Self::NewArray { elements, .. } => elements.clone(),
@@ -262,6 +297,7 @@ impl GraphOp {
             | Self::LoadCell(_)
             | Self::LoadUpvalue(_)
             | Self::LoadBuiltin(_)
+            | Self::LoadGlobalBuiltin(_)
             | Self::ResumeValue
             | Self::CaughtValue
             | Self::MakeCell(_)
@@ -284,7 +320,8 @@ impl GraphOp {
             }
             Self::GetProperty { object, .. } => apply(object),
             Self::SetProperty { object, value, .. }
-            | Self::SetPropertyStrict { object, value, .. } => {
+            | Self::SetPropertyStrict { object, value, .. }
+            | Self::DefineOwnProperty { object, value, .. } => {
                 apply(object);
                 apply(value);
             }
@@ -297,6 +334,9 @@ impl GraphOp {
             }
             | Self::SetComputedStrict {
                 object, key, value, ..
+            }
+            | Self::DefineOwnComputed {
+                object, key, value, ..
             } => {
                 apply(object);
                 apply(key);
@@ -306,8 +346,14 @@ impl GraphOp {
                 apply(callee);
                 args.iter_mut().for_each(&mut apply);
             }
-            Self::CallMethod { object, args, .. } => {
+            Self::CallMethod {
+                object,
+                args,
+                prepared_callee,
+                ..
+            } => {
                 apply(object);
+                prepared_callee.iter_mut().for_each(&mut apply);
                 args.iter_mut().for_each(&mut apply);
             }
             Self::NewArray { elements, .. } => elements.iter_mut().for_each(&mut apply),
@@ -345,6 +391,14 @@ impl GraphOp {
 
             Self::LoadCell(_) | Self::LoadUpvalue(_) => Effects::READS_HEAP | Effects::MAY_THROW,
 
+            Self::LoadGlobalBuiltin(_) => {
+                Effects::READS_HEAP
+                    | Effects::MAY_THROW
+                    | Effects::CALLS_USER_CODE
+                    | Effects::ALLOCATES
+                    | Effects::WRITES_HEAP
+            }
+
             Self::LoadGlobal(_) => Effects::READS_HEAP,
 
             Self::StoreCell { .. } | Self::StoreUpvalue { .. } | Self::StoreGlobal { .. } => {
@@ -363,7 +417,8 @@ impl GraphOp {
                 | UnaryOp::Negate
                 | UnaryOp::ToNumeric
                 | UnaryOp::Increment
-                | UnaryOp::Decrement => Effects::UNKNOWN,
+                | UnaryOp::Decrement
+                | UnaryOp::ToString => Effects::UNKNOWN,
             },
 
             Self::Binary { op, .. } => match op {
@@ -398,7 +453,9 @@ impl GraphOp {
                     | Effects::WRITES_HEAP
             }
 
-            Self::SetProperty { .. } | Self::SetPropertyStrict { .. } => {
+            Self::SetProperty { .. }
+            | Self::SetPropertyStrict { .. }
+            | Self::DefineOwnProperty { .. } => {
                 Effects::WRITES_HEAP
                     | Effects::MAY_THROW
                     | Effects::CALLS_USER_CODE
@@ -414,7 +471,9 @@ impl GraphOp {
                     | Effects::WRITES_HEAP
             }
 
-            Self::SetComputed { .. } | Self::SetComputedStrict { .. } => {
+            Self::SetComputed { .. }
+            | Self::SetComputedStrict { .. }
+            | Self::DefineOwnComputed { .. } => {
                 Effects::WRITES_HEAP
                     | Effects::MAY_THROW
                     | Effects::CALLS_USER_CODE
@@ -430,6 +489,7 @@ impl GraphOp {
                 Instruction::LoadPrototype => Effects::READS_HEAP | Effects::MAY_THROW,
                 Instruction::SetPrototype => Effects::WRITES_HEAP | Effects::MAY_THROW,
                 Instruction::GetPrivate(_) => Effects::READS_HEAP | Effects::MAY_THROW,
+                Instruction::HasPrivate { .. } => Effects::READS_HEAP | Effects::MAY_THROW,
                 Instruction::SetPrivate(_) => Effects::WRITES_HEAP | Effects::MAY_THROW,
                 Instruction::NewRegExp { .. } => Effects::ALLOCATES,
                 Instruction::DeleteProperty(_)
@@ -447,8 +507,8 @@ impl GraphOp {
     }
 
     /// Refine coercion effects only when the graph's type proof establishes numeric operands.
-    /// Unknown values must retain the full effect set: ToPrimitive/ToNumeric can invoke user
-    /// code, allocate, mutate, or throw. Numeric specialization is safe because it bypasses that
+    /// Unknown values must retain the full effect set: primitive/numeric/string coercion can invoke
+    /// user code, allocate, mutate, or throw. Numeric specialization is safe because it bypasses that
     /// conversion path, and is shared by DCE, LICM, and parallel-map admission.
     pub fn effects_with_proven_numbers(&self, proven_numbers: &HashSet<ValueId>) -> Effects {
         let numeric = |value: &ValueId| proven_numbers.contains(value);
@@ -580,6 +640,7 @@ mod effect_tests {
             UnaryOp::Plus,
             UnaryOp::Negate,
             UnaryOp::ToNumeric,
+            UnaryOp::ToString,
             UnaryOp::Increment,
             UnaryOp::Decrement,
         ] {
@@ -881,6 +942,7 @@ pub fn build_function_graph(
     );
 
     let code = &proto.code;
+    let debug_function_span = (proto.span.end > proto.span.start).then_some(proto.span);
     if code.is_empty() {
         let block_id = BlockId(0);
         graph.blocks.push(BasicBlock {
@@ -1000,7 +1062,12 @@ pub fn build_function_graph(
         block_ranges.push((start, end));
     }
 
-    let mut handler_stack = Vec::new();
+    // Each block's innermost handler, from the handler stack its control flow reaches it with.
+    // A scan in code order is wrong: `continue` inside a `try` compiles to `PopHandler; Jump`
+    // back to the loop head, and the code that follows it in the `try` body is still protected,
+    // so the stack has to travel along edges. A handler block itself is entered with the stack
+    // as it was at its push. Structured code reaches each block with one stack; the first one
+    // to arrive is kept.
     let mut block_handlers = vec![None; num_blocks];
     let handler_targets: HashSet<BlockId> = code
         .iter()
@@ -1009,20 +1076,90 @@ pub fn build_function_graph(
             _ => None,
         })
         .collect();
-    for (i, &(start, end)) in block_ranges.iter().enumerate() {
-        let b_idx = i + block_offset;
-        for inst in &code[start..end] {
-            match inst {
-                Instruction::PushHandler(target) => {
-                    handler_stack.push(*pc_to_block.get(&(*target as usize)).unwrap());
-                }
-                Instruction::PopHandler => {
-                    handler_stack.pop();
-                }
-                _ => {}
+    {
+        let mut entry_stacks: Vec<Option<Vec<BlockId>>> = vec![None; num_blocks];
+        let first = BlockId(block_offset as u32);
+        entry_stacks[first.0 as usize] = Some(Vec::new());
+        let mut pending = vec![first];
+        fn arrive(
+            entry_stacks: &mut [Option<Vec<BlockId>>],
+            block: BlockId,
+            stack: &[BlockId],
+            pending: &mut Vec<BlockId>,
+        ) {
+            let slot = &mut entry_stacks[block.0 as usize];
+            if slot.is_none() {
+                *slot = Some(stack.to_vec());
+                pending.push(block);
             }
         }
-        block_handlers[b_idx] = handler_stack.last().copied();
+        while let Some(block) = pending.pop() {
+            let b_idx = block.0 as usize;
+            let Some(i) = b_idx.checked_sub(block_offset) else {
+                continue;
+            };
+            let (start, end) = block_ranges[i];
+            let mut stack = entry_stacks[b_idx].clone().unwrap_or_default();
+            for inst in &code[start..end] {
+                match inst {
+                    Instruction::PushHandler(target) => {
+                        let handler = *pc_to_block.get(&(*target as usize)).unwrap();
+                        arrive(&mut entry_stacks, handler, &stack, &mut pending);
+                        stack.push(handler);
+                    }
+                    Instruction::PopHandler => {
+                        stack.pop();
+                    }
+                    _ => {}
+                }
+            }
+            block_handlers[b_idx] = stack.last().copied();
+            let next = (i + 1 < block_ranges.len()).then(|| BlockId((b_idx + 1) as u32));
+            let mut succs: Vec<BlockId> = Vec::new();
+            match if end > start { code.get(end - 1) } else { None } {
+                Some(Instruction::Jump(target)) => {
+                    succs.push(pc_to_containing_block(*target as usize))
+                }
+                Some(
+                    Instruction::JumpIfFalse(target)
+                    | Instruction::JumpIfTruthy(target)
+                    | Instruction::JumpIfNotNullish(target)
+                    | Instruction::JumpIfReturnSignal(target),
+                ) => {
+                    succs.push(pc_to_containing_block(*target as usize));
+                    succs.extend(next);
+                }
+                Some(Instruction::Return | Instruction::Throw) => {}
+                Some(Instruction::YieldStar(target)) => {
+                    succs.push(pc_to_containing_block(end));
+                    succs.push(pc_to_containing_block(*target as usize));
+                }
+                _ => succs.extend(next),
+            }
+            for succ in succs {
+                arrive(&mut entry_stacks, succ, &stack, &mut pending);
+            }
+        }
+        // A block no edge reaches (dead code after a `throw`) keeps the code-order answer, which
+        // is all it ever had and is never executed.
+        let mut linear = Vec::new();
+        for (i, &(start, end)) in block_ranges.iter().enumerate() {
+            let b_idx = i + block_offset;
+            for inst in &code[start..end] {
+                match inst {
+                    Instruction::PushHandler(target) => {
+                        linear.push(*pc_to_block.get(&(*target as usize)).unwrap());
+                    }
+                    Instruction::PopHandler => {
+                        linear.pop();
+                    }
+                    _ => {}
+                }
+            }
+            if entry_stacks[b_idx].is_none() {
+                block_handlers[b_idx] = linear.last().copied();
+            }
+        }
     }
 
     // Phase 3: Abstract Interpretation across basic blocks
@@ -1051,8 +1188,10 @@ pub fn build_function_graph(
     // pre-branch value after the join. Stack merges (`c ? a : b`) get their phis when the first
     // frame arrives, because only then is the depth known.
     let mut static_preds: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
+    let mut static_succs: Vec<Vec<BlockId>> = vec![Vec::new(); num_blocks];
     if jumps_to_zero {
         static_preds[1].push(BlockId(0));
+        static_succs[0].push(BlockId(1));
     }
     for (i, &(start, end)) in block_ranges.iter().enumerate() {
         let b_idx = i + block_offset;
@@ -1093,7 +1232,32 @@ pub fn build_function_graph(
             if !list.contains(&this) {
                 list.push(this);
             }
+            let list = &mut static_succs[this.0 as usize];
+            if !list.contains(&succ) {
+                list.push(succ);
+            }
         }
+    }
+    // Frame lowering must distinguish a reachable block whose incoming frame has not yet been
+    // visited (for example, a loop back-edge) from a syntactically present but unreachable
+    // block. A dead block after `Throw` can contain a jump into a live join; allowing that edge
+    // into `static_preds` creates a stack phi from the dead block's empty fallback frame, which
+    // may become the first frame observed by the join. Compute reachability from CFG edges before
+    // allocating merge frames, retaining conservative handler and suspension edges above.
+    let mut reachable = vec![false; num_blocks];
+    let mut pending = vec![BlockId(0)];
+    reachable[0] = true;
+    while let Some(from) = pending.pop() {
+        for &to in &static_succs[from.0 as usize] {
+            let index = to.0 as usize;
+            if !reachable[index] {
+                reachable[index] = true;
+                pending.push(to);
+            }
+        }
+    }
+    for preds in &mut static_preds {
+        preds.retain(|pred| reachable[pred.0 as usize]);
     }
     // A suspending body keeps its locals in the frame, where the runtime and every later call
     // find them, and reads them back at the start of every block: no local crosses a block in
@@ -1150,6 +1314,9 @@ pub fn build_function_graph(
         // A handler block merges nothing: a throw can happen mid-block, when the locals are
         // half stored, so its locals come from the array and its stack is fixed at the push.
         let this = BlockId(b_idx as u32);
+        if !reachable[b_idx] {
+            continue;
+        }
         let resume_depth = resume_depths.get(&this).copied();
         if handler_targets.contains(&this) || (preds.len() < 2 && resume_depth.is_none()) {
             continue;
@@ -1228,6 +1395,19 @@ pub fn build_function_graph(
     for (i, &(start, end)) in block_ranges.iter().enumerate() {
         let b_idx = i + block_offset;
         let block_id = BlockId(b_idx as u32);
+        if !reachable[b_idx] {
+            // Keep block ids dense until graph pruning runs, but do not interpret dead bytecode
+            // from an empty frame or let it manufacture CFG edges into reachable joins.
+            basic_blocks.push(BasicBlock {
+                id: block_id,
+                operations: Vec::new(),
+                terminator: Terminator::Unreachable,
+                predecessors: Vec::new(),
+                successors: Vec::new(),
+                exception_handler: None,
+            });
+            continue;
+        }
         let mut frame = block_entry_frames
             .get(&block_id)
             .cloned()
@@ -1494,7 +1674,7 @@ pub fn build_function_graph(
                         &mut operations,
                     );
                 }
-                Instruction::Nop => {}
+                Instruction::Nop | Instruction::MarkCellFunctionName(_) => {}
                 Instruction::Return => {
                     let ret_val = frame.stack.pop();
                     terminator = Terminator::Return(ret_val);
@@ -1512,7 +1692,19 @@ pub fn build_function_graph(
                     let callee = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let site = graph.alloc_site();
                     let result = graph.alloc_value();
-                    operations.push((result, GraphOp::Call { callee, args, site }));
+                    let (line, column) = program
+                        .debug_call_site(debug_function_span, pc)
+                        .map_or((0, 0), |entry| (entry.line, entry.column));
+                    operations.push((
+                        result,
+                        GraphOp::Call {
+                            callee,
+                            args,
+                            site,
+                            line,
+                            column,
+                        },
+                    ));
                     frame.stack.push(result);
                 }
                 Instruction::CallMethod { name, argc } => {
@@ -1530,7 +1722,39 @@ pub fn build_function_graph(
                             object,
                             name: *name,
                             args,
+                            prepared_callee: None,
                             site,
+                            line: program
+                                .debug_call_site(debug_function_span, pc)
+                                .map_or(0, |entry| entry.line),
+                            column: program
+                                .debug_call_site(debug_function_span, pc)
+                                .map_or(0, |entry| entry.column),
+                        },
+                    ));
+                    frame.stack.push(result);
+                }
+                Instruction::CallMethodPrepared { name, argc } => {
+                    let mut args = Vec::with_capacity(*argc as usize);
+                    for _ in 0..*argc {
+                        args.push(frame.stack.pop().unwrap_or_else(|| graph.alloc_value()));
+                    }
+                    args.reverse();
+                    let prepared_callee = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let site = graph.alloc_site();
+                    let result = graph.alloc_value();
+                    let call_site = program.debug_call_site(debug_function_span, pc);
+                    operations.push((
+                        result,
+                        GraphOp::CallMethod {
+                            object,
+                            name: *name,
+                            args,
+                            prepared_callee: Some(prepared_callee),
+                            site,
+                            line: call_site.map_or(0, |entry| entry.line),
+                            column: call_site.map_or(0, |entry| entry.column),
                         },
                     ));
                     frame.stack.push(result);
@@ -1625,6 +1849,39 @@ pub fn build_function_graph(
                     ));
                     frame.stack.push(result);
                 }
+                Instruction::DefineOwnProperty(name) => {
+                    let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let site = graph.alloc_site();
+                    let result = graph.alloc_value();
+                    operations.push((
+                        result,
+                        GraphOp::DefineOwnProperty {
+                            object,
+                            name: *name,
+                            value,
+                            site,
+                        },
+                    ));
+                    frame.stack.push(result);
+                }
+                Instruction::DefineOwnComputed => {
+                    let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let key = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let object = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let site = graph.alloc_site();
+                    let result = graph.alloc_value();
+                    operations.push((
+                        result,
+                        GraphOp::DefineOwnComputed {
+                            object,
+                            key,
+                            value,
+                            site,
+                        },
+                    ));
+                    frame.stack.push(result);
+                }
                 Instruction::MakeFunction(index) => {
                     let site = graph.alloc_site();
                     let result = graph.alloc_value();
@@ -1676,6 +1933,11 @@ pub fn build_function_graph(
                 }
                 Instruction::LoadBuiltin(builtin) => {
                     let res = graph.alloc_value();
+                    operations.push((res, GraphOp::LoadGlobalBuiltin(*builtin)));
+                    frame.stack.push(res);
+                }
+                Instruction::LoadIntrinsicBuiltin(builtin) => {
+                    let res = graph.alloc_value();
                     operations.push((res, GraphOp::LoadBuiltin(*builtin)));
                     frame.stack.push(res);
                 }
@@ -1689,7 +1951,19 @@ pub fn build_function_graph(
                     let callee = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let res = graph.alloc_value();
                     let site = graph.alloc_site();
-                    operations.push((res, GraphOp::New { callee, args, site }));
+                    let (line, column) = program
+                        .debug_call_site(debug_function_span, pc)
+                        .map_or((0, 0), |entry| (entry.line, entry.column));
+                    operations.push((
+                        res,
+                        GraphOp::New {
+                            callee,
+                            args,
+                            site,
+                            line,
+                            column,
+                        },
+                    ));
                     frame.stack.push(res);
                 }
                 Instruction::NewObject { count } => {
@@ -1994,74 +2268,8 @@ pub fn build_function_graph(
 }
 
 pub fn compute_dominators(graph: &FunctionGraph) -> HashMap<BlockId, HashSet<BlockId>> {
-    let mut dominators: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
-    if graph.blocks.is_empty() {
-        return dominators;
-    }
-    let mut reachable = HashSet::new();
-    let mut worklist = vec![graph.entry_block];
-    reachable.insert(graph.entry_block);
-    while let Some(bid) = worklist.pop() {
-        if let Some(block) = graph.block(bid) {
-            for &succ in &block.successors {
-                if reachable.insert(succ) {
-                    worklist.push(succ);
-                }
-            }
-        }
-    }
-
-    let all_reachable: HashSet<BlockId> = reachable.clone();
-
-    let mut entry_dom = HashSet::new();
-    entry_dom.insert(graph.entry_block);
-    dominators.insert(graph.entry_block, entry_dom);
-
-    for block in &graph.blocks {
-        if block.id != graph.entry_block {
-            if reachable.contains(&block.id) {
-                dominators.insert(block.id, all_reachable.clone());
-            } else {
-                let mut self_dom = HashSet::new();
-                self_dom.insert(block.id);
-                dominators.insert(block.id, self_dom);
-            }
-        }
-    }
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block in &graph.blocks {
-            if !reachable.contains(&block.id) || block.id == graph.entry_block {
-                continue;
-            }
-            let mut new_dom: Option<HashSet<BlockId>> = None;
-            for &pred in &block.predecessors {
-                if !reachable.contains(&pred) {
-                    continue;
-                }
-                if let Some(pred_dom) = dominators.get(&pred) {
-                    match &mut new_dom {
-                        Some(current) => {
-                            *current = current.intersection(pred_dom).copied().collect();
-                        }
-                        None => {
-                            new_dom = Some(pred_dom.clone());
-                        }
-                    }
-                }
-            }
-            let mut new_dom = new_dom.unwrap_or_default();
-            new_dom.insert(block.id);
-
-            if dominators.get(&block.id) != Some(&new_dom) {
-                dominators.insert(block.id, new_dom);
-                changed = true;
-            }
-        }
-    }
-    dominators
+    let ids: Vec<BlockId> = graph.blocks.iter().map(|block| block.id).collect();
+    crate::dominators::compute(graph, false).into_hash_map(&ids)
 }
 
 /// Find all natural loops in `graph` given precomputed `dominators`.
@@ -2284,7 +2492,13 @@ pub fn hoist_loop_invariants(graph: &mut FunctionGraph) {
     }
 
     // Step 3: For each natural loop, check if a unique preheader exists.
-    for (header_id, loop_blocks) in loops {
+    // Hoisting changes block operation order and can change the compacted SSA ids, so visit
+    // loops in graph order rather than HashMap iteration order. Otherwise identical programs
+    // can produce different generated C and collide in the artifact cache.
+    let mut loop_headers: Vec<_> = loops.keys().copied().collect();
+    loop_headers.sort_unstable();
+    for header_id in loop_headers {
+        let loop_blocks = &loops[&header_id];
         let header_block = match graph.blocks.iter().find(|b| b.id == header_id) {
             Some(b) => b,
             None => continue,
@@ -2994,9 +3208,10 @@ mod dead_phi_tests {
 
     #[test]
     fn delegate_resume_and_completion_edges_supply_phi_inputs() {
-        // The post-YieldStar loop is intentionally tiny: block 3 is the ordinary resume path,
-        // while block 8 is both the ordinary done path and the delegate-completion path. Both
-        // targets must have complete phis before C emission is allowed to run.
+        // The post-YieldStar loop is intentionally tiny: the resume path stores and tests the
+        // sent value, looping back to the delegate when false. Its true path reaches pc 9 through
+        // an ordinary done edge, while YieldStar also has a synthetic completion edge to pc 9.
+        // Both targets must have complete phis before C emission is allowed to run.
         let proto = FunctionProto {
             inferred_name: None,
             span: Span::default(),
@@ -3013,14 +3228,15 @@ mod dead_phi_tests {
             mapped_arguments: false,
             local_count: 1,
             code: vec![
-                Instruction::Const(0),      // wrapped flag placeholder
-                Instruction::Const(0),      // iterator placeholder
-                Instruction::Const(0),      // yielded value
-                Instruction::YieldStar(8),  // synthetic edges to pc 4 and pc 8
-                Instruction::StoreLocal(0), // resume sent value
-                Instruction::Jump(0),       // loop back to the delegate
-                Instruction::Const(0),      // ordinary done value
-                Instruction::Jump(8),       // ordinary predecessor of the exit
+                Instruction::Const(0),       // wrapped flag placeholder
+                Instruction::Const(0),       // iterator placeholder
+                Instruction::Const(0),       // yielded value
+                Instruction::YieldStar(9),   // synthetic edges to pc 4 and pc 9
+                Instruction::StoreLocal(0),  // resume sent value
+                Instruction::LoadLocal(0),   // sent value controls completion
+                Instruction::JumpIfFalse(0), // loop back while the delegate is incomplete
+                Instruction::Const(0),       // ordinary done value
+                Instruction::Jump(9),        // ordinary predecessor of the exit
                 Instruction::Return,
             ],
             upvalues: Vec::new(),
@@ -3054,6 +3270,64 @@ mod dead_phi_tests {
             "ordinary and delegate completion edges"
         );
         assert!(exit.operations.iter().any(|(_, op)| matches!(op, GraphOp::Phi { inputs } if inputs.len() == exit.predecessors.len())));
+    }
+
+    #[test]
+    fn unreachable_post_throw_jump_does_not_supply_a_join_frame() {
+        // The false branch throws, so the jump immediately after Throw has no frame. If that
+        // dead block is included in the static predecessor count, it can seed the return block
+        // with an empty stack before the live edge supplies the return value.
+        let proto = FunctionProto {
+            inferred_name: None,
+            span: Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: Some("dead_throw_edge".into()),
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            parameter_count: 0,
+            declared_length: 0,
+            mapped_arguments: false,
+            local_count: 0,
+            code: vec![
+                Instruction::Const(0),
+                Instruction::JumpIfTruthy(5),
+                Instruction::Const(1),
+                Instruction::Throw,
+                Instruction::Jump(9),
+                Instruction::Const(2),
+                Instruction::Jump(9),
+                Instruction::Nop,
+                Instruction::Nop,
+                Instruction::Return,
+            ],
+            upvalues: Vec::new(),
+            type_annotations: None,
+        };
+        let mut program = Program::default();
+        program.constants.extend([
+            Constant::Boolean(true),
+            Constant::String("unreachable".into()),
+            Constant::Number(42.0f64.to_bits()),
+        ]);
+
+        let graph = build_function_graph(&proto, &program).expect("graph builds");
+        verify_function_graph(&graph).expect("reachable join has complete frame inputs");
+        let returned = graph
+            .blocks
+            .iter()
+            .find_map(|block| match block.terminator {
+                Terminator::Return(value) => value,
+                _ => None,
+            })
+            .expect("live branch returns a value");
+        assert!(
+            proven_numbers(&graph).contains(&returned),
+            "constant true branch must return 42, not an empty-frame undefined"
+        );
     }
 
     #[test]
@@ -3328,6 +3602,12 @@ mod dead_phi_tests {
                         value: ValueId(2),
                     },
                 ),
+                // A source global read remains observable even when its value is discarded:
+                // an accessor can run and an absent binding must throw.
+                (
+                    ValueId(4),
+                    GraphOp::LoadGlobalBuiltin(kiln_ir::Builtin::Date),
+                ),
             ],
             terminator: Terminator::Return(Some(ValueId(2))),
             predecessors: vec![],
@@ -3344,6 +3624,7 @@ mod dead_phi_tests {
         // Values 2 (live return) and 3 (side-effecting CheckTdz) must be preserved
         assert!(remaining_ops.contains(&ValueId(2)));
         assert!(remaining_ops.contains(&ValueId(3)));
+        assert!(remaining_ops.contains(&ValueId(4)));
         crate::verifier::verify_function_graph(&graph).unwrap();
     }
 

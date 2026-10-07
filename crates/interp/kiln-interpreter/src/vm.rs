@@ -31,6 +31,122 @@ mod workers;
 /// check costs nothing measurable.
 pub(crate) const WORKER_QUANTUM: u64 = 100_000;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadonlyCellKind {
+    Const,
+    FunctionName,
+}
+
+#[derive(Default)]
+pub(crate) struct ReadonlyCellRegistry {
+    entries: std::collections::HashMap<usize, ReadonlyCellEntry>,
+    sweep: std::collections::VecDeque<usize>,
+    queued: std::collections::HashSet<usize>,
+}
+
+struct ReadonlyCellEntry {
+    cell: Weak<RefCell<Value>>,
+    kind: ReadonlyCellKind,
+    /// A later lexical declaration in the caller may still need its one initialization store.
+    /// Only that exact program may consume the exception; eval writes and escaped closures may
+    /// not initialize the binding early.
+    initializer_program: Option<Weak<Program>>,
+}
+
+pub(crate) type SharedReadonlyCellRegistry = Rc<RefCell<ReadonlyCellRegistry>>;
+
+impl ReadonlyCellRegistry {
+    pub(crate) fn mark(
+        &mut self,
+        cell: &Cell,
+        kind: ReadonlyCellKind,
+        initializer_program: Option<&Rc<Program>>,
+    ) {
+        let key = Rc::as_ptr(cell) as usize;
+        if let Some(entry) = self.entries.get_mut(&key) {
+            if entry
+                .cell
+                .upgrade()
+                .is_some_and(|known| Rc::ptr_eq(&known, cell))
+            {
+                entry.kind = kind;
+                if entry.initializer_program.is_none()
+                    && matches!(&*cell.borrow(), Value::Native(Native::Uninitialized, _))
+                {
+                    entry.initializer_program = initializer_program.map(Rc::downgrade);
+                }
+                return;
+            }
+        }
+        let initializer_program =
+            matches!(&*cell.borrow(), Value::Native(Native::Uninitialized, _))
+                .then(|| initializer_program.map(Rc::downgrade))
+                .flatten();
+        self.entries.insert(
+            key,
+            ReadonlyCellEntry {
+                cell: Rc::downgrade(cell),
+                kind,
+                initializer_program,
+            },
+        );
+        if self.queued.insert(key) {
+            self.sweep.push_back(key);
+        }
+        self.sweep_dead(16);
+    }
+
+    pub(crate) fn kind_for_write(
+        &mut self,
+        cell: &Cell,
+        program: &Rc<Program>,
+        initializing_store: bool,
+    ) -> Option<ReadonlyCellKind> {
+        let key = Rc::as_ptr(cell) as usize;
+        match self.entries.get_mut(&key) {
+            Some(entry) => match entry.cell.upgrade() {
+                Some(known) if Rc::ptr_eq(&known, cell) => {
+                    let is_uninitialized =
+                        matches!(&*cell.borrow(), Value::Native(Native::Uninitialized, _));
+                    let is_owner_initializer = entry
+                        .initializer_program
+                        .as_ref()
+                        .and_then(Weak::upgrade)
+                        .is_some_and(|owner| Rc::ptr_eq(&owner, program));
+                    if initializing_store && is_uninitialized && is_owner_initializer {
+                        entry.initializer_program = None;
+                        None
+                    } else {
+                        Some(entry.kind)
+                    }
+                }
+                Some(_) | None => {
+                    self.entries.remove(&key);
+                    None
+                }
+            },
+            None => None,
+        }
+    }
+
+    fn sweep_dead(&mut self, budget: usize) {
+        for _ in 0..budget {
+            let Some(key) = self.sweep.pop_front() else {
+                break;
+            };
+            self.queued.remove(&key);
+            let Some(entry) = self.entries.get(&key) else {
+                continue;
+            };
+            if entry.cell.strong_count() == 0 {
+                self.entries.remove(&key);
+            } else if self.queued.insert(key) {
+                self.sweep.push_back(key);
+            }
+        }
+    }
+}
+
 pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// The program the *running* frame belongs to, swapped on every call and restored on return.
     pub(super) program: Rc<Program>,
@@ -48,6 +164,8 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) locals: Vec<Value>,
     /// The closure currently executing: `None` is the module body.
     pub(super) function: Option<Rc<Closure>>,
+    /// Property key used to enter the current function, when it was invoked as a method.
+    pub(super) method_name: Option<StringUnits>,
     /// Set by `Yield`, so the run loop knows it stopped at a suspension rather than a return.
     pub(super) suspended: bool,
     /// Active exception handlers, innermost last.
@@ -94,6 +212,13 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// to find it again. What it does *not* do is back variable lookup: writing
     /// `globalThis.x = 1` does not make a bare `x` resolve, since bindings live in module slots.
     pub(super) global_objects: Vec<Option<Value>>,
+    /// The `Timeout` and `Immediate` prototypes a realm's bootstrap published, by realm: what
+    /// `timer_handle` gives each handle it allocates, found once rather than by a scan of the
+    /// global object's properties on every timer.
+    pub(super) timer_prototypes: Vec<Option<(Value, Value)>>,
+    /// Successful RegExp capture strings, indexed by realm. Failed matches leave this snapshot
+    /// alone, as Annex B requires.
+    pub(super) regexp_legacy_captures: Vec<[StringUnits; 9]>,
     /// How many built-ins are currently between the running code and the interpreter loop.
     pub(super) native_depth: usize,
     /// `process`, built on first use and shared from then on.
@@ -105,6 +230,11 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// production answer), and enough identity to log. It is deliberately not node's `process`
     /// and has no way to exit, spawn, or reach a file system.
     pub(super) process_object: Option<Value>,
+    /// The unterminated tail of what `process.stdout.write` / `process.stderr.write` wrote.
+    /// Host output operations write whole lines, so a partial line waits here: the next write
+    /// completes it, the next `console.log` on the stream continues it, and the end of the run
+    /// flushes it (see `Vm::write_stdio`).
+    pub(super) pending_stdio: [String; 2],
     /// The built-ins a program has mutated, and how.
     ///
     /// A realm root like `global_object` and `error_prototypes`: `Math.max.name` and
@@ -133,9 +263,10 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) instruction: usize,
     /// The explicit language queues and virtual clock owned by the shared Realm Runtime seam.
     pub(super) realm: Realm<Scheduled, Timer>,
-    /// Policy for APIs that expose civil time. The scheduler clock remains `realm`'s virtual
-    /// clock regardless of this setting.
+    /// Policy for civil time and for advancing timer deadlines during event-loop turns.
     pub(super) clock_capability: ClockCapability,
+    /// Shared realm origin used to refresh timer deadlines while synchronous code is running.
+    pub(super) host_clock_origin_ms: Option<Rc<std::cell::Cell<Option<f64>>>>,
     /// Canonical environmental strings resolved once when the realm is entered.
     ///
     /// Host-backed policy crosses HostOps here, never from an individual builtin. This makes the
@@ -156,13 +287,19 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// execution's host granted agents at all. `None` disables `$262AgentStart` and its siblings.
     pub(super) host_agents: Option<&'static str>,
     pub(super) module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
+    pub(super) string_code_generation_allowed: bool,
     /// How this execution starts a worker, if it can (`node:worker_threads`).
     pub(super) worker_host: Option<Arc<dyn crate::WorkerHost>>,
     /// Whether this machine runs in a worker, whose parent may stop it at any checkpoint.
     pub(super) in_worker: bool,
     pub(super) module_path: Option<Rc<str>>,
+    pub(super) module_generation: u64,
+    /// Strong identity for the module-generation context currently executing. The scalar id is
+    /// still used for lookups; this edge keeps its records alive across resetModules.
+    pub(super) module_generation_owner: Option<crate::module_map::ModuleGenerationHandle>,
     /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
     pub(super) argv: Vec<String>,
+    pub(super) exec_argv: Vec<String>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pub(super) pending_host: Vec<PendingHostRequest>,
     /// Persistent Node resource requests routed to provider-neutral server/stream drivers.
@@ -170,6 +307,14 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// Live HTTP servers in this realm. A separate registry makes response-to-stream lookup
     /// independent of which host operations happen to be pending at that moment.
     pub(super) node_servers: Vec<Rc<RefCell<NodeServerState>>>,
+    /// Strong roots for server EventEmitter objects from listen until terminal close. This owner
+    /// registry avoids a cycle through `ObjectData::node_object` and is released with the VM or
+    /// its shared module realm on abort/teardown.
+    pub(super) active_node_server_objects: std::collections::HashMap<usize, Value>,
+    /// Keep outgoing socket wrappers reachable while an OS connection/stream is active. The
+    /// transport state deliberately points back weakly, so this owner registry is the strong
+    /// lifetime edge until terminal close (or VM teardown).
+    pub(super) active_node_socket_objects: std::collections::HashMap<usize, Value>,
     /// Interpreter-owned ClientRequest values keyed exactly like the runtime Agent queue.
     pub(super) http_client_requests:
         std::collections::BTreeMap<u64, Rc<RefCell<HttpClientRequestState>>>,
@@ -182,6 +327,9 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     pub(super) async_host: Option<*mut dyn ActiveAsyncHostOps>,
     /// Runtime-owned HTTP policy installed beside the capability-only HostOps surface.
     pub(super) http_runtime: Option<*mut dyn ActiveHttpRuntime>,
+    /// Async host for the HTTP client (global fetch), available without the Node Adapter.
+    /// Set alongside http_runtime; the underlying RealmRuntime implements ActiveAsyncHostOps.
+    pub(super) http_client_host: Option<*mut dyn ActiveAsyncHostOps>,
     /// Graph-owned lazy CommonJS loader, installed only while evaluating a module graph.
     pub(super) commonjs_loader: Option<*mut (dyn CommonJsModuleLoader + 'host)>,
     /// Which `AsyncLocalStorage`s hold a store right here.
@@ -212,6 +360,9 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// one mechanism for both rather than a fast path and a fallback.
     /// Empty for every module that does not import from itself, which is nearly all of them.
     pub(super) self_bindings: Vec<(Rc<RefCell<Value>>, u32)>,
+    /// Immutable direct-eval bindings keyed by cell identity. Weak keys let closures keep the
+    /// cells alive naturally without retaining every evaluated function for the VM's lifetime.
+    pub(super) readonly_cells: SharedReadonlyCellRegistry,
     /// Namespace objects a module imported from itself, and the slots each name shows. Caught up
     /// from those slots before every instruction, so no read can see one stale.
     pub(super) self_namespaces: Vec<SelfNamespace>,
@@ -268,28 +419,14 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// function a program evaluates stays allocated until the process exits. A program that runs
     /// once never notices; a harness that runs the whole of Test262 in one process grows by the
     /// size of every function it has ever seen and is killed well before the end. Weak, so the
-    /// registry itself keeps nothing alive -- it exists only so [`Vm::release_cycles`] can find
-    /// the closures again and cut the links.
+    /// registry itself keeps nothing alive -- it exists only so cycle collection can discover
+    /// candidates without treating the census as a root.
     pub(super) closures: Vec<Weak<Closure>>,
-    /// What each module a dynamic import has already evaluated, or how it failed, by the host's
-    /// key for it.
-    ///
-    /// The module cache, and the whole of what makes `import("./m.js")` twice run `m.js` once
-    /// (including the once-only evaluation rule for a rejected module).
-    /// It is realm state rather than the loader's, because it holds *values* -- a second
-    /// evaluation would produce a second set of objects, and a program that compared the two
-    /// namespaces would see them differ.
-    ///
-    /// Keyed by realm as well as by specifier, because each realm has its own module map. Two
-    /// realms importing one specifier get two independent instances, which is what stops a
-    /// `ShadowRealm` from sharing module state with the realm that made it: a shared map would
-    /// let a write to an export in one realm be read in the other, and no amount of wrapping
-    /// values at the boundary would close that.
-    pub(super) dynamic_modules: std::collections::HashMap<(RealmId, String), DynamicModuleState>,
-    /// The namespace object handed back for each module, so two imports of one module hand back
-    /// the same object rather than two equal ones. A namespace has identity in the
-    /// specification, and `import(s).then(a => import(s).then(b => a === b))` is how a program
-    /// sees it.
-    pub(super) dynamic_namespaces: std::collections::HashMap<(RealmId, String), Value>,
+    pub(super) closures_prune_at: usize,
+    /// The realm's module map (see [`ModuleMap`]): what each module has come to, by realm and
+    /// canonical key. Shared with every other machine in this realm session, and with the static
+    /// graph executor, so a module is evaluated once however it is reached. A machine running
+    /// outside a session has a map of its own.
+    pub(super) module_map: SharedModuleMap,
     pub(super) limits: ExecutionLimits,
 }

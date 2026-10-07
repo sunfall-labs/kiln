@@ -59,6 +59,9 @@
 
 #![forbid(unsafe_code)]
 
+mod bindings;
+pub use bindings::GlobalBuiltin;
+
 /// The members this implementation serves with *another* member's function.
 ///
 /// A static's `.name` is its member key -- `Object.keys.name` is `"keys"` -- and node makes that
@@ -102,6 +105,182 @@ pub const BOOTSTRAP_STATICS: &[(&str, &str)] = &[
     ("Iterator", "zip"),
     ("Iterator", "zipKeyed"),
 ];
+
+/// Declared lengths for callable built-in members whose identity is shared by both engines.
+/// Prototype methods derive their lengths from `PROTOTYPE_SURFACE`; this table covers static
+/// methods, which are part of `BUILTIN_SURFACE`. Keeping the arity beside the shared public
+/// surface prevents the interpreter and native callable facade from maintaining separate
+/// reflection metadata.
+pub const NATIVE_FUNCTION_LENGTHS: &[(&str, &str, usize)] = &[
+    ("globalThis", "queueMicrotask", 1),
+    ("globalThis", "setTimeout", 2),
+    ("globalThis", "setInterval", 2),
+    ("globalThis", "clearTimeout", 1),
+    ("globalThis", "clearInterval", 1),
+    ("globalThis", "setImmediate", 1),
+    ("globalThis", "clearImmediate", 1),
+    ("AbortSignal", "abort", 0),
+    ("AbortSignal", "any", 1),
+    ("AbortSignal", "timeout", 1),
+    ("Array", "from", 1),
+    ("Array", "isArray", 1),
+    ("Array", "of", 0),
+    ("ArrayBuffer", "isView", 1),
+    ("Buffer", "alloc", 3),
+    ("Buffer", "allocUnsafe", 2),
+    ("Buffer", "allocUnsafeSlow", 2),
+    ("Buffer", "byteLength", 2),
+    ("Buffer", "concat", 2),
+    ("Buffer", "from", 3),
+    ("Buffer", "isBuffer", 1),
+    ("Date", "UTC", 7),
+    ("Date", "now", 0),
+    ("Date", "parse", 1),
+    ("Error", "captureStackTrace", 2),
+    ("Iterator", "from", 1),
+    ("JSON", "parse", 2),
+    ("JSON", "rawJSON", 1),
+    ("JSON", "isRawJSON", 1),
+    ("JSON", "stringify", 3),
+    ("Math", "abs", 1),
+    ("Math", "acos", 1),
+    ("Math", "acosh", 1),
+    ("Math", "asin", 1),
+    ("Math", "asinh", 1),
+    ("Math", "atan", 1),
+    ("Math", "atan2", 2),
+    ("Math", "atanh", 1),
+    ("Math", "cbrt", 1),
+    ("Math", "ceil", 1),
+    ("Math", "clz32", 1),
+    ("Math", "cos", 1),
+    ("Math", "cosh", 1),
+    ("Math", "exp", 1),
+    ("Math", "expm1", 1),
+    ("Math", "floor", 1),
+    ("Math", "fround", 1),
+    ("Math", "hypot", 2),
+    ("Math", "imul", 2),
+    ("Math", "log", 1),
+    ("Math", "log10", 1),
+    ("Math", "log1p", 1),
+    ("Math", "log2", 1),
+    ("Math", "max", 2),
+    ("Math", "min", 2),
+    ("Math", "pow", 2),
+    ("Math", "random", 0),
+    ("Math", "round", 1),
+    ("Math", "sign", 1),
+    ("Math", "sin", 1),
+    ("Math", "sinh", 1),
+    ("Math", "sqrt", 1),
+    ("Math", "tan", 1),
+    ("Math", "tanh", 1),
+    ("Math", "trunc", 1),
+    ("Number", "isFinite", 1),
+    ("Number", "isInteger", 1),
+    ("Number", "isNaN", 1),
+    ("Number", "isSafeInteger", 1),
+    ("Number", "parseFloat", 1),
+    ("Number", "parseInt", 2),
+    ("Object", "assign", 2),
+    ("Object", "create", 2),
+    ("Object", "defineProperties", 2),
+    ("Object", "defineProperty", 3),
+    ("Object", "entries", 1),
+    ("Object", "freeze", 1),
+    ("Object", "fromEntries", 1),
+    ("Object", "getOwnPropertyNames", 1),
+    ("Object", "getOwnPropertySymbols", 1),
+    ("Object", "getPrototypeOf", 1),
+    ("Object", "hasOwn", 2),
+    ("Object", "is", 2),
+    ("Object", "isExtensible", 1),
+    ("Object", "isFrozen", 1),
+    ("Object", "preventExtensions", 1),
+    ("Object", "setPrototypeOf", 2),
+    ("Object", "values", 1),
+    ("Promise", "all", 1),
+    ("Promise", "allSettled", 1),
+    ("Promise", "any", 1),
+    ("Promise", "race", 1),
+    ("Promise", "reject", 1),
+    ("Promise", "resolve", 1),
+    ("Promise", "withResolvers", 0),
+    ("Proxy", "revocable", 2),
+    ("Reflect", "apply", 3),
+    ("Reflect", "construct", 2),
+    ("Reflect", "defineProperty", 3),
+    ("Reflect", "deleteProperty", 2),
+    ("Reflect", "get", 2),
+    ("Reflect", "getOwnPropertyDescriptor", 2),
+    ("Reflect", "getPrototypeOf", 1),
+    ("Reflect", "has", 2),
+    ("Reflect", "ownKeys", 1),
+    ("Reflect", "set", 3),
+    ("String", "fromCharCode", 1),
+    ("String", "fromCodePoint", 1),
+    ("String", "raw", 1),
+    ("node:fs", "readFileSync", 2),
+    ("node:fs", "writeFileSync", 3),
+    ("node:fs", "mkdirSync", 2),
+    ("node:fs", "statSync", 2),
+    ("node:fs", "lstatSync", 2),
+    ("node:fs", "readdirSync", 2),
+    ("node:fs", "realpathSync", 2),
+    ("node:fs", "unlinkSync", 1),
+    ("node:fs", "rmdirSync", 2),
+    ("node:http.ServerResponse.prototype", "setHeader", 2),
+    ("node:http.ServerResponse.prototype", "getHeader", 1),
+    ("node:http.ServerResponse.prototype", "getHeaders", 0),
+    ("node:http.ServerResponse.prototype", "hasHeader", 1),
+    ("node:http.ServerResponse.prototype", "removeHeader", 1),
+    ("node:http.ServerResponse.prototype", "writeHead", 3),
+    ("node:http.ServerResponse.prototype", "write", 3),
+    ("node:http.ServerResponse.prototype", "end", 3),
+    ("node:stream.Writable.prototype", "destroy", 1),
+    // Primitive-dispatched methods use PURE_MEMBERS rather than PROTOTYPE_SURFACE.
+    ("String.prototype", "indexOf", 1),
+    ("Symbol", "for", 1),
+    ("Symbol", "keyFor", 1),
+    ("performance", "now", 0),
+    ("Object", "keys", 1),
+    ("Object", "getOwnPropertyDescriptor", 2),
+    ("Object", "getOwnPropertyDescriptors", 1),
+    ("Function.prototype", "call", 1),
+    ("Function.prototype", "apply", 2),
+    ("Function.prototype", "bind", 1),
+    ("Date.prototype", "getTime", 0),
+    ("RegExp.prototype", "test", 1),
+    ("RegExp.prototype", "exec", 1),
+    ("RegExp.prototype", "toString", 0),
+];
+
+pub const fn native_function_length(owner: &str, member: &str) -> Option<usize> {
+    let mut index = 0;
+    while index < NATIVE_FUNCTION_LENGTHS.len() {
+        let (candidate_owner, candidate_member, length) = NATIVE_FUNCTION_LENGTHS[index];
+        if same(candidate_owner, owner) && same(candidate_member, member) {
+            return Some(length);
+        }
+        index += 1;
+    }
+    /* Prototype callables share the same public arity authority as static callables. Keeping
+     * these rows here lets the interpreter and emitted native facades query one specification
+     * table instead of growing separate backend method-length switches. */
+    index = 0;
+    while index < PROTOTYPE_SURFACE.len() {
+        let row = PROTOTYPE_SURFACE[index];
+        if same(row.prototype.name(), owner) && same(row.key.property_key(), member) {
+            if let MemberKind::Method { length } = row.kind {
+                return Some(length);
+            }
+            return None;
+        }
+        index += 1;
+    }
+    None
+}
 
 /// Whether `global.member` is one of the [`BOOTSTRAP_STATICS`].
 pub fn is_bootstrap_static(global: &str, member: &str) -> bool {
@@ -813,7 +992,6 @@ pub enum ArrayMethod {
     Keys,
     LastIndexOf,
     Map,
-    ParallelMap,
     Pop,
     Push,
     Reduce,
@@ -1050,13 +1228,6 @@ pub const PROTOTYPE_SURFACE: &[PrototypeMember] = &[
         kind: MemberKind::Method { length: 1 },
         attributes: DescriptorAttributes::METHOD,
         binding: SemanticBinding::ArrayMethod(ArrayMethod::Map),
-    },
-    PrototypeMember {
-        prototype: PrototypeId::Array,
-        key: MemberKey::Named("parallelMap"),
-        kind: MemberKind::Method { length: 1 },
-        attributes: DescriptorAttributes::METHOD,
-        binding: SemanticBinding::ArrayMethod(ArrayMethod::ParallelMap),
     },
     PrototypeMember {
         prototype: PrototypeId::Array,
@@ -2038,12 +2209,18 @@ pub enum ExtensionInstaller {
 
 /// Every kiln extension, in both engines. See [`KilnExtension`].
 pub const KILN_EXTENSIONS: &[KilnExtension] = &[
+    // The parallel family (ADR 0058, ADR 0069): one sequential definition of every member, on
+    // both owners, in `kiln-builtins/src/parallel.ts`, and a pooled lowering where the native
+    // backend proves the callback pure (`kiln-backend-c/src/parallel.rs`). Neither engine answers
+    // any of them natively: `parallelMap` was once a `PROTOTYPE_SURFACE` row each engine answered
+    // as `map` under another name, which made three definitions of one method.
+    // `parallelFlatMap` is on arrays only.
     KilnExtension {
         owner: "Array.prototype",
         key: MemberKey::Named("parallelMap"),
         attributes: DescriptorAttributes::METHOD,
         decided_by: "ADR 0058",
-        installed_by: ExtensionInstaller::Description,
+        installed_by: ExtensionInstaller::Bootstrap,
     },
     KilnExtension {
         owner: "%TypedArray%.prototype",
@@ -2052,9 +2229,6 @@ pub const KILN_EXTENSIONS: &[KilnExtension] = &[
         decided_by: "ADR 0058",
         installed_by: ExtensionInstaller::Bootstrap,
     },
-    // The parallel family (ADR 0069, parallel-builtins issue 10): sequential definitions in
-    // `kiln-builtins/src/parallel.ts`, and a pooled lowering where the native backend proves the
-    // callback pure (`kiln-backend-c/src/parallel.rs`). `parallelFlatMap` is on arrays only.
     KilnExtension {
         owner: "Array.prototype",
         key: MemberKey::Named("parallelFilter"),
@@ -2102,6 +2276,24 @@ pub const KILN_EXTENSIONS: &[KilnExtension] = &[
         key: MemberKey::Named("parallelReduce"),
         attributes: DescriptorAttributes::METHOD,
         decided_by: "ADR 0069",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
+    // The two global names a kiln program serves HTTP through (`Kiln.serve`, and `Bun.serve` for
+    // programs written against Bun). Defined by the web bootstrap (`kiln-builtins/src/web.ts`)
+    // only when the realm installs extensions, non-enumerable, so a Node-only program neither
+    // finds them nor sees them walking `globalThis`.
+    KilnExtension {
+        owner: "globalThis",
+        key: MemberKey::Named("Kiln"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0068",
+        installed_by: ExtensionInstaller::Bootstrap,
+    },
+    KilnExtension {
+        owner: "globalThis",
+        key: MemberKey::Named("Bun"),
+        attributes: DescriptorAttributes::METHOD,
+        decided_by: "ADR 0068",
         installed_by: ExtensionInstaller::Bootstrap,
     },
 ];
@@ -2496,7 +2688,8 @@ mod tests {
             .iter()
             .filter(|member| member.is_kiln_extension())
             .collect();
-        assert!(!marked.is_empty());
+        // Every extension today is the bootstrap's (`parallel.ts`), so no row is marked; a row
+        // that ever is must be non-enumerable too.
         for member in marked {
             assert!(
                 !member.attributes.enumerable,
@@ -2512,9 +2705,13 @@ mod tests {
         assert!(is_kiln_extension("Array.prototype", "parallelMap"));
         assert!(is_kiln_extension("%TypedArray%.prototype", "parallelMap"));
         assert!(!is_kiln_extension("Array.prototype", "map"));
+        // The whole family is the bootstrap's (`kiln-builtins/src/parallel.ts`): no engine
+        // answers a member of it from the description.
+        assert!(find_prototype_member(PrototypeId::Array, "parallelMap").is_none());
         assert!(
-            find_prototype_member(PrototypeId::Array, "parallelMap")
-                .is_some_and(PrototypeMember::is_kiln_extension)
+            KILN_EXTENSIONS
+                .iter()
+                .all(|e| e.installed_by == ExtensionInstaller::Bootstrap)
         );
         assert!(
             !find_prototype_member(PrototypeId::Array, "map")
@@ -2556,11 +2753,11 @@ mod tests {
     #[test]
     fn array_prototype_members_are_complete() {
         let members: Vec<_> = prototype_members(PrototypeId::Array).collect();
-        assert_eq!(members.len(), 43);
+        assert_eq!(members.len(), 42);
         assert!(prototype_has(PrototypeId::Array, "length"));
         assert!(prototype_has(PrototypeId::Array, "constructor"));
         assert!(prototype_has(PrototypeId::Array, "map"));
-        assert!(prototype_has(PrototypeId::Array, "parallelMap"));
+        assert!(!prototype_has(PrototypeId::Array, "parallelMap"));
         assert!(prototype_has(PrototypeId::Array, "push"));
         assert!(prototype_has(PrototypeId::Array, "pop"));
         assert!(prototype_has(PrototypeId::Array, "slice"));

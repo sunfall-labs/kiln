@@ -1,0 +1,16 @@
+import * as chai from 'chai';
+import {JestExtend, JestChaiExpect, ChaiStyleAssertions, JestAsymmetricMatchers, ASYMMETRIC_MATCHERS_OBJECT, GLOBAL_EXPECT, setState, getState, addCustomEqualityTesters, customMatchers} from '@vitest/expect';
+import {installExpect} from './harness.mjs';
+chai.use(JestExtend);
+chai.use(JestChaiExpect);
+chai.use(ChaiStyleAssertions);
+chai.use(JestAsymmetricMatchers);
+const expect=Object.assign((value,message)=>chai.expect(value,message),chai.expect,globalThis[ASYMMETRIC_MATCHERS_OBJECT]);
+expect.getState=()=>getState(expect);
+expect.setState=state=>setState(state,expect);
+expect.addEqualityTesters=addCustomEqualityTesters;
+expect.extend=matchers=>chai.expect.extend(expect,matchers);
+setState({assertionCalls:0,isExpectingAssertions:false,expectedAssertionsNumber:null},expect);
+globalThis[GLOBAL_EXPECT]=expect;
+expect.extend(customMatchers);
+installExpect(expect);

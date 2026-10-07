@@ -1,5 +1,12 @@
 use super::*;
 
+/// A resolved ordinary property read. Opcode callers can enter an accessor on the
+/// VM frame stack; synchronous runtime callers consume the same resolution.
+pub(super) enum PropertyRead {
+    Value(Value),
+    Getter { getter: Value, receiver: Value },
+}
+
 impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Read a property, calling a getter when the slot holds one.
     ///
@@ -433,7 +440,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get_prototype_of(target, instruction);
         }
-        Ok(prototype_of(target))
+        Ok(prototype_of_in(&self.intrinsics, target))
     }
 
     /// `proxy.[[IsExtensible]]()`.
@@ -509,7 +516,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let Value::Proxy(proxy) = target else {
-            return Ok(prototype_of(target));
+            return Ok(prototype_of_in(&self.intrinsics, target));
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
@@ -618,7 +625,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             }
             data.set("configurable", Value::Boolean(false));
-            let descriptor = Value::Object(Rc::new(RefCell::new(data)));
+            let descriptor = Value::Object(tracked_object(data));
             self.dispatch_native(
                 Native::ObjectDefineProperty,
                 &Value::Undefined,
@@ -829,7 +836,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Some(configurable) = described.configurable {
             data.set("configurable", Value::Boolean(configurable));
         }
-        Value::Object(Rc::new(RefCell::new(data)))
+        Value::Object(tracked_object(data))
     }
 
     /// `FromPropertyDescriptor(ToPropertyDescriptor(x))`: every field spelled out.
@@ -853,7 +860,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "configurable",
             Value::Boolean(described.configurable.unwrap_or(false)),
         );
-        Value::Object(Rc::new(RefCell::new(data)))
+        Value::Object(tracked_object(data))
     }
 
     /// The trap `name` names on a proxy's handler, or `None` when the handler does not have one.
@@ -960,9 +967,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match target {
             Value::Shared(facade) => facade.own_property(key).map(|(property, _)| property),
             Value::Object(object) => object.borrow().lookup_key(key),
-            Value::Function(closure) if !key.matches_ascii("prototype") => {
-                closure.properties.borrow().lookup_key(key)
+            Value::Function(closure)
+                if key.matches_ascii("prototype") && has_prototype_property(closure) =>
+            {
+                None
             }
+            Value::Function(closure) => closure.properties.borrow().lookup_key(key),
             // An array's non-element properties live in an ordinary store with an ordinary
             // chain, so a subclass's accessor is reachable the same way. An *index* may hold an
             // accessor too, either its own or one the chain carries where the array has a hole.
@@ -1038,6 +1048,63 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: PropertyKeyRef<'_>,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        let read = self.prepare_property_inner_key(target, key, instruction)?;
+        self.finish_property_read(read, instruction)
+    }
+
+    pub(super) fn prepare_property_read_key(
+        &mut self,
+        target: &Value,
+        key: PropertyKeyRef<'_>,
+        instruction: usize,
+    ) -> Result<PropertyRead, ExecutionError> {
+        let read = self.prepare_property_inner_key(target, key, instruction)?;
+        if matches!(
+            &read,
+            PropertyRead::Value(Value::Native(Native::Uninitialized, _))
+        ) {
+            return Err(uninitialized_export_error(&key.owned().to_lossy_string()));
+        }
+        Ok(read)
+    }
+
+    fn finish_property_read(
+        &mut self,
+        read: PropertyRead,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        match read {
+            PropertyRead::Value(value) => Ok(value),
+            PropertyRead::Getter { getter, receiver } => {
+                self.call_value(&getter, receiver, Vec::new(), instruction)
+            }
+        }
+    }
+
+    pub(super) fn dispatch_property_read(
+        &mut self,
+        read: PropertyRead,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        match read {
+            PropertyRead::Value(value) => Ok(Some(value)),
+            PropertyRead::Getter { getter, receiver } => {
+                // A compiled getter owns its realm until Return restores the caller's frame.
+                if matches!(&getter, Value::Function(_)) {
+                    self.invoke_dispatch(getter, receiver, Vec::new(), instruction, None)
+                } else {
+                    self.invoke(getter, receiver, Vec::new(), instruction, None)
+                }
+            }
+        }
+    }
+
+    fn prepare_property_inner_key(
+        &mut self,
+        target: &Value,
+        key: PropertyKeyRef<'_>,
+        instruction: usize,
+    ) -> Result<PropertyRead, ExecutionError> {
         if matches!(target, Value::Proxy(_)) {
             let trap_key = key
                 .is_symbol()
@@ -1046,16 +1113,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .and_then(|spelling| self.symbol_of_key(spelling.as_ref()))
                 .map(Value::Symbol)
                 .unwrap_or_else(|| Value::String(key.owned()));
-            return self.proxy_get(target, &trap_key, instruction);
+            return self
+                .proxy_get(target, &trap_key, instruction)
+                .map(PropertyRead::Value);
         }
-        // A namespace names the exporting module's bindings, so it is caught up before it is
-        // read: the module may have assigned to an export since the link ran. The shared borrow
-        // decides first, so an ordinary object -- which is every object but these -- never takes
-        // the exclusive one, and a read that re-enters through a getter cannot collide with it.
-        if let Value::Object(object) = target
-            && object.borrow().tracks_namespace_cells()
+        // Array `length` is an own data property backed by the dense array header, rather than
+        // by its ordinary property store. Resolve it before walking any stored or inherited
+        // properties so a custom prototype's `length` cannot shadow the array's own value.
+        if let Value::Array(items) = target
+            && key.matches_ascii("length")
         {
-            object.borrow_mut().refresh_namespace();
+            #[expect(clippy::cast_precision_loss)]
+            return Ok(PropertyRead::Value(Value::Number(items.length() as f64)));
         }
         // A `DataView` a shrink has left outside its buffer answers neither of its two
         // measurements: the specification checks the view is still in bounds before it reports
@@ -1071,10 +1140,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // the read reaches it here. An own or inherited property of that name shadows it exactly
         // as it would shadow any accessor further up the chain, which is why this runs only when
         // the walk above found nothing.
-        if key.matches_ascii("__proto__") && stored.is_none() && is_reflect_target(target) {
+        if key.matches_ascii("__proto__")
+            && stored.is_none()
+            && is_reflect_target(target)
+            && self.object_prototype_accessor_in_chain(target, instruction)?
+        {
             // `[[GetPrototypeOf]]`, which a proxy answers with a handler rather than a stored
             // link -- so reading `p.__proto__` reports the proxy's prototype, not its target's.
-            return self.proxy_get_prototype_of(target, instruction);
+            return self
+                .proxy_get_prototype_of(target, instruction)
+                .map(PropertyRead::Value);
         }
         // `Function.prototype.caller` and `.arguments` are the same shape of problem: an
         // accessor on a table that has no room for one. Every function inherits the pair from
@@ -1096,7 +1171,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .known_ascii()
                 .and_then(|name| machine_accessor(target, name.as_ref()))
         {
-            return self.builtin_accessor(builtin, target, instruction);
+            return self
+                .builtin_accessor(builtin, target, instruction)
+                .map(PropertyRead::Value);
         }
         // And once more for `Temporal`, whose forty getters live in a table of the same shape.
         // Reading one off the prototype is the getter's own TypeError -- the prototype is not a
@@ -1107,20 +1184,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .known_ascii()
                 .and_then(|name| temporal::prototype_accessor(*kind, name.as_ref()))
         {
-            return self.temporal_dispatch(
-                temporal::Op::Accessor(*kind, field),
-                target,
-                &[],
-                instruction,
-            );
+            return self
+                .temporal_dispatch(
+                    temporal::Op::Accessor(*kind, field),
+                    target,
+                    &[],
+                    instruction,
+                )
+                .map(PropertyRead::Value);
         }
         match stored {
             Some(Property::Accessor { get, .. }) => match get {
-                Some(getter) => self.call_value(&getter, target.clone(), Vec::new(), instruction),
+                Some(getter) => Ok(PropertyRead::Getter {
+                    getter,
+                    receiver: target.clone(),
+                }),
                 // Setter-only, so there is nothing to read.
-                None => Ok(Value::Undefined),
+                None => Ok(PropertyRead::Value(Value::Undefined)),
             },
-            Some(Property::Value(value)) => Ok(value),
+            Some(Property::Value(value)) => Ok(PropertyRead::Value(value)),
             _ => {
                 let found = self.property_key(target, key);
                 // Nothing in any store, so a proxy further up the chain is the one thing that
@@ -1129,14 +1211,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(found, Value::Undefined)
                     && let Some(proxy) = self.proxy_on_chain(target)
                 {
-                    return self.proxy_get_with_receiver(
-                        &proxy,
-                        &Value::String(key.owned()),
-                        target,
-                        instruction,
-                    );
+                    return self
+                        .proxy_get_with_receiver(
+                            &proxy,
+                            &Value::String(key.owned()),
+                            target,
+                            instruction,
+                        )
+                        .map(PropertyRead::Value);
                 }
-                Ok(found)
+                Ok(PropertyRead::Value(found))
             }
         }
     }
@@ -1171,6 +1255,47 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(true)
     }
 
+    /// Whether an ordinary `__proto__` lookup reaches the synthetic accessor on
+    /// `Object.prototype`. The accessor is not a property on every object: null-prototype
+    /// dictionaries, and objects whose custom prototype chain ends before Object.prototype,
+    /// treat the name as an ordinary absent property. A stored property on an intermediate
+    /// prototype also shadows the synthetic accessor and must be handled by the ordinary walk.
+    fn object_prototype_accessor_in_chain(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let key = PropertyKeyRef::Utf8("__proto__");
+        let mut current = self.prototype_for(target, instruction)?;
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            match &current {
+                Value::Null | Value::Undefined => return Ok(false),
+                // A proxy in the chain gets the ordinary get/set opportunity below. Jumping to
+                // the synthetic accessor here would skip its traps.
+                Value::Proxy(_) => return Ok(false),
+                _ => {}
+            }
+            if matches!(
+                current,
+                Value::Native(Native::PrototypeOf(PrototypeTable::Object), _)
+            ) {
+                return Ok(match self.stored_property_key(&current, key) {
+                    Some(Property::Accessor {
+                        get: Some(Value::Native(Native::ProtoGetter, _)),
+                        set: Some(Value::Native(Native::ProtoSetter, _)),
+                    })
+                    | None => true,
+                    Some(_) => false,
+                });
+            }
+            if self.own_stored_property_key(&current, key).is_some() {
+                return Ok(false);
+            }
+            current = self.prototype_for(&current, instruction)?;
+        }
+        Ok(false)
+    }
+
     /// Route a write up the prototype chain a value's *kind* gives it, answering whether the
     /// chain consumed it.
     ///
@@ -1187,10 +1312,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: &Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
-        let mut current = prototype_of(target);
+        let mut current = match target {
+            Value::Date(date) => date
+                .properties
+                .borrow()
+                .prototype()
+                .cloned()
+                .unwrap_or_else(|| prototype_of_in(&self.intrinsics, target)),
+            _ => prototype_of_in(&self.intrinsics, target),
+        };
         for _ in 0..MAX_PROTOTYPE_DEPTH {
             if matches!(current, Value::Null | Value::Undefined) {
                 return Ok(false);
+            }
+            if matches!(current, Value::Proxy(_)) {
+                let property_key = if key.is_symbol() {
+                    self.symbol_of_key(&key.owned().to_lossy_string())
+                        .map(Value::Symbol)
+                        .unwrap_or_else(|| Value::String(key.owned()))
+                } else {
+                    Value::String(key.owned())
+                };
+                let _ =
+                    self.set_reflect(&current, &property_key, value.clone(), target, instruction)?;
+                return Ok(true);
             }
             match own_property_state_key(&self.intrinsics, &current, key) {
                 Some((Property::Accessor { set, .. }, _)) => {
@@ -1204,7 +1349,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // A data property up the chain does not take the write -- an own one is created
                 // to shadow it -- unless it refused to be written at all.
                 Some((Property::Value(_), attributes)) => return Ok(!attributes.writable),
-                None => current = prototype_of(&current),
+                None => current = prototype_of_in(&self.intrinsics, &current),
             }
         }
         Ok(false)
@@ -1264,11 +1409,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Value::String(text) = target
             && let Some(index) = array_index_key(key)
         {
-            let units: Vec<u16> = text.encode_utf16().collect();
-            return match units.get(index) {
+            // Read in place rather than copying every unit out first, which made each `s[i]`
+            // O(length) and a loop over the string quadratic.
+            return match text.unit_at(index) {
                 // One unit, not one character: indexing a surrogate pair gives half of it, which
                 // is the language's answer and the reason `for-of` over a string differs.
-                Some(unit) => Value::String(StringUnits::from_units(&[*unit])),
+                Some(unit) => Value::String(StringUnits::from_units(&[unit])),
                 None => Value::Undefined,
             };
         }
@@ -1439,12 +1585,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// `false` for every `in` -- the traps never ran, and a proxy used as a prototype is how a
     /// library gives an object dynamic members it cannot enumerate in advance.
     pub(crate) fn proxy_on_chain(&self, target: &Value) -> Option<Value> {
-        let mut current = prototype_of(target);
+        let mut current = prototype_of_in(&self.intrinsics, target);
         for _ in 0..MAX_PROTOTYPE_DEPTH {
             match current {
                 Value::Proxy(_) => return Some(current),
                 Value::Null | Value::Undefined => return None,
-                other => current = prototype_of(&other),
+                other => current = prototype_of_in(&self.intrinsics, &other),
             }
         }
         None
@@ -1530,19 +1676,54 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         receiver: &Value,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        let read = self.prepare_computed_inner(target, key, receiver, instruction)?;
+        self.finish_property_read(read, instruction)
+    }
+
+    pub(super) fn prepare_computed_read(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<PropertyRead, ExecutionError> {
+        let read = self.prepare_computed_inner(target, key, receiver, instruction)?;
+        if matches!(
+            &read,
+            PropertyRead::Value(Value::Native(Native::Uninitialized, _))
+        ) {
+            return Err(uninitialized_export_error(&key.to_display_string()));
+        }
+        Ok(read)
+    }
+
+    fn prepare_computed_inner(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<PropertyRead, ExecutionError> {
         let key = &self.computed_key(key, instruction)?;
         if matches!(target, Value::Proxy(_)) {
-            return self.proxy_get_with_receiver(target, key, receiver, instruction);
+            return self
+                .proxy_get_with_receiver(target, key, receiver, instruction)
+                .map(PropertyRead::Value);
         }
+        // Computed reads are still ordinary [[Get]] operations. In particular, Object.assign
+        // reads namespace exports through this path; stored_property_key resolves an export's
+        // current cell through the same own-property state used by descriptors.
         // A numeric key on an integer-indexed exotic already identifies the canonical
         // numeric string. Avoid formatting and reparsing it for every byte of a view copy.
         // ToPropertyKey maps numeric -0 to "0"; the distinct string "-0" still takes the
         // generic path. Invalid numeric indices never consult the prototype or receiver.
         if let (Value::TypedArray(view), Value::Number(number)) = (target, key) {
             let index = if *number == 0.0 { 0.0 } else { *number };
-            return Ok(valid_integer_index(view, index)
-                .and_then(|at| view.get(at))
-                .unwrap_or(Value::Undefined));
+            return Ok(PropertyRead::Value(
+                valid_integer_index(view, index)
+                    .and_then(|at| view.get(at))
+                    .unwrap_or(Value::Undefined),
+            ));
         }
         let property_key_units = key.property_key_units_checked()?;
 
@@ -1555,7 +1736,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .and_then(|name| machine_accessor(target, name.as_ref()))
             && self.stored_property_key(target, property_key).is_none()
         {
-            return self.builtin_accessor(builtin, receiver, instruction);
+            return self
+                .builtin_accessor(builtin, receiver, instruction)
+                .map(PropertyRead::Value);
         }
         // The named read's own walk, on the computed spelling. This was a second copy of it,
         // arm for arm, with two of the arms already delegating here -- and the copy is how the
@@ -1564,11 +1747,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // drift from itself.
         match self.stored_property_key(target, property_key) {
             Some(Property::Accessor { get, .. }) => match get {
-                Some(getter) => self.call_value(&getter, receiver.clone(), Vec::new(), instruction),
-                None => Ok(Value::Undefined),
+                Some(getter) => Ok(PropertyRead::Getter {
+                    getter,
+                    receiver: receiver.clone(),
+                }),
+                None => Ok(PropertyRead::Value(Value::Undefined)),
             },
-            Some(Property::Value(value)) => Ok(value),
-            _ => Ok(self.computed_key_ref(target, property_key)),
+            Some(Property::Value(value)) => Ok(PropertyRead::Value(value)),
+            _ => {
+                let found = self.computed_key_ref(target, property_key);
+                // Continue observable prototype lookup when the pure indexed-storage lookup
+                // reaches a Proxy. An own undefined still shadows inherited properties.
+                if matches!(found, Value::Undefined)
+                    && own_property_state_key(&self.intrinsics, target, property_key).is_none()
+                    && let Some(proxy) = self.proxy_on_chain(target)
+                {
+                    return self
+                        .proxy_get_with_receiver(&proxy, key, receiver, instruction)
+                        .map(PropertyRead::Value);
+                }
+                Ok(PropertyRead::Value(found))
+            }
         }
     }
 
@@ -1766,6 +1965,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Ordinary arrays with untouched intrinsic numeric properties cannot encounter
             // a setter. Otherwise reuse the same descriptor walk as the other exotic stores.
             if (self.intrinsics.indexed_array_prototype.get()
+                || self
+                    .intrinsics
+                    .indexed_prototype_chain_is_custom(RealmId::PRIMARY)
                 || items.properties.borrow().prototype().is_some())
                 && self.chain_setter_key(
                     target,
@@ -1845,7 +2047,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     self.check_set_invariant(&inner, key, &value, instruction)
                 }
-                None => self.set_computed(&inner, key, value, instruction),
+                None => self
+                    .set_reflect(&inner, key, value, target, instruction)
+                    .map(|_| ()),
             };
         }
         // Numeric array indices are already primitive property keys. Keep their integer
@@ -1874,7 +2078,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The other half of `Object.prototype.__proto__`. A value that is neither an object nor
         // null is *ignored* rather than refused -- the setter has no error to raise for one --
         // and either way nothing is stored under the name.
-        if property_key.matches_ascii("__proto__") && is_reflect_target(target) {
+        if property_key.matches_ascii("__proto__")
+            && is_reflect_target(target)
+            && self.own_stored_property_key(target, property_key).is_none()
+            && self.object_prototype_accessor_in_chain(target, instruction)?
+        {
             match (&value, target) {
                 (Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::Null, _) => {}
                 _ => return Ok(()),
@@ -2003,13 +2211,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // which is a slot on the closure rather than an ordinary property -- so a write
                 // that landed in the property store would be read back by `f.prototype` and
                 // ignored by `new`.
-                if property_key.matches_ascii("prototype") {
-                    if closure.program.functions[closure.function as usize].is_class
-                        || closure.properties.borrow().is_frozen()
+                if property_key.matches_ascii("prototype") && has_prototype_property(closure) {
+                    let attributes = own_attributes_key(&self.intrinsics, target, property_key);
+                    if closure.properties.borrow().is_frozen()
+                        || attributes.is_some_and(|attributes| !attributes.writable)
                     {
                         return Ok(());
                     }
-                    *closure.prototype.borrow_mut() = Some(value);
+                    *closure.prototype.borrow_mut() = Some(value.clone());
+                    if closure
+                        .properties
+                        .borrow()
+                        .get_own_property_key(property_key)
+                        .is_some()
+                    {
+                        closure.properties.borrow_mut().set_key(property_key, value);
+                    }
                     return Ok(());
                 }
                 if self.inherited_setter_key(
@@ -2246,6 +2463,150 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(reflected)
     }
 
+    /// The prototype a `Timeout` (or an `Immediate`) is made with, once the realm's bootstrap has
+    /// published them (`__kilnTimerRef(Timeout.prototype, 5, Immediate.prototype)`); a realm
+    /// without them hands back the bare identity.
+    pub(crate) fn timer_prototype(&self, immediate: bool) -> Option<Value> {
+        let (timeout, immediate_prototype) = self
+            .timer_prototypes
+            .get(self.current_realm.0 as usize)?
+            .as_ref()?;
+        Some(if immediate {
+            immediate_prototype.clone()
+        } else {
+            timeout.clone()
+        })
+    }
+
+    /// The identity a timer handle holds, when `value` is one this engine made.
+    pub(crate) fn timer_handle_id(value: Option<&Value>) -> Option<f64> {
+        match value {
+            Some(Value::Object(handle)) => match &handle.borrow().node_object {
+                Some(NodeObject::TimerHandle(record)) => Some(record.id as f64),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `clearTimeout(handle)`: the realm drops its entry, and the record drops its callback and
+    /// arguments, which is what makes a later `refresh()` do nothing.
+    pub(crate) fn clear_timer_handle(&mut self, handle: &Value) -> Value {
+        if let Value::Object(handle) = handle
+            && let Some(NodeObject::TimerHandle(record)) = &mut handle.borrow_mut().node_object
+        {
+            record.cleared = true;
+            record.callback = Value::Undefined;
+            record.arguments = Vec::new();
+            let id = TimerId::new(record.id);
+            self.with_realm_mut(|realm| realm.clear_timeout(id));
+        }
+        Value::Undefined
+    }
+
+    /// What a timer handle's methods ask of the engine (`__kilnTimerRef(handle, op)`): `op` 0 its
+    /// identity, 1 whether it is referenced, 2 and 3 to reference or unreference it, 4 to restart
+    /// it from now, and 5 (once, from the bootstrap) to adopt the prototypes handles are made
+    /// with. The referenced flag the program sees is on the record, so it survives the timer's
+    /// end as node's does; the one the loop reads lives in the realm's timer queue.
+    pub(crate) fn timer_op(&mut self, arguments: &[Value], op: f64) -> Value {
+        if op == 5.0 {
+            if let (Some(timeout @ Value::Object(_)), Some(immediate @ Value::Object(_))) =
+                (arguments.first(), arguments.get(2))
+            {
+                let slot = self.current_realm.0 as usize;
+                if self.timer_prototypes.len() <= slot {
+                    self.timer_prototypes.resize(slot + 1, None);
+                }
+                self.timer_prototypes[slot] = Some((timeout.clone(), immediate.clone()));
+            }
+            return Value::Undefined;
+        }
+        let absent = || {
+            if op == 0.0 {
+                Value::Undefined
+            } else {
+                Value::Boolean(true)
+            }
+        };
+        let Some(Value::Object(handle)) = arguments.first() else {
+            return absent();
+        };
+        let mut data = handle.borrow_mut();
+        let Some(NodeObject::TimerHandle(record)) = &mut data.node_object else {
+            return absent();
+        };
+        let timer = TimerId::new(record.id);
+        match op as u8 {
+            0 => Value::Number(record.id as f64),
+            2 | 3 => {
+                let unref = op == 3.0;
+                if unref != record.unreferenced {
+                    record.unreferenced = unref;
+                    self.with_realm_mut(|realm| realm.set_timer_referenced(timer, !unref));
+                }
+                Value::Boolean(!unref)
+            }
+            4 => {
+                if record.cleared {
+                    return Value::Undefined;
+                }
+                // A pending timer restarts in place. A timeout that already ran -- or is running,
+                // when this is its own callback -- is armed again under the same identity.
+                let restarted = self.with_realm_mut(|realm| realm.refresh_timer(timer));
+                if !restarted && record.ran && !record.interval && !record.immediate {
+                    let delay = record.delay;
+                    let unreferenced = record.unreferenced;
+                    let queued = Timer::Handle(Rc::clone(handle));
+                    let armed = self.with_realm_mut(|realm| {
+                        if !realm.is_rearmable(timer) {
+                            return false;
+                        }
+                        realm.rearm_timeout(timer, delay, queued);
+                        if unreferenced {
+                            realm.set_timer_referenced(timer, false);
+                        }
+                        true
+                    });
+                    if armed && let Some(NodeObject::TimerHandle(record)) = &mut data.node_object {
+                        record.ran = false;
+                    }
+                }
+                Value::Undefined
+            }
+            _ => Value::Boolean(!record.unreferenced),
+        }
+    }
+
+    /// A platform exception, as node raises one: an `Error` named `name` whose prototype is the
+    /// realm's `DOMException.prototype`, so `instanceof DOMException` and its `code` hold. A
+    /// realm without `DOMException` gets the named `Error` alone.
+    pub(crate) fn dom_exception(
+        &mut self,
+        message: &str,
+        name: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let error = self.construct_error(
+            ErrorKind::Error,
+            &[Value::String(message.to_owned().into())],
+        );
+        let global = self.global_object_in(self.current_realm);
+        let constructor = self.read_property(&global, "DOMException", instruction)?;
+        let prototype = match constructor {
+            Value::Undefined => Value::Undefined,
+            constructor => self.read_property(&constructor, "prototype", instruction)?,
+        };
+        if let Value::Object(object) = &error {
+            let mut object = object.borrow_mut();
+            object.set_non_enumerable("name", Value::String(name.to_owned().into()));
+            if matches!(prototype, Value::Object(_)) {
+                object.set_prototype(prototype);
+            }
+        }
+        Ok(error)
+    }
+
     /// The abort algorithm: settle the signal once, then tell everyone who asked.
     ///
     /// Idempotent, which is what makes `controller.abort()` safe to call from a `finally` and
@@ -2271,45 +2632,97 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // to tell "the caller cancelled this" from "this failed".
         let reason = match reason {
             Some(reason) if !matches!(reason, Value::Undefined) => reason,
-            _ => {
-                let error = self.construct_error(
-                    ErrorKind::Error,
-                    &[Value::String(
-                        "This operation was aborted".to_owned().into(),
-                    )],
-                );
-                if let Value::Object(error) = &error {
-                    error
-                        .borrow_mut()
-                        .set_non_enumerable("name", Value::String("AbortError".to_owned().into()));
-                }
-                error
-            }
+            _ => self.dom_exception("This operation was aborted", "AbortError", instruction)?,
         };
-        let listeners = {
+        let (listeners, handler) = {
             let mut held = object.borrow_mut();
             held.set_non_enumerable("aborted", Value::Boolean(true));
             held.set_non_enumerable("reason", reason);
             let listeners = match held.get_own(ABORT_LISTENERS) {
-                Some(Value::Array(listeners)) => listeners.borrow().clone(),
-                _ => Vec::new(),
+                Some(Value::Array(listeners)) => Some(Rc::clone(listeners)),
+                _ => None,
             };
             let handler = held.get_own("onabort").cloned();
-            handler
-                .filter(is_callable)
-                .into_iter()
-                .chain(listeners)
-                .collect::<Vec<_>>()
+            (listeners, handler.filter(is_callable))
         };
+        let single_listener = listeners
+            .as_ref()
+            .is_none_or(|listeners| listeners.borrow().len() + usize::from(handler.is_some()) <= 1);
+        let snapshot = listeners
+            .as_ref()
+            .map(|listeners| ArrayData::new(listeners.borrow().clone()));
+        if !single_listener {
+            if let Some(snapshot) = &snapshot {
+                object
+                    .borrow_mut()
+                    .set_non_enumerable("@@abort-dispatch", Value::Array(Rc::clone(snapshot)));
+            }
+        }
         // One event object, shared by every listener, as a real dispatch would be.
         let event = ordinary_object([
             ("type".to_owned(), Value::String("abort".to_owned().into())),
             ("target".to_owned(), signal.clone()),
+            ("currentTarget".to_owned(), signal.clone()),
         ]);
-        for listener in listeners {
-            self.call_value(&listener, signal.clone(), vec![event.clone()], instruction)?;
+        let result = (|| {
+            if let Some(handler) = handler {
+                self.call_value(&handler, signal.clone(), vec![event.clone()], instruction)?;
+            }
+            let (Some(listeners), Some(snapshot)) = (listeners.as_ref(), snapshot.as_ref()) else {
+                return Ok(());
+            };
+            // The signal points at the stable record snapshot during multi-listener dispatch;
+            // registration appends directly, while removals mark records that have not run yet.
+            let mut index = 0;
+            loop {
+                let record = {
+                    let dispatch = snapshot.borrow();
+                    dispatch.get(index).cloned()
+                };
+                let Some(record) = record else {
+                    break;
+                };
+                index += 1;
+                if self
+                    .read_property(&record, "removed", instruction)?
+                    .is_truthy()
+                {
+                    continue;
+                }
+                let callback = self.read_property(&record, "listener", instruction)?;
+                let once = self
+                    .read_property(&record, "once", instruction)?
+                    .is_truthy();
+                if once {
+                    if let Value::Object(record_object) = &record {
+                        record_object
+                            .borrow_mut()
+                            .set_non_enumerable("removed", Value::Boolean(true));
+                    }
+                    if single_listener {
+                        listeners
+                            .borrow_mut()
+                            .retain(|entry| !same_value(entry, &record));
+                    }
+                }
+                if is_callable(&callback) {
+                    self.call_value(&callback, signal.clone(), vec![event.clone()], instruction)?;
+                }
+            }
+            Ok(())
+        })();
+        if !single_listener {
+            object
+                .borrow_mut()
+                .set_non_enumerable("@@abort-dispatch", Value::Undefined);
+            if let Some(listeners) = &listeners {
+                listeners.borrow_mut().retain(|entry| {
+                    !matches!(entry,
+                        Value::Object(record) if record.borrow().get_own("removed").is_some_and(Value::is_truthy))
+                });
+            }
         }
-        Ok(())
+        result
     }
 
     /// `Reflect.set` returns the boolean result of `[[Set]]` instead of applying the throwing
@@ -2470,14 +2883,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
-        let key = Value::String(key.owned());
+        let key = if key.is_symbol() {
+            self.symbol_of_key(&key.owned().to_lossy_string())
+                .map(Value::Symbol)
+                .unwrap_or_else(|| Value::String(key.owned()))
+        } else {
+            Value::String(key.owned())
+        };
         let Some(trap) = self.proxy_trap(&proxy, "defineProperty", instruction)? else {
             // No trap: the definition forwards to the target as the record it is. Round-tripping
             // it through a descriptor object here is what used to complete it.
             let key_units = key.property_key_units_checked()?;
             return self.define_own_operation_key(
                 &inner,
-                PropertyKeyRef::Units(&key_units),
+                PropertyKeyRef::from_value(&key, &key_units),
                 descriptor,
                 instruction,
             );

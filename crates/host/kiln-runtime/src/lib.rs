@@ -28,7 +28,10 @@ pub mod http_engine;
 #[cfg(feature = "http")]
 pub use http_client::HttpClientEngine;
 #[cfg(feature = "http")]
-pub use http_engine::{HostTransport, HttpDispatch, HttpEvent, HttpEventKind, HttpServerEngine};
+pub use http_engine::{
+    HostIo, HostTransport, HttpDispatch, HttpEvent, HttpEventKind, HttpServerEngine,
+    UpgradeWriteCompletion, UpgradeWriteFenceBoundary,
+};
 /// Hyper-free transport seam used when the `http` feature is off: the boxed Tokio
 /// socket a host hands over has no Hyper in it, so it lives here rather than in the
 /// gated engine.
@@ -78,7 +81,7 @@ pub use worker_pool::{
     WorkerRealmHandle,
 };
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -93,8 +96,9 @@ use timer_queue::{SequenceBuild, TimerEntry, TimerQueue};
 pub use kiln_artifact_cache::{CapabilityIdentity, RealmCapabilityIdentity};
 use kiln_host_abi::{
     AcceptedTcpStream, ActiveAsyncHostOps, AsyncHostError, AsyncHostOp, AsyncHostOps,
-    AsyncHostValue, Completion, FileStat, HostError, HostOp, HostOps, HostValue, ProcessOutput,
-    RequestId, ResourceId, ResourceInfo, ResourceKind, ResourceState,
+    AsyncHostValue, Completion, FileStat, HostError, HostOp, HostOps, HostValue,
+    PendingCancellation, ProcessOutput, RequestId, ResourceId, ResourceInfo, ResourceKind,
+    ResourceState,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{
@@ -104,7 +108,9 @@ use tokio::net::{
 use tokio::sync::oneshot;
 use tokio_util::task::JoinMap;
 
-use crate::node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpAgent, HttpOrigin};
+use crate::node_http_agent::{
+    AgentCancellation, AgentDecision, AgentFailure, AgentRelease, HttpAgent, HttpOrigin,
+};
 
 /// A protocol event selected by the runtime-owned HTTP engine for the realm to publish as Node
 /// objects and stream events. No Hyper or Tokio type crosses this seam.
@@ -113,6 +119,19 @@ pub enum RuntimeHttpEvent {
     RequestHead {
         id: u64,
         request: node_http::HttpRequest,
+    },
+    UpgradeRequest {
+        id: u64,
+        request: node_http::HttpRequest,
+        head: Vec<u8>,
+    },
+    UpgradeReady {
+        head: Vec<u8>,
+    },
+    UpgradeWriteComplete {
+        id: u64,
+        fence: u64,
+        error: Option<String>,
     },
     RequestData {
         id: u64,
@@ -132,6 +151,13 @@ pub enum RuntimeHttpEvent {
         message: String,
     },
     Closed,
+}
+
+/// Result of accepting one queued HTTP upgrade write, including its per-append completion key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpgradeWriteReceipt {
+    pub disposition: node_stream::WriteDisposition,
+    pub fence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +180,13 @@ pub enum RuntimeHttpClientEvent {
         status: u16,
         reason: String,
         headers: Vec<(String, String)>,
+    },
+    Upgrade {
+        id: u64,
+        status: u16,
+        reason: String,
+        headers: Vec<(String, String)>,
+        head: Vec<u8>,
     },
     ResponseData {
         id: u64,
@@ -194,8 +227,11 @@ pub trait ActiveHttpRuntime {
         resource: ResourceId,
         request: u64,
     ) -> bool;
+    /// Inspect retention without releasing or reserving a connection across language callbacks.
+    fn client_connection_can_retain(&self, resource: ResourceId, reusable: bool) -> bool;
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease;
-    fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure;
+    fn client_connection_failed(&mut self, origin: &HttpOrigin, request: u64) -> AgentFailure;
+    fn cancel_client_connection(&mut self, origin: &HttpOrigin, request: u64) -> AgentCancellation;
     fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64>;
     /// Attach the server engine to an accepted stream. False if the host cannot hand its
     /// transport over or the resource is already attached.
@@ -217,6 +253,17 @@ pub trait ActiveHttpRuntime {
     /// Stop a connection of either role. False once no engine owns it, which is not an error
     /// for a caller that heard `Closed` a moment ago.
     fn close_connection(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool;
+    /// Bytes written by a server's `upgrade` listener before Hyper has transferred the stream.
+    /// The runtime parses one raw HTTP response head and hands any trailing bytes to the socket
+    /// after the 101 response commits.
+    fn write_upgrade(
+        &mut self,
+        _resource: ResourceId,
+        _id: u64,
+        _data: &[u8],
+    ) -> Option<UpgradeWriteReceipt> {
+        None
+    }
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent>;
     fn start_response(
         &mut self,
@@ -534,6 +581,20 @@ pub trait RealmHostProvider: AsyncHostOps {
         None
     }
 
+    /// Replace the HTTP engine's `TcpTaken` ownership with an ordinary stream resource after a
+    /// protocol upgrade. The resource identity is preserved for Node's existing socket object.
+    #[cfg(feature = "http")]
+    fn adopt_upgrade_transport(
+        &mut self,
+        _resource: ResourceId,
+        _transport: HostTransport,
+        _pending_write: Vec<u8>,
+        _write_fences: Vec<http_engine::UpgradeWriteFenceBoundary>,
+        _write_completion: std::sync::Arc<UpgradeWriteCompletion>,
+    ) -> bool {
+        false
+    }
+
     /// A signal that fires whenever a host operation completes, so a drive can wait for
     /// completions without borrowing the host across the wait (ADR 0046: language callbacks
     /// run inside I/O tasks while the drive is parked, and they borrow the realm).
@@ -547,6 +608,13 @@ pub trait RealmHostProvider: AsyncHostOps {
     }
 
     fn has_pending_work(&self) -> bool;
+
+    /// Whether pending work needs the I/O driver turned to make progress (sockets, tasks), as
+    /// opposed to work that is woken directly through the completion signal (port waits). A
+    /// park that waits outside Tokio (ADR 0074) must poll the driver while this holds.
+    fn needs_io_driver(&self) -> bool {
+        self.has_pending_work()
+    }
 
     /// Returns the sticky realm failure, if the provider's asynchronous supervisor failed.
     fn runtime_failure(&self) -> Option<&RuntimeFailure> {
@@ -640,6 +708,15 @@ impl AsyncHostOps for ScriptedHost {
 
     fn cancel(&mut self, request: RequestId) -> bool {
         self.pending.remove(&request).is_some()
+    }
+
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation {
+        // Scripted operations already own their terminal result at submission.
+        if self.pending.contains_key(&request) {
+            PendingCancellation::CompletionReady
+        } else {
+            PendingCancellation::Unknown
+        }
     }
 
     fn has_referenced_work(&self) -> bool {
@@ -978,6 +1055,141 @@ pub async fn wait_for_turn(signal: Arc<tokio::sync::Notify>, delay: Option<Durat
     }
 }
 
+/// How long a virtual-clock realm that is parked on real host work lets the I/O driver run
+/// before its clock may jump to the next timer.
+///
+/// The jump asserts "nothing can make progress". For a socket that is a claim about the kernel,
+/// and a paused Tokio clock makes it after a single zero-timeout poll of the reactor: a loopback
+/// connect or accept registered this turn is typically still in flight, so an 8 s guard timer
+/// would fire before the connection it guards had been accepted. Real I/O gets this much real
+/// time, with the driver turned throughout, to produce a completion first.
+pub const VIRTUAL_IO_SETTLE: Duration = Duration::from_millis(5);
+
+/// [`wait_for_turn`] for a virtual-clock realm that may be about to jump its clock to `delay`.
+///
+/// While `others_active` holds -- another realm in the process has runnable work and so may post
+/// a message, close a port or exit within wall-clock moments -- the clock stays where it is and
+/// the wait is a real, short, repeated one that the completion signal ends at once. So it does
+/// for [`VIRTUAL_IO_SETTLE`] when `io_pending` says this realm itself waits on real host work.
+/// Only when every other realm is idle and the driver has been quiet does the sleep run against
+/// the paused clock and jump to the deadline, which is what keeps a lone program's timers free
+/// (ADR 0012) without letting a timer outrun a worker that has not yet been scheduled (ADR 0070)
+/// or a socket whose completion is already on its way.
+pub async fn wait_for_turn_quiescent(
+    signal: Arc<tokio::sync::Notify>,
+    delay: Option<Duration>,
+    others_active: impl Fn() -> bool,
+    io_pending: bool,
+) -> DriveWake {
+    let Some(delay) = delay else {
+        return wait_for_turn(signal, None).await;
+    };
+    // Created first so a wake sent between the checks below is kept as a permit, not lost.
+    let mut notified = std::pin::pin!(signal.notified());
+    let noop = std::task::Waker::noop();
+    let settle_until = io_pending.then(|| std::time::Instant::now() + VIRTUAL_IO_SETTLE);
+    while others_active() || settle_until.is_some_and(|until| std::time::Instant::now() < until) {
+        yield_to_tasks().await;
+        if notified
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(noop))
+            .is_ready()
+        {
+            return DriveWake::Completion;
+        }
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    tokio::select! {
+        biased;
+        _ = notified => DriveWake::Completion,
+        _ = tokio::time::sleep(delay) => DriveWake::Timer,
+    }
+}
+
+/// A foreign event loop the main-thread realm parks inside (ADR 0074): the GUI's run loop.
+///
+/// `wait` blocks in that loop for up to `timeout_ms` (negative: until something happens) and
+/// returns non-zero when it received events for the program. `wake` may be called from any
+/// thread and makes a running `wait` return. `port` is a worker port the program waits on: an
+/// event-bearing wait enqueues a message there, which wakes the language like any completion.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ParkHook {
+    pub wait: extern "C" fn(timeout_ms: f64) -> i32,
+    pub wake: extern "C" fn(),
+    pub port: u64,
+}
+
+thread_local! {
+    static PARK_HOOK: std::cell::Cell<Option<ParkHook>> = const { std::cell::Cell::new(None) };
+}
+
+/// Install (or with `None`, remove) the park hook for the realm driven on this thread.
+pub fn set_park_hook(hook: Option<ParkHook>) {
+    PARK_HOOK.with(|cell| cell.set(hook));
+}
+
+pub fn park_hook() -> Option<ParkHook> {
+    PARK_HOOK.with(|cell| cell.get())
+}
+
+/// How long a hooked park waits in the foreign loop before turning the I/O driver again, while
+/// work that needs the driver (sockets, tasks) is pending. With none pending, it waits for the
+/// exact deadline or an event and uses no CPU.
+const HOOKED_IO_SLICE: Duration = Duration::from_millis(4);
+
+struct HookWaker(extern "C" fn());
+
+impl std::task::Wake for HookWaker {
+    fn wake(self: Arc<Self>) {
+        (self.0)();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        (self.0)();
+    }
+}
+
+/// [`wait_for_turn`] inside a foreign event loop. The completion signal is polled with a waker
+/// that interrupts the foreign wait, so a completion from any thread ends the park at once;
+/// timers end it at their exact deadline; foreign events are posted to the hook's port.
+pub async fn wait_for_turn_in(
+    hook: ParkHook,
+    signal: Arc<tokio::sync::Notify>,
+    delay: Option<Duration>,
+    needs_io_driver: impl Fn() -> bool,
+) -> DriveWake {
+    let deadline = delay.map(|delay| std::time::Instant::now() + delay);
+    let waker = std::task::Waker::from(Arc::new(HookWaker(hook.wake)));
+    let mut notified = std::pin::pin!(signal.notified());
+    loop {
+        // Run woken tasks and give the I/O driver a zero-timeout turn.
+        yield_to_tasks().await;
+        if notified
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+            .is_ready()
+        {
+            return DriveWake::Completion;
+        }
+        let remaining = deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+        if remaining == Some(Duration::ZERO) {
+            return DriveWake::Timer;
+        }
+        let slice = if needs_io_driver() {
+            Some(remaining.map_or(HOOKED_IO_SLICE, |r| r.min(HOOKED_IO_SLICE)))
+        } else {
+            remaining
+        };
+        let timeout_ms = slice.map_or(-1.0, |s| s.as_secs_f64() * 1000.0);
+        if (hook.wait)(timeout_ms) != 0 {
+            workers::enqueue(
+                hook.port,
+                workers::Message::new(workers::kind::USER, Vec::new()),
+            );
+        }
+    }
+}
+
 /// Let every task woken so far run before the caller parks.
 pub async fn yield_to_tasks() {
     tokio::task::yield_now().await;
@@ -993,6 +1205,8 @@ pub async fn yield_to_tasks() {
 pub struct RealmState<H> {
     host: H,
     capabilities: RealmCapabilities,
+    /// Epoch sample shared by every VM that participates in this realm's scheduler.
+    host_clock_origin_ms: Rc<std::cell::Cell<Option<f64>>>,
     http_agent: HttpAgent,
     /// Server connections that are Hyper tasks over host transports (ADR 0046).
     #[cfg(feature = "http")]
@@ -1011,6 +1225,9 @@ pub struct RealmState<H> {
     /// Protocol events parked by the queued adapter for a loop that drains them at its
     /// checkpoint, and the signal that wakes that loop.
     queued_http: Rc<QueuedHttp>,
+    /// Accepted HTTP closes remain referenced until their terminal event reaches the adapter.
+    #[cfg(feature = "http")]
+    closing_http_resources: HashSet<ResourceId>,
     lifecycle: RealmRuntimeLifecycle,
 }
 
@@ -1018,9 +1235,10 @@ pub struct RealmState<H> {
 /// that drives it, for callers that are entered from outside the executor (the interpreter,
 /// the daemon, conformance, the worker pool).
 ///
-/// The runtime starts Tokio time paused on the first call to [`Self::drive`]. A drive advances
-/// automatically to each realm's next timer only after all currently-ready microtasks have been
-/// exhausted. This makes a timer's delay virtual: a one-hour timer costs no wall-clock hour.
+/// A virtual-clock runtime starts Tokio time paused on the first call to [`Self::drive`], and a
+/// drive advances automatically to each realm's next timer only after all currently-ready
+/// microtasks have been exhausted. This makes a timer's delay virtual: a one-hour timer costs no
+/// wall-clock hour. A host-clock runtime leaves Tokio time running and waits for future deadlines.
 ///
 /// `drive` accepts generic caller-owned microtask and timer payloads. Timer payloads must be
 /// [`Clone`] when driven because an interval re-arms the same callback before returning it.
@@ -1232,7 +1450,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             return Some(RuntimeTurn::Failure(failure.clone()));
         }
         if !self.state.host.has_referenced_work()
-            && realm.next_timer_deadline().is_none()
+            && !realm.has_referenced_timers()
             && !self.state.has_live_http_work()
         {
             return None;
@@ -1373,6 +1591,7 @@ impl<H: RealmHostProvider> RealmState<H> {
         Self {
             host,
             capabilities,
+            host_clock_origin_ms: Rc::new(std::cell::Cell::new(None)),
             http_agent: HttpAgent::default(),
             #[cfg(feature = "http")]
             http_server: HttpServerEngine::default(),
@@ -1383,6 +1602,8 @@ impl<H: RealmHostProvider> RealmState<H> {
             #[cfg(not(feature = "http"))]
             http_client: (),
             queued_http: Rc::new(QueuedHttp::default()),
+            #[cfg(feature = "http")]
+            closing_http_resources: HashSet::new(),
             lifecycle: RealmRuntimeLifecycle::Open,
         }
     }
@@ -1510,12 +1731,64 @@ impl<H: RealmHostProvider> RealmState<H> {
         &mut self.http_client
     }
 
+    /// Atomically return an upgraded server stream to the host under its existing resource id.
+    /// Called before the language sees `UpgradeReady`, so socket operations observe the raw
+    /// stream immediately and HTTP close authority has already ended.
+    #[cfg(feature = "http")]
+    pub fn adopt_server_upgrade(&mut self, resource: ResourceId) -> bool {
+        let Some(upgrade) = self.http_server.take_upgrade(resource) else {
+            return false;
+        };
+        let completion = Arc::clone(&upgrade.write_completion);
+        let adopted = self.host.adopt_upgrade_transport(
+            resource,
+            upgrade.transport,
+            upgrade.pending_write,
+            upgrade.write_fences,
+            Arc::clone(&completion),
+        );
+        if !adopted {
+            completion.complete(Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "HTTP upgrade transport could not be adopted",
+            )));
+        }
+        adopted
+    }
+
+    #[cfg(feature = "http")]
+    pub fn adopt_client_upgrade(&mut self, resource: ResourceId) -> bool {
+        let Some(upgrade) = self.http_client.take_upgrade(resource) else {
+            return false;
+        };
+        let completion = Arc::clone(&upgrade.write_completion);
+        let adopted = self.host.adopt_upgrade_transport(
+            resource,
+            upgrade.transport,
+            upgrade.pending_write,
+            upgrade.write_fences,
+            Arc::clone(&completion),
+        );
+        if !adopted {
+            completion.complete(Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "HTTP upgrade transport could not be adopted",
+            )));
+        }
+        adopted
+    }
+
     /// Stop the connection on `resource`, whichever engine owns it. The transport is released
     /// once the engine has published `Closed`; a caller closing from outside an engine
     /// callback sees that on its next turn. Expects the executor's context.
     #[cfg(feature = "http")]
     pub fn http_close(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
-        self.http_server.close(resource, mode) || self.http_client.close(resource, mode)
+        let accepted =
+            self.http_server.close(resource, mode) || self.http_client.close(resource, mode);
+        if accepted {
+            self.closing_http_resources.insert(resource);
+        }
+        accepted
     }
 
     /// Without `http` no engine can own a transport, so there is nothing to stop.
@@ -1645,6 +1918,12 @@ impl<H: RealmHostProvider> RealmState<H> {
         self.http_agent.connected(origin, resource, request)
     }
 
+    /// Whether completing this response can retain its Agent-owned connection. This is a pure
+    /// query: callbacks must run before release publishes the resource or reserves a waiter.
+    pub fn client_connection_can_retain(&self, resource: ResourceId, reusable: bool) -> bool {
+        !self.is_shutdown() && reusable && self.http_agent.has_active_request(resource)
+    }
+
     /// Return a client connection to the agent after its response.
     pub fn release_client_connection(
         &mut self,
@@ -1662,11 +1941,22 @@ impl<H: RealmHostProvider> RealmState<H> {
     }
 
     /// Tell the agent a connect to `origin` failed.
-    pub fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
+    pub fn client_connection_failed(&mut self, origin: &HttpOrigin, request: u64) -> AgentFailure {
         if self.is_shutdown() {
             return AgentFailure::Empty;
         }
-        self.http_agent.connect_failed(origin)
+        self.http_agent.connect_failed(origin, request)
+    }
+
+    pub fn cancel_client_connection(
+        &mut self,
+        origin: &HttpOrigin,
+        request: u64,
+    ) -> AgentCancellation {
+        if self.is_shutdown() {
+            return AgentCancellation::Missing;
+        }
+        self.http_agent.cancel_connect(origin, request)
     }
 
     /// Tell the agent a client connection closed.
@@ -1708,6 +1998,37 @@ impl<H: RealmHostProvider> RealmState<H> {
         &self.capabilities
     }
 
+    /// Record the host epoch for this realm once, before any VM can arm a timer.
+    /// Subsequent module VMs share this origin instead of resetting scheduler time.
+    pub fn initialize_host_clock_origin(&mut self, epoch_ms: f64) {
+        if self.capabilities.clock == ClockCapability::Host
+            && self.host_clock_origin_ms.get().is_none()
+            && epoch_ms.is_finite()
+        {
+            self.host_clock_origin_ms.set(Some(epoch_ms));
+        }
+    }
+
+    pub fn has_host_clock_origin(&self) -> bool {
+        self.host_clock_origin_ms.get().is_some()
+    }
+
+    /// A shared handle for interpreter timer-arm checkpoints; the runtime remains the owner of
+    /// the single origin even when several short-lived module VMs schedule work.
+    pub fn host_clock_anchor(&self) -> Rc<std::cell::Cell<Option<f64>>> {
+        Rc::clone(&self.host_clock_origin_ms)
+    }
+
+    /// Advance an interpreter scheduler from the shared realm's original host epoch.
+    pub fn advance_host_clock<M, T>(&self, realm: &mut Realm<M, T>, epoch_ms: f64) {
+        if self.capabilities.clock != ClockCapability::Host || !epoch_ms.is_finite() {
+            return;
+        }
+        if let Some(origin_ms) = self.host_clock_origin_ms.get() {
+            realm.advance_to(duration_from_milliseconds((epoch_ms - origin_ms).max(0.0)));
+        }
+    }
+
     #[cfg(test)]
     fn host(&mut self) -> &mut H {
         &mut self.host
@@ -1730,9 +2051,20 @@ impl<H: RealmHostProvider> RealmState<H> {
         self.host.has_referenced_work()
     }
 
+    /// Whether a park outside Tokio must keep turning the I/O driver: host tasks, or HTTP work
+    /// on a direct connection.
+    pub fn needs_io_driver(&self) -> bool {
+        self.host.needs_io_driver() || self.requests_in_flight() != 0 || self.has_live_http_work()
+    }
+
     /// Cancels one asynchronous host request owned by this realm.
     pub fn cancel_host_op(&mut self, request: RequestId) -> bool {
         RealmHostProvider::cancel_on_realm(&mut self.host, request)
+    }
+
+    /// Cancel unfinished host work without discarding a result awaiting language delivery.
+    pub fn cancel_host_op_if_pending(&mut self, request: RequestId) -> PendingCancellation {
+        AsyncHostOps::cancel_if_pending(&mut self.host, request)
     }
 
     /// Whether an HTTP engine owns the transport of `resource`.
@@ -1754,6 +2086,7 @@ impl<H: RealmHostProvider> RealmState<H> {
     pub fn has_live_http_work(&self) -> bool {
         self.http_server.requests_in_flight() != 0
             || self.http_client.requests_in_flight() != 0
+            || !self.closing_http_resources.is_empty()
             || self.queued_http.has_pending_admissions()
             || self.queued_http.has_events()
     }
@@ -1768,19 +2101,93 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// Drain the server events the queued adapter parked for `resource`. A `Closed` here is
     /// the connection's last word; the transport goes back to the host with it.
     pub fn take_queued_server_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
-        let events = self.queued_http.take_server(resource);
+        let mut events = self.queued_http.take_server(resource);
+        #[cfg(feature = "http")]
+        if events
+            .iter()
+            .any(|event| matches!(event, RuntimeHttpEvent::UpgradeReady { .. }))
+        {
+            let adopted = self
+                .http_server
+                .take_upgrade(resource)
+                .is_some_and(|upgrade| {
+                    let completion = Arc::clone(&upgrade.write_completion);
+                    let adopted = self.host.adopt_upgrade_transport(
+                        resource,
+                        upgrade.transport,
+                        upgrade.pending_write,
+                        upgrade.write_fences,
+                        Arc::clone(&completion),
+                    );
+                    if !adopted {
+                        completion.complete(Err(std::io::Error::new(
+                            std::io::ErrorKind::NotConnected,
+                            "HTTP upgrade transport could not be adopted",
+                        )));
+                    }
+                    adopted
+                });
+            if !adopted {
+                let _ = self.host.release_transport(resource);
+                events.clear();
+                events.push(RuntimeHttpEvent::Error {
+                    id: 0,
+                    message: "HTTP upgrade transport could not be adopted".into(),
+                });
+                events.push(RuntimeHttpEvent::Closed);
+            }
+        }
         if events.contains(&RuntimeHttpEvent::Closed) {
             let _ = self.host.release_transport(resource);
+            #[cfg(feature = "http")]
+            self.closing_http_resources.remove(&resource);
         }
         events
     }
 
     /// Drain the server events the queued adapter parked for all resources in a single batch.
     pub fn take_all_queued_server_events(&mut self) -> Vec<(ResourceId, Vec<RuntimeHttpEvent>)> {
-        let all = self.queued_http.take_all_server();
-        for (resource, events) in &all {
+        let mut all = self.queued_http.take_all_server();
+        for (resource, events) in &mut all {
+            #[cfg(feature = "http")]
+            if events
+                .iter()
+                .any(|event| matches!(event, RuntimeHttpEvent::UpgradeReady { .. }))
+            {
+                let adopted = self
+                    .http_server
+                    .take_upgrade(*resource)
+                    .is_some_and(|upgrade| {
+                        let completion = Arc::clone(&upgrade.write_completion);
+                        let adopted = self.host.adopt_upgrade_transport(
+                            *resource,
+                            upgrade.transport,
+                            upgrade.pending_write,
+                            upgrade.write_fences,
+                            Arc::clone(&completion),
+                        );
+                        if !adopted {
+                            completion.complete(Err(std::io::Error::new(
+                                std::io::ErrorKind::NotConnected,
+                                "HTTP upgrade transport could not be adopted",
+                            )));
+                        }
+                        adopted
+                    });
+                if !adopted {
+                    let _ = self.host.release_transport(*resource);
+                    events.clear();
+                    events.push(RuntimeHttpEvent::Error {
+                        id: 0,
+                        message: "HTTP upgrade transport could not be adopted".into(),
+                    });
+                    events.push(RuntimeHttpEvent::Closed);
+                }
+            }
             if events.contains(&RuntimeHttpEvent::Closed) {
                 let _ = self.host.release_transport(*resource);
+                #[cfg(feature = "http")]
+                self.closing_http_resources.remove(resource);
             }
         }
         all
@@ -1811,7 +2218,11 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// undrained queue would keep that loop waiting forever; the events of a connection the
     /// language has let go of are of no use to it.
     pub fn discard_queued_http_events_except(&mut self, known: &[ResourceId]) -> usize {
-        self.queued_http.retain_resources(known)
+        let discarded = self.queued_http.retain_resources(known);
+        #[cfg(feature = "http")]
+        self.closing_http_resources
+            .retain(|resource| known.contains(resource));
+        discarded
     }
 
     /// Drain the client events the queued adapter parked for `resource`.
@@ -1819,9 +2230,53 @@ impl<H: RealmHostProvider> RealmState<H> {
         &mut self,
         resource: ResourceId,
     ) -> Vec<RuntimeHttpClientEvent> {
-        let events = self.queued_http.take_client(resource);
+        let mut events = self.queued_http.take_client(resource);
+        #[cfg(feature = "http")]
+        if events
+            .iter()
+            .any(|event| matches!(event, RuntimeHttpClientEvent::Upgrade { .. }))
+        {
+            let adopted = self
+                .http_client
+                .take_upgrade(resource)
+                .is_some_and(|upgrade| {
+                    let completion = Arc::clone(&upgrade.write_completion);
+                    let adopted = self.host.adopt_upgrade_transport(
+                        resource,
+                        upgrade.transport,
+                        upgrade.pending_write,
+                        upgrade.write_fences,
+                        Arc::clone(&completion),
+                    );
+                    if !adopted {
+                        completion.complete(Err(std::io::Error::new(
+                            std::io::ErrorKind::NotConnected,
+                            "HTTP upgrade transport could not be adopted",
+                        )));
+                    }
+                    adopted
+                });
+            if !adopted {
+                let _ = self.host.release_transport(resource);
+                let id = events
+                    .iter()
+                    .find_map(|event| match event {
+                        RuntimeHttpClientEvent::Upgrade { id, .. } => Some(*id),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                events.clear();
+                events.push(RuntimeHttpClientEvent::Error {
+                    id,
+                    message: "HTTP upgrade transport could not be adopted".into(),
+                });
+                events.push(RuntimeHttpClientEvent::Closed);
+            }
+        }
         if events.contains(&RuntimeHttpClientEvent::Closed) {
             let _ = self.host.release_transport(resource);
+            #[cfg(feature = "http")]
+            self.closing_http_resources.remove(&resource);
         }
         events
     }
@@ -1835,6 +2290,8 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// published `Closed` and forgotten the connection, and a table that kept the resource
     /// would grow with connections ever accepted rather than connections open.
     pub fn retire_http_connection(&mut self, resource: ResourceId) -> bool {
+        #[cfg(feature = "http")]
+        self.closing_http_resources.remove(&resource);
         self.host.release_transport(resource)
     }
 }
@@ -2052,6 +2509,31 @@ impl HttpDispatch for QueuedDispatch {
                             keep_alive: event.keep_alive,
                         },
                     },
+                    HttpEventKind::UpgradeRequest => RuntimeHttpEvent::UpgradeRequest {
+                        id: event.id,
+                        request: node_http::HttpRequest {
+                            method: String::from_utf8_lossy(event.method).into_owned(),
+                            target: String::from_utf8_lossy(event.target).into_owned(),
+                            version: if event.version_minor == 0 {
+                                node_http::HttpVersion::Http10
+                            } else {
+                                node_http::HttpVersion::Http11
+                            },
+                            headers: node_http::HttpHeaders::from_raw(event.headers.to_vec()),
+                            body: Vec::new(),
+                            keep_alive: event.keep_alive,
+                        },
+                        head: event.data.to_vec(),
+                    },
+                    HttpEventKind::UpgradeReady => RuntimeHttpEvent::UpgradeReady {
+                        head: event.data.to_vec(),
+                    },
+                    HttpEventKind::UpgradeWriteComplete => RuntimeHttpEvent::UpgradeWriteComplete {
+                        id: event.id,
+                        fence: event.write_fence,
+                        error: (!event.message.is_empty())
+                            .then(|| String::from_utf8_lossy(event.message).into_owned()),
+                    },
                     HttpEventKind::RequestData => RuntimeHttpEvent::RequestData {
                         id: event.id,
                         data: event.data.to_vec(),
@@ -2066,7 +2548,8 @@ impl HttpDispatch for QueuedDispatch {
                     HttpEventKind::Closed => RuntimeHttpEvent::Closed,
                     HttpEventKind::ResponseHead
                     | HttpEventKind::ResponseData
-                    | HttpEventKind::ResponseEnd => return 0,
+                    | HttpEventKind::ResponseEnd
+                    | HttpEventKind::UpgradeResponse => return 0,
                 };
                 self.queue.push_server(self.resource, queued);
             }
@@ -2077,6 +2560,13 @@ impl HttpDispatch for QueuedDispatch {
                         status: event.status,
                         reason: String::from_utf8_lossy(event.reason).into_owned(),
                         headers: unflatten_headers(event.headers),
+                    },
+                    HttpEventKind::UpgradeResponse => RuntimeHttpClientEvent::Upgrade {
+                        id: event.id,
+                        status: event.status,
+                        reason: String::from_utf8_lossy(event.reason).into_owned(),
+                        headers: unflatten_headers(event.headers),
+                        head: event.data.to_vec(),
                     },
                     HttpEventKind::ResponseData => RuntimeHttpClientEvent::ResponseData {
                         id: event.id,
@@ -2094,11 +2584,21 @@ impl HttpDispatch for QueuedDispatch {
                     },
                     HttpEventKind::Closed => RuntimeHttpClientEvent::Closed,
                     HttpEventKind::RequestHead
+                    | HttpEventKind::UpgradeRequest
+                    | HttpEventKind::UpgradeReady
+                    | HttpEventKind::UpgradeWriteComplete
                     | HttpEventKind::RequestData
                     | HttpEventKind::RequestEnd => return 0,
                 };
                 self.queue.push_client(self.resource, queued);
             }
+        }
+        if matches!(
+            event.kind,
+            HttpEventKind::UpgradeReady | HttpEventKind::UpgradeResponse
+        ) {
+            self.queue
+                .cancel_admission_token(self.resource, self.admission);
         }
         0
     }
@@ -2146,12 +2646,20 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
             .client_connection_connected(origin, resource, request)
     }
 
+    fn client_connection_can_retain(&self, resource: ResourceId, reusable: bool) -> bool {
+        self.state.client_connection_can_retain(resource, reusable)
+    }
+
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease {
         self.state.release_client_connection(resource, reusable)
     }
 
-    fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
-        self.state.client_connection_failed(origin)
+    fn client_connection_failed(&mut self, origin: &HttpOrigin, request: u64) -> AgentFailure {
+        self.state.client_connection_failed(origin, request)
+    }
+
+    fn cancel_client_connection(&mut self, origin: &HttpOrigin, request: u64) -> AgentCancellation {
+        self.state.cancel_client_connection(origin, request)
     }
 
     fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64> {
@@ -2188,6 +2696,23 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         {
             let _ = (resource, mode);
             return false;
+        }
+    }
+
+    fn write_upgrade(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: &[u8],
+    ) -> Option<UpgradeWriteReceipt> {
+        #[cfg(feature = "http")]
+        {
+            return self.state.http_server.write_upgrade(resource, id, data);
+        }
+        #[cfg(not(feature = "http"))]
+        {
+            let _ = (resource, id, data);
+            None
         }
     }
 
@@ -2382,6 +2907,10 @@ impl<H: RealmHostProvider> ActiveAsyncHostOps for RealmRuntime<H> {
     fn cancel(&mut self, request: RequestId) -> bool {
         RealmHostProvider::cancel_on_realm(&mut self.state.host, request)
     }
+
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation {
+        self.state.cancel_host_op_if_pending(request)
+    }
 }
 
 impl ActiveAsyncHostOps for TokioHost {
@@ -2391,6 +2920,10 @@ impl ActiveAsyncHostOps for TokioHost {
 
     fn cancel(&mut self, request: RequestId) -> bool {
         AsyncHostOps::cancel(self, request)
+    }
+
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation {
+        AsyncHostOps::cancel_if_pending(self, request)
     }
 }
 
@@ -2498,6 +3031,7 @@ enum HostResource {
     TcpTaken {
         info: ResourceInfo,
         referenced: bool,
+        restore_referenced: bool,
     },
     TcpStream {
         reader: Rc<tokio::sync::Mutex<OwnedReadHalf>>,
@@ -2507,6 +3041,83 @@ enum HostResource {
         read_closed: bool,
         write_closed: bool,
     },
+    /// A Hyper-upgraded stream may be a rewind wrapper around the original socket rather than a
+    /// concrete `TcpStream`. Keep it as two Tokio split halves and expose the same TCP operations.
+    #[cfg(feature = "http")]
+    TcpUpgraded {
+        reader: Rc<tokio::sync::Mutex<tokio::io::ReadHalf<Box<dyn HostIo>>>>,
+        writer: Rc<tokio::sync::Mutex<tokio::io::WriteHalf<Box<dyn HostIo>>>>,
+        write_completion: Arc<UpgradeWriteCompletion>,
+        prefix_abort: Option<tokio::task::AbortHandle>,
+        info: ResourceInfo,
+        referenced: bool,
+        read_closed: bool,
+        write_closed: bool,
+    },
+}
+
+enum TcpReader {
+    Native(Rc<tokio::sync::Mutex<OwnedReadHalf>>),
+    #[cfg(feature = "http")]
+    Upgraded(Rc<tokio::sync::Mutex<tokio::io::ReadHalf<Box<dyn HostIo>>>>),
+}
+
+impl TcpReader {
+    async fn read(&self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Native(reader) => reader.lock().await.read(bytes).await,
+            #[cfg(feature = "http")]
+            Self::Upgraded(reader) => reader.lock().await.read(bytes).await,
+        }
+    }
+}
+
+enum TcpWriter {
+    Native(Rc<tokio::sync::Mutex<OwnedWriteHalf>>),
+    #[cfg(feature = "http")]
+    Upgraded {
+        writer: Rc<tokio::sync::Mutex<tokio::io::WriteHalf<Box<dyn HostIo>>>>,
+        write_completion: Arc<UpgradeWriteCompletion>,
+    },
+}
+
+impl TcpWriter {
+    async fn write_all(&self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Native(writer) => {
+                let mut writer = writer.lock().await;
+                // Attempt the real nonblocking write before yielding. Retain the lock across
+                // any remaining asynchronous write so later submissions cannot overtake it.
+                let written = match writer.try_write(bytes) {
+                    Ok(written) => written,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => 0,
+                    Err(error) => return Err(error),
+                };
+                writer.write_all(&bytes[written..]).await
+            }
+            #[cfg(feature = "http")]
+            Self::Upgraded {
+                writer,
+                write_completion,
+            } => {
+                write_completion.wait().await?;
+                writer.lock().await.write_all(bytes).await
+            }
+        }
+    }
+    async fn shutdown(&self) -> std::io::Result<()> {
+        match self {
+            Self::Native(writer) => writer.lock().await.shutdown().await,
+            #[cfg(feature = "http")]
+            Self::Upgraded {
+                writer,
+                write_completion,
+            } => {
+                write_completion.wait().await?;
+                writer.lock().await.shutdown().await
+            }
+        }
+    }
 }
 
 struct PendingRequest {
@@ -2547,6 +3158,8 @@ impl std::fmt::Debug for TokioHost {
                         HostResource::TcpListener { referenced, .. }
                         | HostResource::TcpStream { referenced, .. }
                         | HostResource::TcpTaken { referenced, .. } => *referenced,
+                        #[cfg(feature = "http")]
+                        HostResource::TcpUpgraded { referenced, .. } => *referenced,
                         #[cfg(target_os = "linux")]
                         HostResource::TcpRaw { referenced, .. } => *referenced,
                     })
@@ -2560,6 +3173,8 @@ impl std::fmt::Debug for TokioHost {
 
 impl Drop for TokioHost {
     fn drop(&mut self) {
+        #[cfg(feature = "http")]
+        self.abort_upgrade_prefixes();
         for (_, wait) in std::mem::take(&mut self.port_waits) {
             workers::unsubscribe(wait.port, wait.subscription);
         }
@@ -2567,6 +3182,24 @@ impl Drop for TokioHost {
 }
 
 impl TokioHost {
+    #[cfg(feature = "http")]
+    fn abort_upgrade_prefixes(&self) {
+        for resource in self.resources.values() {
+            if let HostResource::TcpUpgraded {
+                prefix_abort: Some(abort),
+                write_completion,
+                ..
+            } = resource
+            {
+                write_completion.complete(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "realm shut down during HTTP upgrade write",
+                )));
+                abort.abort();
+            }
+        }
+    }
+
     /// Builds the request and completion state owned by a [`RealmRuntime`].
     pub fn new() -> Self {
         Self {
@@ -3074,21 +3707,29 @@ impl TokioHost {
                 #[cfg(target_os = "linux")]
                 self.materialize_raw(stream);
                 let stream_id = stream;
-                let Some(HostResource::TcpStream {
-                    reader,
-                    read_closed,
-                    ..
-                }) = self.resources.get(&stream)
-                else {
-                    self.insert_immediate(
-                        request,
-                        sequence,
-                        referenced,
-                        Err(invalid_resource("read", stream)),
-                    );
-                    return request;
+                let (reader, read_closed) = match self.resources.get(&stream) {
+                    Some(HostResource::TcpStream {
+                        reader,
+                        read_closed,
+                        ..
+                    }) => (TcpReader::Native(Rc::clone(reader)), *read_closed),
+                    #[cfg(feature = "http")]
+                    Some(HostResource::TcpUpgraded {
+                        reader,
+                        read_closed,
+                        ..
+                    }) => (TcpReader::Upgraded(Rc::clone(reader)), *read_closed),
+                    _ => {
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Err(invalid_resource("read", stream)),
+                        );
+                        return request;
+                    }
                 };
-                if *read_closed {
+                if read_closed {
                     self.insert_immediate(
                         request,
                         sequence,
@@ -3097,11 +3738,9 @@ impl TokioHost {
                     );
                     return request;
                 }
-                let reader = Rc::clone(reader);
                 self.spawn_task(request, sequence, referenced, async move {
                     let mut bytes = vec![0; max_bytes];
                     let result = async {
-                        let mut reader = reader.lock().await;
                         let length = reader.read(&mut bytes).await?;
                         bytes.truncate(length);
                         Ok(AsyncHostValue::Bytes(bytes))
@@ -3125,21 +3764,36 @@ impl TokioHost {
                 #[cfg(target_os = "linux")]
                 self.materialize_raw(stream);
                 let stream_id = stream;
-                let Some(HostResource::TcpStream {
-                    writer,
-                    write_closed,
-                    ..
-                }) = self.resources.get(&stream)
-                else {
-                    self.insert_immediate(
-                        request,
-                        sequence,
-                        referenced,
-                        Err(invalid_resource("write", stream)),
-                    );
-                    return request;
+                let (writer, write_closed) = match self.resources.get(&stream) {
+                    Some(HostResource::TcpStream {
+                        writer,
+                        write_closed,
+                        ..
+                    }) => (TcpWriter::Native(Rc::clone(writer)), *write_closed),
+                    #[cfg(feature = "http")]
+                    Some(HostResource::TcpUpgraded {
+                        writer,
+                        write_completion,
+                        write_closed,
+                        ..
+                    }) => (
+                        TcpWriter::Upgraded {
+                            writer: Rc::clone(writer),
+                            write_completion: Arc::clone(write_completion),
+                        },
+                        *write_closed,
+                    ),
+                    _ => {
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Err(invalid_resource("write", stream)),
+                        );
+                        return request;
+                    }
                 };
-                if *write_closed {
+                if write_closed {
                     self.insert_immediate(
                         request,
                         sequence,
@@ -3148,10 +3802,10 @@ impl TokioHost {
                     );
                     return request;
                 }
-                let writer = Rc::clone(writer);
-                self.spawn_task(request, sequence, referenced, async move {
+                let immediate_write = matches!(&writer, TcpWriter::Native(_));
+                let mut write = Box::pin(async move {
                     let result = async {
-                        writer.lock().await.write_all(&data).await?;
+                        writer.write_all(&data).await?;
                         Ok(AsyncHostValue::Undefined)
                     }
                     .await
@@ -3163,27 +3817,57 @@ impl TokioHost {
                         result: result.map(HostCompletionValue::Public),
                     }
                 });
+                if immediate_write {
+                    // A successful OS write is already complete even when its language callback
+                    // has not run. Poll once and preserve the same future on Pending; dropping it
+                    // would lose partial progress and release write-order authority.
+                    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+                    if let std::task::Poll::Ready(completion) = write.as_mut().poll(&mut context) {
+                        let result = completion.result.map(|value| match value {
+                            HostCompletionValue::Public(value) => value,
+                            _ => unreachable!("TCP writes only publish public results"),
+                        });
+                        self.insert_immediate(request, sequence, referenced, result);
+                        return request;
+                    }
+                }
+                self.spawn_task(request, sequence, referenced, write);
                 return request;
             }
             AsyncHostOp::TcpShutdown { stream } => {
                 #[cfg(target_os = "linux")]
                 self.materialize_raw(stream);
                 let stream_id = stream;
-                let Some(HostResource::TcpStream {
-                    writer,
-                    write_closed,
-                    ..
-                }) = self.resources.get(&stream)
-                else {
-                    self.insert_immediate(
-                        request,
-                        sequence,
-                        referenced,
-                        Err(invalid_resource("shutdown", stream)),
-                    );
-                    return request;
+                let (writer, write_closed) = match self.resources.get(&stream) {
+                    Some(HostResource::TcpStream {
+                        writer,
+                        write_closed,
+                        ..
+                    }) => (TcpWriter::Native(Rc::clone(writer)), *write_closed),
+                    #[cfg(feature = "http")]
+                    Some(HostResource::TcpUpgraded {
+                        writer,
+                        write_completion,
+                        write_closed,
+                        ..
+                    }) => (
+                        TcpWriter::Upgraded {
+                            writer: Rc::clone(writer),
+                            write_completion: Arc::clone(write_completion),
+                        },
+                        *write_closed,
+                    ),
+                    _ => {
+                        self.insert_immediate(
+                            request,
+                            sequence,
+                            referenced,
+                            Err(invalid_resource("shutdown", stream)),
+                        );
+                        return request;
+                    }
                 };
-                if *write_closed {
+                if write_closed {
                     self.insert_immediate(
                         request,
                         sequence,
@@ -3192,11 +3876,8 @@ impl TokioHost {
                     );
                     return request;
                 }
-                let writer = Rc::clone(writer);
                 self.spawn_task(request, sequence, referenced, async move {
                     let result = writer
-                        .lock()
-                        .await
                         .shutdown()
                         .await
                         .map(|()| AsyncHostValue::Undefined)
@@ -3330,6 +4011,19 @@ impl TokioHost {
 
     fn close_resource(&mut self, resource: ResourceId) -> Result<AsyncHostValue, AsyncHostError> {
         self.listen_tickets.remove(&resource);
+        #[cfg(feature = "http")]
+        if let Some(HostResource::TcpUpgraded {
+            prefix_abort: Some(abort),
+            write_completion,
+            ..
+        }) = self.resources.get(&resource)
+        {
+            write_completion.complete(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "socket closed during HTTP upgrade write",
+            )));
+            abort.abort();
+        }
         self.resources
             .remove(&resource)
             .map(|_| AsyncHostValue::Undefined)
@@ -3352,8 +4046,17 @@ impl TokioHost {
             | HostResource::TcpStream {
                 referenced: current,
                 ..
+            } => *current = referenced,
+            HostResource::TcpTaken {
+                referenced: current,
+                restore_referenced,
+                ..
+            } => {
+                *current = referenced;
+                *restore_referenced = referenced;
             }
-            | HostResource::TcpTaken {
+            #[cfg(feature = "http")]
+            HostResource::TcpUpgraded {
                 referenced: current,
                 ..
             } => *current = referenced,
@@ -3391,7 +4094,22 @@ impl TokioHost {
                 read_closed: *read_closed,
                 write_closed: *write_closed,
             },
-            HostResource::TcpTaken { info, referenced } => ResourceState {
+            #[cfg(feature = "http")]
+            HostResource::TcpUpgraded {
+                info,
+                referenced,
+                read_closed,
+                write_closed,
+                ..
+            } => ResourceState {
+                info: info.clone(),
+                referenced: *referenced,
+                read_closed: *read_closed,
+                write_closed: *write_closed,
+            },
+            HostResource::TcpTaken {
+                info, referenced, ..
+            } => ResourceState {
                 info: info.clone(),
                 referenced: *referenced,
                 read_closed: false,
@@ -3452,6 +4170,8 @@ impl TokioHost {
         self.tasks.abort_all();
         self.pending.clear();
         self.ready.clear();
+        #[cfg(feature = "http")]
+        self.abort_upgrade_prefixes();
         self.resources.clear();
         self.listen_tickets.clear();
         self.failure.get_or_insert_with(|| RuntimeFailure {
@@ -3515,9 +4235,21 @@ impl TokioHost {
                     {
                         *read_closed = true;
                     }
+                    #[cfg(feature = "http")]
+                    if let Some(HostResource::TcpUpgraded { read_closed, .. }) =
+                        self.resources.get_mut(&resource)
+                    {
+                        *read_closed = true;
+                    }
                 }
                 Some(ResourceLifecycleUpdate::WriteClosed(resource)) => {
                     if let Some(HostResource::TcpStream { write_closed, .. }) =
+                        self.resources.get_mut(&resource)
+                    {
+                        *write_closed = true;
+                    }
+                    #[cfg(feature = "http")]
+                    if let Some(HostResource::TcpUpgraded { write_closed, .. }) =
                         self.resources.get_mut(&resource)
                     {
                         *write_closed = true;
@@ -3669,8 +4401,35 @@ impl AsyncHostOps for TokioHost {
         } else {
             self.tasks.abort(&request);
         }
-        self.ready.remove(&pending.sequence);
+        if let Some(completion) = self.ready.remove(&pending.sequence) {
+            // Promotion allocates a resource before publishing its completion. Until the
+            // language receives that completion, the request still owns the resource: cancelling
+            // a queued accept/connect/listen must retire it along with the completion.
+            let resource = match completion.result {
+                Ok(AsyncHostValue::Resource(resource)) => Some(resource.id),
+                Ok(AsyncHostValue::AcceptedTcpStream(accepted)) => Some(accepted.resource.id),
+                _ => None,
+            };
+            if let Some(resource) = resource {
+                let _ = self.close_resource(resource);
+            }
+        }
         true
+    }
+
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation {
+        self.collect_ready_nonblocking();
+        let Some(pending) = self.pending.get(&request) else {
+            return PendingCancellation::Unknown;
+        };
+        if self.ready.contains_key(&pending.sequence) {
+            return PendingCancellation::CompletionReady;
+        }
+        if AsyncHostOps::cancel(self, request) {
+            PendingCancellation::Cancelled
+        } else {
+            PendingCancellation::Unknown
+        }
     }
 
     fn has_referenced_work(&self) -> bool {
@@ -3679,6 +4438,8 @@ impl AsyncHostOps for TokioHost {
                 HostResource::TcpListener { referenced, .. }
                 | HostResource::TcpStream { referenced, .. }
                 | HostResource::TcpTaken { referenced, .. } => *referenced,
+                #[cfg(feature = "http")]
+                HostResource::TcpUpgraded { referenced, .. } => *referenced,
                 #[cfg(target_os = "linux")]
                 HostResource::TcpRaw { referenced, .. } => *referenced,
             })
@@ -3709,6 +4470,8 @@ impl RealmHostProvider for TokioHost {
             self.process_tasks.remove(&request);
         }
         self.tasks.abort_all();
+        #[cfg(feature = "http")]
+        self.abort_upgrade_prefixes();
     }
 
     fn shutdown_on_realm(&mut self) {
@@ -3723,6 +4486,8 @@ impl RealmHostProvider for TokioHost {
         }
         self.pending.clear();
         self.ready.clear();
+        #[cfg(feature = "http")]
+        self.abort_upgrade_prefixes();
         self.resources.clear();
         self.listen_tickets.clear();
         #[cfg(target_os = "linux")]
@@ -3739,6 +4504,11 @@ impl RealmHostProvider for TokioHost {
 
     fn has_pending_work(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    fn needs_io_driver(&self) -> bool {
+        // Port waits are woken by `completed` directly; only spawned tasks need the driver.
+        !self.tasks.is_empty()
     }
 
     fn ready_completions_count(&self) -> usize {
@@ -3771,6 +4541,88 @@ impl RealmHostProvider for TokioHost {
         }
     }
 
+    #[cfg(feature = "http")]
+    fn adopt_upgrade_transport(
+        &mut self,
+        resource: ResourceId,
+        transport: HostTransport,
+        pending_write: Vec<u8>,
+        write_fences: Vec<http_engine::UpgradeWriteFenceBoundary>,
+        write_completion: Arc<UpgradeWriteCompletion>,
+    ) -> bool {
+        let Some(HostResource::TcpTaken {
+            info,
+            referenced: _,
+            restore_referenced,
+        }) = self.resources.remove(&resource)
+        else {
+            write_completion.complete(Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "HTTP upgrade transport has no host resource",
+            )));
+            return false;
+        };
+        let (reader, writer) = tokio::io::split(transport.0);
+        let writer = Rc::new(tokio::sync::Mutex::new(writer));
+        let prefix_abort = if pending_write.is_empty() {
+            write_completion.complete(Ok(()));
+            None
+        } else {
+            let prefix_writer = Rc::clone(&writer);
+            let prefix_completion = Arc::clone(&write_completion);
+            let task = tokio::task::spawn_local(async move {
+                let writing = async {
+                    let mut writer = prefix_writer.lock().await;
+                    let mut offset = 0usize;
+                    for boundary in write_fences {
+                        let end = boundary.offset;
+                        if end < offset || end > pending_write.len() {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "HTTP upgrade write fence offsets are out of order",
+                            ));
+                        }
+                        writer.write_all(&pending_write[offset..end]).await?;
+                        writer.flush().await?;
+                        offset = end;
+                        prefix_completion.complete_fence(boundary.fence, Ok(()));
+                    }
+                    writer.write_all(&pending_write[offset..]).await?;
+                    writer.flush().await
+                };
+                tokio::pin!(writing);
+                tokio::select! {
+                    biased;
+                    // An abort can complete the shared fence state while this task is blocked
+                    // on a raw write. Dropping that future prevents later append bytes from
+                    // escaping after their callbacks were failed. Check cancellation first,
+                    // including when it was recorded before this task's initial poll.
+                    result = prefix_completion.wait() => {
+                        if result.is_ok() {
+                            prefix_completion.complete(Ok(()));
+                        }
+                    },
+                    result = &mut writing => prefix_completion.complete(result),
+                }
+            });
+            Some(task.abort_handle())
+        };
+        self.resources.insert(
+            resource,
+            HostResource::TcpUpgraded {
+                reader: Rc::new(tokio::sync::Mutex::new(reader)),
+                writer,
+                write_completion,
+                prefix_abort,
+                info,
+                referenced: restore_referenced,
+                read_closed: false,
+                write_closed: false,
+            },
+        );
+        true
+    }
+
     fn take_transport(&mut self, resource: ResourceId) -> Option<HostTransport> {
         // A connection the ring accepted goes straight onto the ring: it was never registered
         // with Tokio's reactor, so there is nothing to leave.
@@ -3780,7 +4632,7 @@ impl RealmHostProvider for TokioHost {
             && let Some(HostResource::TcpRaw {
                 stream,
                 info,
-                referenced: _,
+                referenced,
             }) = self.resources.remove(&resource)
         {
             let _ = stream.set_nodelay(true);
@@ -3789,6 +4641,7 @@ impl RealmHostProvider for TokioHost {
                 HostResource::TcpTaken {
                     info,
                     referenced: false,
+                    restore_referenced: referenced,
                 },
             );
             return match ring.register(std::os::fd::OwnedFd::from(stream)) {
@@ -3867,6 +4720,7 @@ impl RealmHostProvider for TokioHost {
             HostResource::TcpTaken {
                 info,
                 referenced: false,
+                restore_referenced: referenced,
             },
         );
         #[cfg(target_os = "linux")]
@@ -4124,6 +4978,7 @@ async fn execute_process(
     let mut child = process
         .spawn()
         .map_err(|error| io_error("spawn", command.clone(), error))?;
+    let pid = child.id();
     let mut child_stdout = child.stdout.take().ok_or_else(|| {
         AsyncHostError::new(
             "EIO",
@@ -4198,6 +5053,7 @@ async fn execute_process(
     #[cfg(not(unix))]
     let signal = None;
     Ok(AsyncHostValue::ProcessOutput(ProcessOutput {
+        pid,
         stdout,
         stderr,
         exit_code: status.code(),
@@ -4350,14 +5206,17 @@ fn io_error(syscall: &str, path: String, error: std::io::Error) -> AsyncHostErro
         std::io::ErrorKind::NotADirectory => "ENOTDIR",
         _ => "EIO",
     };
-    AsyncHostError::new(code, syscall, Some(path), error.to_string())
+    let mut result = AsyncHostError::new(code, syscall, Some(path), error.to_string());
+    result.os_errno = error.raw_os_error();
+    result
 }
 
 /// A single-thread-owned realm scheduler.
 ///
 /// Microtasks are FIFO. Timers are ordered by `(deadline, sequence)` and each timer is followed
 /// by a complete microtask drain. The observable clock starts at the Unix epoch and is represented
-/// as elapsed virtual time from that epoch.
+/// as elapsed time from the realm's start. Deterministic realms advance it virtually; host-clock
+/// realms advance it from their host's monotonic elapsed reading at turn boundaries.
 ///
 /// Macrotasks come from three lanes, taken in the order of one turn of node's event loop (libuv's
 /// timers, poll and check phases): the timers that were due when the turn began, then the I/O
@@ -4380,6 +5239,15 @@ pub struct Realm<M = WorkId, T = WorkId> {
     phase: Phase,
     cancelled_timers: HashSet<TimerId, SequenceBuild>,
     active_timers: HashSet<TimerId, SequenceBuild>,
+    /// The active timers that do not keep the loop alive (`timer.unref()`). Always a subset of
+    /// `active_timers`: every place that retires an identity retires it here too.
+    unreferenced_timers: HashSet<TimerId, SequenceBuild>,
+    /// Timers restarted by `refresh_timer` whose queue entry still sits at its old deadline: the
+    /// new base (the realm's time when it was refreshed) and the sequence it was refreshed at.
+    /// The entry is moved when it reaches the front (`discard_cancelled_timers`), as node's timer
+    /// lists do, so a refresh is a map write and never a search of the queue. Empty unless a
+    /// program refreshes, and a subset of `active_timers` like the set above.
+    refreshed_timers: HashMap<TimerId, (Duration, u64), SequenceBuild>,
     /// Whether a process warning has been written, after which node leaves off its
     /// `--trace-warnings` hint.
     warned: bool,
@@ -4443,11 +5311,13 @@ impl<M, T> Realm<M, T> {
             phase: Phase::Check { remaining: 0 },
             cancelled_timers: HashSet::default(),
             active_timers: HashSet::default(),
+            unreferenced_timers: HashSet::default(),
+            refreshed_timers: HashMap::default(),
             _not_send: PhantomData,
         }
     }
 
-    /// Returns the realm's current virtual time from the Unix epoch.
+    /// Returns the realm's current scheduler time as elapsed time from its start.
     pub fn now(&self) -> Duration {
         self.now
     }
@@ -4572,12 +5442,12 @@ impl<M, T> Realm<M, T> {
         text
     }
 
-    /// Schedules a one-shot timer relative to the realm's current virtual time.
+    /// Schedules a one-shot timer relative to the realm's current scheduler time.
     pub fn set_timeout(&mut self, delay: Duration, work: T) -> TimerId {
         self.schedule_timer(delay, work, None)
     }
 
-    /// Schedules a repeating timer relative to the realm's current virtual time.
+    /// Schedules a repeating timer relative to the realm's current scheduler time.
     ///
     /// The next occurrence is inserted before the current occurrence is returned to the caller,
     /// so clearing `id` from its callback prevents the next run. The timer keeps the same identity
@@ -4618,11 +5488,16 @@ impl<M, T> Realm<M, T> {
     }
 
     fn schedule_timer(&mut self, delay: Duration, work: T, interval: Option<Duration>) -> TimerId {
+        let id = self.new_timer_id();
+        self.push_timer(id, delay, work, interval);
+        id
+    }
+
+    fn push_timer(&mut self, id: TimerId, delay: Duration, work: T, interval: Option<Duration>) {
         // Saturating arithmetic gives callers the same well-defined behaviour as a timer delay
         // clamped to the largest representable duration, without allowing an integer overflow to
         // become a scheduler panic.
         let deadline = self.now.saturating_add(delay);
-        let id = self.new_timer_id();
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.timers.push(
@@ -4633,19 +5508,82 @@ impl<M, T> Realm<M, T> {
                 id,
                 work,
                 interval,
+                delay,
             },
         );
-        id
     }
 
     /// Cancels a pending timer, returning whether `id` was still active.
     pub fn clear_timeout(&mut self, id: TimerId) -> bool {
         if self.active_timers.remove(&id) {
+            self.unreferenced_timers.remove(&id);
+            self.refreshed_timers.remove(&id);
             self.cancelled_timers.insert(id);
             true
         } else {
             false
         }
+    }
+
+    /// Marks an active timer, interval, immediate or I/O callback as keeping the loop alive
+    /// (`referenced`, node's default and `timer.ref()`) or not (`timer.unref()`). An unreferenced
+    /// timer still runs when its turn comes while something else keeps the loop going, but it
+    /// never holds the loop open and never moves the virtual clock by itself. Returns whether
+    /// `id` was still active.
+    pub fn set_timer_referenced(&mut self, id: TimerId, referenced: bool) -> bool {
+        if !self.active_timers.contains(&id) {
+            return false;
+        }
+        if referenced {
+            self.unreferenced_timers.remove(&id);
+        } else {
+            self.unreferenced_timers.insert(id);
+        }
+        true
+    }
+
+    /// Restarts an active timeout or interval as `Timeout.prototype.refresh()` does: the same
+    /// identity, callback and arguments, referenced state and delay, measured from the realm's
+    /// current scheduler time. An interval restarts its current period. A timer that already
+    /// finished or was cleared is not re-armed. `id` must name a timeout or an interval: an
+    /// immediate or an I/O callback has no delay to restart, and the caller (`Timeout`, never
+    /// `Immediate`) is what keeps them apart. Returns whether `id` was restarted.
+    ///
+    /// The queue entry is not searched for: the new base is recorded, and the entry moves when it
+    /// reaches the front of the queue, which it does no later than its new deadline.
+    pub fn refresh_timer(&mut self, id: TimerId) -> bool {
+        if !self.active_timers.contains(&id) {
+            return false;
+        }
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.refreshed_timers.insert(id, (self.now, sequence));
+        true
+    }
+
+    /// Whether `rearm_timeout` can arm `id` again: it ran (or is running) and has not been
+    /// cleared, so nothing of it is left in the queue or the sets.
+    pub fn is_rearmable(&self, id: TimerId) -> bool {
+        id.get() != 0
+            && id.get() < self.next_timer_id
+            && !self.active_timers.contains(&id)
+            && !self.cancelled_timers.contains(&id)
+    }
+
+    /// Arms a timeout under an identity that already ran, as node's `Timeout.prototype.refresh()`
+    /// does for a timeout that fired: the same timer object restarts, so `clearTimeout` of its
+    /// identity still finds it. The caller checks `is_rearmable` first and keeps ownership of
+    /// `work` when it is not.
+    pub fn rearm_timeout(&mut self, id: TimerId, delay: Duration, work: T) {
+        debug_assert!(self.is_rearmable(id));
+        self.active_timers.insert(id);
+        self.push_timer(id, delay, work, None);
+    }
+
+    /// Whether any active timer keeps the loop alive: the loop is finished, as far as timers
+    /// go, when only unreferenced ones remain.
+    pub fn has_referenced_timers(&self) -> bool {
+        self.active_timers.len() > self.unreferenced_timers.len()
     }
 
     /// Returns whether this realm still has language work waiting to run.
@@ -4727,17 +5665,28 @@ impl<M, T> Realm<M, T> {
         };
     }
 
+    /// Brings the front of the queue up to date: drops cancelled entries, and moves a refreshed
+    /// timer's entry, found at its old deadline, to the deadline its refresh gave it. Both are
+    /// settled here, before anything reads the front, so the virtual clock never advances to a
+    /// deadline the timer no longer has.
     fn discard_cancelled_timers(&mut self) {
-        if self.cancelled_timers.is_empty() {
+        if self.cancelled_timers.is_empty() && self.refreshed_timers.is_empty() {
             return;
         }
-        while self
-            .timers
-            .peek_key()
-            .is_some_and(|(_, _, id)| self.cancelled_timers.contains(&TimerId(id)))
-        {
-            let timer = self.timers.pop().expect("peeked timer exists");
-            self.cancelled_timers.remove(&timer.id);
+        while let Some((_, _, id)) = self.timers.peek_key() {
+            let id = TimerId(id);
+            if self.cancelled_timers.contains(&id) {
+                let timer = self.timers.pop().expect("peeked timer exists");
+                self.cancelled_timers.remove(&timer.id);
+            } else if let Some((base, sequence)) = self.refreshed_timers.remove(&id) {
+                let mut timer = self.timers.pop().expect("peeked timer exists");
+                let delay = timer.interval.unwrap_or(timer.delay);
+                timer.deadline = base.saturating_add(delay);
+                timer.sequence = sequence;
+                self.timers.push(delay, timer);
+            } else {
+                break;
+            }
         }
     }
 
@@ -4748,7 +5697,8 @@ impl<M, T> Realm<M, T> {
     }
 
     /// Take the next macrotask -- advancing virtual time to the earliest timer when nothing is
-    /// ready before it -- re-arming an interval.
+    /// ready before it -- re-arming an interval. A host-clock caller advances the scheduler at
+    /// turn boundaries before using this method.
     pub fn run_next_timer(&mut self) -> Option<WorkItem<M, T>>
     where
         T: Clone,
@@ -4769,6 +5719,8 @@ impl<M, T> Realm<M, T> {
             *remaining -= 1;
         }
         self.active_timers.remove(&id);
+        self.unreferenced_timers.remove(&id);
+        self.refreshed_timers.remove(&id);
         Some(WorkItem::Timer { id, work })
     }
 
@@ -4799,10 +5751,12 @@ impl<M, T> Realm<M, T> {
                     id,
                     work: rearmed,
                     interval: Some(interval),
+                    delay: interval,
                 },
             );
         } else {
             self.active_timers.remove(&id);
+            self.unreferenced_timers.remove(&id);
         }
         Some(WorkItem::Timer { id, work })
     }
@@ -4844,6 +5798,10 @@ where
             execute(realm, WorkItem::Microtask(work))?;
         }
         checkpoint(realm)?;
+        // Finished once only unreferenced timers remain, though one of them may be due.
+        if !realm.has_referenced_timers() {
+            return Ok(());
+        }
         let Some(deadline) = realm.next_timer_deadline() else {
             return Ok(());
         };
@@ -4852,8 +5810,8 @@ where
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        // Tokio's paused clock has advanced to the sleep deadline. The realm's own clock remains
-        // authoritative and advances only when the corresponding timer is selected below.
+        // Tokio has reached the sleep deadline. The realm's clock remains authoritative and
+        // advances virtually only when the corresponding timer is selected below.
         let work = realm
             .run_next_timer()
             .expect("a timer was present when its deadline was selected");
@@ -4865,6 +5823,9 @@ async fn next_timer<M, T>(realm: &mut Realm<M, T>) -> Option<WorkItem<M, T>>
 where
     T: Clone,
 {
+    if !realm.has_referenced_timers() {
+        return None;
+    }
     let deadline = realm.next_timer_deadline()?;
     let delay = deadline.saturating_sub(realm.now);
     if !delay.is_zero() {
@@ -4878,26 +5839,28 @@ const CAPTURE_HOST_CLOCK_START_MS: f64 = 1_577_836_800_000.0;
 /// How far it moves per read. One millisecond keeps ordinary elapsed-time code sane.
 const CAPTURE_HOST_CLOCK_STEP_MS: f64 = 1.0;
 
-/// A deterministic host used by the interpreter, tests, and CLI execution mode.
+#[derive(Debug)]
+enum CaptureClock {
+    Synthetic(f64),
+    Host,
+}
+
+/// A host that captures output, with a deterministic clock unless explicitly configured otherwise.
 pub struct CaptureHost {
     stdout: String,
     /* Separate from `stdout`, because which stream a line went to is observable: a caller that
      * redirects one and not the other sees the difference, and node puts `console.error` on this
      * one. Kept as its own buffer rather than interleaved so a test can assert either alone. */
     stderr: String,
-    /// Epoch milliseconds this host will answer `ClockNow` with next.
-    ///
-    /// A deterministic host still has to *have* a clock. `--node` asks for
-    /// [`ClockCapability::Host`], because a Node program expects real time (ADR 0044), and a host
-    /// that refuses the question leaves the realm asking for time from something that has none --
-    /// which is how `fastify` and `express` came to be unrunnable here: any real library
-    /// timestamps something.
-    ///
-    /// Fixed start, fixed step, so a run is reproducible and two reads never return the same
-    /// value. Monotonic rather than constant because code that waits for the clock to move is
-    /// ordinary, and against a constant clock it would wait forever.
-    clock_ms: f64,
+    /// The synthetic clock is reproducible; a CLI wall-clock request must opt into the host
+    /// clock rather than charge one synthetic millisecond for every event-loop checkpoint.
+    clock: CaptureClock,
     fs: Option<Box<dyn kiln_host_abi::FileSystemOps>>,
+    sync_process: bool,
+    /// When set, each write is handed here (`true` for stderr) the moment it happens and is not
+    /// retained in `stdout`/`stderr`. A program that never finishes, a server, would otherwise
+    /// say nothing until it was killed.
+    stream: Option<Box<dyn FnMut(bool, &str)>>,
 }
 
 impl std::fmt::Debug for CaptureHost {
@@ -4905,8 +5868,9 @@ impl std::fmt::Debug for CaptureHost {
         f.debug_struct("CaptureHost")
             .field("stdout", &self.stdout)
             .field("stderr", &self.stderr)
-            .field("clock_ms", &self.clock_ms)
+            .field("clock", &self.clock)
             .field("has_fs", &self.fs.is_some())
+            .field("sync_process", &self.sync_process)
             .finish()
     }
 }
@@ -4916,8 +5880,10 @@ impl Default for CaptureHost {
         Self {
             stdout: String::new(),
             stderr: String::new(),
-            clock_ms: CAPTURE_HOST_CLOCK_START_MS,
+            clock: CaptureClock::Synthetic(CAPTURE_HOST_CLOCK_START_MS),
             fs: None,
+            sync_process: false,
+            stream: None,
         }
     }
 }
@@ -4927,8 +5893,32 @@ impl CaptureHost {
         Self::default()
     }
 
+    /// Use the clock authority selected for this run. Output capture is independent of time:
+    /// explicit host-clock execution reads epoch time from the system; virtual execution keeps
+    /// the deterministic capture-host clock for any host calls a test makes directly.
+    pub fn with_clock(mut self, capability: ClockCapability) -> Self {
+        self.clock = match capability {
+            ClockCapability::Virtual => CaptureClock::Synthetic(CAPTURE_HOST_CLOCK_START_MS),
+            ClockCapability::Host => CaptureClock::Host,
+        };
+        self
+    }
+
+    /// Deliver standard-stream writes to `stream(is_stderr, text)` as they happen instead of
+    /// buffering them; [`Self::stdout`] and [`Self::stderr`] then stay empty.
+    pub fn with_stream(mut self, stream: Box<dyn FnMut(bool, &str)>) -> Self {
+        self.stream = Some(stream);
+        self
+    }
+
     pub fn with_fs(mut self, fs: Box<dyn kiln_host_abi::FileSystemOps>) -> Self {
         self.fs = Some(fs);
+        self
+    }
+
+    /// Grant the Node adapter synchronous child-process authority for this host.
+    pub fn with_sync_process(mut self, enabled: bool) -> Self {
+        self.sync_process = enabled;
         self
     }
 
@@ -4962,11 +5952,13 @@ impl HostOps for CaptureHost {
     fn call(&mut self, operation: HostOp, arguments: &[HostValue]) -> Result<HostValue, HostError> {
         match operation {
             HostOp::WriteStdout | HostOp::WriteStderr => {
-                let sink = if operation == HostOp::WriteStdout {
-                    &mut self.stdout
-                } else {
+                let is_stderr = operation == HostOp::WriteStderr;
+                let sink = if is_stderr {
                     &mut self.stderr
+                } else {
+                    &mut self.stdout
                 };
+                let start = sink.len();
                 if !arguments.is_empty() {
                     if !sink.is_empty() && !sink.ends_with('\n') {
                         sink.push('\n');
@@ -4979,11 +5971,29 @@ impl HostOps for CaptureHost {
                     }
                 }
                 sink.push('\n');
+                if let Some(stream) = self.stream.as_mut() {
+                    stream(is_stderr, &sink[start..]);
+                    sink.clear();
+                }
                 Ok(HostValue::Undefined)
             }
             HostOp::ClockNow => {
-                let now = self.clock_ms;
-                self.clock_ms += CAPTURE_HOST_CLOCK_STEP_MS;
+                let now = match &mut self.clock {
+                    CaptureClock::Synthetic(next) => {
+                        let now = *next;
+                        *next += CAPTURE_HOST_CLOCK_STEP_MS;
+                        now
+                    }
+                    CaptureClock::Host => {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(|error| {
+                                HostError::new(format!("host clock precedes Unix epoch: {error}"))
+                            })?
+                            .as_secs_f64()
+                            * 1000.0
+                    }
+                };
                 Ok(HostValue::number(now))
             }
             HostOp::TransferRegion => {
@@ -5005,6 +6015,77 @@ impl HostOps for CaptureHost {
     fn clone_fs(&self) -> Option<Box<dyn kiln_host_abi::FileSystemOps>> {
         self.fs.as_ref().and_then(|f| f.clone_box())
     }
+
+    fn run_process_sync(
+        &mut self,
+        command: &str,
+        args: &[String],
+    ) -> Result<kiln_host_abi::SyncProcessOutput, HostError> {
+        use std::process::{Command, Stdio};
+
+        if !self.sync_process {
+            return Err(HostError::new(
+                "synchronous process execution is unavailable in this host",
+            ));
+        }
+
+        let child = match Command::new(command)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                return Ok(kiln_host_abi::SyncProcessOutput {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    status: None,
+                    signal: None,
+                    pid: None,
+                    error: Some(error.to_string()),
+                });
+            }
+        };
+        let pid = Some(child.id());
+        let output = child.wait_with_output().map_err(|error| {
+            HostError::new(format!("failed waiting for child process: {error}"))
+        })?;
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt;
+            output.status.signal().map(sync_signal_name)
+        };
+        #[cfg(not(unix))]
+        let signal: Option<String> = None;
+
+        Ok(kiln_host_abi::SyncProcessOutput {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            status: output.status.code(),
+            signal,
+            pid,
+            error: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+fn sync_signal_name(signal: i32) -> String {
+    match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        6 => "SIGABRT",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => return format!("SIG{signal}"),
+    }
+    .to_owned()
 }
 
 /// Converts a JavaScript millisecond delay into the Realm's virtual duration.

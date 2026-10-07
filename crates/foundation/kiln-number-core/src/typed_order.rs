@@ -32,7 +32,8 @@ pub enum ElementKind {
 }
 
 impl ElementKind {
-    /// The kind a native `kiln_typed_kind` names (0..=10; the native backend has no `Float16`).
+    /// The kind a native `kiln_typed_kind` names. Keep these discriminants aligned with
+    /// `kiln_typed_kind` in the native prelude: Float16 occupies 7, shifting every later kind.
     pub fn from_native(kind: i32) -> Option<Self> {
         Some(match kind {
             0 => Self::Int8,
@@ -42,10 +43,11 @@ impl ElementKind {
             4 => Self::Uint16,
             5 => Self::Int32,
             6 => Self::Uint32,
-            7 => Self::Float32,
-            8 => Self::Float64,
-            9 => Self::BigInt64,
-            10 => Self::BigUint64,
+            7 => Self::Float16,
+            8 => Self::Float32,
+            9 => Self::Float64,
+            10 => Self::BigInt64,
+            11 => Self::BigUint64,
             _ => return None,
         })
     }
@@ -249,6 +251,48 @@ mod tests {
         .collect();
         assert_eq!(bits.get(..8), Some(expected.as_slice()));
         assert!(out.get(8).is_some_and(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn native_kind_discriminants_preserve_element_width_and_signed_bigints() {
+        let expected = [
+            (0, ElementKind::Int8, 1),
+            (1, ElementKind::Uint8, 1),
+            (2, ElementKind::Uint8Clamped, 1),
+            (3, ElementKind::Int16, 2),
+            (4, ElementKind::Uint16, 2),
+            (5, ElementKind::Int32, 4),
+            (6, ElementKind::Uint32, 4),
+            (7, ElementKind::Float16, 2),
+            (8, ElementKind::Float32, 4),
+            (9, ElementKind::Float64, 8),
+            (10, ElementKind::BigInt64, 8),
+            (11, ElementKind::BigUint64, 8),
+        ];
+        for (native, kind, width) in expected {
+            assert_eq!(
+                ElementKind::from_native(native),
+                Some(kind),
+                "kind {native}"
+            );
+            assert_eq!(kind.width(), width, "kind {native}");
+        }
+        assert_eq!(ElementKind::from_native(12), None);
+
+        let mut signed = i64::MIN
+            .to_le_bytes()
+            .into_iter()
+            .chain((-1_i64).to_le_bytes())
+            .chain(1_i64.to_le_bytes())
+            .collect::<Vec<_>>();
+        let mut keys = [0; 3];
+        sort_elements(
+            &mut signed,
+            ElementKind::from_native(10).unwrap(),
+            &mut keys,
+        )
+        .unwrap();
+        assert_eq!(elements(&signed, 8), [i64::MIN as u64, u64::MAX, 1]);
     }
 
     #[test]

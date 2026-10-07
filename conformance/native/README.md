@@ -28,7 +28,7 @@ A probe may name, in its first five lines, a profile and a set of thread counts:
 `scripts/native.sh` then builds it with `--profile native-release` and runs the binary once per
 `KILN_PARALLELISM` value (`max` is the core count); every run must print the interpreter's bytes.
 The `parallel-*.js` probes -- the parallel/sequential differential harness of
-`.scratch/parallel-builtins` issue 02 -- use it, because only a release build emits the parallel
+`docs/issues/parallel-builtins` issue 02 -- use it, because only a release build emits the parallel
 lowering of `parallelMap`, and because a result that depends on how many threads computed it is a
 divergence like any other. A release module past 16 functions or 512 instructions is emitted
 generic-only, but its qualifying `parallelMap` sites keep their parallel lowering (issue 13):

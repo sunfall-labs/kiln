@@ -110,14 +110,26 @@ struct NativeInspector {
 #[derive(Debug)]
 enum NativeInspectError {
     InvalidSource,
+    /// C classified the value (`kiln-shared-graph`'s kind codes), so the words are the crate's.
+    Refused(kiln_shared_graph::UnsupportedKind),
     Unsupported,
     TooLarge,
 }
 
 impl std::fmt::Display for NativeInspectError {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(out, "{self:?}")
+        match self {
+            Self::Refused(kind) => write!(out, "cannot share {}", kind.describe()),
+            Self::InvalidSource | Self::Unsupported => out.write_str("cannot share this value"),
+            Self::TooLarge => out.write_str("shared graph is too large"),
+        }
     }
+}
+
+/// A C inspector status of `-(16 + code)` is a refusal of kind `code`.
+fn refused_kind(status: i32) -> Option<kiln_shared_graph::UnsupportedKind> {
+    let code = status.checked_neg()?.checked_sub(16)?;
+    kiln_shared_graph::UnsupportedKind::from_code(u32::try_from(code).ok()?)
 }
 
 impl NativeInspector {
@@ -161,7 +173,10 @@ impl kiln_shared_graph::Inspector for NativeInspector {
             )
         };
         if status != 0 {
-            return Err(NativeInspectError::Unsupported);
+            return match refused_kind(status) {
+                Some(kind) => Ok(SourceNode::Unsupported(kind)),
+                None => Err(NativeInspectError::Unsupported),
+            };
         }
         if node.kind != 1 && node.kind != 2 {
             return Err(NativeInspectError::Unsupported);
@@ -227,6 +242,12 @@ impl kiln_shared_graph::Inspector for NativeInspector {
                         InputValue::Shared(
                             Handle::resolve(token).ok_or(NativeInspectError::InvalidSource)?,
                         )
+                    }
+                    9 => {
+                        return Err(u32::try_from(field.value_bits)
+                            .ok()
+                            .and_then(kiln_shared_graph::UnsupportedKind::from_code)
+                            .map_or(NativeInspectError::Unsupported, NativeInspectError::Refused));
                     }
                     _ => return Err(NativeInspectError::Unsupported),
                 };
@@ -542,6 +563,42 @@ pub unsafe extern "C" fn kiln_shared_graph_field(
     0
 }
 
+thread_local! {
+    /// Why this thread's last [`kiln_shared_graph_build`] refused, NUL-terminated.
+    static LAST_REFUSAL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The words for a refusal, so a native `share` throws exactly the interpreter's text
+/// (`kiln-shared-graph` writes both): kind 0 is why this thread's last [`kiln_shared_graph_build`]
+/// refused (-2), any other `kiln-shared-graph` kind code is that kind -- a root C refuses before
+/// building. A NUL-terminated UTF-8 message in `*text`, valid until this thread's next call;
+/// -1 when there is nothing to say.
+///
+/// # Safety
+///
+/// `text` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_shared_graph_refusal(kind: u32, text: *mut *const u8) -> i32 {
+    if text.is_null() {
+        return -1;
+    }
+    LAST_REFUSAL.with(|last| {
+        let mut last = last.borrow_mut();
+        if kind != 0 {
+            let Some(kind) = kiln_shared_graph::UnsupportedKind::from_code(kind) else {
+                return -1;
+            };
+            *last = format!("{}\0", NativeInspectError::Refused(kind));
+        }
+        if last.is_empty() {
+            return -1;
+        }
+        // SAFETY: checked above; the buffer lives until this thread's next build or call.
+        unsafe { *text = last.as_ptr() };
+        0
+    })
+}
+
 /// Seal a native object graph by synchronously inspecting C's own storage. The returned build
 /// lease keeps the graph alive until C installs a realm-local facade and releases this lease.
 /// An inspector refusal returns -2; allocation/size failure returns -3; bad ABI arguments -1.
@@ -565,6 +622,7 @@ pub unsafe extern "C" fn kiln_shared_graph_build(
     if root == 0 || out.is_null() {
         return -1;
     }
+    LAST_REFUSAL.with(|last| last.borrow_mut().clear());
     let mut source = NativeInspector {
         context,
         inspect,
@@ -578,7 +636,10 @@ pub unsafe extern "C" fn kiln_shared_graph_build(
                 kiln_shared_graph::SnapshotError::TooLarge
                 | kiln_shared_graph::SnapshotError::Source(NativeInspectError::TooLarge),
             ) => return -3,
-            Err(_) => return -2,
+            Err(refusal) => {
+                LAST_REFUSAL.with(|last| *last.borrow_mut() = format!("{refusal}\0"));
+                return -2;
+            }
         };
     let opaque = handle.opaque();
     let lease = insert(handle);

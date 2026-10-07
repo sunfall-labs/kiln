@@ -2,15 +2,17 @@
 
 pub mod closed_world;
 pub mod demanded;
+mod dominators;
 pub mod graph;
 pub mod summary;
+mod suspended_liveness;
 pub mod validation;
 pub mod verifier;
 
 pub use closed_world::{
     closed_world_function_liveness, closed_world_module_live_slots,
     closed_world_module_live_slots_with_declarations, closed_world_namespace_members,
-    retained_module_instructions, retained_module_size,
+    closed_world_namespace_members_for_slots, retained_module_instructions, retained_module_size,
 };
 pub use demanded::{
     CORE_METHOD_GROUPS, DemandedMembers, PRUNABLE_METHOD_GROUPS, analyze_demanded_members,
@@ -19,6 +21,7 @@ pub use demanded::{
 pub use graph::*;
 pub use kiln_db::summaries_digest;
 pub use summary::{summarize_function, summarize_graph, summarize_program};
+pub use suspended_liveness::suspended_local_liveness;
 pub use validation::{StackEffectError, stack_effect};
 pub use verifier::{VerifierError, verify_function_graph};
 
@@ -34,8 +37,10 @@ pub fn instruction_diagnostic(
         .to_owned();
     let named = match instruction {
         kiln_ir::Instruction::CallMethod { name, .. }
+        | kiln_ir::Instruction::CallMethodPrepared { name, .. }
         | kiln_ir::Instruction::GetProperty(name)
         | kiln_ir::Instruction::SetProperty(name)
+        | kiln_ir::Instruction::DefineOwnProperty(name)
         | kiln_ir::Instruction::SetPropertyStrict { name, .. } => constants.get(*name as usize),
         _ => None,
     };

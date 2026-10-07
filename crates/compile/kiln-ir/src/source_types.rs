@@ -5,7 +5,7 @@ use kiln_hir::{
     source_types::{CheckResult, TypeClass, TypeRole},
 };
 use std::collections::BTreeMap;
-/// Metadata format identity, included in bytecode contract version 8.
+/// Metadata format identity, included in the versioned bytecode contract.
 pub const SOURCE_TYPE_METADATA_VERSION: u16 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceTypeAnnotations {
@@ -43,6 +43,10 @@ pub fn apply_source_types(
         .filter(|signature| signature.has_body)
         .map(|signature| (signature.owner_span, signature))
         .collect();
+    let signature_starts: BTreeMap<_, _> = signatures
+        .values()
+        .map(|signature| (signature.owner_span.start, *signature))
+        .collect();
     let mut parameter_types = BTreeMap::new();
     let mut return_types = BTreeMap::new();
     for fact in checked.types.iter().filter(|fact| fact.path == path) {
@@ -61,7 +65,16 @@ pub fn apply_source_types(
         }
     }
     for proto in &mut program.functions {
-        let Some(signature) = signatures.get(&proto.span) else {
+        // Static TS execution uses generated JavaScript coordinates. Checker signatures use
+        // authored coordinates, so cross this boundary through the frontend's source map.
+        let signature = if let Some(provenance) = &module.static_source_provenance {
+            provenance
+                .original_offset(proto.span.start)
+                .and_then(|start| signature_starts.get(&start).copied())
+        } else {
+            signatures.get(&proto.span).copied()
+        };
+        let Some(signature) = signature else {
             continue;
         };
         let parameters = signature

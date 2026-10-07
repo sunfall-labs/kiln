@@ -182,7 +182,8 @@ impl super::Compiler {
     pub(super) fn require_object_coercible(&mut self) {
         self.code.push(Instruction::Dup);
         let coercible = self.emit_jump(Instruction::JumpIfNotNullish(0));
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
             "Cannot destructure 'null' or 'undefined'".to_owned().into(),
         ));
@@ -335,6 +336,8 @@ impl super::Compiler {
         // `value[Symbol.iterator]()`, which is what makes `const [a] = new Set([1])` bind 1: a
         // pattern reads what the value yields, not what its indices hold.
         self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+        self.code.push(Instruction::Dup2);
+        self.code.push(Instruction::GetComputed);
         self.code.push(Instruction::CallComputed { argc: 0 });
         self.declare_hidden(&iterator, span);
         // The rest of the iterator record. `GetIteratorFromMethod` reads `next` once, before any
@@ -580,7 +583,8 @@ impl super::Compiler {
         let object = self.emit_jump(Instruction::JumpIfNotNullish(0));
 
         self.patch_jump(refused);
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(message.to_owned().into()));
         self.code.push(Instruction::New { argc: 1 });
         self.code.push(Instruction::Throw);
@@ -837,6 +841,7 @@ impl super::Compiler {
                 imported: false,
                 initialized: !in_dead_zone,
                 celled,
+                eval_declaration: None,
             },
         );
         if celled {
@@ -955,16 +960,17 @@ impl super::Compiler {
         }
         for statement in list {
             if let StatementKind::Function(function) = &statement.kind {
-                self.emit_function_declaration(function, statement.span);
+                self.initialize_function_declaration(function, statement.span);
             }
         }
         for statement in list {
-            // Emitted above; running it again would rebuild the closure and overwrite the
-            // binding with an identical one.
-            if matches!(statement.kind, StatementKind::Function(_)) {
-                continue;
+            // The lexical closure already exists. Only the Annex B copy belongs at the
+            // declaration's execution point, so an earlier break or return skips that copy.
+            if let StatementKind::Function(function) = &statement.kind {
+                self.emit_annexb_function_write(function);
+            } else {
+                self.statement(statement);
             }
-            self.statement(statement);
         }
     }
 
@@ -1014,6 +1020,9 @@ impl super::Compiler {
         // `this` is not a binding an environment record answers for, and a compiler-introduced
         // name is not one any object can have: neither is ever looked for on a `with` object.
         if name == "this" || name.starts_with('%') || name.starts_with('*') {
+            return Vec::new();
+        }
+        if self.eval_program && self.eval_lexical_names.contains(name) {
             return Vec::new();
         }
         let bound = self
@@ -1242,14 +1251,11 @@ impl super::Compiler {
         let mut blocked: Vec<String> = parameters.iter().cloned().collect();
         let mut names = Vec::new();
         collect_annexb_function_names(body, false, &mut blocked, &mut names);
-        for name in names {
-            if self.annexb_var_functions.contains(&name) {
-                continue;
-            }
+        for (name, span) in names {
             // A `var` or a top-level function declaration of the same name already owns the
             // binding; Annex B only adds the write, never a second slot.
             self.predeclare(VariableKind::Var, &name, true);
-            self.annexb_var_functions.insert(name);
+            self.annexb_var_functions.insert(span);
         }
     }
 
@@ -1332,6 +1338,7 @@ impl super::Compiler {
                 imported: false,
                 initialized,
                 celled,
+                eval_declaration: None,
             },
         );
         // The cell has to exist before a hoisted function captures it, which is why this is here
@@ -1644,7 +1651,8 @@ impl super::Compiler {
     /// shadow that name and the error a language rule raises is not the shadowing program's to
     /// choose.
     pub(super) fn emit_type_error(&mut self, message: &str) {
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(message.to_owned().into()));
         self.code.push(Instruction::New { argc: 1 });
         self.code.push(Instruction::Throw);
@@ -1681,14 +1689,22 @@ impl super::Compiler {
     pub(super) fn emit_iterator_close(&mut self, binding: &str) {
         let name = self.constant_index(Constant::String("return".to_owned().into()));
         self.load_hidden(binding);
+        self.code.push(Instruction::Dup);
         self.code.push(Instruction::GetProperty(name));
+        // GetMethod observes the `return` property once. Preserve the fetched value through the
+        // truthiness test, then call that saved value with the iterator as `this`.
+        self.code.push(Instruction::Dup);
         let skip = self.emit_jump(Instruction::JumpIfFalse(0));
-        self.load_hidden(binding);
-        self.code.push(Instruction::CallMethod { name, argc: 0 });
+        self.code
+            .push(Instruction::CallMethodPrepared { name, argc: 0 });
         // The specification ignores the result unless it is not an object; nothing observes it
         // here, so it is discarded.
         self.code.push(Instruction::Pop);
+        let done = self.emit_jump(Instruction::Jump(0));
         self.patch_jump(skip);
+        self.code.push(Instruction::Pop);
+        self.code.push(Instruction::Pop);
+        self.patch_jump(done);
     }
 
     /// Run every cleanup between here and `depth`, innermost first.
@@ -1712,8 +1728,21 @@ impl super::Compiler {
     /// is emitted here. On anything else it names a block, which needs a context of its own for
     /// `break label` to have somewhere to land.
     pub(super) fn labelled_statement(&mut self, label: &str, body: &Statement) {
+        // A chain such as `outer: inner: while (...)` gives both labels the same iteration
+        // target. Keep them together on that loop context so a continue to either label can
+        // resolve there; treating the outer label as a non-loop block incorrectly rejects it.
+        let mut target = body;
+        let mut labels = vec![label.to_owned()];
+        while let StatementKind::Labelled {
+            label: nested_label,
+            body: nested_body,
+        } = &target.kind
+        {
+            labels.push(nested_label.clone());
+            target = nested_body;
+        }
         if matches!(
-            body.kind,
+            target.kind,
             StatementKind::While { .. }
                 | StatementKind::DoWhile { .. }
                 | StatementKind::For { .. }
@@ -1721,16 +1750,16 @@ impl super::Compiler {
                 | StatementKind::ForOf { .. }
                 | StatementKind::Switch { .. }
         ) {
-            self.pending_label = Some(label.to_owned());
-            self.statement(body);
-            // Cleared in case the statement turned out not to claim it after all.
-            self.pending_label = None;
+            let previous = std::mem::replace(&mut self.pending_labels, labels);
+            self.statement(target);
+            // Restore the outer pending state even if a future target form fails to claim it.
+            self.pending_labels = previous;
             return;
         }
 
         self.loops.push(LoopContext {
             kind: BreakableKind::Labelled,
-            label: Some(label.to_owned()),
+            labels: vec![label.to_owned()],
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -1804,7 +1833,7 @@ impl super::Compiler {
         self.declare_bound(kind, name, span);
 
         self.loops.push(LoopContext {
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -1889,6 +1918,8 @@ impl super::Compiler {
 
             self.load_hidden(&subject);
             self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::Dup2);
+            self.code.push(Instruction::GetComputed);
             self.code.push(Instruction::CallComputed { argc: 0 });
             self.push_constant(Constant::Boolean(false));
             let chosen = self.emit_jump(Instruction::Jump(0));
@@ -1908,6 +1939,8 @@ impl super::Compiler {
             // only an array.
             self.expression(iterable);
             self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::Dup2);
+            self.code.push(Instruction::GetComputed);
             self.code.push(Instruction::CallComputed { argc: 0 });
             self.declare_hidden(&iterator_binding, span);
         }
@@ -1972,7 +2005,7 @@ impl super::Compiler {
         });
         self.handler_depth += 1;
         self.loops.push(LoopContext {
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -2080,6 +2113,8 @@ impl super::Compiler {
             // it does that the async protocol does not.
             self.load_hidden(&subject_binding);
             self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::Dup2);
+            self.code.push(Instruction::GetComputed);
             self.code.push(Instruction::CallComputed { argc: 0 });
             self.push_constant(Constant::Boolean(true));
             let chosen = self.emit_jump(Instruction::Jump(0));
@@ -2096,6 +2131,8 @@ impl super::Compiler {
             self.declare_hidden(&iterator_binding, span);
         } else {
             self.push_constant(Constant::WellKnownSymbol(WellKnownSymbol::Iterator));
+            self.code.push(Instruction::Dup2);
+            self.code.push(Instruction::GetComputed);
             self.code.push(Instruction::CallComputed { argc: 0 });
             self.declare_hidden(&iterator_binding, span);
         }
@@ -2255,7 +2292,8 @@ impl super::Compiler {
         let yielded_this = self.emit_jump(Instruction::Jump(0));
 
         self.patch_jump(refused);
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
             "a derived constructor may only return an object or undefined"
                 .to_owned()
@@ -2283,7 +2321,8 @@ impl super::Compiler {
         self.push_constant(Constant::String("prototype".to_owned().into()));
         self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
         let usable = self.emit_jump(Instruction::JumpIfFalse(0));
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
             "a static class element may not be named `prototype`"
                 .to_owned()
@@ -2317,7 +2356,8 @@ impl super::Compiler {
 
     /// `throw new TypeError("...")`, spelled in the instructions that already exist.
     pub(super) fn emit_iterator_result_type_error(&mut self) {
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
             "iterator result is not an object".to_owned().into(),
         ));
@@ -2437,7 +2477,7 @@ impl super::Compiler {
         });
 
         self.loops.push(LoopContext {
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -2489,7 +2529,7 @@ impl super::Compiler {
                 .iter()
                 .rposition(|context| context.kind == BreakableKind::Loop),
             Some(label) => self.loops.iter().rposition(|context| {
-                context.label.as_deref() == Some(label)
+                context.labels.iter().any(|candidate| candidate == label)
                     && (is_break || context.kind == BreakableKind::Loop)
             }),
         };
@@ -2555,7 +2595,7 @@ impl super::Compiler {
         let exit_jump = self.emit_jump(Instruction::JumpIfFalse(0));
 
         self.loops.push(LoopContext {
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -2580,7 +2620,7 @@ impl super::Compiler {
         let loop_start = self.code.len();
 
         self.loops.push(LoopContext {
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -2639,6 +2679,16 @@ impl super::Compiler {
                 self.hoist_names(statement);
             }
         }
+        // CaseBlock declaration instantiation initializes every function before any case test
+        // runs, including declarations in unselected clauses. Annex B's outer var write is a
+        // separate operation that occurs only when execution reaches the declaration below.
+        for case in cases {
+            for statement in &case.body {
+                if let StatementKind::Function(function) = &statement.kind {
+                    self.initialize_function_declaration(function, statement.span);
+                }
+            }
+        }
 
         let mut entries = Vec::with_capacity(cases.len());
         let mut fallback = None;
@@ -2660,7 +2710,7 @@ impl super::Compiler {
 
         self.loops.push(LoopContext {
             kind: BreakableKind::Switch,
-            label: self.pending_label.take(),
+            labels: std::mem::take(&mut self.pending_labels),
             finalizer_depth: self.finalizers.len(),
             handler_depth: self.handler_depth,
             ..LoopContext::default()
@@ -2669,7 +2719,11 @@ impl super::Compiler {
         for case in cases {
             starts.push(self.code.len() as u32);
             for statement in &case.body {
-                self.statement(statement);
+                if let StatementKind::Function(function) = &statement.kind {
+                    self.emit_annexb_function_write(function);
+                } else {
+                    self.statement(statement);
+                }
             }
         }
         let context = self

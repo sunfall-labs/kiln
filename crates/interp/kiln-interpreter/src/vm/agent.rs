@@ -21,14 +21,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match op {
             AgentOp::Start => {
                 let source = self.as_text_units(&first, instruction)?;
-                let source = self.checked_dynamic_source(&source)?;
                 // The host's prelude first: a new realm has never heard of `$262`, and the
                 // source it was given assumes it has.
                 let prelude = self.host_agents.unwrap_or_default();
-                group.start(format!(
-                    "{prelude}
-{source}"
-                ))?;
+                let prelude = StringUnits::from(format!("{prelude}\n"));
+                group.start(prelude.concat(&source))?;
                 self.checkpoint = self.next_checkpoint();
                 Ok(Value::Undefined)
             }
@@ -122,6 +119,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             },
         };
+        // `SetTypedArrayFromSource` begins by validating that the target can be written, before
+        // it reads either the source or its options. In particular, an empty input still throws
+        // for an immutable target, and option getters must not run first.
+        if matches!(conversion, ByteText::SetFromBase64 | ByteText::SetFromHex)
+            && view.as_ref().is_some_and(|view| view.buffer.immutable)
+        {
+            return Err(ExecutionError::BufferDetached);
+        }
         // Which argument carries the options is the one thing the six do not share: a conversion
         // that reads a string takes it first, and one that writes a string takes none at all.
         let (text, options) = match conversion {
@@ -256,7 +261,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut record = ObjectData::default();
                 record.set("read", Value::Number(decoded.read as f64));
                 record.set("written", Value::Number(written as f64));
-                Ok(Value::Object(Rc::new(RefCell::new(record))))
+                Ok(Value::Object(tracked_object(record)))
             }
         }
     }

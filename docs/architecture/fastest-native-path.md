@@ -8,7 +8,7 @@ change that produces that C for every program rather than for the benchmarks som
 
 Everything here was measured in a worktree on an 18-core aarch64 macOS machine, first at
 `84b2087b` and again at `cf93bb61`, the commit that NaN-boxed the emitted bodies.
-`.scratch/fastest-native/measure.sh` reproduces the table.
+`docs/issues/fastest-native/measure.sh` reproduces the table.
 
 ## Where today's number comes from
 
@@ -76,7 +76,7 @@ the call site already proved.
 
 ## The ceiling, measured
 
-`.scratch/fastest-native/{loop,fib,class-poly}.c` is the C a middle-end should emit for those three
+`docs/issues/fastest-native/{loop,fib,class-poly}.c` is the C a middle-end should emit for those three
 programs, written by hand against the value model this repository has already decided on: NaN-boxed
 values (ADR 0053), shape-plus-slots objects (ADR 0050), interned keys and per-site caches (ADR
 0047). It is deliberately *not* clever C: a guarded fast clone and a generic fallback, a typed
@@ -248,10 +248,18 @@ Two things make that sound, and both are cheap:
   flagged object bumps one realm counter; the PIC entry records the counter it was filled under.
   V8 calls this a validity cell; one word does it here.
 - **Intrinsics under a realm epoch.** `Math.sqrt`, `Math.round`, `Array.prototype.push`,
-  `.length` on an array or a string: the emitter knows the receiver is the builtin (it emitted
-  `LoadBuiltin(Math)`) and the method is the intrinsic unless the program has written to that
-  builtin. The same counter, bumped by a write to any builtin object, guards `sqrt(a*a + b*b)`
-  emitted as exactly that.
+  `.length` on an array or a string: a compiler-proven intrinsic receiver and the method are
+  intrinsic unless the program has written to that builtin. The same counter, bumped by a write
+  to any builtin object, guards `sqrt(a*a + b*b)` emitted as exactly that. A source spelling
+  such as `Math` or `Array` is an ordinary mutable global-object read; it can invoke an accessor
+  or throw after deletion, so native specialization must preserve or guard that lookup before
+  using builtin identity. Compiler-generated language errors use intrinsic constructors instead
+  of redirecting through a replaced global binding.
+
+  This distinction is visible in the facts snapshot: PostCSS function #9 is the `() => String`
+  fallback at `conformance/thirdparty/postcss.bundle.js:52`. Its read of the source-level `String`
+  binding may invoke a getter or throw if the global was deleted, so the baseline records that
+  function as impure and throwable.
 
 ### The differentiator: a closed world
 

@@ -69,7 +69,7 @@ static const void *kiln_c99_graph_capsule_root_payload(const kiln_gc_heap *from,
             payload != (const void *)(uintptr_t)root.bits ||
             !kiln_c99_graph_inert_finalizer_block(block)) return NULL;
     } else if (root.tag == KILN_VALUE_DATE) {
-        if (kind != KILN_GC_DATE || block->size != sizeof(double) ||
+        if (kind != KILN_GC_DATE || block->size != sizeof(kiln_date) ||
             payload != (const void *)(uintptr_t)root.bits) return NULL;
     } else {
         return NULL;
@@ -157,7 +157,9 @@ static int kiln_c99_graph_capsule_prepare_with_large(const kiln_gc_heap *from,
         const char *cursor;
         for (cursor = part->base; cursor < part->limit;) {
             const kiln_gc_block *member = (const kiln_gc_block *)cursor;
-            if ((member->kind & KILN_GC_KIND_MASK) == KILN_GC_OBJECT) {
+            size_t bit = (size_t)(cursor - part->base) >> 4;
+            if ((part->bitmap[bit >> 6] & (UINT64_C(1) << (bit & 63))) != 0 &&
+                (member->kind & KILN_GC_KIND_MASK) == KILN_GC_OBJECT) {
                 const kiln_object *object = (const kiln_object *)(member + 1);
                 if (object->shape == NULL && object->count != 0)
                     out->needs.foreign_dictionary_keys = 1;

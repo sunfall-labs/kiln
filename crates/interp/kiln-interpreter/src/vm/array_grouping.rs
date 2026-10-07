@@ -66,7 +66,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 RealmId::PRIMARY,
             ));
             data.set(COLLECTION_SIZE, Value::Number(size));
-            return Ok(Value::Object(Rc::new(RefCell::new(data))));
+            return Ok(Value::Object(tracked_object(data)));
         }
         let mut result = ObjectData::default();
         result.set_prototype(Value::Null);
@@ -74,6 +74,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let key = key.property_key_units_checked()?;
             result.set_units(&key, Value::Array(ArrayData::new(members)));
         }
-        Ok(Value::Object(Rc::new(RefCell::new(result))))
+        Ok(Value::Object(tracked_object(result)))
     }
 }

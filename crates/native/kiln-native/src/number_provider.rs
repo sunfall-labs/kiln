@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use kiln_artifact_cache::Digest;
 use kiln_native_provider_contract as provider_contract;
 pub(crate) use kiln_native_provider_contract::abi::PROVIDER_ABI_VERSION;
+#[cfg(test)]
 use kiln_native_provider_contract::abi::PROVIDER_EXPORTS;
 use kiln_native_provider_contract::number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 use kiln_native_provider_contract::{ProviderCapabilities, ProviderVariant};
@@ -54,6 +55,9 @@ pub(crate) struct NumberProvider {
     pub(crate) rust_target: String,
     pub(crate) variant: ProviderVariant,
     pub(crate) capabilities: ProviderCapabilities,
+    /// Linker arguments this archive needs beyond the C runtime's own (ADR 0074): the host GUI
+    /// bridge's OS frameworks when the variant carries it, nothing otherwise.
+    pub(crate) link_arguments: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -131,7 +135,10 @@ impl fmt::Display for NumberProviderError {
             ),
             Self::SourceUnavailable { root } => write!(
                 formatter,
-                "no shipped number provider was found and source fallback is unavailable at {}",
+                "no installed number provider covers this program, and this kiln has no source \
+                 tree to build one from (looked for {}). A release install carries every provider \
+                 variant in `lib/kiln/` beside its `bin/`; reinstall from a release archive, or set \
+                 KILN_NATIVE_PROVIDER_MANIFEST to a packaged provider manifest",
                 root.display()
             ),
         }
@@ -213,6 +220,7 @@ pub(crate) fn producer_identities(
                 deployment.clone(),
                 libc.clone(),
                 variant,
+                Vec::new(),
             );
             (variant, manifest.identity())
         })
@@ -260,15 +268,24 @@ pub(crate) fn discover_for(
     build_from_source(identity, required)
 }
 
+/// The running `kiln`, with symlinks resolved. An install commonly links `bin/kiln` into a
+/// directory already on `PATH` (`~/.local/bin`, Homebrew's `bin/`), and on macOS `current_exe`
+/// answers with the link's own path rather than its target -- so `bin/../lib/kiln` would be looked
+/// for beside the link and every installed provider would be missed.
+fn installed_executable() -> Option<PathBuf> {
+    let executable = env::current_exe().ok()?;
+    Some(fs::canonicalize(&executable).unwrap_or(executable))
+}
+
 fn installed_manifest_candidates() -> Vec<PathBuf> {
-    let Ok(executable) = env::current_exe() else {
+    let Some(executable) = installed_executable() else {
         return Vec::new();
     };
     installed_manifest_candidates_for(&executable)
 }
 
 fn installed_variant_manifest_candidates(variant: ProviderVariant) -> Vec<PathBuf> {
-    let Ok(executable) = env::current_exe() else {
+    let Some(executable) = installed_executable() else {
         return Vec::new();
     };
     installed_manifest_candidates_for(&executable)
@@ -336,6 +353,7 @@ fn load_manifest(
         rust_target: manifest.rust_target,
         variant: manifest.variant,
         capabilities: ProviderCapabilities::from_capabilities(manifest.capabilities),
+        link_arguments: manifest.link_arguments,
     })
 }
 
@@ -397,12 +415,17 @@ fn validate_manifest(
             "the provider archive must use the `{PROVIDER_PROFILE}` profile"
         ))
     } else if manifest.exports
-        != PROVIDER_EXPORTS
+        != manifest
+            .variant
+            .exports()
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<Vec<_>>()
     {
-        Some("the provider export list does not exactly match its private ABI".to_owned())
+        Some(format!(
+            "the provider export list does not exactly match the private ABI of the {} variant",
+            manifest.variant.as_str()
+        ))
     } else if !is_sha256_identity(&manifest.rustc_identity) {
         Some("`rustc_identity` must be `sha256:` followed by 64 lowercase hex digits".to_owned())
     } else if Digest::from_hex(&manifest.source_sha256).is_err() {
@@ -576,6 +599,7 @@ fn build_from_source(
     }
     let archive = read(&archive_path, "read source-built number-provider archive")?;
     let archive_digest = Digest::hash(&archive);
+    let link_arguments = provider_link_arguments(variant, &rust_target);
     let identity = provider_contract::manifest(
         rust_target.clone(),
         rustc_digest_identity,
@@ -584,6 +608,7 @@ fn build_from_source(
         env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default(),
         env::var("KILN_LIBC_BASELINE").unwrap_or_default(),
         variant,
+        link_arguments.clone(),
     )
     .identity();
     Ok(NumberProvider {
@@ -593,7 +618,25 @@ fn build_from_source(
         rust_target,
         variant,
         capabilities: variant.capabilities(),
+        link_arguments,
     })
+}
+
+/// What a source-built archive needs at link time: the same answer the packager writes into a
+/// shipped manifest, from the same contract table, so a checkout build and an installed package
+/// link identically.
+fn provider_link_arguments(variant: ProviderVariant, rust_target: &str) -> Vec<String> {
+    if variant
+        .capabilities()
+        .contains(provider_contract::ProviderCapability::Gui)
+    {
+        provider_contract::gui::link_arguments(rust_target)
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
@@ -930,6 +973,7 @@ mod tests {
             "deployment": "",
             "libc_baseline": "",
             "exports": PROVIDER_EXPORTS,
+            "link_arguments": [],
             "variant": ProviderVariant::Full,
             "capabilities": ProviderCapabilities::FULL.iter().collect::<Vec<_>>(),
         });
@@ -1005,6 +1049,7 @@ mod tests {
             "deployment": "",
             "libc_baseline": "",
             "exports": PROVIDER_EXPORTS,
+            "link_arguments": [],
             "variant": ProviderVariant::Full,
             "capabilities": ProviderCapabilities::FULL.iter().collect::<Vec<_>>(),
         });
@@ -1103,6 +1148,7 @@ mod tests {
             "deployment": "",
             "libc_baseline": "",
             "exports": PROVIDER_EXPORTS,
+            "link_arguments": [],
             "variant": ProviderVariant::Common,
             "capabilities": ProviderCapabilities::COMMON.iter().collect::<Vec<_>>(),
         });

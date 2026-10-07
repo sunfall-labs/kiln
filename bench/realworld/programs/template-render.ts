@@ -14,11 +14,7 @@ function esc(s: string): string {
 
 function fnv1a(s: string): number {
   let h = 0x811c9dc5;
-  // Stride-64 sample, not every char: a per-character loop over the whole document is
-  // ~1000x slower than node in the interpreter today (charCodeAt call overhead), while
-  // node/bun/native finish it in milliseconds. The length plus head/tail slices below
-  // pin the rest. Revisit when the interpreter closes the charCodeAt gap.
-  for (let i = 0; i < s.length; i += 64) {
+  for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
     h = Math.imul(h, 0x01000193);
   }

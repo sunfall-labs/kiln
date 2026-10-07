@@ -1,0 +1,5 @@
+External result-marker profile
+
+The original symbolized native executable and all 66 original tests ran unchanged. All 66 output IDs were verified in order, with 60 passes and the same six TEST_TIMEOUT5000 failures. No stress variables or modified case deadlines were used. The Python observer records timestamps when flushed console result lines arrive; native-runtime/src/lib.rs flushes its console sink after each newline. Marker-to-marker windows include suite/test hooks, setup, cleanup and potentially background work, and must not be described as isolated callback timings. Clock-pair discrepancy is recorded in receipt.json. Profile, symbol sidecar, raw log and observer hashes are retained.
+
+This is sampled-code attribution evidence, not a quiet benchmark: the serial full322 run was active, and the initial seconds overlapped a subagent Cargo build that omitted its explicit one-job bound and was subsequently stopped. The profiler exit status is separate from the native process status; the output inventory is verified, while no native-exit verdict is invented. The earlier separate quiet replay remains the authoritative unchanged-deadline correctness result.

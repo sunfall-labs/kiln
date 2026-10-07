@@ -234,6 +234,13 @@ pub enum Native {
     NodeCryptoCreateHash,
     NodeCryptoCreateHmac,
     NodeCryptoTimingSafeEqual,
+    NodeCryptoKeyImport,
+    NodeCryptoKeyPublic,
+    NodeCryptoKeyInfo,
+    NodeCryptoKeyExport,
+    NodeCryptoKeyFree,
+    WebCryptoPrimitive,
+    WebCompressionPrimitive,
     NodeHashUpdate,
     NodeHashDigest,
     NodeStringDecoder,
@@ -284,6 +291,8 @@ pub enum Native {
     NodeHttp2CreateSecureServer,
     NodeModule,
     NodeModuleCreateRequire,
+    /// Private runner-only access to the realm's module export cells for Vitest spy overlays.
+    NodeModuleLoader,
     NodePath,
     NodePathJoin,
     NodePathResolve,
@@ -321,6 +330,8 @@ pub enum Native {
     NodeSocketWrite,
     NodeSocketEnd,
     NodeSocketDestroy,
+    NodeSocketCork,
+    NodeSocketUncork,
     NodeReadablePause,
     NodeReadableResume,
     NodeReadableSetEncoding,
@@ -334,9 +345,11 @@ pub enum Native {
     /// The private host half of `serve()` (`__kilnNativeModules.http`).
     NodeHttpCreateFetchServer,
     NodeHttpFetchRespond,
+    NodeHttpCancelRequest,
     NodeHttpServerResponse,
     NodeClientRequestWrite,
     NodeClientRequestEnd,
+    NodeClientRequestAssignSocket,
     NodeBuffer,
     /// The *global* `Buffer`, as distinct from the `node:buffer` namespace above.
     ///
@@ -361,6 +374,14 @@ pub enum Native {
     ProcessExit,
     ProcessStartRaw,
     ProcessCancelRaw,
+    /// Synchronous child-process authority for `node:child_process.execFileSync`.
+    NodeChildProcessExecFileSync,
+    /// Private realm status access used by the shared TypeScript `process.exitCode` policy.
+    ProcessExitCodeGet,
+    ProcessExitCodeSet,
+    /// The interpreter releases unreachable acyclic values through Rc; this request is a
+    /// lifecycle boundary hook, not a claim to trace or collect cycles.
+    GcRequest,
     /// The four bridges the shared TypeScript `URL` captures (`kiln-builtins/src/url.ts`).
     UrlParseRaw,
     UrlSetRaw,
@@ -377,6 +398,7 @@ pub enum Native {
     NodeServerListen,
     NodeServerClose,
     NodeServerAddress,
+    NodeServerIsListening,
     NodeServerSetTimeout,
     NodeResponseSetHeader,
     NodeResponseGetHeader,
@@ -456,6 +478,9 @@ pub enum Native {
     NumberToString,
     NumberToFixed,
     NumberValueOf,
+    StringValueOf,
+    SymbolValueOf,
+    BigIntValueOf,
     StringAt,
     StringCharAt,
     StringCharCodeAt,
@@ -705,7 +730,10 @@ pub enum Native {
     CollectionEntries(bool),
     /// `Function`, which programs reach for through `Function.prototype`.
     FunctionConstructor,
-    /// `GeneratorFunction` and `AsyncGeneratorFunction` constructors and prototypes.
+    /// `AsyncFunction`, `GeneratorFunction` and `AsyncGeneratorFunction` constructors and
+    /// prototypes.
+    AsyncFunctionConstructor,
+    AsyncFunctionPrototype,
     GeneratorFunctionConstructor,
     GeneratorFunctionPrototype,
     AsyncGeneratorFunctionConstructor,
@@ -735,6 +763,9 @@ pub enum Native {
     /// buffer and detach this one -- the primitive under `transfer`, `transferToFixedLength` and
     /// every transfer list, which are the shared bootstrap's.
     ArrayBufferDetachRaw,
+    /// `__kilnArrayBufferByteLength(buffer)`: the internal-slot reader for the shared TypeScript
+    /// `ArrayBuffer.prototype.byteLength` accessor.
+    ArrayBufferByteLengthRaw,
     /// `__kilnArrayBufferResize(buffer, length)`: move a resizable buffer's length, or grow a
     /// growable shared one, in place (ADR 0065, representation). `resize` and `grow` are the
     /// shared TypeScript over it (`kiln-builtins/src/arraybuffer.ts`), which makes every check a
@@ -744,12 +775,25 @@ pub enum Native {
     /// -- detached, or a resizable buffer shrunk under the window. The shared `%TypedArray%`
     /// methods ask it in `ValidateTypedArray` (`kiln-builtins/src/typedarray.ts`).
     TypedArrayOutOfBoundsRaw,
+    /// `__kilnCollectionSize(collection, isMap)`: internal Map/Set storage read used by the shared
+    /// TypeScript accessor so its descriptor and brand behavior have one owner.
+    CollectionSizeRaw,
     /// `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)`: a same-type element
     /// copy as bytes (ADR 0065, representation), `false` when the TypeScript's loop must run.
     TypedArrayCopyRaw,
     /// `__kilnTypedArraySort(view)`: the default-order sort in place (ADR 0065, representation),
     /// over the order `kiln_number_core::typed_order` owns for both engines.
     TypedArraySortRaw,
+    /// `__kilnDataViewState(view)`: 0 for a non-view, 1 for a mutable view, 2 for an immutable
+    /// view. A side-effect-free internal-slot read, checked before any argument coercion.
+    DataViewStateRaw,
+    /// Side-effect-free ECMAScript IsConstructor predicate for shared built-ins.
+    IsConstructorRaw,
+    /// Whether a constructable value is exactly another realm's intrinsic Array constructor.
+    IsOtherRealmArrayConstructorRaw,
+    /// Find the next present indexed slot on an ordinary array without charging a VM instruction
+    /// for every dense hole. Returns undefined to request ordinary HasProperty fallback.
+    ArrayNextPresentIndexRaw,
     /// `__kilnCloneData(value)`: the structured clone's plain-data fast path, which this engine
     /// never takes (it answers `undefined`, "not handled").
     CloneDataRaw,
@@ -763,6 +807,13 @@ pub enum Native {
     /// `__kilnQueueIo(callback, argument)`: `callback(argument)` as an I/O callback, node's poll
     /// phase (`kiln_runtime::Realm::queue_io`), which is where a message port delivers.
     QueueIoRaw,
+    /// `__kilnTimerRef(handle, op)`: what the methods of a timer handle ask of the engine, which
+    /// made the handle and holds its identity (`op` 0 the identity, 1 `hasRef`, 2 `ref`, 3
+    /// `unref`, 4 `refresh`). Whether a timer keeps the loop alive is a flag the realm's timer
+    /// queue owns (`kiln_runtime::Realm::set_timer_referenced`), and a refresh restarts the
+    /// queue's own entry (`refresh_timer`). Captured and deleted by
+    /// `kiln-builtins/src/timers.ts`.
+    TimerRefRaw,
     /// `__kilnWorkerOp(op, ...)`: the runtime's cross-realm ports and workers
     /// (`kiln_runtime::workers`), for `kiln-builtins/src/web_events_streams.ts`.
     WorkerOpRaw,
@@ -836,6 +887,7 @@ pub enum Native {
     RegExpConstructor,
     RegExpTest,
     RegExpExec,
+    RegExpLegacyCaptureRaw,
     StringMatch,
     StringMatchAll,
     StringSearch,
@@ -963,19 +1015,8 @@ pub enum Native {
     /// `Array.prototype.values`, which is also `Array.prototype[Symbol.iterator]` -- the same
     /// function object, which is what `[][Symbol.iterator] === [].values` asserts.
     ArrayValues,
-    /// V8's stack-capture extension, implemented by the VM because it needs logical frames and
-    /// may call a program-provided `Error.prepareStackTrace` hook.
+    /// Private activation-snapshot primitive used by the TypeScript CallSite facade.
     ErrorCaptureStackTrace,
-    CallSiteGetFileName,
-    CallSiteGetLineNumber,
-    CallSiteGetColumnNumber,
-    CallSiteGetFunctionName,
-    CallSiteGetMethodName,
-    CallSiteGetTypeName,
-    CallSiteGetThis,
-    CallSiteGetEvalOrigin,
-    CallSiteIsEval,
-    CallSiteToString,
     /// `Error.prototype.toString`, which renders `name: message`.
     ErrorToString,
     /// Standard Web/Node globals provided as stubs or baseline classes.
@@ -1261,7 +1302,7 @@ impl Native {
                             Value::Native(Native::PrimitiveToString, RealmId::PRIMARY)
                         }
                         kiln_builtin_surface::SemanticBinding::PrimitiveValueOf => {
-                            Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY)
+                            Value::Native(Native::SymbolValueOf, RealmId::PRIMARY)
                         }
                         kiln_builtin_surface::SemanticBinding::StringTag(tag) => {
                             Value::String(tag.to_owned().into())
@@ -1305,6 +1346,10 @@ impl Native {
     /// one authority; property() converts the selected row to a Value.
     pub(crate) fn own_property_rows(self) -> &'static [(&'static str, FixedOwnValue)] {
         match self {
+            Self::AsyncFunctionPrototype => &[(
+                "constructor",
+                FixedOwnValue::Native(Self::AsyncFunctionConstructor),
+            )],
             Self::AbortSignalConstructor => &[
                 ("abort", FixedOwnValue::Native(Self::AbortSignalAbort)),
                 ("timeout", FixedOwnValue::Native(Self::AbortSignalTimeout)),
@@ -1658,6 +1703,16 @@ impl Native {
                 Self::PrototypeOf(PrototypeTable::TypedArray),
                 RealmId::PRIMARY,
             )),
+            // The shared constructor owns these methods; each concrete constructor inherits the
+            // same callable through its [[Prototype]] link and supplies itself as `this`.
+            (Self::TypedArrayIntrinsic, "of") => Some(Value::Native(
+                Self::TypedArrayOf(TypedKind::Int8),
+                RealmId::PRIMARY,
+            )),
+            (Self::TypedArrayIntrinsic, "from") => Some(Value::Native(
+                Self::TypedArrayFrom(TypedKind::Int8),
+                RealmId::PRIMARY,
+            )),
             (Self::TypedArrayConstructor(kind), "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::TypedArrayFor(kind)),
                 RealmId::PRIMARY,
@@ -1669,12 +1724,14 @@ impl Native {
             (Self::ProxyConstructor, "revocable") => {
                 Some(Value::Native(Self::ProxyRevocable, RealmId::PRIMARY))
             }
-            (Self::TypedArrayConstructor(kind), "of") => {
-                Some(Value::Native(Self::TypedArrayOf(kind), RealmId::PRIMARY))
-            }
-            (Self::TypedArrayConstructor(kind), "from") => {
-                Some(Value::Native(Self::TypedArrayFrom(kind), RealmId::PRIMARY))
-            }
+            (Self::TypedArrayConstructor(_), "of") => Some(Value::Native(
+                Self::TypedArrayOf(TypedKind::Int8),
+                RealmId::PRIMARY,
+            )),
+            (Self::TypedArrayConstructor(_), "from") => Some(Value::Native(
+                Self::TypedArrayFrom(TypedKind::Int8),
+                RealmId::PRIMARY,
+            )),
             (Self::TypedArrayConstructor(kind), "BYTES_PER_ELEMENT") => {
                 Some(Value::Number(kind.width() as f64))
             }
@@ -1687,6 +1744,17 @@ impl Native {
                 Self::PrototypeOf(PrototypeTable::Function),
                 RealmId::PRIMARY,
             )),
+            (Self::AsyncFunctionConstructor, "prototype") => Some(Value::Native(
+                Self::AsyncFunctionPrototype,
+                RealmId::PRIMARY,
+            )),
+            (Self::AsyncFunctionConstructor, "name") => {
+                Some(Value::String("AsyncFunction".to_owned().into()))
+            }
+            (Self::AsyncFunctionConstructor, "length") => Some(Value::Number(1.0)),
+            (Self::AsyncFunctionPrototype, key) if key == WellKnown::ToStringTag.property_key() => {
+                Some(Value::String("AsyncFunction".to_owned().into()))
+            }
             (Self::AsyncGeneratorFunctionConstructor, "prototype") => Some(Value::Native(
                 Self::AsyncGeneratorFunctionPrototype,
                 RealmId::PRIMARY,

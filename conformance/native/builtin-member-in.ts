@@ -19,7 +19,8 @@ for (const [name, proto, member] of protos) {
   console.log(name, member in proto, "hasOwnProperty" in proto, "nopeNopeNope" in proto);
 }
 
-console.log("inst", "map" in [], "nope" in [], "then" in Promise.resolve(1));
+console.log("inst", "map" in [], "nope" in [], "then" in Promise.resolve(1),
+  "valueOf" in [], "hasOwnProperty" in []);
 console.log("ns", "floor" in Math, "nope" in Math, "stringify" in JSON, "nope" in JSON);
 console.log("ctor", "keys" in Object, "nope" in Object, "isArray" in Array, "nope" in Array);
 
@@ -28,6 +29,12 @@ console.log("ctor", "keys" in Object, "nope" in Object, "isArray" in Array, "nop
 console.log("kinds", "get" in Map.prototype, "add" in Map.prototype, "add" in Set.prototype, "get" in Set.prototype);
 console.log("weak", "get" in WeakMap.prototype, "add" in WeakMap.prototype, "add" in WeakSet.prototype, "get" in WeakSet.prototype);
 console.log("kindread", typeof Map.prototype.add, typeof Set.prototype.get, typeof (WeakSet.prototype as any).get);
+
+// Built-in constructors with a shared member surface still answer genuinely absent names as
+// undefined. `kind-of` probes `value.constructor.isBuffer` for arbitrary values, including Set;
+// Set does not have an `isBuffer` property and that probe must take its ordinary fallback.
+console.log("missing-constructor-members", typeof (Set as any).isBuffer,
+  (Set as any).isBuffer === undefined, "isBuffer" in (Set as any));
 
 // A string carries `@@iterator` and no `values` beside it.
 console.log("strvalues", typeof String.prototype.values, typeof "ab".values, [..."ab"].join("-"));

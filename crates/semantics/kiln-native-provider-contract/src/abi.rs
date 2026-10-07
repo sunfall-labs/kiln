@@ -59,6 +59,16 @@ pub const PROVIDER_GROUP_OWNERSHIP: &[GroupOwnership] = &[
         kind: OwnershipKind::SharedSemanticEngine,
     },
     GroupOwnership {
+        group: "crypto",
+        owner: "kiln-key-core",
+        kind: OwnershipKind::SharedSemanticEngine,
+    },
+    GroupOwnership {
+        group: "compression",
+        owner: "kiln-compression",
+        kind: OwnershipKind::SharedSemanticEngine,
+    },
+    GroupOwnership {
         group: "parallel",
         owner: "kiln-native-provider-ffi parallel engine",
         kind: OwnershipKind::RuntimeEngine,
@@ -67,6 +77,11 @@ pub const PROVIDER_GROUP_OWNERSHIP: &[GroupOwnership] = &[
         group: "ffi",
         owner: "kiln-native-provider-ffi foreign interface",
         kind: OwnershipKind::ForeignInterface,
+    },
+    GroupOwnership {
+        group: "date",
+        owner: "kiln-date-core",
+        kind: OwnershipKind::SharedSemanticEngine,
     },
 ];
 
@@ -90,12 +105,22 @@ macro_rules! provider_abi_registry {
             (realm, kiln_node_path_relative, node_path_relative);
             (realm, kiln_url_parse, url_parse);
             (realm, kiln_url_set, url_set);
+            (realm, kiln_text_decoder_label, text_decoder_label);
+            (realm, kiln_text_decode, text_decode);
+            (realm, kiln_text_decoder_state_create, text_decoder_state_create);
+            (realm, kiln_text_decoder_state_decode, text_decoder_state_decode);
+            (realm, kiln_text_decoder_state_free, text_decoder_state_free);
             (realm, kiln_string_case, string_case);
             (realm, kiln_realm_symbol_for, realm_symbol_for);
             (realm, kiln_realm_symbol_key_for, realm_symbol_key_for);
             (realm, kiln_realm_callable_store, realm_callable_store);
             (realm, kiln_realm_value_slot, realm_value_slot);
             (realm, kiln_realm_set_argv, realm_set_argv);
+            (realm, kiln_realm_set_string_code_generation, realm_set_string_code_generation);
+            (realm, kiln_realm_string_code_generation_allowed, realm_string_code_generation_allowed);
+            (realm, kiln_process_exec_file_sync, process_exec_file_sync);
+            (realm, kiln_process_output_view, process_output_view);
+            (realm, kiln_process_output_free, process_output_free);
             (realm, kiln_realm_argv_count, realm_argv_count);
             (realm, kiln_realm_argv_at, realm_argv_at);
             (realm, kiln_realm_entropy_word, realm_entropy_word);
@@ -137,6 +162,9 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_set_immediate, realm_queue_macrotask);
             (realm, kiln_realm_queue_io, realm_queue_macrotask);
             (realm, kiln_realm_clear_timer, realm_clear_timer);
+            (realm, kiln_realm_set_timer_ref, realm_set_timer_ref);
+            (realm, kiln_realm_refresh_timer, realm_clear_timer);
+            (realm, kiln_realm_rearm_timeout, realm_rearm_timer);
             (realm, kiln_realm_drive, realm_drive);
             (realm, kiln_realm_drive_step, realm_drive_step);
             (realm, kiln_realm_destroy, realm_destroy);
@@ -145,6 +173,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_start_active_host_op, realm_start_active_host_op);
             (realm, kiln_realm_cancel_request, realm_cancel_request);
             (realm, kiln_realm_cancel_active_request, realm_cancel_active_request);
+            (realm, kiln_realm_cancel_active_request_if_pending, realm_cancel_active_request_if_pending);
             (realm, kiln_realm_http_server_attach_active, realm_http_attach);
             (realm, kiln_realm_http_server_attach_with_options_active, realm_http_attach_options);
             (realm, kiln_realm_http_server_close_active, realm_http_close_mode);
@@ -153,6 +182,9 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_http_agent_acquire_active, realm_http_agent_acquire);
             (realm, kiln_realm_http_client_owner_active, realm_http_client_owner);
             (realm, kiln_realm_http_agent_connected_active, realm_http_agent_connected);
+            (realm, kiln_realm_http_agent_connect_failed_active, realm_http_agent_connect_failed);
+            (realm, kiln_realm_http_agent_cancel_connect_active, realm_http_agent_cancel_connect);
+            (realm, kiln_realm_http_agent_can_retain_active, realm_http_agent_can_retain);
             (realm, kiln_realm_http_agent_release_active, realm_http_agent_release);
             (realm, kiln_realm_http_client_start_active, realm_http_client_start);
             (realm, kiln_realm_http_client_write_active, realm_http_client_write);
@@ -160,6 +192,8 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_http_response_start_active, realm_http_response_start);
             (realm, kiln_realm_http_response_write_active, realm_http_response_write);
             (realm, kiln_realm_http_response_end_active, realm_http_response_end);
+            (realm, kiln_realm_http_upgrade_write_active, realm_http_response_write);
+            (realm, kiln_realm_http_upgrade_write_active_with_fence, realm_http_upgrade_write_fence);
             (realm, kiln_node_fs_read_file_sync, node_fs_read_file_sync);
             (realm, kiln_node_fs_free_bytes, node_fs_free_bytes);
             (realm, kiln_node_fs_write_file_sync, node_fs_write_file_sync);
@@ -190,6 +224,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_shared_graph_find_field, shared_graph_find_field);
             (realm, kiln_shared_graph_field, shared_graph_field);
             (realm, kiln_shared_graph_build, shared_graph_build);
+            (realm, kiln_shared_graph_refusal, shared_graph_build);
             (realm, kiln_shared_release, shared_release);
             (realm, kiln_shared_grow, shared_grow);
             (realm, kiln_atomics_wait, atomics_wait);
@@ -198,12 +233,15 @@ macro_rules! provider_abi_registry {
             (realm, kiln_atomics_notify, atomics_notify);
             (root, kiln_number_to_js_string, number_to_js_string);
             (root, kiln_string_to_number, string_to_number);
+            (date, kiln_date_parse, date_parse);
             (root, kiln_typed_array_sort, typed_array_sort);
             (regexp, kiln_regexp_compile, regexp_compile);
             (regexp, kiln_regexp_free, regexp_free);
             (regexp, kiln_regexp_search, regexp_search);
             (regexp, kiln_regexp_group_count, regexp_group_count);
             (regexp, kiln_regexp_group_name, regexp_group_name);
+            (regexp, kiln_regexp_named_group_count, regexp_named_group_count);
+            (regexp, kiln_regexp_named_group_at, regexp_named_group_at);
             (bigint, kiln_bigint_parse, bigint_parse);
             (bigint, kiln_bigint_from_double, bigint_from_double);
             (bigint, kiln_bigint_free, bigint_free);
@@ -233,6 +271,18 @@ macro_rules! provider_abi_registry {
             (intl, kiln_intl_segment, intl_segment);
             (intl, kiln_string_normalize, string_normalize);
             (intl, kiln_intl_collate, intl_collate);
+            (intl, kiln_intl_string_case, intl_string_case);
+            (intl, kiln_intl_datetime_format, intl_datetime_format);
+            (crypto, kiln_crypto_key_import, crypto_key_import);
+            (crypto, kiln_crypto_key_public, crypto_key_public);
+            (crypto, kiln_crypto_key_info, crypto_key_info);
+            (crypto, kiln_crypto_key_export, crypto_key_export);
+            (crypto, kiln_crypto_key_free, crypto_key_free);
+            (crypto, kiln_webcrypto_execute, webcrypto_execute);
+            (compression, kiln_compression_state_create, compression_state_create);
+            (compression, kiln_compression_state_free, compression_state_free);
+            (compression, kiln_compression_state_push, compression_state_push);
+            (compression, kiln_compression_output_free, compression_output_free);
             (parallel, kiln_parallel_map, parallel_map);
             (parallel, kiln_parallel_sort, parallel_sort);
             (parallel, kiln_parallel_threads, parallel_threads);
@@ -254,7 +304,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 64;
+pub const PROVIDER_ABI_VERSION: u32 = 82;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -273,7 +323,23 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 52 and 144 exports: the native launcher can move an audited realm between
+        // 80 and 195 exports: per-realm string-code-generation policy joined; this lets a launcher
+        // disable eval/Function source strings without disabling linked source modules. Before that,
+        // 79 and 193 exports: stateful compression stream primitives joined; the TypeScript
+        // TransformStream adapters own the public CompressionStream and DecompressionStream APIs.
+        // 78 and 189 exports: stateless SHA-256, HKDF, AES-GCM and Ed25519 operations joined
+        // `kiln-webcrypto`; the TypeScript facade owns WebCrypto keys and policy. Before that,
+        // 76 and 185 exports: `kiln_realm_rearm_timeout` joined, so a `Timeout` that already ran
+        // restarts under its own identity on `refresh()`, as node's does. Before that,
+        // 75 and 184 exports: `kiln_realm_refresh_timer` joined, `Timeout.prototype.refresh()`:
+        // the realm's timer queue restarts the timer it already owns from the realm's current time.
+        // Before that, 74 and 183 exports: `kiln_realm_set_timer_ref` joined, the per-timer flag behind
+        // `timer.unref()` and `AbortSignal.timeout`, which the realm's timer queue owns. Before
+        // that, 73 and 182 exports: `kiln_shared_graph_refusal` joined, so a native `share` throws the
+        // refusal `kiln-shared-graph` words, exactly the interpreter's text. Before that,
+        // 72 and 181 exports: `kiln_text_decoder_label` and `kiln_text_decode` joined, so native
+        // `TextDecoder` resolves labels and decodes through `kiln-encoding` (ADR 0060) as the
+        // interpreter does. Before that, 52 and 144 exports: the native launcher can move an audited realm between
         // scheduler lanes after each generated frame has returned.
         // 51 and 143 exports: the scheduled launcher drives one realm turn at a time and
         // multiplexes pinned realm sessions over fixed scheduler lanes. Before that, 50 and
@@ -321,8 +387,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 64);
-        assert_eq!(PROVIDER_EXPORTS.len(), 163);
+        assert_eq!(PROVIDER_ABI_VERSION, 82);
+        assert_eq!(PROVIDER_EXPORTS.len(), 198);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

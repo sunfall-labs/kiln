@@ -87,6 +87,7 @@ pub enum NodeBuiltin {
     WorkerThreads,
     Http2,
     Https,
+    Tls,
     PerfHooks,
     Os,
     Tty,
@@ -108,16 +109,22 @@ pub enum NodeBuiltin {
     Constants,
     V8,
     Vm,
+    GuiJsxRuntime,
+    NodeProcess,
+    /// Oxc's explicit-resource-management helper. Only generated TS-transform edges may link it.
+    OxcUsingCtx,
 }
 
 impl NodeBuiltin {
     pub const ALL: &[Self] = &[
         Self::Process,
+        Self::NodeProcess,
         Self::Shared,
         Self::Actors,
         Self::ActorsCore,
         Self::ActorsWorker,
         Self::Gui,
+        Self::GuiJsxRuntime,
         Self::Assert,
         Self::Buffer,
         Self::AsyncHooks,
@@ -136,6 +143,7 @@ impl NodeBuiltin {
         Self::WorkerThreads,
         Self::Http2,
         Self::Https,
+        Self::Tls,
         Self::PerfHooks,
         Self::Os,
         Self::Tty,
@@ -157,6 +165,7 @@ impl NodeBuiltin {
         Self::Constants,
         Self::V8,
         Self::Vm,
+        Self::OxcUsingCtx,
     ];
 
     pub fn parse(specifier: &str) -> Option<Self> {
@@ -164,12 +173,18 @@ impl NodeBuiltin {
             return None;
         }
         Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
-            "process" | "kiln:process" => Self::Process,
+            // Node's `process` module is the global `process` object; kiln's own process API
+            // (`run`) is a separate extension module and never part of Node's namespace.
+            "process" => Self::NodeProcess,
+            "kiln:process" => Self::Process,
             "kiln:shared" => Self::Shared,
             "kiln:actors" => Self::Actors,
             "kiln:actors/core" => Self::ActorsCore,
             "kiln:actors/worker" => Self::ActorsWorker,
+            "kiln:compiler-runtime/helpers/usingCtx" => Self::OxcUsingCtx,
             "kiln:gui" => Self::Gui,
+            // What `"jsxImportSource": "kiln:gui"` compiles JSX to.
+            "kiln:gui/jsx-runtime" | "kiln:gui/jsx-dev-runtime" => Self::GuiJsxRuntime,
             "assert" | "assert/strict" => Self::Assert,
             "buffer" => Self::Buffer,
             "async_hooks" => Self::AsyncHooks,
@@ -188,6 +203,7 @@ impl NodeBuiltin {
             "worker_threads" => Self::WorkerThreads,
             "http2" => Self::Http2,
             "https" => Self::Https,
+            "tls" => Self::Tls,
             "perf_hooks" => Self::PerfHooks,
             "os" => Self::Os,
             "tty" => Self::Tty,
@@ -216,11 +232,14 @@ impl NodeBuiltin {
     pub const fn specifier(self) -> &'static str {
         match self {
             Self::Process => "kiln:process",
+            Self::NodeProcess => "node:process",
             Self::Shared => "kiln:shared",
             Self::Actors => "kiln:actors",
             Self::ActorsCore => "kiln:actors/core",
             Self::ActorsWorker => "kiln:actors/worker",
+            Self::OxcUsingCtx => "kiln:compiler-runtime/helpers/usingCtx",
             Self::Gui => "kiln:gui",
+            Self::GuiJsxRuntime => "kiln:gui/jsx-runtime",
             Self::Assert => "node:assert",
             Self::Buffer => "node:buffer",
             Self::AsyncHooks => "node:async_hooks",
@@ -239,6 +258,7 @@ impl NodeBuiltin {
             Self::WorkerThreads => "node:worker_threads",
             Self::Http2 => "node:http2",
             Self::Https => "node:https",
+            Self::Tls => "node:tls",
             Self::PerfHooks => "node:perf_hooks",
             Self::Os => "node:os",
             Self::Tty => "node:tty",
@@ -263,16 +283,40 @@ impl NodeBuiltin {
         }
     }
 
+    /// The module that owns this one when it is an implementation detail of an engine module
+    /// (`kiln:actors/core` belongs to `kiln:actors`), or `None` for a module programs may import.
+    ///
+    /// An internal module exposes helpers (`prepareActorMessage`, ticket marks) that exist for the
+    /// engine's other modules; only an engine builtin may import one.
+    pub const fn internal_owner(self) -> Option<&'static str> {
+        match self {
+            Self::ActorsCore | Self::ActorsWorker => Some("kiln:actors"),
+            Self::OxcUsingCtx => {
+                Some("kiln:compiler-runtime (compiler-generated TypeScript helper import)")
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether only engine modules may import this one.
+    pub const fn is_engine_internal(self) -> bool {
+        self.internal_owner().is_some()
+    }
+
+    /// Where the module graph records this builtin: `.kiln/builtins/<scheme>/<name>.builtin`.
+    /// The scheme is part of the path because `node:process` and `kiln:process` are different
+    /// modules and must not share a node in the graph.
     pub fn virtual_path(self, project_root: &Path) -> PathBuf {
-        project_root
-            .join(".kiln")
-            .join("builtins")
-            .join(
-                self.specifier()
-                    .trim_start_matches("node:")
-                    .trim_start_matches("kiln:"),
-            )
-            .with_extension("builtin")
+        let (scheme, name) = self
+            .specifier()
+            .split_once(':')
+            .expect("every builtin specifier has a scheme");
+        let mut path = project_root.join(".kiln").join("builtins").join(scheme);
+        for segment in name.split('/') {
+            path.push(segment);
+        }
+        path.set_extension("builtin");
+        path
     }
 }
 
@@ -291,30 +335,54 @@ fn engine_builtin_dependency(
     .then_some(dependency)
 }
 
+/// Whether `importer` is an engine builtin's virtual identity rather than a source file.
+fn is_engine_builtin_importer(importer: &Path, project_root: &Path) -> bool {
+    !importer.exists()
+        && NodeBuiltin::ALL
+            .iter()
+            .any(|builtin| importer == builtin.virtual_path(project_root))
+}
+
+/// The refusal for an import of an engine-internal module (`kiln:actors/core`) from anything but
+/// an engine builtin. It names the module and the one that owns it.
+fn refuse_internal_builtin(
+    specifier: &str,
+    importer: &Path,
+    project_root: &Path,
+) -> Result<(), ResolveError> {
+    match NodeBuiltin::parse(specifier).and_then(NodeBuiltin::internal_owner) {
+        Some(owner) if !is_engine_builtin_importer(importer, project_root) => {
+            Err(ResolveError::InternalBuiltin {
+                specifier: specifier.to_owned(),
+                owner,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 impl ResolvedModule {
     pub fn builtin(&self) -> Option<NodeBuiltin> {
         if self.kind != ResolutionKind::Builtin {
             return None;
         }
-        let mut components = self.path.components().rev();
-        let file = components.next()?.as_os_str().to_str()?;
-        let stem = file.strip_suffix(".builtin")?;
-        let parent = components.next()?.as_os_str().to_str()?;
-        let name = if parent == "actors" && matches!(stem, "core" | "worker") {
-            format!("kiln:actors/{stem}")
-        } else if parent == "builtins" {
-            // Kiln namespaces use an unprefixed virtual path. Preserve their identity here
-            // without making the same bare names or `node:` names aliases.
-            let candidate = format!("kiln:{stem}");
-            if NodeBuiltin::parse(&candidate).is_some() {
-                candidate
-            } else {
-                stem.to_owned()
-            }
-        } else {
-            format!("{parent}/{stem}")
-        };
-        NodeBuiltin::parse(&name)
+        // `.kiln/builtins/<scheme>/<name...>.builtin`, the inverse of `virtual_path`.
+        let components: Vec<&str> = self
+            .path
+            .components()
+            .map(|component| component.as_os_str().to_str())
+            .collect::<Option<_>>()?;
+        let builtins = components
+            .iter()
+            .rposition(|component| *component == "builtins")?;
+        let (scheme, rest) = components[builtins + 1..].split_first()?;
+        let mut name = rest.join("/");
+        name.truncate(name.strip_suffix(".builtin")?.len());
+        let specifier = format!("{scheme}:{name}");
+        let builtin = NodeBuiltin::parse(&specifier)?;
+        // A spelling must round-trip: `node:fs` and `fs` parse alike, but only the canonical
+        // path names a builtin.
+        (builtin.specifier() == specifier).then_some(builtin)
     }
 }
 
@@ -408,6 +476,8 @@ pub enum InvalidSpecifierReason {
     UrlScheme,
     BarePackage,
     EmbeddedNul,
+    InvalidPercentEncoding,
+    EncodedPathSeparator,
 }
 
 impl InvalidSpecifierReason {
@@ -418,6 +488,8 @@ impl InvalidSpecifierReason {
             Self::UrlScheme => "URL schemes are not supported",
             Self::BarePackage => "bare package specifiers are not supported",
             Self::EmbeddedNul => "embedded NUL is not supported",
+            Self::InvalidPercentEncoding => "invalid percent encoding in file URL path",
+            Self::EncodedPathSeparator => "encoded path separators are not supported",
         }
     }
 }
@@ -438,6 +510,11 @@ pub enum ResolveError {
     InvalidSpecifier {
         specifier: String,
         reason: InvalidSpecifierReason,
+    },
+    /// An engine-internal module imported by something that is not an engine builtin.
+    InternalBuiltin {
+        specifier: String,
+        owner: &'static str,
     },
     NonAbsolutePath {
         role: PathRole,
@@ -500,6 +577,9 @@ impl fmt::Display for ResolveError {
                     formatter,
                     "invalid module specifier `{specifier}`: {reason}"
                 )
+            }
+            Self::InternalBuiltin { specifier, owner } => {
+                write!(formatter, "`{specifier}` is internal to {owner}")
             }
             Self::NonAbsolutePath { role, path } => {
                 write!(
@@ -640,9 +720,16 @@ impl ModuleResolver {
                 ResolutionKind::Builtin,
             ));
         }
+        refuse_internal_builtin(specifier, importer.as_ref(), self.project_root())?;
         if matches!(
             specifier,
-            "kiln:shared" | "kiln:actors" | "kiln:actors/core" | "kiln:actors/worker"
+            "kiln:shared"
+                | "kiln:actors"
+                | "kiln:actors/core"
+                | "kiln:actors/worker"
+                | "kiln:gui"
+                | "kiln:gui/jsx-runtime"
+                | "kiln:gui/jsx-dev-runtime"
         ) {
             let builtin = NodeBuiltin::parse(specifier).expect("Kiln builtin");
             return Ok(ResolvedModule::new(
@@ -683,6 +770,30 @@ pub trait ResolutionPolicy {
         _module: &ResolvedModule,
     ) -> Result<Option<NodeModuleFormat>, ResolveError> {
         Ok(None)
+    }
+
+    /// Package specifiers that resolve to an already compiled target when imported from a
+    /// runtime-created module in the target's package scope. A runtime module is not itself a
+    /// graph node, so its import text cannot contribute a normal graph dependency edge. The
+    /// native linker embeds these verified aliases and still requires the target to be linked.
+    fn runtime_package_aliases(&self, _target: &Path) -> Vec<(PathBuf, String)> {
+        Vec::new()
+    }
+
+    /// Batch form used by graph construction so package manifests and export patterns are
+    /// traversed once per graph rather than once for every linked module.
+    fn runtime_package_aliases_for_targets(
+        &self,
+        targets: &[PathBuf],
+    ) -> Vec<(PathBuf, String, PathBuf)> {
+        targets
+            .iter()
+            .flat_map(|target| {
+                self.runtime_package_aliases(target)
+                    .into_iter()
+                    .map(move |(root, specifier)| (root, specifier, target.clone()))
+            })
+            .collect()
     }
 }
 
@@ -748,23 +859,23 @@ impl NodePackageResolver {
                 (
                     ".js".to_owned(),
                     vec![
+                        ".js".to_owned(),
                         ".ts".to_owned(),
                         ".tsx".to_owned(),
-                        ".js".to_owned(),
                         ".jsx".to_owned(),
                     ],
                 ),
                 (
                     ".mjs".to_owned(),
-                    vec![".mts".to_owned(), ".mjs".to_owned()],
+                    vec![".mjs".to_owned(), ".mts".to_owned()],
                 ),
                 (
                     ".cjs".to_owned(),
-                    vec![".cts".to_owned(), ".cjs".to_owned()],
+                    vec![".cjs".to_owned(), ".cts".to_owned()],
                 ),
                 (
                     ".jsx".to_owned(),
-                    vec![".tsx".to_owned(), ".jsx".to_owned()],
+                    vec![".jsx".to_owned(), ".tsx".to_owned()],
                 ),
             ],
             // Node's package and directory fallback when no `exports` or `main` target wins.
@@ -809,6 +920,61 @@ impl NodePackageResolver {
         self.resolve_with_metadata_for_request(specifier, importer, NodeRequestKind::Import)
     }
 
+    /// Resolve a bare package request from a Node CLI working directory.
+    ///
+    /// Unlike a source import, a CLI preload has no importing file. Node resolves its bare
+    /// package names from `process.cwd()`, so accepting a directory here avoids inventing a
+    /// package.json importer or resolving from the entry module's directory.
+    pub fn resolve_package_from_directory(
+        &self,
+        specifier: &str,
+        importer_directory: impl AsRef<Path>,
+        request: NodeRequestKind,
+    ) -> Result<ResolvedRequest, ResolveError> {
+        if !matches!(
+            classify_specifier(specifier),
+            Err(ResolveError::InvalidSpecifier {
+                reason: InvalidSpecifierReason::BarePackage,
+                ..
+            })
+        ) {
+            return Err(ResolveError::InvalidSpecifier {
+                specifier: specifier.to_owned(),
+                reason: InvalidSpecifierReason::BarePackage,
+            });
+        }
+        let importer_directory = importer_directory.as_ref();
+        let canonical_directory = canonical_path(importer_directory, PathRole::Importer)?;
+        if !canonical_directory.starts_with(self.project_root()) {
+            return Err(ResolveError::OutsideProject {
+                path: canonical_directory,
+                project_root: self.project_root().to_path_buf(),
+            });
+        }
+        if !metadata_is_dir(&canonical_directory, PathRole::Importer)? {
+            return Err(ResolveError::NotDirectory {
+                role: PathRole::Importer,
+                path: canonical_directory,
+            });
+        }
+        let packages = match request {
+            NodeRequestKind::Import => &self.import_packages,
+            NodeRequestKind::Require => &self.require_packages,
+        };
+        let resolution = packages
+            .resolve(&canonical_directory, specifier)
+            .map_err(|error| map_package_error(specifier, &canonical_directory, error))?;
+        let package_json = resolution
+            .package_json()
+            .map(|manifest| manifest.path().to_path_buf());
+        validate_node_target(
+            resolution.into_path_buf(),
+            ResolutionKind::Package,
+            package_json,
+            self.project_root(),
+        )
+    }
+
     /// Resolve one request and retain metadata while selecting import or require conditions.
     pub fn resolve_with_metadata_for_request(
         &self,
@@ -829,10 +995,37 @@ impl NodePackageResolver {
             })
         ) {
             if matches!(classify_specifier(specifier), Ok(ResolutionKind::Relative)) {
+                // Only percent-escaped ESM file URLs need URL decoding. Keep the package
+                // resolver's established extension aliases and package metadata path for all
+                // ordinary relative requests, and preserve CommonJS's raw-path behavior.
+                if request == NodeRequestKind::Import && specifier.contains('%') {
+                    let canonical_importer = canonical_importer(importer, self.project_root())?;
+                    // The decoded path may legitimately contain `?` or `#`, which are filename
+                    // bytes here rather than URL query/fragment delimiters. Do not feed it back
+                    // through a specifier parser; validate the exact file URL target directly.
+                    let target = decode_esm_relative_specifier(specifier, &canonical_importer)?;
+                    let canonical_target =
+                        fs::canonicalize(&target).map_err(|error| ResolveError::Io {
+                            role: PathRole::Target,
+                            path: target.clone(),
+                            kind: error.kind(),
+                        })?;
+                    let package_json = nearest_package_json(&canonical_target);
+                    return validate_node_target(
+                        canonical_target,
+                        ResolutionKind::Relative,
+                        package_json,
+                        self.project_root(),
+                    );
+                }
                 let canonical_importer = canonical_importer(importer, self.project_root())?;
                 let importer_directory = canonical_importer.parent().unwrap_or(self.project_root());
+                let resolution_specifier = match request {
+                    NodeRequestKind::Import => percent_decode_specifier(specifier),
+                    NodeRequestKind::Require => std::borrow::Cow::Borrowed(specifier),
+                };
                 let resolution = packages
-                    .resolve(importer_directory, specifier)
+                    .resolve(importer_directory, resolution_specifier.as_ref())
                     .map_err(|error| map_package_error(specifier, &canonical_importer, error))?;
                 let package_json = resolution
                     .package_json()
@@ -870,6 +1063,282 @@ impl NodePackageResolver {
             self.project_root(),
         )
     }
+
+    /// Return public package-export spellings which resolve to `target` from the package that
+    /// owns it. Runtime-created ESM has no build-time dependency edge, but native execution can
+    /// still link an import when its target is already in the closed graph. Every candidate is
+    /// passed through the same Oxc resolver used by ordinary imports, so this reverse index does
+    /// not implement a second package-resolution policy.
+    fn runtime_package_aliases_for_targets(
+        &self,
+        targets: &[PathBuf],
+    ) -> Vec<(PathBuf, String, PathBuf)> {
+        let target_set = targets
+            .iter()
+            .filter_map(|target| fs::canonicalize(target).ok())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut packages = std::collections::BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+        for target in target_set {
+            if let Some(manifest) = nearest_package_json(&target) {
+                packages.entry(manifest).or_default().push(target);
+            }
+        }
+        let mut aliases = std::collections::BTreeSet::new();
+        for (manifest_path, package_targets) in packages {
+            let Some(package_root) = manifest_path.parent() else {
+                continue;
+            };
+            let Ok(bytes) = fs::read(&manifest_path) else {
+                continue;
+            };
+            let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            let Some(package_name) = manifest.get("name").and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Some(exports) = manifest.get("exports") else {
+                continue;
+            };
+            for (subpath, target_template) in package_export_entries(exports) {
+                for target in &package_targets {
+                    let Some(capture) =
+                        export_pattern_capture(package_root, target, &target_template)
+                    else {
+                        continue;
+                    };
+                    let Some(package_subpath) = subpath
+                        .replace('*', &capture)
+                        .strip_prefix('.')
+                        .map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    let specifier = format!("{package_name}{package_subpath}");
+                    let resolved =
+                        self.resolve_for_request(&specifier, target, NodeRequestKind::Import);
+                    if resolved.is_ok_and(|resolved| resolved.path == *target) {
+                        aliases.insert((package_root.to_path_buf(), specifier, target.clone()));
+                    }
+                }
+            }
+        }
+        // TypeScript projects can expose linked source through `paths` even when a package
+        // deliberately exports only its public barrel. Runtime-generated modules (for example
+        // compiler output) still use those project aliases. Enumerate only aliases whose path
+        // template names one of the linked targets, then ask the ordinary Oxc resolver to
+        // confirm the candidate from the project root before publishing it.
+        if let Some(config_path) = ["tsconfig.json", "jsconfig.json"]
+            .into_iter()
+            .map(|name| self.project_root().join(name))
+            .find(|path| path.is_file())
+        {
+            if let Ok(bytes) = fs::read(&config_path) {
+                if let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    let options = config.get("compilerOptions");
+                    let base_url = options
+                        .and_then(|options| options.get("baseUrl"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(|base| {
+                            config_path
+                                .parent()
+                                .unwrap_or(self.project_root())
+                                .join(base)
+                        })
+                        .unwrap_or_else(|| {
+                            config_path
+                                .parent()
+                                .unwrap_or(self.project_root())
+                                .to_path_buf()
+                        });
+                    let base_url = fs::canonicalize(&base_url).unwrap_or(base_url);
+                    if let Some(paths) = options
+                        .and_then(|options| options.get("paths"))
+                        .and_then(serde_json::Value::as_object)
+                    {
+                        for (pattern, templates) in paths {
+                            let Some(templates) = templates.as_array() else {
+                                continue;
+                            };
+                            for template in templates.iter().filter_map(serde_json::Value::as_str) {
+                                for target in targets
+                                    .iter()
+                                    .filter_map(|target| fs::canonicalize(target).ok())
+                                {
+                                    let Some(capture) =
+                                        tsconfig_path_capture(&base_url, &target, template)
+                                    else {
+                                        continue;
+                                    };
+                                    let specifier = pattern.replace('*', &capture);
+                                    if self
+                                        .resolve_for_request(
+                                            &specifier,
+                                            &target,
+                                            NodeRequestKind::Import,
+                                        )
+                                        .is_ok_and(|resolved| resolved.path == target)
+                                    {
+                                        let package_root = nearest_package_json(&target)
+                                            .and_then(|manifest| {
+                                                manifest.parent().map(Path::to_path_buf)
+                                            })
+                                            .unwrap_or_else(|| self.project_root().to_path_buf());
+                                        aliases.insert((package_root, specifier, target));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        aliases.into_iter().collect()
+    }
+}
+
+fn tsconfig_path_capture(base_url: &Path, target: &Path, template: &str) -> Option<String> {
+    let mut parts = template.split('*');
+    let prefix = parts.next()?;
+    let suffix = parts.next().unwrap_or("");
+    if parts.next().is_some() {
+        return None;
+    }
+    let template_path = base_url.join(prefix);
+    let target_text = target.to_string_lossy();
+    let prefix_text = template_path.to_string_lossy();
+    let suffix_path = if suffix.is_empty() {
+        String::new()
+    } else {
+        suffix.to_owned()
+    };
+    let capture = target_text
+        .strip_prefix(prefix_text.as_ref())?
+        .strip_suffix(&suffix_path)?;
+    Some(capture.to_owned())
+}
+
+/// Flatten the source targets of package export entries while retaining their public subpaths.
+/// Conditional maps and fallback arrays are collected as candidates; the actual resolver below
+/// selects the active condition and rejects candidates that do not name the target.
+fn package_export_entries(exports: &serde_json::Value) -> Vec<(String, String)> {
+    fn targets(value: &serde_json::Value, output: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(target) => output.push(target.clone()),
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    targets(value, output);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    targets(value, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut output = Vec::new();
+    if let serde_json::Value::Object(entries) = exports {
+        if entries.keys().any(|key| key.starts_with('.')) {
+            for (subpath, value) in entries {
+                if !subpath.starts_with('.') {
+                    continue;
+                }
+                let mut values = Vec::new();
+                targets(value, &mut values);
+                output.extend(values.into_iter().map(|target| (subpath.clone(), target)));
+            }
+        } else {
+            let mut values = Vec::new();
+            targets(exports, &mut values);
+            output.extend(values.into_iter().map(|target| (".".to_owned(), target)));
+        }
+    } else {
+        let mut values = Vec::new();
+        targets(exports, &mut values);
+        output.extend(values.into_iter().map(|target| (".".to_owned(), target)));
+    }
+    output
+}
+
+/// Match one package export target template to the canonical target path and return its wildcard
+/// capture (empty for an exact target). Invalid traversal and multi-wildcard patterns are
+/// deliberately omitted; the ordinary resolver remains the authority for admitted candidates.
+fn export_pattern_capture(package_root: &Path, target: &Path, template: &str) -> Option<String> {
+    let relative = target.strip_prefix(package_root).ok()?.to_str()?;
+    let template = template.strip_prefix("./")?;
+    if !template.contains('*') {
+        return (relative == template).then(String::new);
+    }
+    let mut parts = template.split('*');
+    let prefix = parts.next()?;
+    let suffix = parts.next().unwrap_or("");
+    if parts.next().is_some() || !relative.starts_with(prefix) || !relative.ends_with(suffix) {
+        return None;
+    }
+    let capture_end = relative.len().checked_sub(suffix.len())?;
+    let capture = relative.get(prefix.len()..capture_end)?;
+    if capture.contains('*') || capture.split('/').any(|segment| segment == "..") {
+        return None;
+    }
+    Some(capture.to_owned())
+}
+
+fn nearest_package_json(path: &Path) -> Option<PathBuf> {
+    let mut directory = path.parent();
+    while let Some(current) = directory {
+        let manifest = current.join("package.json");
+        if manifest.is_file() {
+            return Some(manifest);
+        }
+        directory = current.parent();
+    }
+    None
+}
+
+/// Decode a relative ESM URL path for filesystem resolution. Encoded path separators are
+/// rejected, matching file-URL module loading, while escaped `#`, `?`, `%`, and UTF-8 bytes are
+/// ordinary filename characters after URL decoding.
+fn decode_esm_relative_specifier(
+    specifier: &str,
+    importer: &Path,
+) -> Result<PathBuf, ResolveError> {
+    let invalid = |reason| ResolveError::InvalidSpecifier {
+        specifier: specifier.to_owned(),
+        reason,
+    };
+    let bytes = specifier.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err(invalid(InvalidSpecifierReason::InvalidPercentEncoding));
+            }
+            let hex = |byte: u8| (byte as char).to_digit(16);
+            let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) else {
+                return Err(invalid(InvalidSpecifierReason::InvalidPercentEncoding));
+            };
+            let escaped = ((high << 4) | low) as u8;
+            if matches!(escaped, b'/' | b'\\') {
+                return Err(invalid(InvalidSpecifierReason::EncodedPathSeparator));
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    let base = url::Url::from_file_path(importer)
+        .map_err(|_| invalid(InvalidSpecifierReason::InvalidPercentEncoding))?;
+    let target = base
+        .join(specifier)
+        .map_err(|_| invalid(InvalidSpecifierReason::InvalidPercentEncoding))?;
+    let path = target
+        .to_file_path()
+        .map_err(|_| invalid(InvalidSpecifierReason::EncodedPathSeparator))?;
+    Ok(path)
 }
 
 fn validate_node_target(
@@ -953,6 +1422,7 @@ impl NodeRuntimeResolver {
         specifier: &str,
         importer: impl AsRef<Path>,
     ) -> Result<ResolvedModule, ResolveError> {
+        refuse_internal_builtin(specifier, importer.as_ref(), self.project_root())?;
         if let Some(builtin) = NodeBuiltin::parse(specifier) {
             return Ok(ResolvedModule::new(
                 builtin.virtual_path(self.project_root()),
@@ -984,6 +1454,7 @@ impl ResolutionPolicy for NodeRuntimeResolver {
         importer: &Path,
         request: NodeRequestKind,
     ) -> Result<ResolvedModule, ResolveError> {
+        refuse_internal_builtin(specifier, importer, self.project_root())?;
         if let Some(builtin) = NodeBuiltin::parse(specifier) {
             return Ok(ResolvedModule::new(
                 builtin.virtual_path(self.project_root()),
@@ -1010,6 +1481,21 @@ impl ResolutionPolicy for NodeRuntimeResolver {
             Ok(Some(node_module_format_for_path(&module.path)?))
         }
     }
+
+    fn runtime_package_aliases(&self, target: &Path) -> Vec<(PathBuf, String)> {
+        self.packages
+            .runtime_package_aliases_for_targets(&[target.to_path_buf()])
+            .into_iter()
+            .map(|(root, specifier, _)| (root, specifier))
+            .collect()
+    }
+
+    fn runtime_package_aliases_for_targets(
+        &self,
+        targets: &[PathBuf],
+    ) -> Vec<(PathBuf, String, PathBuf)> {
+        self.packages.runtime_package_aliases_for_targets(targets)
+    }
 }
 
 fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveError> {
@@ -1019,15 +1505,8 @@ fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveE
     ) {
         return node_module_format(path, None);
     }
-    let mut directory = path.parent();
-    while let Some(current) = directory {
-        let manifest = current.join("package.json");
-        if manifest.is_file() {
-            return node_module_format(path, Some(&manifest));
-        }
-        directory = current.parent();
-    }
-    node_module_format(path, None)
+    let manifest = nearest_package_json(path);
+    node_module_format(path, manifest.as_deref())
 }
 
 /// Whether Node leaves this path's module format to syntax detection.
@@ -1073,6 +1552,7 @@ pub struct PinnedPackageResolver {
     explicit: ModuleResolver,
     packages: HashMap<(PathBuf, String, NodeRequestKind), PathBuf>,
     formats: HashMap<PathBuf, NodeModuleFormat>,
+    runtime_package_aliases: Vec<(PathBuf, String, PathBuf)>,
     node_builtins: bool,
 }
 
@@ -1141,8 +1621,22 @@ impl PinnedPackageResolver {
                 })
                 .collect(),
             formats: formats.into_iter().collect(),
+            runtime_package_aliases: Vec::new(),
             node_builtins: false,
         })
+    }
+
+    /// Attach aliases approved by the synchronizing client. They remain limited to targets
+    /// already present in the synchronized source graph.
+    pub fn with_runtime_package_aliases(
+        mut self,
+        aliases: impl IntoIterator<Item = (PathBuf, String, PathBuf)>,
+    ) -> Self {
+        let mut aliases = aliases.into_iter().collect::<Vec<_>>();
+        aliases.sort();
+        aliases.dedup();
+        self.runtime_package_aliases = aliases;
+        self
     }
 
     /// Construct a pinned resolver with the explicit Node compatibility builtin surface enabled.
@@ -1214,6 +1708,7 @@ impl PinnedPackageResolver {
                 ResolutionKind::Builtin,
             ));
         }
+        refuse_internal_builtin(specifier, importer, self.project_root())?;
         if (self.node_builtins || specifier.starts_with("kiln:"))
             && let Some(builtin) = NodeBuiltin::parse(specifier)
         {
@@ -1289,25 +1784,37 @@ impl ResolutionPolicy for PinnedPackageResolver {
         &self,
         module: &ResolvedModule,
     ) -> Result<Option<NodeModuleFormat>, ResolveError> {
-        if !self.node_builtins || module.kind == ResolutionKind::Builtin {
+        if module.kind == ResolutionKind::Builtin {
             Ok(None)
         } else if matches!(
             module
                 .path
                 .extension()
                 .and_then(|extension| extension.to_str()),
-            Some("mjs" | "cjs")
+            Some("mjs" | "mts" | "cjs" | "cts")
         ) {
             Ok(Some(node_module_format(&module.path, None)?))
         } else {
-            self.formats
-                .get(&module.path)
-                .copied()
-                .map(Some)
-                .ok_or_else(|| ResolveError::NodeFormatNotPinned {
+            match self.formats.get(&module.path).copied() {
+                Some(format) => Ok(Some(format)),
+                None if self.node_builtins => Err(ResolveError::NodeFormatNotPinned {
                     path: module.path.clone(),
-                })
+                }),
+                None => Ok(None),
+            }
         }
+    }
+
+    fn runtime_package_aliases_for_targets(
+        &self,
+        targets: &[PathBuf],
+    ) -> Vec<(PathBuf, String, PathBuf)> {
+        let targets = targets.iter().collect::<std::collections::HashSet<_>>();
+        self.runtime_package_aliases
+            .iter()
+            .filter(|(_, _, target)| targets.contains(target))
+            .cloned()
+            .collect()
     }
 }
 
@@ -1384,6 +1891,32 @@ pub fn resolve(
     resolver.resolve(specifier, importer)
 }
 
+fn percent_decode_specifier(specifier: &str) -> std::borrow::Cow<'_, str> {
+    if !specifier.contains('%') {
+        return std::borrow::Cow::Borrowed(specifier);
+    }
+    let bytes = specifier.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let h1 = (bytes[i + 1] as char).to_digit(16);
+            let h2 = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h1), Some(h2)) = (h1, h2) {
+                decoded.push(((h1 << 4) | h2) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[i]);
+        i += 1;
+    }
+    match String::from_utf8(decoded) {
+        Ok(s) => std::borrow::Cow::Owned(s),
+        Err(_) => std::borrow::Cow::Borrowed(specifier),
+    }
+}
+
 fn resolve_in_root(
     specifier: &str,
     importer: &Path,
@@ -1394,12 +1927,13 @@ fn resolve_in_root(
     ensure_utf8(project_root, PathRole::ProjectRoot)?;
     let canonical_importer = canonical_importer(importer, project_root)?;
 
+    let decoded = percent_decode_specifier(specifier);
     let candidate = match kind {
         ResolutionKind::Relative => canonical_importer
             .parent()
             .unwrap_or(project_root)
-            .join(specifier),
-        ResolutionKind::Absolute => PathBuf::from(specifier),
+            .join(decoded.as_ref()),
+        ResolutionKind::Absolute => PathBuf::from(decoded.as_ref()),
         ResolutionKind::Package => unreachable!("explicit resolver cannot classify packages"),
         ResolutionKind::Builtin => unreachable!("builtins bypass filesystem resolution"),
     };
@@ -1430,10 +1964,10 @@ fn resolve_in_root(
 fn classify_specifier(specifier: &str) -> Result<ResolutionKind, ResolveError> {
     let reason = if specifier.is_empty() {
         Some(InvalidSpecifierReason::Empty)
-    } else if specifier.starts_with('#') {
-        if specifier.len() == 1 {
+    } else if let Some(import_name) = specifier.strip_prefix('#') {
+        if import_name.is_empty() {
             Some(InvalidSpecifierReason::Empty)
-        } else if specifier[1..].contains(['?', '#']) {
+        } else if import_name.contains(['?', '#']) {
             Some(InvalidSpecifierReason::QueryOrFragment)
         } else {
             None
@@ -1605,6 +2139,8 @@ mod tests {
             let outside = std::env::temp_dir().join(format!("{name}-outside"));
             fs::create_dir_all(&root).expect("create test project");
             fs::create_dir_all(&outside).expect("create outside project");
+            let root = fs::canonicalize(&root).expect("canonical test project");
+            let outside = fs::canonicalize(&outside).expect("canonical outside project");
             Self { root, outside }
         }
 
@@ -1641,6 +2177,42 @@ mod tests {
         assert_eq!(resolved.kind, ResolutionKind::Relative);
         assert_eq!(resolved.path, fs::canonicalize(target).unwrap());
         assert!(resolved.path.is_absolute());
+    }
+
+    #[test]
+    fn resolves_cli_package_preload_from_working_directory() {
+        let project = TempProject::new();
+        project.write(
+            "node_modules/preload-target/package.json",
+            r#"{"exports":"./root.mjs"}"#,
+        );
+        project.write(
+            "node_modules/preload-target/root.mjs",
+            "export const where = 'root';",
+        );
+        project.write(
+            "tools/node_modules/preload-target/package.json",
+            r#"{"exports":"./cwd.mjs"}"#,
+        );
+        let working_target = project.write(
+            "tools/node_modules/preload-target/cwd.mjs",
+            "export const where = 'cwd';",
+        );
+        fs::create_dir_all(project.root.join("tools")).expect("create working directory");
+
+        let resolver = NodePackageResolver::new(&project.root).expect("Node resolver");
+        let resolved = resolver
+            .resolve_package_from_directory(
+                "preload-target",
+                project.root.join("tools"),
+                NodeRequestKind::Import,
+            )
+            .expect("resolve preload from CLI cwd");
+        assert_eq!(resolved.module.kind, ResolutionKind::Package);
+        assert_eq!(
+            resolved.module.path,
+            fs::canonicalize(working_target).unwrap()
+        );
     }
 
     #[test]
@@ -1758,6 +2330,50 @@ mod tests {
     }
 
     #[test]
+    fn derives_runtime_aliases_from_public_package_exports() {
+        let project = TempProject::new();
+        let target = project.write(
+            "src/schema/SchemaCompiler/runtime.ts",
+            "export const value = 1;",
+        );
+        project.write(
+            "package.json",
+            r#"{"name":"effect","type":"module","exports":{"./*":"./src/*.ts","./hidden/*":null}}"#,
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let aliases = resolver.runtime_package_aliases(&target);
+        assert!(aliases.contains(&(
+            project.root.clone(),
+            "effect/schema/SchemaCompiler/runtime".to_owned()
+        )));
+        assert!(
+            !aliases
+                .iter()
+                .any(|(_, specifier)| specifier.starts_with("effect/hidden/"))
+        );
+    }
+
+    #[test]
+    fn derives_runtime_aliases_from_resolver_verified_tsconfig_paths() {
+        let project = TempProject::new();
+        let target = project.write("src/schema/runtime.ts", "export const value = 1;");
+        project.write(
+            "tsconfig.json",
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"effect/*":["src/*.ts"]}}}"#,
+        );
+        project.write(
+            "package.json",
+            r#"{"name":"effect","exports":{"./schema":"./src/schema/index.ts"}}"#,
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let aliases = resolver.runtime_package_aliases(&target);
+        assert!(
+            aliases.contains(&(project.root.clone(), "effect/schema/runtime".to_owned())),
+            "aliases: {aliases:?}"
+        );
+    }
+
+    #[test]
     fn resolves_typescript_extension_aliases_under_node_policy() {
         let project = TempProject::new();
         let importer = project.write("src/main.ts", "import './dep.js'; import './ui.js';");
@@ -1776,6 +2392,12 @@ mod tests {
             .expect("resolve .js to .tsx");
         assert_eq!(resolved_tsx.kind, ResolutionKind::Relative);
         assert_eq!(resolved_tsx.path, fs::canonicalize(target_tsx).unwrap());
+
+        let node_resolver = NodeRuntimeResolver::new(&project.root).expect("valid node resolver");
+        let node_alias = node_resolver
+            .resolve_for_request("./dep.js", &importer, NodeRequestKind::Import)
+            .expect("ordinary ESM imports retain the .js to .ts alias");
+        assert_eq!(node_alias.path, resolved_ts.path);
 
         // A missing relative module reports as module resolution failure, not package not found
         let err = resolver
@@ -1948,6 +2570,34 @@ mod tests {
     }
 
     #[test]
+    fn pinned_source_format_is_available_without_node_builtins() {
+        let project = TempProject::new();
+        let importer = fs::canonicalize(project.write("main.js", "")).expect("canonical importer");
+        let target = fs::canonicalize(project.write("pkg/index.js", "")).expect("canonical target");
+        let pinned = PinnedPackageResolver::new_with_formats(
+            &project.root,
+            std::iter::empty::<(PathBuf, String, PathBuf)>(),
+            [(target.clone(), NodeModuleFormat::CommonJs)],
+        )
+        .expect("construct ordinary pinned resolver");
+        let resolved = pinned
+            .resolve("./pkg/index.js", &importer)
+            .expect("resolve explicit module");
+
+        assert_eq!(
+            pinned.node_format(&resolved).unwrap(),
+            Some(NodeModuleFormat::CommonJs)
+        );
+        assert!(matches!(
+            pinned.resolve("node:http", &importer),
+            Err(ResolveError::InvalidSpecifier {
+                reason: InvalidSpecifierReason::UrlScheme,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn package_conditions_follow_import_and_require_requests_and_can_be_pinned() {
         let project = TempProject::new();
         let importer = project.write("main.mjs", "");
@@ -2009,6 +2659,22 @@ mod tests {
                 .path,
             cjs
         );
+    }
+
+    #[test]
+    fn package_main_prefers_existing_javascript_over_typescript_alias() {
+        let project = TempProject::new();
+        let importer = project.write("main.cjs", "");
+        let javascript = project.write("node_modules/pkg/index.js", "module.exports = 'js';");
+        project.write("node_modules/pkg/index.ts", "export default 'ts';");
+        write_package(&project, "pkg", r#"{"main":"index.js"}"#);
+
+        let resolved = NodePackageResolver::new(&project.root)
+            .expect("valid project root")
+            .resolve_for_request("pkg", &importer, NodeRequestKind::Require)
+            .expect("Node require resolves package main");
+
+        assert_eq!(resolved.path, fs::canonicalize(javascript).unwrap());
     }
 
     #[test]
@@ -2261,12 +2927,103 @@ mod tests {
             );
         }
         assert!(matches!(
-            resolver.resolve("node:tls", &importer),
+            resolver.resolve("node:cluster", &importer),
             Err(ResolveError::InvalidSpecifier {
                 reason: InvalidSpecifierReason::UrlScheme,
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn node_require_resolves_extensionless_relative_javascript() {
+        let project = TempProject::new();
+        let importer = project.write("lib/main.cjs", "");
+        let target = project.write("lib/impl/format.js", "module.exports = {};\n");
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
+
+        let resolved = resolver
+            .resolve_for_request("./impl/format", &importer, NodeRequestKind::Require)
+            .expect("Node require resolves the .js extension");
+
+        assert_eq!(resolved.path, target);
+    }
+
+    #[test]
+    fn esm_relative_specifiers_decode_file_url_escapes_but_require_does_not() {
+        let project = TempProject::new();
+        project.write("package.json", r#"{"type":"module"}"#);
+        let importer = project.write("main.mjs", "");
+        let decoded_target = project.write("identity #%? ü 😀.js", "export {};");
+        let raw_target = project.write(
+            "identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.js",
+            "module.exports = {};",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
+        let encoded = "./identity%20%23%25%3F%20%C3%BC%20%F0%9F%98%80.js";
+
+        let imported = resolver
+            .resolve_for_request(encoded, &importer, NodeRequestKind::Import)
+            .expect("ESM URL escapes resolve to filename bytes");
+        assert_eq!(imported.path, fs::canonicalize(decoded_target).unwrap());
+        assert_eq!(
+            node_module_format_for_path(&imported.path).unwrap(),
+            NodeModuleFormat::EsModule
+        );
+        let metadata = resolver
+            .packages
+            .resolve_with_metadata_for_request(encoded, &importer, NodeRequestKind::Import)
+            .expect("decoded JS target retains package metadata");
+        assert_eq!(
+            metadata.package_json,
+            Some(project.root.join("package.json"))
+        );
+
+        let required = resolver
+            .resolve_for_request(encoded, &importer, NodeRequestKind::Require)
+            .expect("CommonJS keeps literal percent escapes in its path");
+        assert_eq!(required.path, fs::canonicalize(raw_target).unwrap());
+
+        for invalid in ["./bad%2Fname.mjs", "./bad%5cname.mjs", "./bad%XZ.mjs"] {
+            assert!(matches!(
+                resolver.resolve_for_request(invalid, &importer, NodeRequestKind::Import),
+                Err(ResolveError::InvalidSpecifier { .. })
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encoded_esm_symlink_uses_canonical_target_package_metadata() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempProject::new();
+        project.write("package.json", r#"{"type":"module"}"#);
+        let importer = project.write("main.mjs", "");
+        project.write("provider/package.json", r#"{"type":"commonjs"}"#);
+        let target = project.write("provider/real.js", "module.exports = {};\n");
+        let alias = project.root.join("entry #%?.js");
+        symlink(&target, &alias).expect("create encoded-path alias");
+
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
+        let metadata = resolver
+            .packages
+            .resolve_with_metadata_for_request(
+                "./entry%20%23%25%3F.js",
+                &importer,
+                NodeRequestKind::Import,
+            )
+            .expect("resolve URL-escaped symlink");
+
+        assert_eq!(metadata.module.path, fs::canonicalize(target).unwrap());
+        assert_eq!(
+            metadata.package_json,
+            Some(project.root.join("provider/package.json"))
+        );
+        assert_eq!(
+            node_module_format_for_path(&metadata.module.path).unwrap(),
+            NodeModuleFormat::CommonJs
+        );
     }
 
     #[test]
@@ -2298,10 +3055,49 @@ mod tests {
     }
 
     #[test]
+    fn every_builtin_virtual_path_names_exactly_that_builtin() {
+        let root = Path::new("/project");
+        let mut seen = std::collections::BTreeSet::new();
+        for &builtin in NodeBuiltin::ALL {
+            let path = builtin.virtual_path(root);
+            assert!(seen.insert(path.clone()), "{builtin:?} shares {path:?}");
+            let module = ResolvedModule::new(path, ResolutionKind::Builtin);
+            assert_eq!(module.builtin(), Some(builtin));
+        }
+        assert_eq!(
+            NodeBuiltin::NodeProcess.virtual_path(root),
+            Path::new("/project/.kiln/builtins/node/process.builtin")
+        );
+        assert_eq!(
+            NodeBuiltin::Process.virtual_path(root),
+            Path::new("/project/.kiln/builtins/kiln/process.builtin")
+        );
+    }
+
+    #[test]
     fn bounded_node_builtin_parse_and_specifier_round_trip() {
         assert_eq!(NodeBuiltin::parse("kiln:shared"), Some(NodeBuiltin::Shared));
         assert_eq!(NodeBuiltin::parse("kiln:gui"), Some(NodeBuiltin::Gui));
         assert_eq!(NodeBuiltin::Gui.specifier(), "kiln:gui");
+        assert_eq!(
+            NodeBuiltin::parse("kiln:gui/jsx-runtime"),
+            Some(NodeBuiltin::GuiJsxRuntime)
+        );
+        assert_eq!(
+            NodeBuiltin::GuiJsxRuntime.specifier(),
+            "kiln:gui/jsx-runtime"
+        );
+        assert_eq!(NodeBuiltin::parse("kiln:jsx-runtime"), None);
+        assert_eq!(NodeBuiltin::parse("kiln/jsx-runtime"), None);
+        let root = Path::new("/project");
+        for builtin in [
+            NodeBuiltin::GuiJsxRuntime,
+            NodeBuiltin::ActorsCore,
+            NodeBuiltin::FsPromises,
+        ] {
+            let module = ResolvedModule::new(builtin.virtual_path(root), ResolutionKind::Builtin);
+            assert_eq!(module.builtin(), Some(builtin));
+        }
         assert_eq!(NodeBuiltin::parse("shared"), None);
         assert_eq!(NodeBuiltin::parse("node:shared"), None);
         assert_eq!(NodeBuiltin::parse("node:kiln:shared"), None);
@@ -2319,6 +3115,14 @@ mod tests {
             assert_eq!(NodeBuiltin::parse(builtin.specifier()), Some(builtin));
             if builtin == NodeBuiltin::Process {
                 assert_eq!(NodeBuiltin::parse("kiln:process"), Some(builtin));
+                assert_eq!(
+                    NodeBuiltin::parse("process"),
+                    Some(NodeBuiltin::NodeProcess)
+                );
+                assert_eq!(
+                    NodeBuiltin::parse("node:process"),
+                    Some(NodeBuiltin::NodeProcess)
+                );
             } else {
                 assert_eq!(
                     NodeBuiltin::parse(builtin.specifier().trim_start_matches("node:")),
@@ -2388,6 +3192,48 @@ mod tests {
     }
 
     #[test]
+    fn engine_internal_modules_resolve_only_for_engine_importers() {
+        let project = TempProject::new();
+        let source = project.write("main.ts", "");
+        let runtime = NodeRuntimeResolver::new(&project.root).expect("runtime resolver");
+        let explicit = ModuleResolver::new(&project.root).expect("explicit resolver");
+        let pinned = PinnedPackageResolver::new(
+            &project.root,
+            std::iter::empty::<(PathBuf, String, PathBuf)>(),
+        )
+        .expect("pinned resolver");
+        let actors = NodeBuiltin::Actors.virtual_path(&project.root);
+        for specifier in ["kiln:actors/core", "kiln:actors/worker"] {
+            for resolved in [
+                runtime.resolve(specifier, &source),
+                explicit.resolve(specifier, &source),
+                pinned.resolve(specifier, &source),
+            ] {
+                let error = resolved.expect_err("a user import of an internal module");
+                assert_eq!(
+                    error.to_string(),
+                    format!("`{specifier}` is internal to kiln:actors")
+                );
+            }
+            for resolved in [
+                runtime.resolve(specifier, &actors),
+                explicit.resolve(specifier, &actors),
+                pinned.resolve(specifier, &actors),
+            ] {
+                assert!(resolved.expect("engine importer").builtin().is_some());
+            }
+        }
+        // The public module stays importable from user code.
+        assert_eq!(
+            runtime
+                .resolve("kiln:actors", &source)
+                .expect("kiln:actors")
+                .builtin(),
+            Some(NodeBuiltin::Actors)
+        );
+    }
+
+    #[test]
     fn pinned_node_policy_is_opt_in_and_keeps_unknown_builtins_refused() {
         let project = TempProject::new();
         let importer = project.write("main.js", "");
@@ -2396,6 +3242,16 @@ mod tests {
             std::iter::empty::<(PathBuf, String, PathBuf)>(),
         )
         .expect("ordinary pinned resolver");
+        assert_eq!(
+            ordinary
+                .node_format(&ResolvedModule::new(
+                    fs::canonicalize(&importer).unwrap(),
+                    ResolutionKind::Relative,
+                ))
+                .unwrap(),
+            None,
+            "missing metadata keeps ordinary source policy unchanged"
+        );
         assert!(matches!(
             ordinary.resolve("node:http", &importer),
             Err(ResolveError::InvalidSpecifier {
@@ -2416,7 +3272,7 @@ mod tests {
             Some(NodeBuiltin::Http)
         );
         assert!(matches!(
-            node.resolve("node:tls", &importer),
+            node.resolve("node:cluster", &importer),
             Err(ResolveError::InvalidSpecifier {
                 reason: InvalidSpecifierReason::UrlScheme,
                 ..

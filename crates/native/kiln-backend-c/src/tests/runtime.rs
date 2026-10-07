@@ -1,16 +1,1049 @@
 use super::*;
 
 #[test]
+fn key_hash_width_specialization_matches_unit_at_reference() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits the shared runtime");
+    let wrapper = r#"
+static uint64_t reference_key_hash(const kiln_string *string) {
+    const uint64_t mix = UINT64_C(0xff51afd7ed558ccd);
+    uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) ^
+                    (uint64_t)(string == NULL ? 0 : string->unit_len);
+    size_t index;
+    if (string == NULL) return hash ^ (hash >> 32);
+    if (kiln_c99_key_is_symbol(string)) hash ^= UINT64_C(0x6a09e667f3bcc909);
+    if (string->flags & KILN_STRING_PRIVATE_KEY) hash ^= UINT64_C(0xbb67ae8584caa73b);
+    index = 0;
+    while (string->unit_len - index >= 4) {
+        uint64_t word = (uint64_t)kiln_string_unit_at(string, index) |
+                        ((uint64_t)kiln_string_unit_at(string, index + 1) << 16) |
+                        ((uint64_t)kiln_string_unit_at(string, index + 2) << 32) |
+                        ((uint64_t)kiln_string_unit_at(string, index + 3) << 48);
+        hash = (hash ^ word) * mix;
+        hash ^= hash >> 29;
+        index += 4;
+    }
+    if (index < string->unit_len) {
+        uint64_t tail = 0;
+        size_t lane = 0;
+        while (index < string->unit_len)
+            tail |= (uint64_t)kiln_string_unit_at(string, index++) << (16 * lane++);
+        hash = (hash ^ tail) * mix;
+        hash ^= hash >> 29;
+    }
+    return hash ^ (hash >> 32);
+}
+
+int main(void) {
+    uint8_t latin1[67];
+    uint16_t random_utf16[67];
+    uint16_t utf16[67];
+    uint32_t state = UINT32_C(0x91e10da5);
+    static const uint32_t domains[] = {
+        0, KILN_STRING_SYMBOL_KEY, KILN_STRING_PRIVATE_KEY,
+        KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY
+    };
+    for (size_t index = 0; index < 67; ++index) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        latin1[index] = (uint8_t)state;
+        random_utf16[index] = (uint16_t)(state >> 7);
+    }
+    /* Include lone high/low surrogates and their neighbors in the UTF-16 lane. */
+    random_utf16[0] = UINT16_C(0xd800);
+    random_utf16[1] = UINT16_C(0xdc00);
+    random_utf16[2] = UINT16_C(0xdfff);
+    random_utf16[3] = UINT16_C(0xffff);
+    for (size_t length = 0; length <= 67; ++length) {
+        memcpy(utf16, random_utf16, sizeof utf16);
+        for (size_t domain = 0; domain < sizeof domains / sizeof domains[0]; ++domain) {
+            kiln_string byte_string = {
+                (uint32_t)length, KILN_STRING_LATIN1 | domains[domain], latin1
+            };
+            kiln_string word_string = {
+                (uint32_t)length, KILN_STRING_UTF16 | domains[domain], utf16
+            };
+            if (kiln_c99_key_hash(&byte_string) != reference_key_hash(&byte_string) ||
+                kiln_c99_key_hash(&word_string) != reference_key_hash(&word_string)) return 1;
+        }
+        /* The same Latin1 code units hash identically after widening to UTF-16. */
+        for (size_t index = 0; index < length; ++index) utf16[index] = latin1[index];
+        for (size_t domain = 0; domain < sizeof domains / sizeof domains[0]; ++domain) {
+            kiln_string byte_string = {
+                (uint32_t)length, KILN_STRING_LATIN1 | domains[domain], latin1
+            };
+            kiln_string word_string = {
+                (uint32_t)length, KILN_STRING_UTF16 | domains[domain], utf16
+            };
+            if (kiln_c99_key_hash(&byte_string) != kiln_c99_key_hash(&word_string)) return 2;
+        }
+    }
+    for (uint32_t length = 1; length <= 9; ++length) {
+        kiln_string missing = { length, KILN_STRING_UTF16 | KILN_STRING_SYMBOL_KEY, NULL };
+        if (kiln_c99_key_hash(&missing) != reference_key_hash(&missing)) return 3;
+    }
+    if (kiln_c99_key_hash(NULL) != reference_key_hash(NULL)) return 4;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "key-hash-width-specialization");
+    assert!(
+        run.status.success(),
+        "key hash width specialization mismatch ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn hidden_runtime_key_check_skips_only_ordinary_string_domain() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits the shared runtime");
+    let wrapper = r#"
+int main(void) {
+    static const char *const names[] = {
+        "@@node:socket", "@@node:server", "@@node:client", "@@node:response",
+        "@@kiln:node:is-file", "@@kiln:node:is-directory",
+    };
+    if (kiln_c99_is_node_hidden_key_key(NULL)) return 1;
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; ++i) {
+        size_t len = strlen(names[i]);
+        kiln_string ordinary = {(uint32_t)len, KILN_STRING_LATIN1, names[i]};
+        kiln_string private_key = {
+            (uint32_t)len, KILN_STRING_LATIN1 | KILN_STRING_PRIVATE_KEY, names[i]
+        };
+        kiln_string symbol_key = {
+            (uint32_t)len, KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY, names[i]
+        };
+        if (kiln_c99_is_node_hidden_key_key(&ordinary)) return 2;
+        if (!kiln_c99_is_node_hidden_key_key(&private_key) ||
+            !kiln_c99_is_node_hidden_key_key(&symbol_key)) return 3;
+    }
+
+    /* The ordinary program string domain remains observable, including the exact spelling. */
+    static const char *const ordinary_names[] = {
+        "@@node:socket", "@@node:socketx", "@@node:socke", "@@kiln:node:is-filex",
+        "@@", "@node:socket", "ordinary",
+    };
+    for (size_t i = 0; i < sizeof ordinary_names / sizeof ordinary_names[0]; ++i) {
+        size_t len = strlen(ordinary_names[i]);
+        kiln_string ordinary = {(uint32_t)len, KILN_STRING_LATIN1, ordinary_names[i]};
+        if (kiln_c99_is_node_hidden_key_key(&ordinary)) return 4;
+    }
+
+    /* UTF-16 and the interned compiler-key route keep the same exact-domain decision. */
+    uint16_t wide_units[32];
+    size_t wide_len = strlen(names[3]);
+    for (size_t i = 0; i < wide_len; ++i) wide_units[i] = (uint8_t)names[3][i];
+    kiln_string wide = {
+        (uint32_t)wide_len, KILN_STRING_UTF16 | KILN_STRING_PRIVATE_KEY, wide_units
+    };
+    if (!kiln_c99_is_node_hidden_key_key(&wide)) return 5;
+    kiln_string intern_view = {
+        (uint32_t)strlen(names[0]), KILN_STRING_LATIN1 | KILN_STRING_PRIVATE_KEY, names[0]
+    };
+    const kiln_string *interned = kiln_c99_intern_static_key(&intern_view);
+    if (interned == NULL || !kiln_c99_is_node_hidden_key_key(interned)) return 6;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "hidden-runtime-key-domain-fast-reject");
+    assert!(
+        run.status.success(),
+        "hidden key check changed reserved/ordinary domain behavior ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn compiler_named_key_preserves_the_reserved_name_matrix() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits the shared runtime");
+    let wrapper = r#"
+int main(void) {
+    static const char *const well_known[] = {
+        "@@iterator", "@@asyncIterator", "@@dispose", "@@asyncDispose"
+    };
+    static const char *const ordinary[] = {
+        "", "@", "@x", "x@@iterator", "@@", "@@iterato", "@@iteratorx",
+        "@@hasInstance", "@@private", "@@privateX:value", "ordinary"
+    };
+
+    /* Ordinary source strings must pass through unchanged, including nearby reserved-looking
+     * spellings. These are the common case for compiler-named property access. */
+    for (size_t i = 0; i < sizeof ordinary / sizeof ordinary[0]; ++i) {
+        kiln_string key = {
+            (uint32_t)strlen(ordinary[i]), KILN_STRING_LATIN1, ordinary[i]
+        };
+        if (kiln_c99_compiler_named_key(&key) != &key) return 1;
+    }
+    /* No reserved spelling is shorter than @@dispose. A short malformed view must be
+     * rejected by length before code-unit decoding touches its absent backing storage. */
+    kiln_string empty_view = { 0, KILN_STRING_UTF16, NULL };
+    kiln_string short_view = { 8, KILN_STRING_UTF16, NULL };
+    if (kiln_c99_compiler_named_key(&empty_view) != &empty_view ||
+        kiln_c99_compiler_named_key(&short_view) != &short_view) return 9;
+
+    /* Only the compiler's four named protocol keys enter the symbol domain. */
+    for (size_t i = 0; i < sizeof well_known / sizeof well_known[0]; ++i) {
+        kiln_string key = {
+            (uint32_t)strlen(well_known[i]), KILN_STRING_LATIN1, well_known[i]
+        };
+        const kiln_string *classified = kiln_c99_compiler_named_key(&key);
+        if (classified == NULL || !kiln_c99_key_is_symbol(classified) ||
+            (classified->flags & KILN_STRING_PRIVATE_KEY) != 0 ||
+            classified->unit_len != key.unit_len ||
+            !kiln_c99_key_has_prefix(classified, well_known[i])) return 2;
+    }
+
+    /* Private slots have a separate domain; a symbol input is already classified and stays
+     * untouched. */
+    static const char private_name[] = "@@private:Scope.state";
+    kiln_string private_key = {
+        (uint32_t)(sizeof private_name - 1), KILN_STRING_LATIN1, private_name
+    };
+    const kiln_string *private_classified = kiln_c99_compiler_named_key(&private_key);
+    if (private_classified == NULL || kiln_c99_key_is_symbol(private_classified) ||
+        (private_classified->flags & KILN_STRING_PRIVATE_KEY) == 0) return 3;
+    kiln_string existing_symbol = {
+        (uint32_t)strlen("@@iterator"), KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY,
+        "@@iterator"
+    };
+    if (kiln_c99_compiler_named_key(&existing_symbol) != &existing_symbol) return 4;
+    if (kiln_c99_compiler_named_key(NULL) != NULL) return 5;
+
+    /* The same code-unit prefixes work for UTF-16 backing storage, including non-ASCII
+     * ordinary names and reserved names. */
+    uint16_t wide_symbol[] = {
+        '@', '@', 'a', 's', 'y', 'n', 'c', 'D', 'i', 's', 'p', 'o', 's', 'e'
+    };
+    kiln_string wide = {
+        (uint32_t)(sizeof wide_symbol / sizeof wide_symbol[0]), KILN_STRING_UTF16,
+        wide_symbol
+    };
+    const kiln_string *wide_classified = kiln_c99_compiler_named_key(&wide);
+    if (wide_classified == NULL || !kiln_c99_key_is_symbol(wide_classified)) return 6;
+    uint16_t wide_ordinary[] = { 0xd800, '@', 'x' };
+    kiln_string wide_nonprefix = {
+        (uint32_t)(sizeof wide_ordinary / sizeof wide_ordinary[0]), KILN_STRING_UTF16,
+        wide_ordinary
+    };
+    if (kiln_c99_compiler_named_key(&wide_nonprefix) != &wide_nonprefix) return 7;
+    uint16_t wide_private[] = {
+        '@', '@', 'p', 'r', 'i', 'v', 'a', 't', 'e', ':', 'x'
+    };
+    kiln_string wide_private_key = {
+        (uint32_t)(sizeof wide_private / sizeof wide_private[0]), KILN_STRING_UTF16,
+        wide_private
+    };
+    const kiln_string *wide_private_classified =
+        kiln_c99_compiler_named_key(&wide_private_key);
+    if (wide_private_classified == NULL ||
+        (wide_private_classified->flags & KILN_STRING_PRIVATE_KEY) == 0 ||
+        kiln_c99_key_is_symbol(wide_private_classified)) return 8;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "compiler-named-key-reserved-matrix");
+    assert!(
+        run.status.success(),
+        "compiler named key classification changed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn canonical_array_index_parser_matches_previous_round_trip_and_respects_domains() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits the shared runtime");
+    let wrapper = r#"
+static double previous_index_rule(const char *key, size_t key_len) {
+    char buffer[64];
+    double number;
+    int length;
+    if (key_len == 0 || key_len > 10 || (unsigned char)(key[0] - '0') > 9u) return -1.0;
+    number = kiln_string_to_number(key, key_len);
+    if (!(number >= 0.0) || floor(number) != number || number > 4294967294.0) return -1.0;
+    length = kiln_c99_double_to_js(number, buffer);
+    if (length != (int)key_len || memcmp(buffer, key, key_len) != 0) return -1.0;
+    return number;
+}
+
+int main(void) {
+    static const char *const spellings[] = {
+        "", "0", "00", "01", "9", "10", "2147483647", "4294967294",
+        "4294967295", "9999999999", "12x", "-1", " 1"
+    };
+    static const uint16_t utf16_index[] = {'1', '2', '3'};
+    static const uint16_t utf16_surrogate[] = {0xd800};
+    static const uint16_t utf16_non_ascii_digit[] = {0x0661};
+    static const unsigned char latin1_non_ascii[] = {0xe9};
+    size_t spelling;
+    kiln_string key = {0};
+    for (spelling = 0; spelling < sizeof spellings / sizeof spellings[0]; ++spelling) {
+        const char *text = spellings[spelling];
+        size_t length = strlen(text);
+        if (kiln_c99_key_index(text, length) != previous_index_rule(text, length)) return 1;
+    }
+    if (kiln_c99_key_index("1\0", 2) >= 0.0 ||
+        kiln_c99_key_index("4294967294", 10) != 4294967294.0 ||
+        kiln_c99_key_index("4294967295", 10) >= 0.0 ||
+        kiln_c99_key_index(NULL, 1) >= 0.0) return 2;
+    key.unit_len = 3; key.flags = KILN_STRING_UTF16; key.data = (const char *)utf16_index;
+    if (kiln_c99_key_index_key(&key) != 123.0) return 3;
+    key.unit_len = 1; key.data = (const char *)utf16_surrogate;
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 4;
+    key.data = (const char *)utf16_non_ascii_digit;
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 5;
+    key.flags = KILN_STRING_LATIN1; key.data = (const char *)latin1_non_ascii;
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 6;
+    key.flags = KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY; key.data = "1";
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 7;
+    key.flags = KILN_STRING_LATIN1 | KILN_STRING_PRIVATE_KEY;
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 8;
+    if (kiln_c99_key_index_key(NULL) >= 0.0) return 9;
+    key.flags = KILN_STRING_LATIN1; key.unit_len = 0; key.data = "";
+    if (kiln_c99_key_index_key(&key) >= 0.0) return 10;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "canonical-array-index-parser");
+    assert!(
+        run.status.success(),
+        "canonical index classification disagreed with the previous rule or domains ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn generic_only_direct_call_keeps_boxed_dynamic_fallback() {
+    let mut add = function(vec![
+        Instruction::LoadLocal(0),
+        Instruction::LoadLocal(1),
+        Instruction::Binary(kiln_ir::BinaryOp::Add),
+        Instruction::Return,
+    ]);
+    add.local_count = 2;
+    add.parameter_count = 2;
+
+    let mut invoke = function(vec![
+        Instruction::LoadLocal(0),
+        Instruction::Const(0),
+        Instruction::Const(1),
+        Instruction::Call { argc: 2 },
+        Instruction::Return,
+    ]);
+    invoke.local_count = 1;
+    invoke.parameter_count = 1;
+
+    let mut program = program(
+        vec![
+            Constant::Number(1.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+        ],
+        vec![
+            Instruction::MakeFunction(1),
+            Instruction::MakeFunction(0),
+            Instruction::Call { argc: 1 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    program.functions = vec![add, invoke];
+    let generated = emit_with_policy(
+        &program,
+        EmissionPolicy {
+            generic_only: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("generic-only module emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    kiln_value result = kiln_c99_undefined();
+    if ({}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_NUMBER && kiln_c99_as_number(result) == 3.0 ? 0 : 3;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "generic-only-direct-call");
+    assert!(
+        run.status.success(),
+        "generic-only direct/dynamic call result diverged ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn computed_builtin_read_sees_sealed_callable_store_before_method_table() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty module emits");
+    let wrapper = r#"
+static int sealed_date_store_entry(void *context) {
+    kiln_value store, parent, result, thrown = kiln_c99_undefined();
+    const kiln_string *key, *canonical;
+    int status;
+    (void)context;
+    status = kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_DATE_PROTOTYPE),
+                                     &store, 1);
+    if (status != KILN_C99_OK) return 10;
+    status = kiln_c99_new_object(&parent);
+    if (status != KILN_C99_OK) return 16;
+    status = kiln_c99_define_accessor(parent, "observed", 8,
+                                      kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF),
+                                      kiln_c99_undefined(), 0);
+    if (status != KILN_C99_OK) return 17;
+    status = kiln_c99_set_prototype(store, parent);
+    if (status != KILN_C99_OK) return 18;
+    key = kiln_c99_intern_static("setTime", 7);
+    canonical = key == NULL ? NULL : kiln_c99_intern_static_key(key);
+    if (canonical == NULL) return 9;
+    status = kiln_c99_put_mode_key(NULL, store, key, canonical, kiln_c99_number(42.0),
+                                   1, 0, NULL);
+    if (status != KILN_C99_OK) return 11;
+    if (kiln_c99_ensure_dictionary(kiln_c99_object_of(store)) != KILN_C99_OK) return 12;
+    kiln_c99_sealed_layout_publish(KILN_VALUE_BUILTIN, UINT64_C(1234567),
+                                   kiln_c99_object_of(store));
+    if (!kiln_c99_sealed_layout_attach(KILN_VALUE_BUILTIN, UINT64_C(1234567),
+                                       kiln_c99_object_of(store))) return 15;
+    status = kiln_c99_get_computed(NULL, kiln_c99_builtin(KILN_C99_BUILTIN_DATE_PROTOTYPE),
+                                   kiln_c99_copy_text("setTime", 7), &result, 0, &thrown);
+    if (status != KILN_C99_OK) return 13;
+    if (result.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(result) != 42.0) return 14;
+    status = kiln_c99_get_computed(NULL, kiln_c99_builtin(KILN_C99_BUILTIN_DATE_PROTOTYPE),
+                                   kiln_c99_copy_text("observed", 8), &result, 0, &thrown);
+    if (status != KILN_C99_OK) return 19;
+    return result.tag == KILN_VALUE_BUILTIN &&
+                   result.bits == KILN_C99_BUILTIN_DATE_PROTOTYPE
+               ? 0
+               : 20;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 20;
+    status = kiln_realm_enter(realm, sealed_date_store_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 21;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "computed-sealed-builtin-store");
+    assert!(
+        run.status.success(),
+        "computed lookup fell through a sealed Date.prototype store ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn generic_only_direct_call_preserves_captured_cells_under_gc_stress() {
+    let mut add = FunctionProto {
+        upvalues: vec![kiln_ir::Upvalue::ParentLocal(0)],
+        ..function(vec![
+            Instruction::LoadUpvalue(0),
+            Instruction::LoadLocal(0),
+            Instruction::Binary(kiln_ir::BinaryOp::Add),
+            Instruction::Return,
+        ])
+    };
+    add.parameter_count = 1;
+    add.local_count = 1;
+
+    let mut run = function(vec![
+        Instruction::NewCell(0),
+        Instruction::MakeFunction(0),
+        Instruction::StoreLocal(1),
+        Instruction::LoadLocal(1),
+        Instruction::Const(1),
+        Instruction::Call { argc: 1 },
+        Instruction::Return,
+    ]);
+    run.parameter_count = 1;
+    run.local_count = 2;
+
+    let mut mutated_program = program(
+        vec![
+            Constant::Number(40.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+        ],
+        vec![
+            Instruction::MakeFunction(1),
+            Instruction::Const(0),
+            Instruction::Call { argc: 1 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    mutated_program.functions = vec![add, run];
+    let generated = emit_with_policy(
+        &mutated_program,
+        EmissionPolicy {
+            generic_only: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("generic-only captured module emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    kiln_value result = kiln_c99_undefined();
+    if (heap == NULL) return 1;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 1;
+    heap->stress = 1;
+    heap->stress_every = 1;
+    heap->stress_countdown = 1;
+    kiln_c99_gc_heap_register(heap);
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+    if ({}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_NUMBER && kiln_c99_as_number(result) == 42.0 ? 0 : 3;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "generic-only-captured-direct-call-gc");
+    assert!(
+        run.status.success(),
+        "generic-only captured call failed under collection stress ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn generic_only_direct_call_observes_mutated_binding_and_propagates_throw() {
+    let one = function(vec![Instruction::Const(0), Instruction::Return]);
+    let two = function(vec![Instruction::Const(1), Instruction::Return]);
+    let mut mutated_program = program(
+        vec![
+            Constant::Number(1.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+        ],
+        vec![
+            Instruction::NewCell(0),
+            Instruction::MakeFunction(0),
+            Instruction::StoreCell(0),
+            Instruction::MakeFunction(1),
+            Instruction::StoreCell(0),
+            Instruction::LoadCell(0),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        1,
+    );
+    mutated_program.functions = vec![one, two];
+    let generated = emit_with_policy(
+        &mutated_program,
+        EmissionPolicy {
+            generic_only: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("mutated generic-only module emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    kiln_value result = kiln_c99_undefined();
+    if ({}(NULL, &result) != KILN_C99_OK) return 2;
+    return result.tag == KILN_VALUE_NUMBER && kiln_c99_as_number(result) == 2.0 ? 0 : 3;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "generic-only-mutated-binding");
+    assert!(
+        run.status.success(),
+        "a reassigned callable did not use the current binding ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let throwing = function(vec![Instruction::Const(0), Instruction::Throw]);
+    let mut throwing_program = program(
+        vec![Constant::Number(9.0f64.to_bits())],
+        vec![
+            Instruction::MakeFunction(0),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    throwing_program.functions = vec![throwing];
+    let generated = emit_with_policy(
+        &throwing_program,
+        EmissionPolicy {
+            generic_only: true,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("throwing generic-only module emits");
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result = kiln_c99_undefined(); return {}(NULL, &result) == KILN_C99_THROWN ? 0 : 1; }}\n",
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "generic-only-direct-call-throw");
+    assert!(
+        run.status.success(),
+        "direct-call throw status diverged ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn array_index_range_is_shared_by_string_and_numeric_keys() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value array, read, thrown = kiln_c99_undefined();
+    kiln_value key = kiln_c99_static_text("4294967295", 10);
+    if (kiln_c99_array_index(key) != -1.0 ||
+        kiln_c99_array_index(kiln_c99_number(4294967295.0)) != -1.0 ||
+        kiln_c99_array_index(kiln_c99_static_text("4294967294", 10)) != 4294967294.0 ||
+        kiln_c99_array_index(kiln_c99_static_text("01", 2)) != -1.0) return 1;
+    if (kiln_c99_new_array(&array) != KILN_C99_OK) return 2;
+    if (kiln_c99_set_computed(NULL, array, key, kiln_c99_number(17), 0, &thrown) !=
+        KILN_C99_OK) return 3;
+    if (kiln_c99_array_of(array)->count != 0 ||
+        kiln_c99_get_computed(NULL, array, key, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(read) != 17) return 4;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "array-index-range");
+    assert!(
+        run.status.success(),
+        "array index range diverged ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn array_create_data_property_keeps_default_indices_dense_under_gc_stress() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    kiln_value array = kiln_c99_undefined();
+    kiln_value object = kiln_c99_undefined();
+    kiln_value first_text = kiln_c99_undefined();
+    kiln_value tail_text = kiln_c99_undefined();
+    kiln_value keys = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value read = kiln_c99_undefined();
+    kiln_array *elements;
+    if (heap == NULL) return 1;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 1;
+    heap->stress = 1;
+    heap->stress_every = 1;
+    heap->stress_countdown = 1;
+    kiln_c99_gc_heap_register(heap);
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+
+    if (kiln_c99_new_array(&array) != KILN_C99_OK ||
+        kiln_c99_new_object(&object) != KILN_C99_OK) return 2;
+    kiln_c99_gc_keep_alive(&array);
+    kiln_c99_gc_keep_alive(&object);
+    first_text = kiln_c99_copy_text("first", 5);
+    kiln_c99_gc_keep_alive(&first_text);
+    if (kiln_c99_array_push(array, object) != KILN_C99_OK ||
+        kiln_c99_array_push(array, first_text) != KILN_C99_OK) return 3;
+    tail_text = kiln_c99_copy_text("tail", 4);
+    kiln_c99_gc_keep_alive(&array);
+    kiln_c99_gc_keep_alive(&object);
+    kiln_c99_gc_keep_alive(&first_text);
+    kiln_c99_gc_keep_alive(&tail_text);
+    if (kiln_c99_create_data_property(NULL, array, kiln_c99_number(9), tail_text, 0,
+                                      &thrown) != KILN_C99_OK) return 4;
+
+    elements = kiln_c99_array_of(array);
+    if (elements->count != 10 || elements->capacity < 10 || elements->has_index_descriptors ||
+        elements->properties.tag != KILN_VALUE_UNDEFINED || elements->is_numeric) return 5;
+    if (kiln_val_to_boundary(elements->elements[0]).ptr != object.ptr ||
+        kiln_val_to_boundary(elements->elements[1]).ptr != first_text.ptr ||
+        kiln_val_to_boundary(elements->elements[9]).ptr != tail_text.ptr) return 6;
+    for (size_t index = 2; index < 9; ++index)
+        if (elements->elements[index] != KILN_VAL_HOLE) return 7;
+    if (kiln_c99_get(NULL, array, "9", 1, &read, 0, &thrown) != KILN_C99_OK ||
+        read.ptr != tail_text.ptr) return 8;
+    if (kiln_c99_own_keys(NULL, array, &keys, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_array_of(keys)->count != 3) return 9;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "array-create-data-property-dense");
+    assert!(
+        run.status.success(),
+        "array CreateDataProperty did not retain dense storage under GC stress ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn array_index_enumeration_merges_descriptor_overlays_once() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value array, keys, names, descriptor, thrown = kiln_c99_undefined();
+    kiln_value read;
+    if (kiln_c99_new_array(&array) != KILN_C99_OK) return 1;
+    for (int i = 0; i < 3; ++i)
+        if (kiln_c99_array_push(array, kiln_c99_number(i + 10)) != KILN_C99_OK) return 2;
+    if (kiln_c99_create_data_property(NULL, array, kiln_c99_static_text("0", 1),
+                                      kiln_c99_number(11), 0, &thrown) != KILN_C99_OK) return 3;
+    if (kiln_c99_new_object(&descriptor) != KILN_C99_OK ||
+        kiln_c99_put(NULL, descriptor, "enumerable", 10, kiln_c99_boolean(0), 0,
+                       &thrown) != KILN_C99_OK) return 4;
+    if (kiln_c99_define_property(NULL, array, "1", 1, descriptor, 0, &thrown) !=
+        KILN_C99_OK) return 5;
+    if (kiln_c99_put(NULL, array, "named", 5, kiln_c99_number(20), 0, &thrown) !=
+        KILN_C99_OK) return 6;
+    if (kiln_c99_own_keys(NULL, array, &keys, 0, &thrown) != KILN_C99_OK) return 7;
+    if (kiln_c99_array_of(keys)->count != 3) return 8;
+    const char *expected[] = {"0", "2", "named"};
+    for (int i = 0; i < 3; ++i) {
+        read = kiln_val_to_boundary(kiln_c99_array_of(keys)->elements[i]);
+        if (read.tag != KILN_VALUE_STRING ||
+            !kiln_c99_same_name_key((const kiln_string *)read.ptr, expected[i]))
+            return 9;
+    }
+    if (kiln_c99_all_own_keys(NULL, array, &names, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_array_of(names)->count != 5) return 10;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "array-index-enumeration");
+    assert!(
+        run.status.success(),
+        "array indexed keys diverged ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn class_field_data_descriptor_uses_canonical_definition_rules() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value target = kiln_c99_undefined();
+    kiln_value descriptor = kiln_c99_undefined();
+    kiln_value object_value = kiln_c99_undefined();
+    kiln_value value = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    int found = 0;
+    if (kiln_c99_new_object(&target) != KILN_C99_OK ||
+        kiln_c99_new_object(&object_value) != KILN_C99_OK) return 1;
+    if (kiln_c99_create_data_property(NULL, target, kiln_c99_number(17.0),
+                                      object_value, 0, &thrown) != KILN_C99_OK) return 2;
+    if (kiln_c99_describe_property(NULL, target, "17", 2, &descriptor, &found, 0,
+                                   &thrown) != KILN_C99_OK || !found) return 3;
+    if (kiln_c99_get(NULL, descriptor, "value", 5, &value, 0, &thrown) != KILN_C99_OK ||
+        value.tag != KILN_VALUE_OBJECT || value.ptr != object_value.ptr) return 4;
+    if (kiln_c99_get(NULL, descriptor, "writable", 8, &value, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(value)) return 5;
+    if (kiln_c99_get(NULL, descriptor, "enumerable", 10, &value, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(value)) return 6;
+    if (kiln_c99_get(NULL, descriptor, "configurable", 12, &value, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(value)) return 7;
+
+    kiln_c99_object_of(target)->not_extensible = 1;
+    thrown = kiln_c99_undefined();
+    if (kiln_c99_create_data_property(NULL, target, kiln_c99_number(18.0),
+                                      kiln_c99_number(43.0), 0, &thrown) != KILN_C99_THROWN) return 8;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "class-field-prepared-descriptor");
+    assert!(
+        run.status.success(),
+        "class field prepared descriptor changed own attributes/refusal ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn collection_for_each_validates_callback_before_empty_history_fast_return() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_value map = kiln_c99_undefined();
+    kiln_value set = kiln_c99_undefined();
+    kiln_value args[1];
+    kiln_value result = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value for_each = kiln_c99_method(KILN_C99_METHOD_COLLECTION_FOR_EACH);
+    int status;
+    if (kiln_c99_new_collection(&map, 1, 0) != KILN_C99_OK ||
+        kiln_c99_new_collection(&set, 0, 0) != KILN_C99_OK) return 1;
+
+    args[0] = kiln_c99_number(1.0);
+    status = kiln_c99_call(NULL, &result, for_each, map, args, 1, 0, &thrown);
+    if (status != KILN_C99_THROWN) return 2;
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_call(NULL, &result, for_each, set, args, 1, 0, &thrown);
+    if (status != KILN_C99_THROWN) return 3;
+
+    if (kiln_c99_collection_put(map, kiln_c99_number(1.0), kiln_c99_number(10.0)) != KILN_C99_OK ||
+        kiln_c99_collection_put(map, kiln_c99_number(2.0), kiln_c99_number(20.0)) != KILN_C99_OK ||
+        kiln_c99_collection_put(set, kiln_c99_number(1.0), kiln_c99_number(1.0)) != KILN_C99_OK ||
+        kiln_c99_collection_put(set, kiln_c99_number(2.0), kiln_c99_number(2.0)) != KILN_C99_OK) return 4;
+    args[0] = kiln_c99_number(1.0);
+    if (kiln_c99_call(NULL, &result, kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE),
+                      map, args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 5;
+    if (kiln_c99_call(NULL, &result, kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE),
+                      set, args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 6;
+    args[0] = kiln_c99_number(2.0);
+    if (kiln_c99_call(NULL, &result, kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE),
+                      map, args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 7;
+    if (kiln_c99_call(NULL, &result, kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE),
+                      set, args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 8;
+
+    args[0] = kiln_c99_number(1.0);
+    if (kiln_c99_call(NULL, &result, for_each, map, args, 1, 0, &thrown) != KILN_C99_THROWN) return 9;
+    thrown = kiln_c99_undefined();
+    if (kiln_c99_call(NULL, &result, for_each, set, args, 1, 0, &thrown) != KILN_C99_THROWN) return 10;
+
+    /* This callable would throw if called on the callback arguments, but an empty history must
+     * return normally without invoking it. */
+    args[0] = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_STRING);
+    if (kiln_c99_call(NULL, &result, for_each, map, args, 1, 0, &thrown) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_UNDEFINED) return 11;
+    if (kiln_c99_call(NULL, &result, for_each, set, args, 1, 0, &thrown) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_UNDEFINED) return 12;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "collection-for-each-empty-history");
+    assert!(
+        run.status.success(),
+        "forEach callback validation / empty history fast path failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn text_decoder_rejects_other_external_owner_context_before_reading_it() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int tiny_visit(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {
+    (void)context; (void)visit; (void)visit_context; return 0;
+}
+static void tiny_release(void *context) { (void)context; }
+extern void *kiln_c99_text_decoder_state(kiln_value receiver);
+int main(void) {
+    unsigned char tiny_context = 0;
+    void *owner = kiln_c99_external_owner_create(&tiny_context, tiny_visit, tiny_release);
+    kiln_value object = kiln_c99_undefined();
+    if (owner == NULL || kiln_c99_new_object(&object) != KILN_C99_OK) return 1;
+    if (kiln_c99_object_set_external_owner(object, owner) != KILN_C99_OK) return 2;
+    if (kiln_c99_text_decoder_state(object) != NULL) return 3;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "text-decoder-wrong-owner");
+    assert!(
+        run.status.success(),
+        "wrong external owner was not safely rejected ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn object_initializer_clears_external_owner_in_poisoned_memory() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_object object;
+    memset(&object, 0xa5, sizeof object);
+    kiln_c99_object_init(&object, 0);
+    return object.external_owner == NULL ? 0 : 1;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "object-external-owner-initialized");
+    assert!(
+        run.status.success(),
+        "object initializer retained poisoned external_owner ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn parallel_arena_initializers_clear_runtime_metadata() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_c99_par_env env = {0};
+    kiln_c99_par_arena *arena;
+    kiln_val object_value = KILN_VAL_UNDEFINED;
+    kiln_val array_value = KILN_VAL_UNDEFINED;
+    kiln_object *object;
+    kiln_array *array;
+    int result = 0;
+    env.heap = kiln_c99_gc_heap();
+    if (!kiln_c99_par_arenas_open(&env, 1)) return 1;
+    arena = kiln_c99_par_arena_claim(&env);
+    if (arena == NULL || !kiln_c99_par_arena_refill(arena)) {
+        (void)kiln_c99_par_arenas_join(&env, 0);
+        return 2;
+    }
+    memset(arena->bump + sizeof(kiln_gc_block), 0xa5, sizeof(kiln_object));
+    if (!kiln_c99_par_object(arena, &object_value)) {
+        (void)kiln_c99_par_arenas_join(&env, 0);
+        return 3;
+    }
+    object = (kiln_object *)KILN_VAL_PTR(object_value);
+    if (object->external_owner != NULL || object->raw_json_brand != 0 ||
+        object->error_stack_frames.tag != KILN_VALUE_UNDEFINED ||
+        object->prototype.tag != KILN_VALUE_UNDEFINED || object->properties != NULL ||
+        object->shape == NULL || object->slots == NULL) result = 4;
+
+    memset(arena->bump + sizeof(kiln_gc_block), 0xa5, sizeof(kiln_array));
+    if (!kiln_c99_par_array(arena, NULL, 0, &array_value)) {
+        (void)kiln_c99_par_arenas_join(&env, 0);
+        return 5;
+    }
+    array = (kiln_array *)KILN_VAL_PTR(array_value);
+    if (array->has_index_descriptors != 0 || array->properties.tag != KILN_VALUE_UNDEFINED ||
+        array->match_index != -1 || array->match_input.tag != KILN_VALUE_UNDEFINED ||
+        array->match_groups.tag != KILN_VALUE_UNDEFINED || array->elements != NULL ||
+        array->count != 0 || array->capacity != 0) result = 6;
+    (void)kiln_c99_par_arenas_join(&env, 0);
+    return result;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "parallel-arena-initializer-poison");
+    assert!(
+        run.status.success(),
+        "parallel arena initializer retained poisoned metadata ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn poisoned_parallel_chunk_child_survives_minor_collection() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int poisoned_chunk_minor_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_c99_par_arena arena = {0};
+    kiln_value parent = kiln_c99_undefined();
+    kiln_value registry = kiln_c99_undefined();
+    kiln_val child = KILN_VAL_UNDEFINED;
+    kiln_val child_element = KILN_VAL_TRUE;
+    kiln_array *parent_array;
+    kiln_array *child_array;
+    kiln_gc_block *child_block;
+    kiln_nursery_chunk *chunk;
+    char *region;
+    size_t capacity;
+    size_t minor_before;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->enabled = 1;
+    heap->fallback = 0;
+    heap->stress = 0;
+    heap->force_pending = 0;
+    heap->floor = SIZE_MAX;
+    heap->since_collection = 0;
+    heap->minor_audit_enabled = 1;
+    if (kiln_c99_new_array_with_capacity(&parent, 1, 0) != KILN_C99_OK ||
+        kiln_c99_new_collection(&registry, 1, 0) != KILN_C99_OK) return 2;
+    heap->realm.isolated_graphs = registry;
+    if (kiln_c99_collection_put(registry, parent, parent) != KILN_C99_OK) return 3;
+
+    capacity = heap->nursery.capacity;
+    region = (char *)kiln_c99_gc_aligned_alloc(capacity, capacity);
+    if (region == NULL) return 4;
+    memset(region, 0xa5, capacity);
+    chunk = kiln_c99_chunk_lay_out(region, heap->nursery.bitmap_words);
+    arena.heap = heap;
+    arena.current = chunk;
+    arena.bump = chunk->base;
+    arena.limit = region + capacity;
+    arena.budget = capacity;
+    arena.taken = capacity;
+    if (!kiln_c99_par_array(&arena, &child_element, 1, &child)) {
+        kiln_c99_gc_aligned_free(region);
+        return 5;
+    }
+    kiln_c99_par_arena_seal(&arena);
+    if (!kiln_c99_heap_adopt_chunks(heap, arena.filled)) return 6;
+    parent_array = (kiln_array *)(uintptr_t)parent.bits;
+    kiln_c99_heap_store_val(parent_array, &parent_array->elements[0], child);
+    parent_array->count = 1;
+    minor_before = heap->minor_audit_collections;
+    kiln_c99_gc_collect_minor_mid_turn(heap);
+
+    child_block = kiln_c99_gc_lookup(heap, KILN_VAL_PTR(child));
+    if (heap->minor_audit_collections != minor_before + 1 || child_block == NULL) return 7;
+    child_array = (kiln_array *)(uintptr_t)KILN_VAL_PTR(child);
+    if (child_array->count != 1 || child_array->elements[0] != KILN_VAL_TRUE) return 8;
+    return 0;
+}
+
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 9;
+    status = kiln_realm_enter(realm, poisoned_chunk_minor_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 10;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "poisoned-parallel-chunk-minor");
+    assert!(
+        run.status.success(),
+        "rooted child in poisoned parallel chunk did not survive minor collection ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
     let module = ModuleProgram {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![Instruction::Return],
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -81,12 +1114,16 @@ fn executable_namespace_wrapper_materializes_sorted_immutable_namespace() {
     let module = ModuleProgram {
         program: Program {
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             source: String::new().into(),
             constants: Vec::new(),
             code: vec![Instruction::Return],
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -127,6 +1164,9 @@ int main(void) {{
     if (kiln_c99_object_of(namespace_object)->prototype.tag != KILN_VALUE_NULL) return 4;
     if (!kiln_c99_object_of(namespace_object)->module_namespace ||
         kiln_c99_object_of(namespace_object)->frozen) return 5;
+    /* Extending an already-created namespace with no new exports is a valid no-op. */
+    if ({symbol}_namespace_wrapper(&namespace_object, NULL, NULL, NULL, 0) != KILN_C99_OK)
+        return 28;
     if (kiln_c99_object_of(namespace_object)->count != 3 ||
         !kiln_test_key_equal(kiln_c99_object_of(namespace_object)->properties[0].key, "a", 1) ||
         !kiln_test_key_equal(kiln_c99_object_of(namespace_object)->properties[1].key, "z", 1) ||
@@ -136,7 +1176,8 @@ int main(void) {{
     if (kiln_c99_object_of(namespace_object)->properties[0].refused ||
         kiln_c99_object_of(namespace_object)->properties[0].symbol_hidden ||
         kiln_c99_object_of(namespace_object)->properties[1].refused ||
-        kiln_c99_object_of(namespace_object)->properties[1].symbol_hidden)
+        kiln_c99_object_of(namespace_object)->properties[1].symbol_hidden ||
+        !kiln_c99_object_of(namespace_object)->properties[2].symbol_hidden)
         return 28;
     if (kiln_c99_get(NULL, namespace_object, "z", 1, &read, 0, &thrown) != KILN_C99_OK ||
         read.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(read) != 9.0) return 7;
@@ -221,11 +1262,15 @@ fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![Instruction::Return],
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -468,7 +1513,7 @@ fn every_mutable_c99_static_has_an_explicit_owner() {
             pending.push(' ');
             pending.push_str(line);
         }
-        if pending.ends_with(';') {
+        if pending.ends_with(';') && pending.matches('{').count() == pending.matches('}').count() {
             statements.push(std::mem::take(&mut pending));
         } else if pending
             .split('{')
@@ -483,8 +1528,17 @@ fn every_mutable_c99_static_has_an_explicit_owner() {
         .filter_map(|line| {
             let line = line.trim();
             let declaration = line.split('=').next().unwrap_or(line);
-            let name_start = line.find("kiln_c99_")?;
-            let before_name = &line[..name_start];
+            // An anonymous struct can contain domain-prefixed types and fields. Its
+            // declarator follows the closing brace; for named types, the variable is
+            // the last identifier before an optional array suffix.
+            let declarator = declaration.rsplit('}').next().unwrap_or(declaration);
+            let declarator = declarator.split('[').next().unwrap_or(declarator);
+            let name = declarator
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .filter(|word| word.starts_with("kiln_c99_"))
+                .next_back()?;
+            let name_start = declaration.rfind(name)?;
+            let before_name = &declaration[..name_start];
             let immutable = if before_name.contains('*') {
                 // `*const` and `* const` declare the same thing, so the guard must not depend
                 // on which one somebody wrote.
@@ -503,11 +1557,7 @@ fn every_mutable_c99_static_has_an_explicit_owner() {
             {
                 return None;
             }
-            let tail = &line[name_start..];
-            let end = tail
-                .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .unwrap_or(tail.len());
-            Some(tail[..end].to_owned())
+            Some(name.to_owned())
         })
         .collect::<Vec<_>>();
     discovered.sort();
@@ -1234,6 +2284,9 @@ fn executable_arrow_captures_its_defining_receiver() {
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("make".into())],
         code: vec![
             Instruction::MakeFunction(0),
@@ -1256,6 +2309,7 @@ fn executable_arrow_captures_its_defining_receiver() {
         local_count: 3,
         functions: vec![maker, arrow],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("arrow receiver program emits");
     let wrapper = format!(
@@ -1291,6 +2345,9 @@ fn executable_runaway_recursion_reports_rather_than_crashing() {
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![
             Instruction::NewCell(0),
@@ -1303,6 +2360,7 @@ fn executable_runaway_recursion_reports_rather_than_crashing() {
         local_count: 1,
         functions: vec![forever],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("program emits");
     let wrapper = format!(
@@ -1532,6 +2590,72 @@ int main(void) {{
     status = kiln_c99_get(NULL, my_obj, "count", 5, &read_back, 0, &thrown);
     if (status != KILN_C99_OK || kiln_c99_as_number(read_back) != 15.0) return 10;
 
+    // 4. Generated schema functions bind aliased properties from the runtime object.
+    kiln_value runtime_obj;
+    status = kiln_c99_new_object(&runtime_obj);
+    if (status != KILN_C99_OK) return 11;
+    status = kiln_c99_put(NULL, runtime_obj, "invalid", 7, kiln_c99_number(17.0), 0, &thrown);
+    if (status != KILN_C99_OK) return 12;
+    status = kiln_c99_put(NULL, runtime_obj, "getCheckIssues", 14,
+                          kiln_c99_number(25.0), 0, &thrown);
+    if (status != KILN_C99_OK) return 13;
+    const char generated_body[] =
+        "const {{invalid:I,getCheckIssues:K}}=R; return I + K;";
+    kiln_value generated_args[2] = {{
+        kiln_c99_copy_text("R", 1),
+        kiln_c99_copy_text(generated_body, sizeof generated_body - 1)
+    }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, generated_args, 2, 0, &thrown);
+    if (status != KILN_C99_OK) return 14;
+    kiln_value call_args4[1] = {{ runtime_obj }};
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(),
+                           call_args4, 1, 0, &thrown);
+    if (status != KILN_C99_OK || call_res.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(call_res) != 42.0) return 15;
+
+    // 5. Object-pattern lexical bindings enter their TDZ before the initializer runs.
+    kiln_value globals;
+    status = kiln_c99_global_object(&globals);
+    if (status != KILN_C99_OK) return 16;
+    status = kiln_c99_put(NULL, globals, "x", 1, kiln_c99_number(99.0), 0, &thrown);
+    if (status != KILN_C99_OK) return 17;
+    const char tdz_body[] = "const {{x}}=x; return x;";
+    kiln_value tdz_args[1] = {{ kiln_c99_copy_text(tdz_body, sizeof tdz_body - 1) }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, tdz_args, 1, 0, &thrown);
+    if (status != KILN_C99_OK) return 18;
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
+    if (status == KILN_C99_OK || thrown.tag == KILN_VALUE_UNDEFINED) return 19;
+
+    // 6. Even an empty object pattern performs RequireObjectCoercible.
+    const char null_body[] = "const {{}}=null; return 1;";
+    kiln_value null_args[1] = {{ kiln_c99_copy_text(null_body, sizeof null_body - 1) }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, null_args, 1, 0, &thrown);
+    if (status != KILN_C99_OK) return 20;
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
+    if (status == KILN_C99_OK || thrown.tag == KILN_VALUE_UNDEFINED) return 21;
+
+    // 7. Duplicate bound names fail before the initializer can run.
+    const char duplicate_body[] = "const {{x,y:x}}=({{}}); return x;";
+    kiln_value duplicate_args[1] = {{ kiln_c99_copy_text(duplicate_body, sizeof duplicate_body - 1) }};
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_dynamic_new_function(NULL, &result, duplicate_args, 1, 0, &thrown);
+    // Function construction validates its entire body before returning a callable.
+    if (status != KILN_C99_THROWN || thrown.tag == KILN_VALUE_UNDEFINED) return 22;
+
+    // 8. Var patterns may bind the same identifier more than once; the last property wins.
+    const char var_alias_body[] = "var {{x:a,y:a}}={{x:1,y:2}}; return a;";
+    kiln_value var_alias_args[1] = {{
+        kiln_c99_copy_text(var_alias_body, sizeof var_alias_body - 1)
+    }};
+    thrown = kiln_c99_undefined();
+    status = kiln_c99_dynamic_new_function(NULL, &result, var_alias_args, 1, 0, &thrown);
+    if (status != KILN_C99_OK) return 24;
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
+    if (status != KILN_C99_OK || call_res.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(call_res) != 2.0) return 25;
+
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 101;
 }}
@@ -1542,6 +2666,101 @@ int main(void) {{
     assert!(
         run.status.success(),
         "dynamic function execution failed with exit code {:?}:\nstdout:\n{}\nstderr:\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn string_code_generation_policy_guards_eval_and_function_only_for_strings() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty program emits");
+    let wrapper = format!(
+        r#"
+extern int kiln_test_string_code_generation_allowed;
+static int conversions = 0;
+static int codegen_to_string(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                             const kiln_val *receiver, const kiln_val *args, size_t argc) {{
+    (void)ctx; (void)upvalues; (void)receiver; (void)args; (void)argc;
+    conversions++;
+    *result = kiln_val_from_boundary(kiln_c99_copy_text("return 1;", 9));
+    return KILN_C99_OK;
+}}
+static const kiln_string codegen_to_string_name = {{ 12, KILN_STRING_LATIN1, "toStringBody" }};
+int main(void) {{
+    uint64_t realm = 0;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 99;
+    kiln_test_realm_active = 1;
+    kiln_value dummy, out = kiln_c99_undefined(), thrown = kiln_c99_undefined();
+    if ({}(NULL, &dummy) != KILN_C99_OK) return 100;
+    kiln_test_string_code_generation_allowed = 0;
+
+    kiln_value source = kiln_c99_copy_text("(", 1);
+    if (kiln_c99_dynamic_indirect_eval(NULL, 1, &source, &out, 0, &thrown) != KILN_C99_THROWN)
+        return 1;
+    kiln_value kind = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, thrown, "@@error", 7, &kind, 0, &thrown) != KILN_C99_OK ||
+        kind.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(kind) != (double)KILN_C99_BUILTIN_EVAL_ERROR) return 2;
+    kiln_value message = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, thrown, "message", 7, &message, 0, &thrown) != KILN_C99_OK ||
+        message.tag != KILN_VALUE_STRING ||
+        !kiln_test_units_contain(message, "Code generation from strings is disabled")) return 20;
+
+    thrown = kiln_c99_undefined();
+    source = kiln_c99_copy_text("1+1", 3);
+    if (kiln_c99_dynamic_eval_expression(NULL, source, NULL, NULL, NULL, NULL, 0, 0,
+                                         &out, 0, &thrown) != KILN_C99_THROWN) return 6;
+    kind = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, thrown, "@@error", 7, &kind, 0, &thrown) != KILN_C99_OK ||
+        kind.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(kind) != (double)KILN_C99_BUILTIN_EVAL_ERROR) return 7;
+
+    thrown = kiln_c99_undefined();
+    kiln_value function_args[1] = {{ kiln_c99_copy_text("return 1", 8) }};
+    if (kiln_c99_dynamic_new_function(NULL, &out, function_args, 1, 0, &thrown) !=
+        KILN_C99_THROWN) return 3;
+    kind = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, thrown, "@@error", 7, &kind, 0, &thrown) != KILN_C99_OK ||
+        kind.tag != KILN_VALUE_NUMBER ||
+        kiln_c99_as_number(kind) != (double)KILN_C99_BUILTIN_EVAL_ERROR) return 4;
+
+    kiln_value coercible, coercer;
+    if (kiln_c99_new_object(&coercible) != KILN_C99_OK ||
+        kiln_c99_make_closure(&coercer, codegen_to_string, &codegen_to_string_name,
+                              NULL, 0, "<test>", 0, 0, 0, 0, 0, 0, 0,
+                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
+                              NULL, 0) != KILN_C99_OK ||
+        kiln_c99_put(NULL, coercible, "toString", 8, coercer, 0, &thrown) != KILN_C99_OK)
+        return 8;
+    thrown = kiln_c99_undefined();
+    if (kiln_c99_dynamic_new_function(NULL, &out, &coercible, 1, 0, &thrown) !=
+        KILN_C99_THROWN || conversions != 1) return 9;
+
+    kiln_value non_string = kiln_c99_number(17.0);
+    thrown = kiln_c99_undefined();
+    if (kiln_c99_dynamic_indirect_eval(NULL, 1, &non_string, &out, 0, &thrown) != KILN_C99_OK ||
+        out.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(out) != 17.0) return 5;
+
+    // This is the runtime source-module evaluator, not eval of a user string. Linked module
+    // execution stays available when string compilation is disabled.
+    kiln_value module_source = kiln_c99_copy_text("export const value = 1;", 23);
+    kiln_value module_url = kiln_c99_copy_text("generated.js", 12);
+    thrown = kiln_c99_undefined();
+    if (kiln_c99_dynamic_eval_module(NULL, module_source, module_url, &out, 0, &thrown) !=
+        KILN_C99_OK || out.tag != KILN_VALUE_OBJECT) return 10;
+
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 101;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "string-code-generation-policy");
+    assert!(
+        run.status.success(),
+        "string code generation policy failed with exit code {:?}:\nstdout:\n{}\nstderr:\n{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
@@ -1563,7 +2782,7 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
 
     let code = vec![
         // local 0 = Math.imul(3, 4) (= 12), local 1 = 5
-        Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+        Instruction::LoadIntrinsicBuiltin(kiln_ir::Builtin::Math),
         Instruction::Const(1),
         Instruction::Const(2),
         Instruction::CallMethod { name: 0, argc: 2 },
@@ -1617,11 +2836,15 @@ fn executable_native_alu_and_bitwise_operations_execute_correctly() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants,
         code,
         local_count: 2,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("program emits");
@@ -1692,6 +2915,9 @@ fn executable_generic_clone_reads_a_speculated_sum_boxed_after_an_exit() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String("".into()),        // 0
             Constant::Number(0.0f64.to_bits()), // 1
@@ -1713,6 +2939,7 @@ fn executable_generic_clone_reads_a_speculated_sum_boxed_after_an_exit() {
         local_count: 0,
         functions: vec![callee],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit(&program).expect("program emits");
     assert!(
@@ -1780,6 +3007,9 @@ fn executable_fast_clone_exit_boxes_a_speculated_value_it_never_boxed() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String("".into()),        // 0
             Constant::Number(0.0f64.to_bits()), // 1
@@ -1809,6 +3039,7 @@ fn executable_fast_clone_exit_boxes_a_speculated_value_it_never_boxed() {
         local_count: 1,
         functions: vec![callee],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit(&program).expect("program emits");
     assert!(
@@ -1851,6 +3082,9 @@ fn executable_branch_on_a_number_remainder_reads_a_live_twin() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::Number(0.0f64.to_bits()),   // 0
             Constant::Number(2.0f64.to_bits()),   // 1
@@ -1875,6 +3109,7 @@ fn executable_branch_on_a_number_remainder_reads_a_live_twin() {
         local_count: 0,
         functions: vec![callee],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit(&program).expect("program emits");
     assert!(
@@ -1926,6 +3161,9 @@ fn executable_unary_plus_of_a_product_copies_a_written_box() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::Number(2.5f64.to_bits()), // 0
             Constant::Number(2.0f64.to_bits()), // 1
@@ -1945,6 +3183,7 @@ fn executable_unary_plus_of_a_product_copies_a_written_box() {
         local_count: 0,
         functions: vec![callee],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit(&program).expect("program emits");
     let wrapper = format!(
@@ -2011,11 +3250,15 @@ fn executable_length_specialization() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants,
         code,
         local_count: 6,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("length program emits");
@@ -2092,4 +3335,143 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
     assert!(!String::from_utf8_lossy(&run.stderr).contains("candidate ledger disagrees"));
+}
+
+#[test]
+fn requested_minor_collection_keeps_active_and_pending_candidate_provenance() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int keep_candidate_root(kiln_gc_heap *heap, kiln_value candidate) {
+    kiln_value registry;
+    if (kiln_c99_new_collection(&registry, 0, 0) != KILN_C99_OK) return 0;
+    heap->realm.isolated_graphs = registry;
+    return kiln_c99_collection_put(registry, candidate, candidate) == KILN_C99_OK;
+}
+
+static int candidate_minor_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value candidate = kiln_c99_undefined();
+    kiln_c99_candidate_group *group;
+    kiln_gc_block *object_block;
+    kiln_nursery_chunk *object_chunk;
+    uint64_t id;
+    uint64_t collections;
+    uint64_t audited_minors;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    heap->force_pending = 0;
+    heap->minor_audit_enabled = 1;
+    heap->stress_every = 1; /* Force the active-candidate collection past its normal deferral. */
+    if (!kiln_c99_actor_candidate_begin(heap) ||
+        kiln_c99_new_object(&candidate) != KILN_C99_OK ||
+        !keep_candidate_root(heap, candidate)) return 2;
+    id = heap->actor_candidate_id;
+    group = heap->actor_candidate_group;
+    collections = heap->collections;
+    audited_minors = heap->minor_audit_collections;
+    kiln_c99_gc_collect_minor_mid_turn(heap);
+    object_block = kiln_c99_gc_lookup(heap, (void *)(uintptr_t)candidate.bits);
+    object_chunk = object_block != NULL && (object_block->kind & KILN_GC_FLAG_NURSERY) != 0
+        ? kiln_c99_nursery_chunk_of(heap, object_block) : NULL;
+    if (heap->collections != collections + 1 ||
+        heap->minor_audit_collections != audited_minors ||
+        heap->actor_candidate_id != id || heap->actor_candidate_group != group ||
+        heap->candidate_ledger_groups != 1 || object_chunk == NULL ||
+        object_chunk->candidate_id != id || object_chunk->candidate_state != 3 ||
+        !kiln_c99_candidate_group_contains(group, object_chunk) || object_block == NULL)
+        return 3;
+    if (!kiln_c99_actor_candidate_end(heap, 0)) return 4;
+
+    heap->stress_every = 0;
+    heap->realm.isolated_graphs = kiln_c99_undefined();
+    if (!kiln_c99_actor_candidate_begin(heap) ||
+        kiln_c99_new_object(&candidate) != KILN_C99_OK ||
+        !keep_candidate_root(heap, candidate) || !kiln_c99_actor_candidate_end(heap, 1)) return 5;
+    id = heap->actor_candidate_pending_id;
+    group = heap->actor_candidate_group;
+    collections = heap->collections;
+    audited_minors = heap->minor_audit_collections;
+    kiln_c99_gc_collect_minor_mid_turn(heap);
+    object_block = kiln_c99_gc_lookup(heap, (void *)(uintptr_t)candidate.bits);
+    object_chunk = object_block != NULL && (object_block->kind & KILN_GC_FLAG_NURSERY) != 0
+        ? kiln_c99_nursery_chunk_of(heap, object_block) : NULL;
+    if (heap->collections != collections + 1 ||
+        heap->minor_audit_collections != audited_minors ||
+        heap->actor_candidate_pending_id != id || heap->actor_candidate_group != group ||
+        heap->candidate_ledger_groups != 1 || object_chunk == NULL ||
+        object_chunk->candidate_id != id || object_chunk->candidate_state != 1 ||
+        !kiln_c99_candidate_group_contains(group, object_chunk) || object_block == NULL)
+        return 6;
+    kiln_c99_actor_candidate_finish(heap, 0);
+    heap->realm.isolated_graphs = kiln_c99_undefined();
+    return 0;
+}
+
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 7;
+    status = kiln_realm_enter(realm, candidate_minor_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 8;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-minor-eligibility");
+    assert!(
+        run.status.success(),
+        "a requested minor collection must fall back to full collection while candidate provenance is live ({:?}):\nstdout: {}\nstderr: {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn string_wrapper_definition_shadows_inherited_readonly_length() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty wrapper fixture emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_value prototype = kiln_c99_undefined();
+    kiln_value receiver = kiln_c99_undefined();
+    kiln_value got = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_property *inherited;
+    kiln_property *own;
+    kiln_object *object;
+    if (kiln_c99_new_object(&prototype) != KILN_C99_OK ||
+        kiln_c99_new_object(&receiver) != KILN_C99_OK) return 1;
+    if (kiln_c99_own_slot(prototype, "length", 6, &inherited) != KILN_C99_OK) return 2;
+    object = kiln_c99_object_of(prototype);
+    kiln_c99_heap_store_value(object, &inherited->value, kiln_c99_number(0.0));
+    inherited->enumerable = 0;
+    inherited->writable = 0;
+    inherited->configurable = 0;
+    object = kiln_c99_object_of(receiver);
+    kiln_c99_heap_store_value(object, &object->prototype, prototype);
+
+    if (kiln_c99_primitive_wrapper_define_data(receiver, "length", 6,
+                                               kiln_c99_number(3.0), 0, 0, 0) !=
+        KILN_C99_OK) return 3;
+    if (kiln_c99_get(NULL, receiver, "length", 6, &got, 0, &thrown) != KILN_C99_OK ||
+        got.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(got) != 3.0) return 4;
+    object = kiln_c99_object_of(receiver);
+    if (object->count != 1 || object->properties == NULL) return 5;
+    own = &object->properties[0];
+    if (own->enumerable || own->writable || own->configurable || own->accessor ||
+        own->value.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(own->value) != 3.0)
+        return 6;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "string-wrapper-own-descriptor");
+    assert!(
+        run.status.success(),
+        "String wrapper definition must shadow inherited readonly length ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }

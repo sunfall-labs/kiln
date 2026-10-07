@@ -16,6 +16,9 @@ console.log(
 
 const array = Reflect.construct(Array, [1, 2], Derived);
 console.log(Array.isArray(array), array.length, array[1], Object.getPrototypeOf(array) === Derived.prototype);
+const original = { untouched: true };
+const object = Reflect.construct(Object, [original], Derived);
+console.log(object !== original, object.untouched, Object.getPrototypeOf(object) === Derived.prototype);
 
 let argumentRead = false;
 try {
@@ -24,7 +27,16 @@ try {
   console.log(error instanceof TypeError, argumentRead);
 }
 
-for (const invalid of [Symbol, BigInt, () => {}]) {
+for (const newTarget of [Symbol, BigInt]) {
+  const created = Reflect.construct(Target, ["builtin"], newTarget);
+  if (Object.getPrototypeOf(created) !== newTarget.prototype || created.seenNewTarget !== newTarget) {
+    throw new Error("Symbol and BigInt are valid Reflect.construct newTarget values");
+  }
+  let rejected = false;
+  try { Reflect.construct(newTarget, []); } catch (error) { rejected = error instanceof TypeError; }
+  if (!rejected) throw new Error("Symbol and BigInt must reject their own construction");
+}
+for (const invalid of [() => {}]) {
   try {
     Reflect.construct(Target, [], invalid);
   } catch (error) {

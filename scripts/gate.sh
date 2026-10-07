@@ -64,6 +64,7 @@ THIRDPARTY_PREP_JOBS=0
 if [[ $QUICK -eq 0 && $GATE_PARALLEL -eq 1 && $GATE_JOBS -ge 4 ]]; then
 	THIRDPARTY_PREP_JOBS=1
 fi
+THIRDPARTY_RELEASE_TIMEOUT_SECONDS="${KILN_GATE_THIRDPARTY_RELEASE_TIMEOUT_SECONDS:-7200}"
 printf 'gate budget: %s CPUs; crate tests %s, native %s, Test262 %s (%s MiB cap), thirdparty prepare %s\n' \
 	"$GATE_JOBS" "$TEST_JOBS" "$NATIVE_JOBS" "$TEST262_JOBS" "$TEST262_MEMORY_MB" "$THIRDPARTY_PREP_JOBS"
 BACKGROUND_PIDS=()
@@ -223,11 +224,17 @@ if [[ $GATE_TEST262_SUITE == full ]]; then
 fi
 THIRDPARTY_STAGED=0
 if [[ $THIRDPARTY_PREP_JOBS -eq 1 ]]; then
+	if [[ ! $THIRDPARTY_RELEASE_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]]; then
+		echo "gate: KILN_GATE_THIRDPARTY_RELEASE_TIMEOUT_SECONDS must be a positive integer" >&2
+		exit 2
+	fi
 	THIRDPARTY_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiln-gate-thirdparty.XXXXXXXX")"
 	THIRDPARTY_RELEASE_MARKER="$THIRDPARTY_STAGE_DIR/release"
 	step "thirdparty baseline" env KILN_THIRDPARTY_WORK_TMPDIR="$THIRDPARTY_STAGE_DIR" \
 		KILN_THIRDPARTY_BUILD_JOBS=1 KILN_JOBS=1 RAYON_NUM_THREADS=1 \
-		./scripts/thirdparty.sh "${THIRDPARTY_BENCH_ARGS[@]}" --wait-for-release "$THIRDPARTY_RELEASE_MARKER" &
+		KILN_THIRDPARTY_RELEASE_TIMEOUT_SECONDS="$THIRDPARTY_RELEASE_TIMEOUT_SECONDS" \
+		./scripts/thirdparty.sh "${THIRDPARTY_BENCH_ARGS[@]}" \
+		--wait-for-release "$THIRDPARTY_RELEASE_MARKER" --wait-owner-pid "$$" &
 	THIRDPARTY_PID=$!
 	GATE_STEP_NUMBER=$((GATE_STEP_NUMBER + 1))
 	THIRDPARTY_STAGED=1
@@ -245,7 +252,7 @@ background_step "crate tests" env KILN_JOBS="$TEST_JOBS" RAYON_NUM_THREADS="$TES
 	test_status="$GATE_CACHE_TEST_STATUS"
 	raw_log="${GATE_STEP_LOG}.raw"
 	cat "$GATE_CACHE_TEST_LOG" >"$raw_log"
-	mbx test --workspace --exclude kiln-artifact-cache --locked --jobs="$KILN_TEST_THREADS" -- --test-threads="$KILN_TEST_THREADS" >>"$raw_log" 2>&1 || test_status=$?
+	mbx test --workspace --exclude kiln-artifact-cache --locked --no-fail-fast --jobs="$KILN_TEST_THREADS" -- --test-threads="$KILN_TEST_THREADS" >>"$raw_log" 2>&1 || test_status=$?
 	output="$(cat "$raw_log")"
 	# The failing *names* as well as the summary: a count says the suite is red and nothing
 	# about which part, and this step is the one that reports breakage in any other crate.

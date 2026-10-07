@@ -1,0 +1,1362 @@
+{
+  "schema": 1,
+  "generated": "2026-09-30T22:03:04.708980+00:00",
+  "state": "complete",
+  "completed": 30,
+  "inventory_sha256": "fdfc282a801d46f54e07eb9af6c204f56c218dde2b4d76a1e7429abab68aee94",
+  "kiln_sha256": "859c257a1e1621a35e6f5cc4ad4a8bc0988e7934c70ac8fa02943c8755a83650",
+  "selected": 30,
+  "deferred": 331,
+  "timezone": "UTC",
+  "host": "node",
+  "kiln_jobs": "2",
+  "timing_kind": "phase wall time including startup; not warmed workload throughput",
+  "results": [
+    {
+      "name": "iconv-lite",
+      "version": "0.7.3",
+      "porffor_status": "missing-api",
+      "test_sha256": "19dd7c4cd021141e23070b1b6a323762d06153138cf1000ac83c475294abec4d",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/iconv-lite.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.064022
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/iconv-lite.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/iconv-lite.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 56.85157,
+          "native_timing_ms": {
+            "emit": 667,
+            "compile": 8332,
+            "link": 83
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/iconv-lite.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.114902
+        }
+      },
+      "binary_bytes": 37541280,
+      "status": "runtime-error"
+    },
+    {
+      "name": "@babel/core",
+      "version": "8.0.6",
+      "porffor_status": "missing-api",
+      "test_sha256": "466efe587198ada6e184f62f856fe76ddf340a3f1f2d308a2812ea91d7b8d111",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/babel__core.test.mjs"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.264546
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/babel__core.test.mjs",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/babel__core.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 30.995358,
+          "native_timing_ms": {
+            "emit": 12290,
+            "compile": 17260,
+            "link": 173
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/babel__core.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.415361
+        }
+      },
+      "binary_bytes": 137832024,
+      "status": "runtime-error"
+    },
+    {
+      "name": "http-errors",
+      "version": "2.0.1",
+      "porffor_status": "missing-api",
+      "test_sha256": "91cc1f5152d4712184f8af932ae8e2e398e33edd0e751e92d2f5d252f2e65cbc",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/http-errors.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.06466
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/http-errors.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/http-errors.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.815973,
+          "native_timing_ms": {
+            "emit": 159,
+            "compile": 243,
+            "link": 84
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/http-errors.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.015683
+        }
+      },
+      "binary_bytes": 34467016,
+      "status": "runtime-error"
+    },
+    {
+      "name": "jose",
+      "version": "6.2.12",
+      "porffor_status": "missing-api",
+      "test_sha256": "1134caee224fc49382ef35e0ecd91d329d3eda45b863832c9b58d131148f023f",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/jose.test.mjs"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.063999
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/jose.test.mjs",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/jose.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 1.817396,
+          "native_timing_ms": {
+            "emit": 186,
+            "compile": 1178,
+            "link": 87
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/jose.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.031774
+        }
+      },
+      "binary_bytes": 34847680,
+      "status": "pass"
+    },
+    {
+      "name": "express",
+      "version": "5.2.1",
+      "porffor_status": "missing-api",
+      "test_sha256": "e91b98208801e7be541bec177d82560c7fe30c45a4f7a5470cccc3850e866f79",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/express.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.114115
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/express.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/express.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 3.876693,
+          "native_timing_ms": {
+            "emit": 921,
+            "compile": 2249,
+            "link": 106
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/express.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.015819
+        }
+      },
+      "binary_bytes": 56820632,
+      "status": "runtime-error"
+    },
+    {
+      "name": "prettier",
+      "version": "3.9.9",
+      "porffor_status": "runtime-error",
+      "test_sha256": "1e762f4351b8903b71eecaf7c4dc271efa05d1f83d22c055d6103f8f6a1bc5ee",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/prettier.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.11409
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/prettier.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/prettier.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 35.765407,
+          "native_timing_ms": {
+            "emit": 12782,
+            "compile": 20726,
+            "link": 255
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/prettier.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.032172
+        }
+      },
+      "binary_bytes": 256026080,
+      "status": "runtime-error"
+    },
+    {
+      "name": "@tanstack/query-core",
+      "version": "5.104.0",
+      "porffor_status": "missing-api",
+      "test_sha256": "be6b417e3b2643fce8ef68bd3b1e03e66de5f55763742688c8fc69ffe5d83f43",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/tanstack__query-core.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.064304
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/tanstack__query-core.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/tanstack__query-core.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 1.718536,
+          "native_timing_ms": {
+            "emit": 303,
+            "compile": 911,
+            "link": 87
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/tanstack__query-core.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.031946
+        }
+      },
+      "binary_bytes": 39024328,
+      "status": "pass"
+    },
+    {
+      "name": "regenerator-runtime",
+      "version": "0.14.1",
+      "porffor_status": "runtime-error",
+      "test_sha256": "0d4b78467f14806d164fd9cf3315b0a8226110d0c120f64a45502c6652bd6338",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/regenerator-runtime.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.031989
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/regenerator-runtime.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/regenerator-runtime.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.965913,
+          "native_timing_ms": {
+            "emit": 123,
+            "compile": 426,
+            "link": 87
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/regenerator-runtime.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.015828
+        }
+      },
+      "binary_bytes": 33596496,
+      "status": "pass"
+    },
+    {
+      "name": "bluebird",
+      "version": "3.7.2",
+      "porffor_status": "runtime-error",
+      "test_sha256": "8cf6c928b2af57c045f70d1439964206c60c3bcc87b7da5cf094d7bff5866c23",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/bluebird.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.063968
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/bluebird.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/bluebird.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 1.917582,
+          "native_timing_ms": {
+            "emit": 332,
+            "compile": 1081,
+            "link": 95
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/bluebird.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.032003
+        }
+      },
+      "binary_bytes": 39338488,
+      "status": "runtime-error"
+    },
+    {
+      "name": "fast-safe-stringify",
+      "version": "2.1.1",
+      "porffor_status": "pass",
+      "test_sha256": "975f8ca42cf2ecb164ee9969e6c5ae33828864d1660880181f250501398d9a32",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/fast-safe-stringify.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.031882
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/fast-safe-stringify.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/fast-safe-stringify.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 1.61697,
+          "native_timing_ms": {
+            "emit": 98,
+            "compile": 1098,
+            "link": 102
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/fast-safe-stringify.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.01815
+        }
+      },
+      "binary_bytes": 33184432,
+      "status": "pass"
+    },
+    {
+      "name": "h3",
+      "version": "2.0.1-rc.32",
+      "porffor_status": "missing-api",
+      "test_sha256": "afc624ea27d41cbbbfe78a445a6e9a99fdb62862466d22314539bc1100abf430",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/h3.test.mjs"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.11467
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/h3.test.mjs",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/h3.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 2.420218,
+          "native_timing_ms": {
+            "emit": 656,
+            "compile": 1273,
+            "link": 89
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/h3.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.031869
+        }
+      },
+      "binary_bytes": 41450576,
+      "status": "pass"
+    },
+    {
+      "name": "uglify-js",
+      "version": "3.19.3",
+      "porffor_status": "missing-api",
+      "test_sha256": "ee03112ead56d8b6f6135a8a95b5f2132687363f3b81222036df50e3160fa7a4",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/uglify-js.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.114293
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/uglify-js.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/uglify-js.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.715267,
+          "native_timing_ms": {
+            "emit": 147,
+            "compile": 145,
+            "link": 81
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/uglify-js.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.063828
+        }
+      },
+      "binary_bytes": 34133000,
+      "status": "runtime-error"
+    },
+    {
+      "name": "winston",
+      "version": "3.19.0",
+      "porffor_status": "missing-api",
+      "test_sha256": "b1c53c32b4c4d0f981b8378145eb541090cdd2c8d08f686a2bbdd79c7e4a1fdb",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/winston.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.114591
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/winston.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/winston.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 4.241184,
+          "native_timing_ms": {
+            "emit": 1026,
+            "compile": 2519,
+            "link": 105
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/winston.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.064071
+        }
+      },
+      "binary_bytes": 56223984,
+      "status": "runtime-error"
+    },
+    {
+      "name": "assert",
+      "version": "2.1.0",
+      "porffor_status": "missing-api",
+      "test_sha256": "b29e7a357ee0ae3d5b48f31794be3f65a753d582c5793f6f56708ceea0bffe9f",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/assert.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.064386
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/assert.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/assert.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 1.670616,
+          "native_timing_ms": {
+            "emit": 387,
+            "compile": 777,
+            "link": 109
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/assert.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.015765
+        }
+      },
+      "binary_bytes": 39257968,
+      "status": "runtime-error"
+    },
+    {
+      "name": "@iarna/toml",
+      "version": "2.2.5",
+      "porffor_status": "missing-api",
+      "test_sha256": "52ff45345a12ccd227d90cac03319e70a4c4595a6de355bcdf470033b8093afb",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/iarna__toml.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.063927
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/iarna__toml.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/iarna__toml.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 2.520269,
+          "native_timing_ms": {
+            "emit": 294,
+            "compile": 1756,
+            "link": 106
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/iarna__toml.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.032031
+        }
+      },
+      "binary_bytes": 38325992,
+      "status": "pass"
+    },
+    {
+      "name": "eta",
+      "version": "4.6.0",
+      "porffor_status": "missing-api",
+      "test_sha256": "b712cb41e36f853399ccb4d09fe5665c4d8d4a62aae4cda387775fe13cfa8257",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/eta.test.mjs"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.031929
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/eta.test.mjs",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/eta.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 1.166155,
+          "native_timing_ms": {
+            "emit": 185,
+            "compile": 583,
+            "link": 90
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/eta.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.015825
+        }
+      },
+      "binary_bytes": 34854744,
+      "status": "runtime-error"
+    },
+    {
+      "name": "koa",
+      "version": "3.2.1",
+      "porffor_status": "missing-api",
+      "test_sha256": "67d9da40e822279b21ccd4d59b984a577427118838804305b146c061d35c4d45",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/koa.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.114256
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/koa.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/koa.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.515727
+        }
+      },
+      "status": "compile-error"
+    },
+    {
+      "name": "arktype",
+      "version": "2.2.5",
+      "porffor_status": "missing-api",
+      "test_sha256": "a087c331633b8e9beb2211726d8ea22f51f474769349bfe41b559abc1a2a395b",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/arktype.test.mjs"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.214333
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/arktype.test.mjs",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/arktype.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 4.837909
+        }
+      },
+      "status": "compile-error"
+    },
+    {
+      "name": "showdown",
+      "version": "2.1.0",
+      "porffor_status": "runtime-error",
+      "test_sha256": "a8fb71d28c991d24c46460dc84f9f6f2fbb0d37b507631bc8ecd4fc5f49b72a7",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/showdown.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.064311
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/showdown.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/showdown.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 5.526648,
+          "native_timing_ms": {
+            "emit": 3259,
+            "compile": 1843,
+            "link": 94
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/showdown.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.031932
+        }
+      },
+      "binary_bytes": 36162592,
+      "status": "runtime-error"
+    },
+    {
+      "name": "deep-equal",
+      "version": "2.2.3",
+      "porffor_status": "runtime-error",
+      "test_sha256": "356563d5d24b48ce77b078e2929d1f05641a0b0049ea0c2693b1395f6fa37104",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/deep-equal.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.064109
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/deep-equal.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/deep-equal.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 1.166176,
+          "native_timing_ms": {
+            "emit": 220,
+            "compile": 471,
+            "link": 91
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/deep-equal.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.031939
+        }
+      },
+      "binary_bytes": 38427312,
+      "status": "runtime-error"
+    },
+    {
+      "name": "effect",
+      "version": "3.22.2",
+      "porffor_status": "missing-api",
+      "test_sha256": "5c3599899c8bf2c58241bde1a6f46e6da2b43d904e891ef907c4fa1c0e0129a0",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/effect.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.31452
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/effect.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/effect.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 31.50886,
+          "native_timing_ms": {
+            "emit": 6427,
+            "compile": 22075,
+            "link": 254
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/effect.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.164271
+        }
+      },
+      "binary_bytes": 215500112,
+      "status": "runtime-error"
+    },
+    {
+      "name": "fastify",
+      "version": "5.12.5",
+      "porffor_status": "missing-api",
+      "test_sha256": "fccf9eeb1cfe7555ce8ca7286db0c5fd0fae223f62b70cd753813d95285f3c19",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/fastify.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.164404
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/fastify.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/fastify.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 12.076633,
+          "native_timing_ms": {
+            "emit": 2981,
+            "compile": 7840,
+            "link": 163
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/fastify.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.114175
+        }
+      },
+      "binary_bytes": 102042968,
+      "status": "runtime-error"
+    },
+    {
+      "name": "handlebars",
+      "version": "4.7.9",
+      "porffor_status": "runtime-error",
+      "test_sha256": "81cb9b6e641f7e4131d79f231cf5d32cd0bb4e3e450872f2159f802a55c844e8",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/handlebars.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.064228
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/handlebars.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/handlebars.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 2.419363,
+          "native_timing_ms": {
+            "emit": 474,
+            "compile": 1463,
+            "link": 89
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/handlebars.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.031728
+        }
+      },
+      "binary_bytes": 42849376,
+      "status": "runtime-error"
+    },
+    {
+      "name": "jsonwebtoken",
+      "version": "9.0.3",
+      "porffor_status": "missing-api",
+      "test_sha256": "8150f32b984212c413b609cd5eb5be4815e616187d4053770c268c8df212ba61",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/jsonwebtoken.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.064017
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/jsonwebtoken.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/jsonwebtoken.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 1.368927,
+          "native_timing_ms": {
+            "emit": 351,
+            "compile": 529,
+            "link": 93
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/jsonwebtoken.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.031729
+        }
+      },
+      "binary_bytes": 41792424,
+      "status": "runtime-error"
+    },
+    {
+      "name": "keyv",
+      "version": "5.6.0",
+      "porffor_status": "missing-api",
+      "test_sha256": "d281fe19f71bc26dcbe6d25c74f917375fd046012a84b73b38c5dcab9c01ba0a",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/keyv.test.mjs"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.031844
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/keyv.test.mjs",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/keyv.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 1.617191,
+          "native_timing_ms": {
+            "emit": 164,
+            "compile": 963,
+            "link": 82
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/keyv.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.015789
+        }
+      },
+      "binary_bytes": 34468944,
+      "status": "pass"
+    },
+    {
+      "name": "qs",
+      "version": "6.16.0",
+      "porffor_status": "missing-api",
+      "test_sha256": "c1564d0070ee8aebe5a2b16777c80ff9ab29beed9e4eabddeb0ad64f09f3d38b",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/qs.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.064345
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/qs.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/qs.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.865954,
+          "native_timing_ms": {
+            "emit": 155,
+            "compile": 172,
+            "link": 104
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/qs.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.032304
+        }
+      },
+      "binary_bytes": 37251536,
+      "status": "runtime-error"
+    },
+    {
+      "name": "svelte",
+      "version": "5.57.1",
+      "porffor_status": "pass",
+      "test_sha256": "9072cf0e297d536bd5c4e684bf6cc865d9f5d13a998a95e500fe5c9f77e5fa57",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/svelte.test.mjs"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.264563
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/svelte.test.mjs",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/svelte.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 33.111432
+        }
+      },
+      "status": "compile-error"
+    },
+    {
+      "name": "through2",
+      "version": "5.0.11",
+      "porffor_status": "missing-api",
+      "test_sha256": "4c538ca8d36196fd44cff71994ff1d9cc3d35f66e59746f4eb19251e50c62edd",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/through2.test.mjs"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.064312
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/through2.test.mjs",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/through2.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 2.680797,
+          "native_timing_ms": {
+            "emit": 416,
+            "compile": 1533,
+            "link": 92
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/through2.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.066077
+        }
+      },
+      "binary_bytes": 44296312,
+      "status": "runtime-error"
+    },
+    {
+      "name": "url",
+      "version": "0.11.4",
+      "porffor_status": "missing-api",
+      "test_sha256": "066f573a2b4b92be4482d15938e9015be8ac9d91055273a93a885d8f6ef681bb",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/url.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.220864
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/url.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/url.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 2.78396,
+          "native_timing_ms": {
+            "emit": 507,
+            "compile": 1419,
+            "link": 87
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/url.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.015671
+        }
+      },
+      "binary_bytes": 38225568,
+      "status": "runtime-error"
+    },
+    {
+      "name": "ws",
+      "version": "8.22.0",
+      "porffor_status": "missing-api",
+      "test_sha256": "d2b89473c2dd763384edba470b429fe4d91ef7cce520cd8f489dfa3be19f8cd7",
+      "phases": {
+        "node": {
+          "argv": [
+            "node",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/ws.test.js"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 0.063971
+        },
+        "build": {
+          "argv": [
+            "~/.cache/mbx/targets/v1/f18a826645dd31f018fb77c52abf375c02f7eb024de796aef7122054b04c48e1/npm-compat-evidence/kiln-cli29",
+            "--one-shot",
+            "build",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/tests/ws.test.js",
+            "--node",
+            "--output",
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/ws.bin"
+          ],
+          "exit": 0,
+          "timeout": false,
+          "seconds": 1.971401,
+          "native_timing_ms": {
+            "emit": 386,
+            "compile": 1116,
+            "link": 84
+          }
+        },
+        "native": {
+          "argv": [
+            "~/Work/kiln-npm-compat/conformance/npm-compat/results/raw/20260930T220304Z.2147575/ws.bin"
+          ],
+          "exit": 1,
+          "timeout": false,
+          "seconds": 0.031927
+        }
+      },
+      "binary_bytes": 42390864,
+      "status": "runtime-error"
+    }
+  ],
+  "git_head": "4485c94f9c797887f3d6ca5dd742f6d78ba2acb6",
+  "node_version": "v26.8.1",
+  "counts": {
+    "runtime-error": 20,
+    "pass": 7,
+    "compile-error": 3
+  },
+  "source_commit": "4485c94f9c797887f3d6ca5dd742f6d78ba2acb6"
+}

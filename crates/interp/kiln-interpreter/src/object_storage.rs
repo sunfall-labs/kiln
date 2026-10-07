@@ -28,9 +28,10 @@ impl ObjectData {
     }
 
     pub(super) fn get_own_property_key(&self, key: PropertyKeyRef<'_>) -> Option<&Property> {
+        let classification = key.classification();
         self.properties
             .iter()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
             .map(|slot| &slot.property)
     }
 
@@ -44,9 +45,10 @@ impl ObjectData {
     }
 
     pub(super) fn get_own_attributes_key(&self, key: PropertyKeyRef<'_>) -> Option<Attributes> {
+        let classification = key.classification();
         self.properties
             .iter()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
             .map(|slot| slot.attributes)
     }
 
@@ -59,6 +61,31 @@ impl ObjectData {
             Some(Property::Value(value)) => Some(value),
             _ => None,
         }
+    }
+
+    /// An owned own data value, resolving a namespace export through its live cell.
+    ///
+    /// Host adapters that intentionally inspect data properties without invoking accessors use
+    /// this instead of `get_own`, whose borrowed result can only expose the stored slot.
+    pub fn get_own_value(&self, key: &str) -> Option<Value> {
+        self.get_own_value_key(PropertyKeyRef::Utf8(key))
+    }
+
+    /// Exact-unit counterpart of [`ObjectData::get_own_value`].
+    pub fn get_own_value_units(&self, key: &StringUnits) -> Option<Value> {
+        self.get_own_value_key(PropertyKeyRef::Units(key))
+    }
+
+    fn get_own_value_key(&self, key: PropertyKeyRef<'_>) -> Option<Value> {
+        let classification = key.classification();
+        self.properties
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| key.matches_classified_slot(slot, classification))
+            .and_then(|(index, slot)| match self.property_at_slot(index, slot) {
+                Property::Value(value) => Some(value),
+                Property::Accessor { .. } => None,
+            })
     }
 
     /// The primitive this object boxes, or `None` for an ordinary object.
@@ -114,8 +141,15 @@ impl ObjectData {
     }
 
     pub(super) fn lookup_key(&self, key: PropertyKeyRef<'_>) -> Option<Property> {
-        if let Some(own) = self.properties.iter().find(|slot| key.matches_slot(slot)) {
-            return Some(own.property.clone());
+        // Reuse one classification across every slot and prototype in this lookup.
+        let classification = key.classification();
+        if let Some((index, own)) = self
+            .properties
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| key.matches_classified_slot(slot, classification))
+        {
+            return Some(self.property_at_slot(index, own));
         }
         let mut current = self.prototype.clone();
         for _ in 0..MAX_PROTOTYPE_DEPTH {
@@ -130,7 +164,7 @@ impl ObjectData {
                     store
                         .properties
                         .iter()
-                        .find(|slot| key.matches_slot(slot))
+                        .find(|slot| key.matches_classified_slot(slot, classification))
                         .map(|slot| slot.property.clone())
                         .ok_or_else(|| store.prototype.clone())
                 }
@@ -139,8 +173,9 @@ impl ObjectData {
                     parent
                         .properties
                         .iter()
-                        .find(|slot| key.matches_slot(slot))
-                        .map(|slot| slot.property.clone())
+                        .enumerate()
+                        .find(|(_, slot)| key.matches_classified_slot(slot, classification))
+                        .map(|(index, slot)| parent.property_at_slot(index, slot))
                         .ok_or_else(|| parent.prototype.clone())
                 }
                 Some(Value::Function(parent)) => {
@@ -148,7 +183,7 @@ impl ObjectData {
                     parent
                         .properties
                         .iter()
-                        .find(|slot| key.matches_slot(slot))
+                        .find(|slot| key.matches_classified_slot(slot, classification))
                         .map(|slot| slot.property.clone())
                         .ok_or_else(|| parent.prototype.clone())
                 }
@@ -182,10 +217,11 @@ impl ObjectData {
         value: Value,
         attributes: Attributes,
     ) {
+        let classification = key.classification();
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
         {
             if !redefinable(slot, attributes, true) {
                 return;
@@ -246,6 +282,7 @@ impl ObjectData {
         setter: Option<Value>,
         attributes: Attributes,
     ) {
+        let classification = key.classification();
         let existing = match self.get_own_property_key(key) {
             Some(Property::Accessor { get, set }) => (get.clone(), set.clone()),
             _ => (None, None),
@@ -257,7 +294,7 @@ impl ObjectData {
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
         {
             if !redefinable(slot, attributes, false) {
                 return;
@@ -268,8 +305,8 @@ impl ObjectData {
         }
         self.properties.push(Slot {
             key: key.owned(),
-            symbol: key.is_symbol(),
-            internal: key.is_internal(),
+            symbol: classification.symbol,
+            internal: classification.internal,
             property,
             attributes,
         });
@@ -281,10 +318,11 @@ impl ObjectData {
         property: Property,
         attributes: Attributes,
     ) {
+        let classification = key.classification();
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
         {
             slot.property = property;
             slot.attributes = attributes;
@@ -358,10 +396,11 @@ impl ObjectData {
             return;
         }
 
+        let classification = key.classification();
         if let Some(slot) = self
             .properties
             .iter_mut()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
         {
             // Only a data property can refuse a write. An accessor's setter has already had its
             // chance -- `inherited_setter_key` runs ahead of every store -- so a store that reaches
@@ -384,10 +423,11 @@ impl ObjectData {
         property: Property,
         attributes: Attributes,
     ) {
+        let classification = key.classification();
         let slot = Slot {
             key: key.owned(),
-            symbol: key.is_symbol(),
-            internal: key.is_internal(),
+            symbol: classification.symbol,
+            internal: classification.internal,
             property,
             attributes,
         };
@@ -459,47 +499,65 @@ impl ObjectData {
         self.module_namespace = true;
     }
 
-    /// Record the cell an export is a second name for, so the slot can be caught up later.
+    /// Record the cell and immutable property slot an export is a second name for.
     pub fn track_namespace_cell(&mut self, key: &str, cell: Value) {
         if matches!(cell, Value::Cell(_)) {
-            self.namespace_cells.push((key.to_owned(), cell));
+            // Construction has closed the namespace before tracking cells, so later reads can
+            // reuse immutable indices even when numeric export names reordered earlier slots.
+            // The last-slot shortcut and one-time search also preserve duplicate-name inputs;
+            // refreshing never searches by name.
+            let index = self
+                .properties
+                .last()
+                .filter(|slot| slot.key == key)
+                .map(|_| self.properties.len() - 1)
+                .or_else(|| self.properties.iter().position(|slot| slot.key == key));
+            if let Some(index) = index {
+                // The cell is the sole owner of the live export value. Keeping the initial
+                // snapshot in the ordinary property slot would retain replaced objects.
+                self.properties[index].property = Property::Value(Value::Undefined);
+                let bindings = self
+                    .namespace_bindings
+                    .get_or_insert_with(|| Box::default());
+                if bindings.cell_slots.len() < self.properties.len() {
+                    bindings.cell_slots.resize(self.properties.len(), None);
+                }
+                if let Some(cell_index) = bindings.cell_slots[index] {
+                    // A duplicate name in direct construction replaces the property and its
+                    // binding. Reuse that entry so the superseded cell is not retained.
+                    bindings.cells[cell_index] = cell;
+                } else {
+                    let cell_index = bindings.cells.len();
+                    bindings.cells.push(cell);
+                    bindings.cell_slots[index] = Some(cell_index);
+                }
+            }
         }
+    }
+
+    /// Resolve a stored property slot through its live export cell, if it has one.
+    pub(super) fn property_at_slot(&self, index: usize, slot: &Slot) -> Property {
+        if let Some(Value::Cell(cell)) = self
+            .namespace_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.cell_slots.get(index))
+            .and_then(|cell_index| *cell_index)
+            .and_then(|cell_index| {
+                self.namespace_bindings
+                    .as_ref()
+                    .and_then(|bindings| bindings.cells.get(cell_index))
+            })
+        {
+            return Property::Value(read_through_cell(&Value::Cell(Rc::clone(cell))));
+        }
+        slot.property.clone()
     }
 
     /// Whether this object is a namespace built over live bindings, and so needs catching up.
     pub fn tracks_namespace_cells(&self) -> bool {
-        !self.namespace_cells.is_empty()
-    }
-
-    /// Bring a namespace's slots back in step with the bindings they name.
-    ///
-    /// A namespace is a second name for the exporting module's bindings, not a copy of their
-    /// values: `export let n` that the module later increments reads as the new number through
-    /// `ns.n`. This was a snapshot taken when the provider finished, so it answered whatever was
-    /// true at link time for the rest of the program's life.
-    ///
-    /// Cheap when there is nothing to do -- the list is empty for every object that is not a
-    /// namespace over live bindings, which is every object but these.
-    pub fn refresh_namespace(&mut self) {
-        if self.namespace_cells.is_empty() {
-            return;
-        }
-        for index in 0..self.namespace_cells.len() {
-            let (key, cell) = &self.namespace_cells[index];
-            let Value::Cell(cell) = cell else {
-                continue;
-            };
-            let value = cell.borrow().clone();
-            let key = key.clone();
-
-            if let Some(slot) = self
-                .properties
-                .iter_mut()
-                .find(|slot| slot.key == key.as_str())
-            {
-                slot.property = Property::Value(value);
-            }
-        }
+        self.namespace_bindings
+            .as_ref()
+            .is_some_and(|bindings| !bindings.cells.is_empty())
     }
 
     /// Refuse new properties, leaving the existing ones writable.
@@ -543,16 +601,18 @@ impl ObjectData {
     }
 
     pub(super) fn remove_key(&mut self, key: PropertyKeyRef<'_>) -> bool {
+        let classification = key.classification();
         if self
             .properties
             .iter()
-            .find(|slot| key.matches_slot(slot))
+            .find(|slot| key.matches_classified_slot(slot, classification))
             .is_some_and(|slot| !slot.attributes.configurable)
         {
             return false;
         }
-        self.properties
-            .retain(|slot| !key.matches_slot(slot) || !slot.attributes.configurable);
+        self.properties.retain(|slot| {
+            !key.matches_classified_slot(slot, classification) || !slot.attributes.configurable
+        });
 
         true
     }
@@ -571,6 +631,25 @@ impl ObjectData {
             .iter()
             .filter(|slot| slot.attributes.enumerable && !slot.internal)
             .map(|slot| (&slot.key, &slot.property))
+    }
+
+    /// Enumerable entries with namespace exports resolved from their current cells.
+    pub(super) fn resolved_entries(&self) -> Vec<(StringUnits, Property)> {
+        self.properties
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.attributes.enumerable && !slot.internal)
+            .map(|(index, slot)| (slot.key.clone(), self.property_at_slot(index, slot)))
+            .collect()
+    }
+
+    pub(super) fn resolved_string_entries(&self) -> Vec<(StringUnits, Property)> {
+        self.properties
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.attributes.enumerable && !slot.symbol && !slot.internal)
+            .map(|(index, slot)| (slot.key.clone(), self.property_at_slot(index, slot)))
+            .collect()
     }
 
     pub(super) fn string_entries(&self) -> impl Iterator<Item = (&StringUnits, &Property)> {
@@ -684,6 +763,7 @@ pub(super) fn exotic_properties(target: &Value) -> Option<&RefCell<ObjectData>> 
         Value::Date(date) => &date.properties,
         Value::Temporal(built) => &built.properties,
         Value::Promise(promise) => &promise.properties,
+        Value::Generator(generator) => &generator.properties,
         // A wrapped function is exotic in exactly one respect -- what calling it does -- and an
         // ordinary object in every other: it starts out holding the `name` and `length` copied
         // off its target, and a holder may add to it. Its store is its own and is never the
@@ -710,6 +790,16 @@ pub(super) fn prototype_slot(target: &Value) -> Option<&RefCell<ObjectData>> {
         Value::Function(closure) => Some(&closure.properties),
         Value::Bound(bound) => Some(&bound.properties),
         other => exotic_properties(other),
+    }
+}
+
+/// Storage for compiler-owned private elements. Unlike ordinary properties, these internal
+/// slots are installed on the identity passed to the class constructor and never forward through
+/// a Proxy to its target or invoke its traps.
+pub(super) fn private_slot(target: &Value) -> Option<&RefCell<ObjectData>> {
+    match target {
+        Value::Proxy(proxy) => Some(&proxy.private_elements),
+        other => prototype_slot(other),
     }
 }
 
@@ -804,15 +894,28 @@ pub(super) fn own_property_state_key(
     target: &Value,
     key: PropertyKeyRef<'_>,
 ) -> Option<(Property, Attributes)> {
+    let classification = key.classification();
+    // A namespace export's slot carries the ordinary property shape, while its value lives in
+    // the exporting module's cell. Resolve just this slot here so [[GetOwnProperty]], proxy
+    // invariants, descriptors and the ordinary Get walk all observe the same current binding.
+    if let Value::Object(object) = target {
+        let data = object.borrow();
+        if let Some((index, slot)) = data
+            .properties
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| key.matches_classified_slot(slot, classification))
+        {
+            return Some((data.property_at_slot(index, slot), slot.attributes));
+        }
+    }
     let attributes = own_attributes_key(intrinsics, target, key)?;
     let property = match target {
         Value::Shared(facade) => facade.own_property(key).map(|(property, _)| property),
-        Value::Object(object) => object
-            .borrow()
-            .get_own_property_key(key)
-            .cloned()
-            .or_else(|| string_exotic_key(target, key).map(Property::Value)),
-        Value::Function(closure) if key.matches_ascii("prototype") => {
+        Value::Object(_) => string_exotic_key(target, key).map(Property::Value),
+        Value::Function(closure)
+            if key.matches_ascii("prototype") && has_prototype_property(closure) =>
+        {
             Some(Property::Value(prototype_object(closure)))
         }
         Value::Function(closure) => closure
@@ -998,10 +1101,18 @@ pub(super) fn install_property_key(
 ) -> Result<(), ExecutionError> {
     match target {
         Value::Object(object) => object.borrow_mut().install_key(key, property, attributes),
-        Value::Function(closure) => closure
-            .properties
-            .borrow_mut()
-            .install_key(key, property, attributes),
+        Value::Function(closure) => {
+            if key.matches_ascii("prototype")
+                && has_prototype_property(closure)
+                && let Property::Value(value) = &property
+            {
+                *closure.prototype.borrow_mut() = Some(value.clone());
+            }
+            closure
+                .properties
+                .borrow_mut()
+                .install_key(key, property, attributes);
+        }
         Value::Bound(bound) => bound
             .properties
             .borrow_mut()
@@ -1242,20 +1353,29 @@ pub(super) fn indexed_definition_key(
 pub(super) fn inherited_builtin(closure: &Rc<Closure>) -> Option<Native> {
     let mut current = closure.properties.borrow().prototype().cloned();
     if current.is_none() {
-        match generator_prototype_table(closure) {
-            Some(PrototypeTable::AsyncGenerator) => {
-                return Some(Native::AsyncGeneratorFunctionPrototype);
-            }
-            Some(PrototypeTable::Generator) => {
-                return Some(Native::GeneratorFunctionPrototype);
-            }
-            _ => {}
+        if let Some(prototype) = function_kind_prototype(closure) {
+            return Some(prototype);
         }
     }
     for _ in 0..MAX_PROTOTYPE_DEPTH {
         current = match current {
             Some(Value::Native(native, _)) => return Some(native),
-            Some(Value::Function(parent)) => parent.properties.borrow().prototype().cloned(),
+            Some(Value::Function(parent)) => {
+                let prototype = parent.properties.borrow().prototype().cloned();
+                match prototype {
+                    Some(prototype) => Some(prototype),
+                    // An ordinary function's implicit [[Prototype]] is virtual: it is not
+                    // stored in ObjectData. When a derived class constructor inherits through
+                    // another function, the walk must cross that function's implicit tail too.
+                    // Otherwise `class B extends A {}` reaches A's store, stops before
+                    // Function.prototype, and loses inherited `bind`/`call` methods.
+                    None => Some(Value::Native(
+                        function_kind_prototype(&parent)
+                            .unwrap_or(Native::PrototypeOf(PrototypeTable::Function)),
+                        value_realm(&Value::Function(parent)),
+                    )),
+                }
+            }
             Some(Value::Object(object)) => object.borrow().prototype().cloned(),
             _ => return None,
         };
@@ -1269,6 +1389,29 @@ pub(super) fn define_own_property_key(
     key: PropertyKeyRef<'_>,
     descriptor: &Descriptor,
 ) -> Result<bool, ExecutionError> {
+    // Module exports report writable descriptors because their live bindings can change,
+    // but [[DefineOwnProperty]] may only acknowledge the current value and flags. The shared
+    // own-property state resolver reads the cell for this key, not its link-time snapshot.
+    if let Value::Object(object) = target
+        && object.borrow().is_module_namespace()
+        && !key.is_symbol()
+    {
+        let Some((Property::Value(current), _)) = own_property_state_key(intrinsics, target, key)
+        else {
+            return Ok(false);
+        };
+        if matches!(current, Value::Native(Native::Uninitialized, _)) {
+            return Err(uninitialized_export_error(&key.owned().to_lossy_string()));
+        }
+        return Ok(descriptor.configurable != Some(true)
+            && descriptor.enumerable != Some(false)
+            && descriptor.writable != Some(false)
+            && !descriptor.is_accessor()
+            && descriptor
+                .value
+                .as_ref()
+                .is_none_or(|wanted| same_value(wanted, &current)));
+    }
     if let Value::Shared(facade) = target {
         let Some((Property::Value(current), attributes)) = facade.own_property(key) else {
             return Ok(false);

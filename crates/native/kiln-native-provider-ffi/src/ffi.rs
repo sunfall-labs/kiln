@@ -135,16 +135,65 @@ fn ffi_type(kind: u32, argument: bool) -> Result<Type, String> {
     })
 }
 
-struct Library {
-    pointer: *mut c_void,
+/// An open library: one the loader found by path, or one linked into this archive and reached by
+/// its specifier (the host GUI bridge, `kiln:host-gui`, ADR 0074). A static library's symbols are
+/// resolved from the table its crate exports rather than with `dlsym`, so they need no linker
+/// export list and cannot be shadowed by a file of the same name in the working directory.
+enum Library {
+    Dynamic(*mut c_void),
+    Static(Rc<HashMap<&'static str, *const c_void>>),
 }
 
 impl Drop for Library {
     fn drop(&mut self) {
-        if !self.pointer.is_null() {
+        if let Self::Dynamic(pointer) = self
+            && !pointer.is_null()
+        {
             // SAFETY: `pointer` is an owned successful `dlopen` result and is dropped once.
-            unsafe { libc::dlclose(self.pointer) };
+            unsafe { libc::dlclose(*pointer) };
         }
+    }
+}
+
+/// Installs (or, with either function absent, removes) the GUI bridge's park hook on the realm
+/// driven by this thread.
+#[cfg(all(feature = "gui", feature = "realm"))]
+extern "C" fn set_gui_park_hook(
+    wait: Option<extern "C" fn(f64) -> i32>,
+    wake: Option<extern "C" fn()>,
+    port: u64,
+) {
+    kiln_runtime::set_park_hook(match (wait, wake) {
+        (Some(wait), Some(wake)) => Some(kiln_runtime::ParkHook { wait, wake, port }),
+        _ => None,
+    });
+}
+
+/// The libraries linked into this archive, by the specifier a program opens them with.
+///
+/// `Ok(None)` is an ordinary path for the loader. `Err` names a specifier this archive knows but
+/// was packaged without, because a GUI program linked against a headless provider must stop at the
+/// cause -- `kiln_ffi_open` -- rather than fail three frames later on a missing method.
+fn static_library(path: &[u8]) -> Result<Option<HashMap<&'static str, *const c_void>>, String> {
+    if path != kiln_native_provider_contract::gui::LIBRARY_SPECIFIER.as_bytes() {
+        return Ok(None);
+    }
+    #[cfg(feature = "gui")]
+    {
+        // The bridge can park this realm inside the GUI run loop (ADR 0074 §6) only through
+        // the runtime it is linked with; hand it the setter before the program can ask.
+        #[cfg(feature = "realm")]
+        kiln_host_gui::ffi::bind_park_setter(set_gui_park_hook);
+        Ok(Some(kiln_host_gui::ffi::exports().into_iter().collect()))
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        Err(format!(
+            "node:ffi library {} is linked into provider packages that declare the `gui` \
+             capability (the `gui` and `full-gui` variants); this program's provider archive was \
+             packaged without it",
+            kiln_native_provider_contract::gui::LIBRARY_SPECIFIER
+        ))
     }
 }
 
@@ -338,18 +387,23 @@ pub unsafe extern "C" fn kiln_ffi_open(
         }
         // SAFETY: validated by `bytes` against the C ABI contract.
         let path = unsafe { bytes(path, path_len, "node:ffi library path") }?;
-        let path =
-            CString::new(path).map_err(|_| "node:ffi library path contains NUL".to_owned())?;
-        // Clear a prior loader diagnostic before calling `dlopen`.
-        // SAFETY: both loader calls follow their platform contracts.
-        unsafe { libc::dlerror() };
-        let pointer = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-        if pointer.is_null() {
-            return Err(loader_error("node:ffi could not open library"));
-        }
+        let library = if let Some(table) = static_library(path)? {
+            Library::Static(Rc::new(table))
+        } else {
+            let path =
+                CString::new(path).map_err(|_| "node:ffi library path contains NUL".to_owned())?;
+            // Clear a prior loader diagnostic before calling `dlopen`.
+            // SAFETY: both loader calls follow their platform contracts.
+            unsafe { libc::dlerror() };
+            let pointer = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            if pointer.is_null() {
+                return Err(loader_error("node:ffi could not open library"));
+            }
+            Library::Dynamic(pointer)
+        };
         with_state(|state| {
             let handle = state.handle()?;
-            state.libraries.insert(handle, Library { pointer });
+            state.libraries.insert(handle, library);
             // SAFETY: checked non-null and owned by the caller.
             unsafe { out_library.write(handle) };
             Ok(())
@@ -397,6 +451,7 @@ pub unsafe extern "C" fn kiln_ffi_prepare(
         // SAFETY: validated by the two slice helpers against the C ABI contract.
         let symbol = unsafe { bytes(symbol, symbol_len, "node:ffi symbol") }?;
         let argument_codes = unsafe { type_codes(argument_types, argument_count) }?.to_vec();
+        let symbol_name = String::from_utf8_lossy(symbol).into_owned();
         let symbol = CString::new(symbol).map_err(|_| "node:ffi symbol contains NUL".to_owned())?;
         let argument_ffi_types = argument_codes
             .iter()
@@ -404,17 +459,32 @@ pub unsafe extern "C" fn kiln_ffi_prepare(
             .collect::<Result<Vec<_>, _>>()?;
         let result_ffi_type = ffi_type(result_type, false)?;
         with_state(|state| {
-            let library_pointer = state
+            let pointer = match state
                 .libraries
                 .get(&library)
                 .ok_or_else(|| format!("node:ffi library handle {library} is not open"))?
-                .pointer;
-            // SAFETY: the library stays open in `state`; `dlsym` borrows the NUL-terminated name.
-            unsafe { libc::dlerror() };
-            let pointer = unsafe { libc::dlsym(library_pointer, symbol.as_ptr()) };
-            if pointer.is_null() {
-                return Err(loader_error("node:ffi could not resolve symbol"));
-            }
+            {
+                Library::Dynamic(library_pointer) => {
+                    // SAFETY: the library stays open in `state`; `dlsym` borrows the
+                    // NUL-terminated name.
+                    unsafe { libc::dlerror() };
+                    let pointer = unsafe { libc::dlsym(*library_pointer, symbol.as_ptr()) };
+                    if pointer.is_null() {
+                        return Err(loader_error("node:ffi could not resolve symbol"));
+                    }
+                    pointer
+                }
+                Library::Static(table) => table
+                    .get(symbol_name.as_str())
+                    .copied()
+                    .ok_or_else(|| {
+                        format!(
+                            "node:ffi static library {} does not define symbol {symbol_name}",
+                            kiln_native_provider_contract::gui::LIBRARY_SPECIFIER
+                        )
+                    })?
+                    .cast_mut(),
+            };
             let cif = Cif::new(argument_ffi_types, result_ffi_type);
             let handle = state.handle()?;
             state.functions.insert(
@@ -981,6 +1051,85 @@ mod tests {
         assert_eq!(function(17, 25), 42);
         CALLBACK_UNREGISTER_STATUS.with(|status| assert_eq!(status.get(), RUNTIME_ERROR));
         assert_eq!(kiln_ffi_unregister_callback(pointer), 0);
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn the_gui_bridge_opens_by_specifier_and_resolves_from_its_table() {
+        let specifier = kiln_native_provider_contract::gui::LIBRARY_SPECIFIER.as_bytes();
+        let mut library = 0;
+        // SAFETY: all borrowed input and output storage lives through each provider call.
+        assert_eq!(
+            unsafe { kiln_ffi_open(specifier.as_ptr(), specifier.len() as u64, &mut library) },
+            0
+        );
+        // Every promised export resolves; a name the bridge never defined is refused by name.
+        for name in kiln_native_provider_contract::gui::GUI_EXPORTS {
+            let mut function = 0;
+            // SAFETY: as above; `kiln_gui_abi_version`'s real signature is `() -> u32`, and the
+            // one function actually called below is prepared with exactly that.
+            let status = unsafe {
+                kiln_ffi_prepare(
+                    library,
+                    name.as_ptr(),
+                    name.len() as u64,
+                    ptr::null(),
+                    0,
+                    TYPE_U32,
+                    &mut function,
+                )
+            };
+            assert_eq!(status, 0, "{name} must resolve from the linked-in bridge");
+            if *name == "kiln_gui_abi_version" {
+                let mut result = FfiValue::default();
+                // SAFETY: a prepared handle with the function's true signature, no arguments.
+                assert_eq!(
+                    unsafe { kiln_ffi_call(function, ptr::null(), 0, &mut result) },
+                    0
+                );
+                assert_eq!(result.kind, TYPE_U32);
+                assert_eq!(result.bits, u64::from(kiln_host_gui::ffi::ABI_VERSION));
+            }
+        }
+        let missing = b"kiln_gui_not_a_thing";
+        let mut function = 0;
+        // SAFETY: as above.
+        let status = unsafe {
+            kiln_ffi_prepare(
+                library,
+                missing.as_ptr(),
+                missing.len() as u64,
+                ptr::null(),
+                0,
+                TYPE_I32,
+                &mut function,
+            )
+        };
+        assert_eq!(status, RUNTIME_ERROR);
+        LAST_ERROR.with_borrow(|stored| {
+            let text = String::from_utf8_lossy(stored);
+            assert!(
+                text.contains("kiln:host-gui") && text.contains("kiln_gui_not_a_thing"),
+                "{text}"
+            );
+        });
+        assert_eq!(kiln_ffi_close(library), 0);
+    }
+
+    #[cfg(not(feature = "gui"))]
+    #[test]
+    fn a_headless_provider_refuses_the_gui_specifier_at_open() {
+        let specifier = kiln_native_provider_contract::gui::LIBRARY_SPECIFIER.as_bytes();
+        let mut library = 0;
+        // SAFETY: all borrowed input and output storage lives through the provider call.
+        assert_eq!(
+            unsafe { kiln_ffi_open(specifier.as_ptr(), specifier.len() as u64, &mut library) },
+            RUNTIME_ERROR
+        );
+        LAST_ERROR.with_borrow(|stored| {
+            let text = String::from_utf8_lossy(stored);
+            assert!(text.contains("full-gui"), "{text}");
+        });
     }
 
     #[cfg(all(unix, target_pointer_width = "64"))]

@@ -137,6 +137,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let start = self.bound_argument(arguments.get(1), length, 0, instruction)?;
                 let end = self.bound_argument(arguments.get(2), length, length, instruction)?;
+                if self.dense_array_fill(receiver, start, end, &value) {
+                    return Ok(receiver.clone());
+                }
                 let mut index = start;
                 while index < end {
                     Self::walk_step(&mut steps)?;
@@ -295,22 +298,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::ArrayJoin => {
                 let length = self.array_like_length(receiver, instruction)?;
                 let separator = match arguments.first() {
-                    None | Some(Value::Undefined) => ",".to_owned(),
-                    Some(value) => self.as_text(value, instruction)?,
+                    None | Some(Value::Undefined) => StringUnits::from(","),
+                    Some(value) => self.as_text_units(value, instruction)?,
                 };
-                let mut out = String::new();
+                let mut out = StringUnitsBuilder::new();
                 for index in 0..length {
                     Self::walk_step(&mut steps)?;
                     if index > 0 {
-                        push_bounded(&mut out, &separator)?;
+                        out.push_units(&separator)?;
                     }
                     let element = self.element_get(receiver, index, instruction)?;
                     if !matches!(element, Value::Undefined | Value::Null) {
-                        let text = self.as_text(&element, instruction)?;
-                        push_bounded(&mut out, &text)?;
+                        let text = self.as_text_units(&element, instruction)?;
+                        out.push_units(&text)?;
                     }
                 }
-                Ok(Value::String(out.into()))
+                Ok(Value::String(out.finish()))
             }
             // `Array.prototype.toString` is defined as *calling* the receiver's own `join`, and
             // falling back to `Object.prototype.toString` when that is not callable. Joining
@@ -489,6 +492,48 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // arms above answer to.
             _ => Ok(Value::Undefined),
         }
+    }
+
+    /// Fill a preallocated ordinary array range without repeating the generic indexed `Set`
+    /// checks for every slot. All user-visible argument conversions have already happened
+    /// before this guard. A hole takes this path only while neither the receiver nor either
+    /// default indexed-prototype chain can supply an accessor or another indexed property.
+    fn dense_array_fill(&self, target: &Value, start: u64, end: u64, value: &Value) -> bool {
+        if start >= end {
+            return true;
+        }
+        let Value::Array(array) = target else {
+            return false;
+        };
+        let count = end - start;
+        // Keep the bounded generic walk's partial-write/refusal behavior for oversized ranges.
+        if count > MAX_DENSE_ARRAY as u64 {
+            return false;
+        }
+        let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
+            return false;
+        };
+        if !array.length_writable.get()
+            || !array.elements.borrow().is_empty()
+            || !array.properties.borrow().is_extensible()
+            || array.properties.borrow().is_frozen()
+            || array.properties.borrow().prototype().is_some()
+            || self.intrinsics.indexed_array_prototype.get()
+            || self
+                .intrinsics
+                .indexed_prototype_chain_is_custom(RealmId::PRIMARY)
+        {
+            return false;
+        }
+        if end > array.length() {
+            return false;
+        }
+        let mut elements = array.borrow_mut();
+        if end > elements.len() {
+            return false;
+        }
+        elements[start..end].fill(value.clone());
+        true
     }
 
     /// `2 ** 53 - 1` is the largest index the language will name, and a method that would push
@@ -785,7 +830,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // iteration early instead of handing the callback the `undefined` it is owed.
         || matches!(receiver, Value::TypedArray(_));
         let created = match method {
-            CallbackMethod::Map | CallbackMethod::ParallelMap => {
+            CallbackMethod::Map => {
                 Some(self.array_species_create(receiver, length, instruction)?)
             }
             CallbackMethod::Filter | CallbackMethod::FlatMap => {
@@ -814,7 +859,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 instruction,
             )?;
             match method {
-                CallbackMethod::Map | CallbackMethod::ParallelMap => {
+                CallbackMethod::Map => {
                     self.create_element(
                         created.as_ref().unwrap_or(&Value::Undefined),
                         index,
@@ -876,9 +921,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         Ok(match method {
-            CallbackMethod::Map | CallbackMethod::ParallelMap => {
-                created.unwrap_or(Value::Undefined)
-            }
+            CallbackMethod::Map => created.unwrap_or(Value::Undefined),
             CallbackMethod::Filter | CallbackMethod::FlatMap => {
                 let created = created.unwrap_or(Value::Undefined);
                 self.finish_created_array(&created, written)?;

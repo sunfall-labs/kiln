@@ -14,7 +14,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::WeakMapConstructor | Native::WeakSetConstructor
         );
         let mut data = ObjectData::default();
-        data.set("@@entries", Value::Array(ArrayData::new(Vec::new())));
+        if weak {
+            data.weak_collection_entries = Some(Box::default());
+        } else {
+            data.set("@@entries", Value::Array(ArrayData::new(Vec::new())));
+        }
         if is_map {
             data.set("@@map", Value::Boolean(true));
         }
@@ -35,7 +39,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             RealmId::PRIMARY,
         ));
         data.set(COLLECTION_SIZE, Value::Number(0.0));
-        let collection = Value::Object(Rc::new(RefCell::new(data)));
+        let collection = Value::Object(tracked_object(data));
+        if weak {
+            if let Value::Object(object) = &collection {
+                let module_map = self.gc_module_map();
+                let mut module_map = module_map.borrow_mut();
+                if module_map.gc_weak_collections.len()
+                    >= module_map.gc_weak_collections_prune_at.max(1024)
+                {
+                    module_map
+                        .gc_weak_collections
+                        .retain(|entry| entry.strong_count() > 0);
+                    module_map.gc_weak_collections_prune_at = module_map
+                        .gc_weak_collections
+                        .len()
+                        .saturating_add(module_map.gc_weak_collections.len().max(1024));
+                }
+                module_map.gc_weak_collections.push(Rc::downgrade(object));
+            }
+        }
         // A seeded collection goes through `add`/`set`, so deduplication and size accounting are
         // the same code the explicit calls use rather than a second copy of it.
         if let Some(source) = arguments.first().cloned()

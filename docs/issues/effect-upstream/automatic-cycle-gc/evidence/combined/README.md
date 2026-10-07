@@ -1,0 +1,7 @@
+# Combined interpreter validation
+
+The combined tree contains automatic pressure-driven cycle collection, the previously pushed same-representation/ASCII string equality paths, the ordinary-key classifier prefix guard and all earlier private/array fixes. Final full interpreter crate validation under pinned Rust 1.97.1 and one-worker mbx passed **285 tests, 0 failed, 1 ignored**; doc tests 0. Complete logs, terminal receipts and relevant source digests are retained.
+
+The first combined run caught the production internal-slot inventory scanner reading negative program-visible key literals from the new inline classifier test. The test moved to the existing `src/tests/language.rs` directory, which the production scanner already excludes. A separate inline positive test retains coverage of every private internal-slot table row. The guard was not weakened and production classification was not changed. The intermediate relocation attempt referenced a private table; the final split keeps that table private. Failed/compile-error logs are retained as well as the successful run.
+
+The focused collector controls and previous 283-test run on the agent's base are archived in the adjacent `efd9` directory. Native GC code is unchanged by this interpreter patch. No original Arbitrary result or memory bound is claimed yet; the 178-case, 4 GiB replay remains required. Nested Rust callback executions conservatively defer automatic collection until an outermost opcode boundary, where prior instruction borrows have ended; same-job WeakRef keepalive is preserved.

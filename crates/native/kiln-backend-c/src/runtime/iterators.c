@@ -5,22 +5,21 @@
  * hand back the array itself -- an array has no `next`. The state is two reserved properties on
  * an ordinary object, which is what the interpreter does and for the same reason: an iterator is
  * an object with a method, and inventing a third kind of value for it would buy nothing. */
-static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
+static int kiln_c99_new_iterator(kiln_value *out, kiln_value items, int kind) {
     kiln_value iterator;
+    kiln_value prototype;
     int status = kiln_c99_new_object(&iterator);
     if (status != KILN_C99_OK) {
         return status;
     }
+    status = kiln_c99_builtin_iterator_prototype(kind, &prototype);
+    if (status == KILN_C99_OK) status = kiln_c99_set_prototype(iterator, prototype);
+    if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(NULL, iterator, "@@iterated", 10, items, 0, NULL);
     if (status != KILN_C99_OK) {
         return status;
     }
     status = kiln_c99_put(NULL, iterator, "@@index", 7, kiln_c99_number(0.0), 0, NULL);
-    if (status != KILN_C99_OK) {
-        return status;
-    }
-    status = kiln_c99_put(NULL, iterator, "next", 4,
-                          kiln_c99_method(KILN_C99_METHOD_ITERATOR_NEXT), 0, NULL);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -36,7 +35,7 @@ static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
 }
 
 static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part) {
-    int status = kiln_c99_new_iterator(out, source);
+    int status = kiln_c99_new_iterator(out, source, 3);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -370,7 +369,7 @@ static int kiln_c99_iterator_from(kiln_host *host, kiln_value *result, kiln_valu
             status = kiln_c99_iterate(host, characters, value, depth, thrown);
         }
         if (status == KILN_C99_OK) {
-            status = kiln_c99_new_iterator(&iterator, characters);
+            status = kiln_c99_new_iterator(&iterator, characters, 1);
         }
         if (status == KILN_C99_OK) {
             status = kiln_c99_get(host, iterator, "next", 4, &next, depth, thrown);

@@ -204,7 +204,8 @@ pub(super) fn escape_analysis_with(
                         live_values.insert(*object);
                     }
                     GraphOp::SetProperty { object, value, .. }
-                    | GraphOp::SetPropertyStrict { object, value, .. } => {
+                    | GraphOp::SetPropertyStrict { object, value, .. }
+                    | GraphOp::DefineOwnProperty { object, value, .. } => {
                         live_values.insert(*object);
                         live_values.insert(*value);
                     }
@@ -216,6 +217,9 @@ pub(super) fn escape_analysis_with(
                         object, key, value, ..
                     }
                     | GraphOp::SetComputedStrict {
+                        object, key, value, ..
+                    }
+                    | GraphOp::DefineOwnComputed {
                         object, key, value, ..
                     } => {
                         live_values.insert(*object);
@@ -474,6 +478,12 @@ pub(super) fn escape_analysis_with(
                     name,
                     value,
                     ..
+                }
+                | GraphOp::DefineOwnProperty {
+                    object,
+                    name,
+                    value,
+                    ..
                 } => {
                     if let Some(&root) = alias_to_root.get(value) {
                         escaped.insert(root);
@@ -518,6 +528,9 @@ pub(super) fn escape_analysis_with(
                     object, key, value, ..
                 }
                 | GraphOp::SetComputedStrict {
+                    object, key, value, ..
+                }
+                | GraphOp::DefineOwnComputed {
                     object, key, value, ..
                 } => {
                     if let Some(&root) = alias_to_root.get(value) {
@@ -575,6 +588,7 @@ pub(super) fn escape_analysis_with(
                     GraphOp::GetProperty { object, name, .. }
                     | GraphOp::SetProperty { object, name, .. }
                     | GraphOp::SetPropertyStrict { object, name, .. }
+                    | GraphOp::DefineOwnProperty { object, name, .. }
                         if alias_to_root.get(object) == Some(&alloc_id) =>
                     {
                         if let Some(Constant::String(s)) = program.constants.get(*name as usize) {
@@ -586,6 +600,7 @@ pub(super) fn escape_analysis_with(
                     GraphOp::GetComputed { object, key, .. }
                     | GraphOp::SetComputed { object, key, .. }
                     | GraphOp::SetComputedStrict { object, key, .. }
+                    | GraphOp::DefineOwnComputed { object, key, .. }
                         if alias_to_root.get(object) == Some(&alloc_id) =>
                     {
                         if let Some(prop) = resolve_const_string(*key, &defs, program) {
@@ -641,6 +656,12 @@ pub(super) fn escape_analysis_with(
                         name,
                         value,
                         ..
+                    }
+                    | GraphOp::DefineOwnProperty {
+                        object,
+                        name,
+                        value,
+                        ..
                     } if alias_to_root.get(object) == Some(&alloc_id) => {
                         if let Some(&field_idx) = field_by_name_index.get(name) {
                             field_written_values
@@ -653,6 +674,9 @@ pub(super) fn escape_analysis_with(
                         object, key, value, ..
                     }
                     | GraphOp::SetComputedStrict {
+                        object, key, value, ..
+                    }
+                    | GraphOp::DefineOwnComputed {
                         object, key, value, ..
                     } if alias_to_root.get(object) == Some(&alloc_id) => {
                         if let Some(prop) = resolve_const_string(*key, &defs, program)

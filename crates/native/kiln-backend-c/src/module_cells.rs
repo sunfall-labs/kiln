@@ -70,6 +70,10 @@ thread_local! {
     /// The plan of the unit being emitted, while one emitted with `shared_region` is; a
     /// thread-local for the reason `emit_graph`'s `PARALLEL_CLONE` is.
     static PLAN: RefCell<Option<Rc<RegionPlan>>> = const { RefCell::new(None) };
+    /// Module locals are seeded with live cells by graph linking and split instantiation.
+    /// Their first `NewCell` must preserve that identity; ordinary lexical cells are newly
+    /// allocated each time their declaration executes, including on every loop pass.
+    static LINKED_CELLS: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
 }
 
 /// Run `f` with `plan` as the plan of the unit it emits, restoring the previous one.
@@ -78,6 +82,18 @@ pub(crate) fn with_plan<R>(plan: Option<Rc<RegionPlan>>, f: impl FnOnce() -> R) 
     let out = f();
     PLAN.with(|cell| *cell.borrow_mut() = before);
     out
+}
+
+/// Run module-body emission with the slots whose cells precede module evaluation.
+pub(crate) fn with_linked_cells<R>(slots: HashSet<u32>, f: impl FnOnce() -> R) -> R {
+    let before = LINKED_CELLS.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), slots));
+    let out = f();
+    LINKED_CELLS.with(|cell| *cell.borrow_mut() = before);
+    out
+}
+
+pub(crate) fn is_linked_cell(slot: u32) -> bool {
+    LINKED_CELLS.with(|cell| cell.borrow().contains(&slot))
 }
 
 fn with_current<R>(f: impl FnOnce(&RegionPlan) -> R) -> Option<R> {

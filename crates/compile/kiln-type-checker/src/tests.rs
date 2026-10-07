@@ -132,6 +132,90 @@ fn reports_bun_engine_negative_annotation_as_ts2322() {
 }
 
 #[test]
+fn checker_marks_unrepresentable_generated_capability_expressions_incomplete() {
+    let path = "/project/synthetic.ts";
+    let source = "const value = 1;                    ";
+    let (mut snapshot, roots) = snapshot_with(&[(path, source)]);
+    let mut module = kiln_frontend_oxc::parse_static_typescript(
+        path,
+        source,
+        kiln_frontend_oxc::StaticTypescriptPolicy::PreserveAuthoredSource,
+    );
+    for (kind, start) in [
+        (kiln_hir::ExpressionKind::GlobalObject, 17),
+        (kiln_hir::ExpressionKind::ProcessObject, 19),
+    ] {
+        let span = kiln_hir::Span::new(start, start + 1);
+        module.type_syntax.body.push(kiln_hir::Statement {
+            kind: kiln_hir::StatementKind::Expression(kiln_hir::Expression { kind, span }),
+            span,
+        });
+    }
+    snapshot.modules.insert(path.into(), Arc::new(module));
+
+    let result = check_snapshot_with_options(&snapshot, &roots, &options());
+    assert!(
+        !result.complete,
+        "checker must not silently assign a type to unrepresentable compiler capabilities"
+    );
+    for message in [
+        "compiler-generated global object expression",
+        "compiler-generated process capability expression",
+    ] {
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(message)),
+            "missing explicit adapter gap {message:?}: {}",
+            format_diagnostics(&result.diagnostics)
+        );
+    }
+}
+
+#[test]
+fn checker_treats_inline_literal_eval_as_its_original_call() {
+    let path = "/project/eval.ts";
+    let source = "eval('1');";
+    let (mut snapshot, roots) = snapshot_with(&[(path, source)]);
+    let mut module = kiln_frontend_oxc::parse_static_typescript(
+        path,
+        source,
+        kiln_frontend_oxc::StaticTypescriptPolicy::PreserveAuthoredSource,
+    );
+    let call_span = kiln_hir::Span::new(0, source.len() as u32);
+    module.type_syntax.body.push(kiln_hir::Statement {
+        kind: kiln_hir::StatementKind::Expression(kiln_hir::Expression {
+            kind: kiln_hir::ExpressionKind::InlineLiteralEval {
+                callee: Box::new(kiln_hir::Expression {
+                    kind: kiln_hir::ExpressionKind::Identifier("eval".into()),
+                    span: kiln_hir::Span::new(0, 4),
+                }),
+                argument: Box::new(kiln_hir::Expression {
+                    kind: kiln_hir::ExpressionKind::Literal(kiln_hir::Literal::String(
+                        kiln_hir::StringUnits::from("1"),
+                    )),
+                    span: kiln_hir::Span::new(5, 8),
+                }),
+                expression: Box::new(kiln_hir::Expression {
+                    kind: kiln_hir::ExpressionKind::Literal(kiln_hir::Literal::Number(
+                        1.0f64.to_bits(),
+                    )),
+                    span: kiln_hir::Span::new(0, 1),
+                }),
+            },
+            span: call_span,
+        }),
+        span: call_span,
+    });
+    snapshot.modules.insert(path.into(), Arc::new(module));
+
+    let result = check_snapshot_with_options(&snapshot, &roots, &options());
+    assert_complete(&result);
+    assert_clean(&result);
+}
+
+#[test]
 fn es5_dom_declarations_retain_statement_modifiers_and_index_member_types() {
     let path = "/project/main.ts";
     let mut declaration_options = options();

@@ -276,6 +276,17 @@ fn every_executable_script_is_strict_and_sources_the_library() {
             continue;
         }
         let source = std::fs::read_to_string(&script).expect("script is readable");
+        // The release installer runs on a user's machine through `curl ... | sh`, where bash may
+        // be absent or 3.2, so it is POSIX sh. `pipefail` is not POSIX; it is strict with
+        // `set -eu` and checks every download explicitly.
+        if script.file_name().is_some_and(|name| name == "install.sh") {
+            assert!(
+                source.starts_with("#!/bin/sh\n") && source.contains("\nset -eu\n"),
+                "{} is the POSIX installer: it needs `#!/bin/sh` and `set -eu`",
+                script.display(),
+            );
+            continue;
+        }
         assert!(
             source.starts_with("#!/usr/bin/env bash\n"),
             "{} needs `#!/usr/bin/env bash` on its first line",

@@ -6,7 +6,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// The conversion is the program's own -- `{length: {valueOf() { throw x }}}` throws here --
     /// and a `length` that is an object with no `valueOf` reads as `NaN`, which is an empty walk
     /// rather than an error.
-    pub(super) fn array_like_length(
+    pub(crate) fn array_like_length(
         &mut self,
         target: &Value,
         instruction: usize,
@@ -117,7 +117,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             #[expect(clippy::cast_possible_truncation)]
             let at = index as usize;
             let mut elements = items.borrow_mut();
-            if at < elements.len() {
+            if at < elements.len() && !Self::is_hole(&elements[at]) {
                 elements[at] = value;
                 return Ok(());
             }
@@ -189,7 +189,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     self.check_set_invariant(&inner, key, &value, instruction)
                 }
-                None => self.set_or_throw(&inner, key, value, instruction),
+                None => {
+                    if self.set_reflect(&inner, key, value, target, instruction)? {
+                        Ok(())
+                    } else {
+                        Err(Self::write_refused(key))
+                    }
+                }
             };
         }
         // Ordinary numeric writes need no key spelling or prototype scan when the array
@@ -205,6 +211,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             && !items.properties.borrow().is_frozen()
             && items.properties.borrow().prototype().is_none()
             && !self.intrinsics.indexed_array_prototype.get()
+            && !self
+                .intrinsics
+                .indexed_prototype_chain_is_custom(RealmId::PRIMARY)
         {
             return self.set_array_index(target, items, *index as usize, value, instruction);
         }
@@ -246,7 +255,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         // Use the same descriptor authority for ordinary and intrinsic prototypes. The
         // latter may have materialized properties that replace (or add to) the static table.
-        let mut current = prototype_of(target);
+        let mut current = prototype_of_in(&self.intrinsics, target);
         while matches!(
             current,
             Value::Object(_)
@@ -264,7 +273,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some((Property::Accessor { set, .. }, _)) => return set.is_some(),
                 None => {}
             }
-            current = prototype_of(&current);
+            current = prototype_of_in(&self.intrinsics, &current);
         }
         if let Value::Array(items) = target
             && let Some(index) = array_index_key(key)
@@ -316,7 +325,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Callback(method, _) => matches!(
                 method,
                 CallbackMethod::Map
-                    | CallbackMethod::ParallelMap
                     | CallbackMethod::ForEach
                     | CallbackMethod::Filter
                     | CallbackMethod::Reduce
@@ -498,7 +506,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             &[
                 target.clone(),
                 Value::String(key.into()),
-                Value::Object(Rc::new(RefCell::new(data))),
+                Value::Object(tracked_object(data)),
             ],
             instruction,
         )?;

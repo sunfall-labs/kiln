@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// `parallelFilter` is `filter` (ADR 0068 rule 3; .scratch/parallel-builtins issue 10). A pure
+// `parallelFilter` is `filter` (ADR 0068 rule 3; docs/issues/parallel-builtins issue 10). A pure
 // numeric predicate -- one returning booleans, or numbers read through `ToBoolean` -- runs on the
 // pool as a keep mask, and the kept elements are copied in index order; every other call runs the
 // sequential definition in `kiln-builtins/src/parallel.ts`, which is `filter` itself. Each pair

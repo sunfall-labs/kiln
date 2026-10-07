@@ -1,282 +1,328 @@
-//! Host GUI and OS utility capability engine for Kiln (ADR 0074).
-//! Provides cross-platform desktop dialogs, clipboard, system theme detection,
-//! native menus, and system tray integration.
+//! The native half of kiln:gui (ADR 0074): widgets, layout and OS services behind one C ABI.
+//!
+//! * [`ffi`] is the ABI the TypeScript library binds with `dlopen` (`kiln_gui_*`, version
+//!   [`ffi::ABI_VERSION`]).
+//! * `appkit` is the macOS widget backend and `gtk` the Linux one (GTK 4, behind the default
+//!   `gtk` feature). Other platforms report that they have none, and the TypeScript side falls
+//!   back with that reason rather than pretending.
+//! * [`layout`] parses the style objects the TypeScript side sends and keeps the Taffy tree.
+//! * [`events`] is the queue between toolkit callbacks and the program.
+//! * The modules below are OS services that do not need a widget backend: dialogs, clipboard,
+//!   theme, notifications, tray icons, global shortcuts, well-known paths, single-instance.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
+#[cfg(target_os = "macos")]
+pub mod appkit;
+pub mod events;
 pub mod ffi;
+#[cfg(all(target_os = "linux", feature = "gtk"))]
+pub mod gtk;
+pub mod layout;
 
-// OS Dialog Options
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileFilter {
     pub name: String,
     pub extensions: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct OpenFileOptions {
+/// Every dialog's options; each kind reads the fields it understands.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DialogOptions {
     pub title: Option<String>,
-    pub filters: Option<Vec<FileFilter>>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SaveFileOptions {
-    pub title: Option<String>,
+    pub message: Option<String>,
+    pub detail: Option<String>,
     pub default_path: Option<String>,
+    pub file_name: Option<String>,
     pub filters: Option<Vec<FileFilter>>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct MessageOptions {
-    pub title: Option<String>,
-    pub message: String,
-    pub kind: Option<String>, // "info" | "warning" | "error"
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct PickFolderOptions {
-    pub title: Option<String>,
-    pub default_path: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct NotificationOptions {
-    pub title: String,
-    pub body: Option<String>,
-    pub app_name: Option<String>,
+    pub multiple: Option<bool>,
+    pub kind: Option<String>,
 }
 
 pub mod dialog {
     use super::*;
+    use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 
-    pub async fn open_file(options: Option<OpenFileOptions>) -> Option<String> {
-        let mut d = rfd::AsyncFileDialog::new();
-        if let Some(opts) = options {
-            if let Some(title) = opts.title {
-                d = d.set_title(&title);
-            }
-            if let Some(filters) = opts.filters {
-                for filter in filters {
-                    let exts: Vec<&str> = filter.extensions.iter().map(|s| s.as_str()).collect();
-                    d = d.add_filter(&filter.name, &exts);
+    fn file_dialog(options: &DialogOptions) -> FileDialog {
+        let mut d = FileDialog::new();
+        if let Some(title) = &options.title {
+            d = d.set_title(title);
+        }
+        if let Some(dir) = &options.default_path {
+            d = d.set_directory(dir);
+        }
+        if let Some(name) = &options.file_name {
+            d = d.set_file_name(name);
+        }
+        for filter in options.filters.iter().flatten() {
+            let exts: Vec<&str> = filter.extensions.iter().map(String::as_str).collect();
+            d = d.add_filter(&filter.name, &exts);
+        }
+        d
+    }
+
+    fn path(p: std::path::PathBuf) -> Value {
+        Value::String(p.to_string_lossy().into_owned())
+    }
+
+    /// Runs a modal dialog. The result is JSON: a path, a list of paths, `true`/`false` for a
+    /// confirmation, or `null` when the person cancelled.
+    pub fn run(kind: &str, options: &DialogOptions) -> Result<Value, String> {
+        Ok(match kind {
+            "open" if options.multiple == Some(true) => file_dialog(options)
+                .pick_files()
+                .map(|paths| Value::Array(paths.into_iter().map(path).collect()))
+                .unwrap_or(Value::Null),
+            "open" => file_dialog(options)
+                .pick_file()
+                .map(path)
+                .unwrap_or(Value::Null),
+            "save" => file_dialog(options)
+                .save_file()
+                .map(path)
+                .unwrap_or(Value::Null),
+            "folder" => file_dialog(options)
+                .pick_folder()
+                .map(path)
+                .unwrap_or(Value::Null),
+            "message" | "confirm" => {
+                let level = match options.kind.as_deref() {
+                    Some("warning") => MessageLevel::Warning,
+                    Some("error") => MessageLevel::Error,
+                    _ => MessageLevel::Info,
+                };
+                let mut d = MessageDialog::new().set_level(level).set_description(
+                    options
+                        .detail
+                        .clone()
+                        .or_else(|| options.message.clone())
+                        .unwrap_or_default(),
+                );
+                if let Some(title) = options
+                    .title
+                    .clone()
+                    .or_else(|| options.message.clone().filter(|_| options.detail.is_some()))
+                {
+                    d = d.set_title(title);
                 }
-            }
-        }
-        let handle = d.pick_file().await?;
-        Some(handle.path().to_string_lossy().into_owned())
-    }
-
-    pub async fn open_files(options: Option<OpenFileOptions>) -> Vec<String> {
-        let mut d = rfd::AsyncFileDialog::new();
-        if let Some(opts) = options {
-            if let Some(title) = opts.title {
-                d = d.set_title(&title);
-            }
-            if let Some(filters) = opts.filters {
-                for filter in filters {
-                    let exts: Vec<&str> = filter.extensions.iter().map(|s| s.as_str()).collect();
-                    d = d.add_filter(&filter.name, &exts);
+                if kind == "confirm" {
+                    d = d.set_buttons(MessageButtons::OkCancel);
                 }
+                let result = d.show();
+                json!(matches!(
+                    result,
+                    MessageDialogResult::Ok | MessageDialogResult::Yes
+                ))
             }
-        }
-        let handles = d.pick_files().await;
-        handles
-            .into_iter()
-            .flatten()
-            .map(|h| h.path().to_string_lossy().into_owned())
-            .collect()
-    }
-
-    pub async fn pick_folder(options: Option<PickFolderOptions>) -> Option<String> {
-        let mut d = rfd::AsyncFileDialog::new();
-        if let Some(opts) = options {
-            if let Some(title) = opts.title {
-                d = d.set_title(&title);
-            }
-            if let Some(def_path) = opts.default_path {
-                d = d.set_directory(&def_path);
-            }
-        }
-        let handle = d.pick_folder().await?;
-        Some(handle.path().to_string_lossy().into_owned())
-    }
-
-    pub async fn save_file(options: Option<SaveFileOptions>) -> Option<String> {
-        let mut d = rfd::AsyncFileDialog::new();
-        if let Some(opts) = options {
-            if let Some(title) = opts.title {
-                d = d.set_title(&title);
-            }
-            if let Some(def_path) = opts.default_path {
-                d = d.set_file_name(&def_path);
-            }
-            if let Some(filters) = opts.filters {
-                for filter in filters {
-                    let exts: Vec<&str> = filter.extensions.iter().map(|s| s.as_str()).collect();
-                    d = d.add_filter(&filter.name, &exts);
-                }
-            }
-        }
-        let handle = d.save_file().await?;
-        Some(handle.path().to_string_lossy().into_owned())
-    }
-
-    pub async fn message(options: MessageOptions) {
-        let level = match options.kind.as_deref() {
-            Some("warning") => rfd::MessageLevel::Warning,
-            Some("error") => rfd::MessageLevel::Error,
-            _ => rfd::MessageLevel::Info,
-        };
-        let mut d = rfd::AsyncMessageDialog::new()
-            .set_level(level)
-            .set_description(&options.message);
-        if let Some(title) = options.title {
-            d = d.set_title(&title);
-        }
-        d.show().await;
+            other => return Err(format!("unknown dialog `{other}`")),
+        })
     }
 }
 
 pub mod clipboard {
-    use std::sync::Mutex;
-
-    static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
-
     pub fn read_text() -> Result<String, String> {
-        let _guard = CLIPBOARD_LOCK.lock().unwrap();
-        let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-        cb.get_text().map_err(|e| e.to_string())
+        arboard::Clipboard::new()
+            .and_then(|mut cb| cb.get_text())
+            .map_err(|e| e.to_string())
     }
 
     pub fn write_text(text: &str) -> Result<(), String> {
-        let _guard = CLIPBOARD_LOCK.lock().unwrap();
-        let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-        cb.set_text(text).map_err(|e| e.to_string())
+        arboard::Clipboard::new()
+            .and_then(|mut cb| cb.set_text(text))
+            .map_err(|e| e.to_string())
     }
 
     pub fn clear() -> Result<(), String> {
-        let _guard = CLIPBOARD_LOCK.lock().unwrap();
-        let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-        cb.clear().map_err(|e| e.to_string())
+        arboard::Clipboard::new()
+            .and_then(|mut cb| cb.clear())
+            .map_err(|e| e.to_string())
     }
 }
 
 pub mod theme {
-    pub fn get_theme() -> &'static str {
-        match dark_light::detect() {
-            dark_light::Mode::Dark => "dark",
-            dark_light::Mode::Light => "light",
-            dark_light::Mode::Default => "light",
-        }
+    pub fn is_dark() -> bool {
+        matches!(dark_light::detect(), dark_light::Mode::Dark)
     }
 }
 
 pub mod notification {
-    use super::*;
-
-    pub async fn show(options: NotificationOptions) -> Result<(), String> {
+    /// Posts a desktop notification. An unbundled binary cannot use the macOS notification
+    /// center directly, so macOS goes through `osascript`, which can.
+    pub fn show(title: &str, body: &str, app_name: &str) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            let script = format!(
+                "display notification \"{}\" with title \"{}\"",
+                quote(body),
+                quote(if title.is_empty() { app_name } else { title })
+            );
+            let status = std::process::Command::new("osascript")
+                .args(["-e", &script])
+                .status()
+                .map_err(|e| e.to_string())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("osascript exited with {status}"))
+            }
+        }
         #[cfg(target_os = "linux")]
         {
-            let connection = zbus::Connection::session()
-                .await
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
                 .map_err(|e| e.to_string())?;
-            let app_name = options.app_name.as_deref().unwrap_or("Kiln");
-            let body = options.body.as_deref().unwrap_or("");
-            let empty_actions: &[&str] = &[];
-            let empty_hints = std::collections::HashMap::<&str, zbus::zvariant::Value>::new();
-            connection
-                .call_method(
-                    Some("org.freedesktop.Notifications"),
-                    "/org/freedesktop/Notifications",
-                    Some("org.freedesktop.Notifications"),
-                    "Notify",
-                    &(
-                        app_name,
-                        0u32,
-                        "",
-                        &options.title,
-                        body,
-                        empty_actions,
-                        empty_hints,
-                        -1i32,
-                    ),
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(())
+            runtime.block_on(async {
+                let connection = zbus::Connection::session()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let actions: &[&str] = &[];
+                let hints = std::collections::HashMap::<&str, zbus::zvariant::Value>::new();
+                connection
+                    .call_method(
+                        Some("org.freedesktop.Notifications"),
+                        "/org/freedesktop/Notifications",
+                        Some("org.freedesktop.Notifications"),
+                        "Notify",
+                        &(app_name, 0u32, "", title, body, actions, hints, -1i32),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let _ = options;
-            Ok(())
+            let _ = (title, body, app_name);
+            Err("notifications are not implemented on this platform".into())
         }
     }
+}
+
+/// Builds a muda menu from the same JSON shape as the menu bar.
+fn context_menu(items: &[Value]) -> muda::Menu {
+    fn label(item: &Value) -> String {
+        item.get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    }
+    fn fill(target: &dyn Fn(&dyn muda::IsMenuItem), items: &[Value]) {
+        for item in items {
+            if item.get("separator").and_then(Value::as_bool) == Some(true) {
+                target(&muda::PredefinedMenuItem::separator());
+            } else if let Some(Value::Array(children)) = item.get("items") {
+                let sub = muda::Submenu::new(label(item), true);
+                fill(
+                    &|child| {
+                        let _ = sub.append(child);
+                    },
+                    children,
+                );
+                target(&sub);
+            } else {
+                let id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| label(item));
+                let enabled = item.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                let accelerator = item
+                    .get("accelerator")
+                    .and_then(Value::as_str)
+                    .and_then(|a| a.parse().ok());
+                if let Some(checked) = item.get("checked").and_then(Value::as_bool) {
+                    target(&muda::CheckMenuItem::with_id(
+                        id,
+                        label(item),
+                        enabled,
+                        checked,
+                        accelerator,
+                    ));
+                } else {
+                    target(&muda::MenuItem::with_id(
+                        id,
+                        label(item),
+                        enabled,
+                        accelerator,
+                    ));
+                }
+            }
+        }
+    }
+    let menu = muda::Menu::new();
+    fill(
+        &|item| {
+            let _ = menu.append(item);
+        },
+        items,
+    );
+    menu
 }
 
 pub mod tray {
+    use super::*;
     use std::cell::RefCell;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::collections::HashMap;
     use tray_icon::{TrayIcon, TrayIconBuilder};
 
-    static TRAY_ID_COUNTER: AtomicU32 = AtomicU32::new(1);
     thread_local! {
-        static ACTIVE_TRAYS: RefCell<Vec<(u32, TrayIcon)>> = const { RefCell::new(Vec::new()) };
+        static TRAYS: RefCell<HashMap<u32, TrayIcon>> = RefCell::new(HashMap::new());
+        static NEXT: RefCell<u32> = const { RefCell::new(1) };
     }
 
-    pub fn create_tray_icon(tooltip: &str) -> Result<u32, String> {
-        let id = TRAY_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tray = TrayIconBuilder::new()
-            .with_tooltip(tooltip)
-            .build()
-            .map_err(|e| e.to_string())?;
-
-        ACTIVE_TRAYS.with(|trays| {
-            trays.borrow_mut().push((id, tray));
+    /// `{ title, tooltip, menu: [...] }`. Returns the tray's id.
+    pub fn create(spec: &Value) -> Result<u32, String> {
+        let id = NEXT.with(|n| {
+            let mut n = n.borrow_mut();
+            *n += 1;
+            *n - 1
         });
+        let mut builder = TrayIconBuilder::new().with_id(id.to_string());
+        if let Some(title) = spec.get("title").and_then(Value::as_str) {
+            builder = builder.with_title(title);
+        }
+        if let Some(tooltip) = spec.get("tooltip").and_then(Value::as_str) {
+            builder = builder.with_tooltip(tooltip);
+        }
+        if let Some(Value::Array(items)) = spec.get("menu") {
+            builder = builder.with_menu(Box::new(context_menu(items)));
+        }
+        let tray = builder.build().map_err(|e| e.to_string())?;
+        TRAYS.with(|t| t.borrow_mut().insert(id, tray));
         Ok(id)
     }
 
-    pub fn set_tooltip(id: u32, tooltip: &str) -> Result<(), String> {
-        ACTIVE_TRAYS.with(|trays| {
-            if let Some((_, tray)) = trays.borrow_mut().iter_mut().find(|(t_id, _)| *t_id == id) {
-                tray.set_tooltip(Some(tooltip)).map_err(|e| e.to_string())
-            } else {
-                Err(format!("tray {id} not found"))
+    pub fn update(id: u32, spec: &Value) -> Result<(), String> {
+        TRAYS.with(|t| {
+            let trays = t.borrow();
+            let tray = trays.get(&id).ok_or_else(|| format!("no tray {id}"))?;
+            if let Some(title) = spec.get("title").and_then(Value::as_str) {
+                tray.set_title(Some(title));
             }
+            if let Some(tooltip) = spec.get("tooltip").and_then(Value::as_str) {
+                tray.set_tooltip(Some(tooltip)).map_err(|e| e.to_string())?;
+            }
+            if let Some(Value::Array(items)) = spec.get("menu") {
+                tray.set_menu(Some(Box::new(context_menu(items))));
+            }
+            Ok(())
         })
     }
 
-    pub fn destroy_tray_icon(id: u32) {
-        ACTIVE_TRAYS.with(|trays| {
-            trays.borrow_mut().retain(|(t_id, _)| *t_id != id);
-        });
-    }
-
-    pub fn clear_tray_icons() {
-        ACTIVE_TRAYS.with(|trays| {
-            trays.borrow_mut().clear();
-        });
-    }
-}
-
-pub mod menu {
-    pub fn create_menu() -> muda::Menu {
-        muda::Menu::new()
-    }
-
-    pub fn create_separator() -> muda::PredefinedMenuItem {
-        muda::PredefinedMenuItem::separator()
-    }
-
-    pub fn create_submenu(text: &str, enabled: bool) -> muda::Submenu {
-        muda::Submenu::new(text, enabled)
+    pub fn destroy(id: u32) {
+        TRAYS.with(|t| t.borrow_mut().remove(&id));
     }
 }
 
 pub mod app {
     use std::path::PathBuf;
 
-    pub fn get_path(name: &str) -> Option<PathBuf> {
+    pub fn path(name: &str) -> Option<PathBuf> {
         match name {
             "home" => dirs::home_dir(),
             "config" | "appData" => dirs::config_dir(),
@@ -292,21 +338,21 @@ pub mod app {
 }
 
 pub mod single_instance {
-    #[cfg(unix)]
-    use std::os::unix::net::UnixListener;
-    use std::sync::Mutex;
+    use std::cell::RefCell;
 
-    static LOCK_HOLDER: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);
+    thread_local! {
+        static HOLDER: RefCell<Option<Box<dyn std::any::Any>>> = const { RefCell::new(None) };
+    }
 
-    pub fn request_single_instance_lock(app_id: &str) -> bool {
-        let mut guard = LOCK_HOLDER.lock().unwrap();
-        if guard.is_some() {
+    /// True when this process is the only one holding `app_id`.
+    pub fn acquire(app_id: &str) -> bool {
+        if HOLDER.with(|h| h.borrow().is_some()) {
             return true;
         }
-
         #[cfg(unix)]
         {
-            let safe_id: String = app_id
+            use std::os::unix::net::{UnixListener, UnixStream};
+            let safe: String = app_id
                 .chars()
                 .map(|c| {
                     if c.is_alphanumeric() || c == '-' || c == '_' {
@@ -316,22 +362,19 @@ pub mod single_instance {
                     }
                 })
                 .collect();
-            let sock_path = std::env::temp_dir().join(format!("kiln-app-{safe_id}.sock"));
-
-            if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
+            let path = std::env::temp_dir().join(format!("kiln-app-{safe}.sock"));
+            if UnixStream::connect(&path).is_ok() {
                 return false;
             }
-            let _ = std::fs::remove_file(&sock_path);
-
-            match UnixListener::bind(&sock_path) {
+            let _ = std::fs::remove_file(&path);
+            match UnixListener::bind(&path) {
                 Ok(listener) => {
-                    *guard = Some(Box::new(listener));
+                    HOLDER.with(|h| *h.borrow_mut() = Some(Box::new(listener)));
                     true
                 }
                 Err(_) => false,
             }
         }
-
         #[cfg(not(unix))]
         {
             let _ = app_id;
@@ -341,52 +384,82 @@ pub mod single_instance {
 }
 
 pub mod hotkey {
-    use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, hotkey::HotKey};
+    use global_hotkey::{GlobalHotKeyManager, hotkey::HotKey};
     use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::str::FromStr;
 
     thread_local! {
         static MANAGER: RefCell<Option<GlobalHotKeyManager>> = const { RefCell::new(None) };
-        static HOTKEYS: RefCell<HashMap<u32, HotKey>> = RefCell::new(HashMap::new());
+        static KEYS: RefCell<HashMap<u32, HotKey>> = RefCell::new(HashMap::new());
     }
 
     pub fn register(accelerator: &str) -> Result<u32, String> {
-        let hotkey = HotKey::from_str(accelerator).map_err(|e| e.to_string())?;
-        let id = hotkey.id();
-        MANAGER.with(|mgr| {
-            let mut mgr_borrow = mgr.borrow_mut();
-            if mgr_borrow.is_none() {
-                *mgr_borrow = Some(GlobalHotKeyManager::new().map_err(|e| e.to_string())?);
+        let hotkey: HotKey = accelerator.parse().map_err(|e| format!("{e}"))?;
+        MANAGER.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.is_none() {
+                *m = Some(GlobalHotKeyManager::new().map_err(|e| e.to_string())?);
             }
-            if let Some(m) = mgr_borrow.as_ref() {
-                m.register(hotkey).map_err(|e| e.to_string())?;
-            }
-            HOTKEYS.with(|keys| {
-                keys.borrow_mut().insert(id, hotkey);
+            m.as_ref()
+                .expect("manager")
+                .register(hotkey)
+                .map_err(|e| e.to_string())
+        })?;
+        KEYS.with(|k| k.borrow_mut().insert(hotkey.id(), hotkey));
+        Ok(hotkey.id())
+    }
+
+    pub fn unregister(id: u32) {
+        if let Some(hotkey) = KEYS.with(|k| k.borrow_mut().remove(&id)) {
+            MANAGER.with(|m| {
+                if let Some(m) = m.borrow().as_ref() {
+                    let _ = m.unregister(hotkey);
+                }
             });
-            Ok(id)
-        })
+        }
     }
+}
 
-    pub fn unregister(id: u32) -> Result<(), String> {
-        MANAGER.with(|mgr| {
-            if let Some(m) = mgr.borrow().as_ref() {
-                HOTKEYS.with(|keys| {
-                    if let Some(hotkey) = keys.borrow_mut().remove(&id) {
-                        let _ = m.unregister(hotkey);
-                    }
-                });
-            }
-            Ok(())
-        })
+/// Moves tray, tray-menu and global-shortcut notifications into the event queue. Those crates
+/// deliver through process-wide channels; a key press arrives as a press and a release, and only
+/// the press is an event for the program.
+pub fn poll_services() {
+    use events::{Event, EventKind};
+    while let Ok(event) = global_hotkey::GlobalHotKeyEvent::receiver().try_recv() {
+        if event.state == global_hotkey::HotKeyState::Pressed {
+            events::push(Event {
+                handle: 0,
+                kind: EventKind::Hotkey,
+                a: event.id as f64,
+                b: 0.0,
+                text: String::new(),
+            });
+        }
     }
-
-    pub fn poll_event() -> Option<u32> {
-        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            Some(event.id())
-        } else {
-            None
+    while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
+        events::push(Event {
+            handle: 0,
+            kind: EventKind::Menu,
+            a: 0.0,
+            b: 0.0,
+            text: event.id.0,
+        });
+    }
+    while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+        if let tray_icon::TrayIconEvent::Click {
+            id,
+            button_state: tray_icon::MouseButtonState::Up,
+            ..
+        } = event
+        {
+            let tray = id.0.parse::<f64>().unwrap_or(0.0);
+            events::push(Event {
+                handle: 0,
+                kind: EventKind::Tray,
+                a: tray,
+                b: 0.0,
+                text: String::new(),
+            });
         }
     }
 }

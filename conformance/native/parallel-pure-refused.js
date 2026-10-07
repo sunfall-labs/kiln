@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 4 (.scratch/parallel-builtins issue 09), what stays sequential: a call to a built-in that
+// Tier 4 (docs/issues/parallel-builtins issue 09), what stays sequential: a call to a built-in that
 // is not marked pure (`Math.random`, `console.log`, `push`), to a function that writes, to one
 // that is reassigned, anywhere in the call chain -- `--explain-parallel` names each (checked in
 // `parallel_tests.rs`) -- and every effect happens exactly as `map`'s, in order. A patched

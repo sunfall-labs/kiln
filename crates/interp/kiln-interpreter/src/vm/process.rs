@@ -1,18 +1,29 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    pub(super) fn process_exit_code(&mut self, update: Option<Option<i32>>) -> Option<i32> {
+        let Value::Object(process) = self.process_object() else {
+            unreachable!("the process builtin is an object");
+        };
+        let mut process = process.borrow_mut();
+        if let Some(code) = update {
+            process.process_exit_code = code;
+        }
+        process.process_exit_code
+    }
+
     /// Lazily build this execution's restricted `process` object.
     pub(super) fn process_object(&mut self) -> Value {
         if let Some(existing) = &self.process_object {
             return existing.clone();
         }
-        // A realm shared by several machines (a module graph's) has one `process`: the one its
-        // global object was given when the first machine built it. A second machine reaching
-        // `process` must find that one, or a change made through one -- a worker's `env`,
-        // set by the bootstrap before the program runs -- is invisible through the other.
+        // A shared realm keeps its original host identity in the private channel. The
+        // public global may have been replaced between module evaluations.
         if let Some(Some(Value::Object(global))) =
             self.global_objects.get(self.current_realm.0 as usize)
-            && let Some(existing @ Value::Object(_)) = global.borrow().get_own("process").cloned()
+            && let Some(Value::Object(private)) =
+                global.borrow().get_own(ENGINE_PRIVATE_SLOT).cloned()
+            && let Some(existing @ Value::Object(_)) = private.borrow().get_own("process").cloned()
         {
             self.process_object = Some(existing.clone());
             return existing;
@@ -39,7 +50,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Attributes::DEFAULT,
             );
         }
-        process.set("env", Value::Object(Rc::new(RefCell::new(env_obj))));
+        process.set("env", Value::Object(tracked_object(env_obj)));
         // Whatever the host said, verbatim -- including the two leading entries, which node
         // guarantees are there and which `const [, , first] = process.argv` depends on. A host
         // that stated no command line leaves this empty rather than inventing an executable
@@ -54,9 +65,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .collect(),
             )),
         );
-        // The runtime does not forward its own command-line flags to a user's worker. Node
-        // packages such as pino still inspect this array before creating one.
-        process.set("execArgv", Value::Array(ArrayData::new(Vec::new())));
+        process.set(
+            "execArgv",
+            Value::Array(ArrayData::new(
+                self.exec_argv
+                    .iter()
+                    .cloned()
+                    .map(|value| Value::String(value.into()))
+                    .collect(),
+            )),
+        );
         if let Some(executable) = self.argv.first() {
             process.set("execPath", Value::String(executable.clone().into()));
         }
@@ -148,18 +166,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             data.set("isTTY", Value::Boolean(stderr_is_tty));
         }
         process.set("stderr", stderr);
-        process.set_non_enumerable(
+        // Node's process functions are ordinary enumerable own properties: `Object.keys(process)`
+        // lists them there, so it lists them here.
+        process.set(
             "hrtime",
             Value::Native(Native::ProcessHrtime, RealmId::PRIMARY),
         );
-        process.set_non_enumerable("cwd", Value::Native(Native::ProcessCwd, RealmId::PRIMARY));
-        process.set_non_enumerable("kill", Value::Native(Native::ProcessKill, RealmId::PRIMARY));
-        process.set_non_enumerable("exit", Value::Native(Native::ProcessExit, RealmId::PRIMARY));
-        process.set_non_enumerable(
+        process.set("cwd", Value::Native(Native::ProcessCwd, RealmId::PRIMARY));
+        process.set("kill", Value::Native(Native::ProcessKill, RealmId::PRIMARY));
+        process.set("exit", Value::Native(Native::ProcessExit, RealmId::PRIMARY));
+        process.set(
             "nextTick",
             Value::Native(Native::ProcessNextTick, RealmId::PRIMARY),
         );
-        process.set_non_enumerable(
+        process.set(
             "getBuiltinModule",
             Value::Native(Native::ProcessGetBuiltinModule, RealmId::PRIMARY),
         );
@@ -168,6 +188,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // getBuiltinModule projection: asking for the builtin currently being evaluated
         // must not fall back to a second legacy namespace with different identity.
         let native_modules = ordinary_object([
+            (
+                "__kilnHostModuleCreateRequire".to_owned(),
+                Value::Native(Native::NodeModuleCreateRequire, RealmId::PRIMARY),
+            ),
+            (
+                "__kilnHostModuleLoader".to_owned(),
+                Value::Native(Native::NodeModuleLoader, RealmId::PRIMARY),
+            ),
             (
                 "async_hooks".to_owned(),
                 Value::Native(Native::NodeAsyncHooks, RealmId::PRIMARY),
@@ -181,16 +209,42 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Value::Native(Native::NodeFsPromises, RealmId::PRIMARY),
             ),
             (
-                "http".to_owned(),
-                Value::Native(Native::NodeHttp, RealmId::PRIMARY),
+                "child_process".to_owned(),
+                ordinary_object([(
+                    "__execFileSync".to_owned(),
+                    Value::Native(Native::NodeChildProcessExecFileSync, RealmId::PRIMARY),
+                )]),
             ),
-            (
-                "net".to_owned(),
-                Value::Native(Native::NodeNet, RealmId::PRIMARY),
-            ),
+            ("http".to_owned(), crate::http::native_capabilities()),
+            ("net".to_owned(), crate::net::native_capabilities()),
         ]);
+        if self.async_host.is_some() {
+            if let Value::Object(modules) = &native_modules {
+                let mut modules = modules.borrow_mut();
+                modules.set(
+                    "__kilnCryptoKeyImport",
+                    Value::Native(Native::NodeCryptoKeyImport, RealmId::PRIMARY),
+                );
+                modules.set(
+                    "__kilnCryptoKeyPublic",
+                    Value::Native(Native::NodeCryptoKeyPublic, RealmId::PRIMARY),
+                );
+                modules.set(
+                    "__kilnCryptoKeyInfo",
+                    Value::Native(Native::NodeCryptoKeyInfo, RealmId::PRIMARY),
+                );
+                modules.set(
+                    "__kilnCryptoKeyExport",
+                    Value::Native(Native::NodeCryptoKeyExport, RealmId::PRIMARY),
+                );
+                modules.set(
+                    "__kilnCryptoKeyFree",
+                    Value::Native(Native::NodeCryptoKeyFree, RealmId::PRIMARY),
+                );
+            }
+        }
         process.set_non_enumerable("__kilnNativeModules", native_modules);
-        let value = Value::Object(Rc::new(RefCell::new(process)));
+        let value = Value::Object(tracked_object(process));
         self.process_object = Some(value.clone());
         value
     }

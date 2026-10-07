@@ -1,7 +1,9 @@
 // What `require("node:stream")` publishes, and what classes/functions answer.
 const stream = require("node:stream");
+const bareStream = require("stream");
 
 console.log("typeof stream:", typeof stream);
+console.log("bare stream projection:", bareStream === stream, bareStream === bareStream.Stream);
 console.log("has Readable:", typeof stream.Readable === "function");
 console.log("has Writable:", typeof stream.Writable === "function");
 console.log("has finished:", typeof stream.finished === "function");

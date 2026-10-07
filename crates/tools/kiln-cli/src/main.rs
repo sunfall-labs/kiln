@@ -104,9 +104,20 @@ where
         .collect()
 }
 
+/// `KILN_BUILD_COMMIT` and `KILN_BUILD_TARGET` are set by `scripts/package-release.sh` when it
+/// builds a release binary, so `kiln --version` names exactly what was shipped. A developer build
+/// has neither and prints the bare version.
 fn version() -> String {
+    let build = match (
+        option_env!("KILN_BUILD_COMMIT"),
+        option_env!("KILN_BUILD_TARGET"),
+    ) {
+        (Some(commit), Some(target)) => format!(" ({commit} {target})"),
+        (Some(commit), None) => format!(" ({commit})"),
+        _ => String::new(),
+    };
     format!(
-        "kiln {}\nprotocol {}\n",
+        "kiln {}{build}\nprotocol {}\n",
         env!("CARGO_PKG_VERSION"),
         kiln_proto::PROTOCOL_VERSION
     )
@@ -115,6 +126,7 @@ fn version() -> String {
 fn target_for_command(command: &Command) -> Option<&Path> {
     match command {
         Command::Run { path, .. }
+        | Command::NodeLaunch { path, .. }
         | Command::Build { path, .. }
         | Command::Check { path, .. }
         | Command::Watch { path, .. } => Some(path.as_path()),
@@ -210,7 +222,6 @@ fn find_project_root(target: Option<&Path>) -> Result<PathBuf> {
 fn dispatch(invocation: Invocation) -> Result<i32> {
     let target = target_for_command(&invocation.command);
     let root = find_project_root(target)?;
-    let socket = client::socket_path(invocation.socket, &root)?;
     let one_shot = invocation.one_shot;
 
     let is_test = matches!(invocation.command, Command::Test { .. });
@@ -219,6 +230,14 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
     // engines read it once per process. A resident daemon was started with its own environment,
     // so a command that asks for the switch is served in this process instead, where it applies.
     let one_shot = one_shot || !kiln_builtin_surface::kiln_extensions_installed();
+    // Only a command that reaches the daemon needs its socket. Deriving it eagerly made every
+    // `--one-shot` command fail when the path would exceed the platform's unix-socket limit -- a
+    // long `TMPDIR` is enough -- although a one-shot run never opens a socket at all.
+    let socket = if one_shot && !matches!(invocation.command, Command::Daemon(_)) {
+        PathBuf::new()
+    } else {
+        client::socket_path(invocation.socket, &root)?
+    };
 
     let auto_node = |explicit: bool| -> bool {
         explicit
@@ -229,10 +248,29 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
     };
 
     match invocation.command {
+        Command::NodeLaunch {
+            path,
+            args,
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+        } => {
+            let mut backend = open(one_shot, &socket)?;
+            report(commands::run_node_launch(
+                backend.as_mut(),
+                &path,
+                &args,
+                &preloads,
+                &exec_argv,
+                disallow_string_code_generation,
+                &root,
+            )?)
+        }
         Command::Run {
             path,
             args,
             node,
+            wall_clock,
             native: false,
             steps,
             workers,
@@ -248,7 +286,16 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     let socket = socket.clone();
                     handles.push(std::thread::spawn(move || {
                         let mut backend = open(one_shot, &socket)?;
-                        commands::run(backend.as_mut(), &path, &args, &root, node, steps)
+                        commands::run_with_clock(
+                            backend.as_mut(),
+                            &path,
+                            &args,
+                            &root,
+                            node,
+                            steps,
+                            true,
+                            wall_clock,
+                        )
                     }));
                 }
                 let mut status = 0;
@@ -267,13 +314,15 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 Ok(status)
             } else {
                 let mut backend = open(one_shot, &socket)?;
-                report(commands::run(
+                report(commands::run_with_clock(
                     backend.as_mut(),
                     &path,
                     &args,
                     &root,
                     node,
                     steps,
+                    true,
+                    wall_clock,
                 )?)
             }
         }
@@ -281,6 +330,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             path,
             args,
             node,
+            wall_clock,
             native: true,
             profile,
             // Refused by the parser: the native backend does not count steps.
@@ -310,9 +360,11 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                             &args,
                             profile,
                             node,
+                            wall_clock,
                             static_link,
                             pgo_gen.as_deref(),
                             pgo_u.as_deref(),
+                            true,
                         )
                     }));
                 }
@@ -339,14 +391,17 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     &args,
                     profile,
                     node,
+                    wall_clock,
                     static_link,
                     pgo_generate.as_deref(),
                     pgo_use.as_deref(),
+                    true,
                 )?)
             }
         }
         Command::Build {
             path,
+            includes,
             output,
             profile,
             shared,
@@ -376,6 +431,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 static_link,
                 pgo_generate.as_deref(),
                 pgo_use.as_deref(),
+                &includes,
             )?;
             if explain_parallel && !explain {
                 built.text = render::parallel_explanation_only(&built.text);

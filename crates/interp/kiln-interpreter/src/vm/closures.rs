@@ -19,7 +19,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let mut instance = ObjectData::default();
         instance.set_prototype(prototype);
-        Value::Object(Rc::new(RefCell::new(instance)))
+        Value::Object(tracked_object(instance))
     }
 
     /// The same instance, with its prototype taken from `new.target` rather than from the
@@ -49,7 +49,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let mut instance = ObjectData::default();
         instance.set_prototype(prototype);
-        Ok(Value::Object(Rc::new(RefCell::new(instance))))
+        Ok(Value::Object(tracked_object(instance)))
     }
 
     /// Build a closure, resolving each upvalue descriptor against the frame creating it.
@@ -68,6 +68,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let Some(proto) = self.program.functions.get(function as usize) else {
             return Err(ExecutionError::UnknownFunction { function });
         };
+        let module_generation_owner = self
+            .module_generation_owner
+            .clone()
+            .or_else(|| {
+                self.function
+                    .as_ref()
+                    .and_then(|function| function.module_generation_owner.borrow().clone())
+            })
+            .or_else(|| {
+                self.gc_module_map()
+                    .borrow()
+                    .generation_handle(self.current_realm, self.module_generation)
+            });
         let mut upvalues = Vec::with_capacity(proto.upvalues.len());
         for descriptor in &proto.upvalues {
             let cell = match descriptor {
@@ -112,6 +125,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: Rc::clone(&self.program),
             strictness: Rc::clone(&self.strictness),
             module_path: self.module_path.clone(),
+            module_generation: self.module_generation,
+            module_generation_owner: RefCell::new(module_generation_owner),
             captured_new_target: proto.arrow.then(|| self.new_target.clone()),
             captured_arguments,
             prototype: RefCell::new(None),
@@ -136,7 +151,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         // Registered before it is handed out, so a closure that ends up in a cycle is still
         // something `release_cycles` can reach.
+        if self.closures.len() >= self.closures_prune_at {
+            self.closures.retain(|entry| entry.strong_count() > 0);
+            self.closures_prune_at = self
+                .closures
+                .len()
+                .saturating_add(self.closures.len().max(1024));
+        }
         self.closures.push(Rc::downgrade(&closure));
+        let module_map = self.gc_module_map();
+        let mut module_map = module_map.borrow_mut();
+        if module_map.gc_closures.len() >= module_map.gc_closures_prune_at {
+            module_map
+                .gc_closures
+                .retain(|entry| entry.strong_count() > 0);
+            module_map.gc_closures_prune_at = module_map
+                .gc_closures
+                .len()
+                .saturating_add(module_map.gc_closures.len().max(1024));
+        }
+        module_map.gc_closures.push(Rc::downgrade(&closure));
+        module_map.gc_cycle_candidate_allocations =
+            module_map.gc_cycle_candidate_allocations.saturating_add(1);
         Ok(closure)
     }
 }

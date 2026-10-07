@@ -6,11 +6,30 @@
 
 use kiln_proto::{
     CacheGcSummary, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    NativeSharedLibrarySummary, ProjectSummary, RecordedWorkers, Request, ResolutionMap, Response,
-    RunSummary, SourceHash, SourceView, Stats, StepBudget, SyncId, TestMode, TestSummary,
+    NativeSharedLibrarySummary, OutputStream, ProjectSummary, RecordedWorkers, Request,
+    ResolutionMap, Response, RunSummary, SourceHash, SourceView, Stats, StepBudget, SyncId,
+    TestMode, TestSummary,
 };
 
 use crate::error::{Error, Result};
+
+/// Where streamed program output goes: this process's own streams, each write flushed so a
+/// line reaches a pipe or a terminal when the program wrote it, not when the program ends.
+fn write_to_process_streams(stream: OutputStream, text: &str) {
+    use std::io::Write;
+    match stream {
+        OutputStream::Stdout => {
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.flush();
+        }
+        OutputStream::Stderr => {
+            let mut err = std::io::stderr().lock();
+            let _ = err.write_all(text.as_bytes());
+            let _ = err.flush();
+        }
+    }
+}
 
 pub(crate) struct NativeBuildAtRevisionParams {
     pub path: String,
@@ -30,6 +49,30 @@ pub trait Backend: Send {
     /// Send one request and return its response. Implementations must already have turned
     /// [`Response::Error`] into [`Error::Daemon`] via [`interpret`].
     fn request(&mut self, request: Request) -> Result<Response>;
+
+    /// As [`Backend::request`], for a request that sets `stream_output`: the program's output is
+    /// passed to `on_output` as it is written, ahead of the response, whose summary then carries
+    /// none. A backend that cannot stream answers as `request` does and the summary holds the
+    /// output, which is what the default does.
+    fn request_streaming(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(OutputStream, &str),
+    ) -> Result<Response> {
+        let _ = on_output;
+        self.request(request)
+    }
+
+    /// Native run output has a more efficient local option: inherit the caller's actual file
+    /// descriptors so merged stdout/stderr retain kernel write order. Remote backends keep the
+    /// ordinary chunk stream transport.
+    fn request_native_streaming(
+        &mut self,
+        request: Request,
+        on_output: &mut dyn FnMut(OutputStream, &str),
+    ) -> Result<Response> {
+        self.request_streaming(request, on_output)
+    }
 
     /// Open an independent request/response channel to the same engine. Watch uses this to
     /// keep a slow native toolchain off the interpreter's critical path.
@@ -139,18 +182,78 @@ pub trait Backend: Send {
         node: bool,
         steps: StepBudget,
         source_view: SourceView,
+        stream_output: bool,
     ) -> Result<SourceResponse<RunSummary>> {
-        match self.request(Request::Run {
+        self.run_at_view_with_clock(
             path,
             project_root,
             args,
             node,
             steps,
             source_view,
-        })? {
+            stream_output,
+            false,
+        )
+    }
+    fn run_at_view_with_clock(
+        &mut self,
+        path: String,
+        project_root: String,
+        args: Vec<String>,
+        node: bool,
+        steps: StepBudget,
+        source_view: SourceView,
+        stream_output: bool,
+        wall_clock: bool,
+    ) -> Result<SourceResponse<RunSummary>> {
+        match self.request_streaming(
+            Request::Run {
+                path,
+                project_root,
+                args,
+                node,
+                wall_clock,
+                steps,
+                source_view,
+                stream_output,
+            },
+            &mut write_to_process_streams,
+        )? {
             Response::Ran(summary) => Ok(SourceResponse::Ready(summary)),
             Response::StaleSourceView { current } => Ok(SourceResponse::Stale(current)),
             other => Err(mismatch("Run", &other)),
+        }
+    }
+
+    fn node_run_at_view(
+        &mut self,
+        path: String,
+        project_root: String,
+        args: Vec<String>,
+        preloads: Vec<String>,
+        exec_argv: Vec<String>,
+        disallow_string_code_generation: bool,
+        steps: StepBudget,
+        source_view: SourceView,
+    ) -> Result<SourceResponse<RunSummary>> {
+        match self.request_streaming(
+            Request::NodeRun {
+                path,
+                project_root,
+                args,
+                preloads,
+                exec_argv,
+                disallow_string_code_generation,
+                wall_clock: true,
+                steps,
+                source_view,
+                stream_output: true,
+            },
+            &mut write_to_process_streams,
+        )? {
+            Response::Ran(summary) => Ok(SourceResponse::Ready(summary)),
+            Response::StaleSourceView { current } => Ok(SourceResponse::Stale(current)),
+            other => Err(mismatch("NodeRun", &other)),
         }
     }
     #[allow(clippy::too_many_arguments)]
@@ -218,22 +321,29 @@ pub trait Backend: Send {
         args: Vec<String>,
         profile: NativeProfile,
         node: bool,
+        wall_clock: bool,
         static_link: bool,
         pgo_generate: Option<String>,
         pgo_use: Option<String>,
         source_view: SourceView,
+        stream_output: bool,
     ) -> Result<SourceResponse<NativeRunSummary>> {
-        match self.request(Request::NativeRun {
-            path,
-            project_root,
-            args,
-            profile,
-            node,
-            static_link,
-            pgo_generate,
-            pgo_use,
-            source_view,
-        })? {
+        match self.request_native_streaming(
+            Request::NativeRun {
+                path,
+                project_root,
+                args,
+                profile,
+                node,
+                wall_clock,
+                static_link,
+                pgo_generate,
+                pgo_use,
+                source_view,
+                stream_output,
+            },
+            &mut write_to_process_streams,
+        )? {
             Response::NativeRan(summary) => Ok(SourceResponse::Ready(summary)),
             Response::StaleSourceView { current } => Ok(SourceResponse::Stale(current)),
             other => Err(mismatch("NativeRun", &other)),
@@ -355,6 +465,7 @@ fn mismatch(request: &str, response: &Response) -> Error {
 fn name_of(response: &Response) -> &'static str {
     match response {
         Response::Pong { .. } => "Pong",
+        Response::Output { .. } => "Output",
         Response::Checked(_) => "Checked",
         Response::Ran(_) => "Ran",
         Response::NativeBuilt(_) => "NativeBuilt",

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use kiln_hir::Module;
+use kiln_hir::{Module, StaticSourceProvenance};
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
     cjs_static_module_syntax_diagnostics, compile_commonjs, compile_module,
@@ -25,6 +25,45 @@ use kiln_module_resolver::{
 };
 
 pub const COMMONJS_WRAPPER_SOURCE: &str = "*commonjs-wrapper*";
+
+fn compiler_generated_helper_target(
+    specifier: &str,
+    provenance: Option<&StaticSourceProvenance>,
+    project_root: &Path,
+) -> Option<ResolvedModule> {
+    let provenance = provenance?;
+    if !provenance
+        .generated_helper_imports
+        .iter()
+        .any(|helper| helper.as_ref() == specifier)
+        || provenance
+            .authored_internal_helper_imports
+            .iter()
+            .any(|authored| authored.as_ref() == specifier)
+    {
+        return None;
+    }
+    let builtin = NodeBuiltin::parse(specifier)?;
+    if builtin != NodeBuiltin::OxcUsingCtx || !builtin.is_engine_internal() {
+        return None;
+    }
+    Some(ResolvedModule::new(
+        builtin.virtual_path(project_root),
+        ResolutionKind::Builtin,
+    ))
+}
+
+/// A cache-stable identity for private names in one project graph. Files retain their absolute
+/// paths everywhere else (resolution, diagnostics, and `import.meta`); only the compiler identity
+/// uses the path relative to the canonical project root.
+pub fn graph_module_identity(project_root: &Path, path: &Path) -> String {
+    let logical_root =
+        fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    path.strip_prefix(&logical_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
 
 /// Re-exported because [`ModuleGraphError::Resolve`] carries one: a caller that has to tell a
 /// missing module from an unresolvable specifier should not need a second dependency to read it.
@@ -97,6 +136,9 @@ pub struct RuntimeDependency {
     pub importer: PathBuf,
     pub specifier: String,
     pub target: PathBuf,
+    pub source: ModuleSource,
+    /// A `require.resolve` request retains a resolver answer but does not evaluate the target.
+    pub resolve_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,8 +215,8 @@ pub enum ModulePayload {
     AssetPath(PathBuf),
 }
 
-/// An entry-rooted module graph. ESM cycles are rejected during construction; CommonJS `require`
-/// cycles are retained so execution can expose their cache's partially initialized exports.
+/// An entry-rooted module graph. ESM and CommonJS cycles are retained for their respective
+/// link-and-instantiate and partially initialized `require` semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleGraph {
     entry: PathBuf,
@@ -182,6 +224,8 @@ pub struct ModuleGraph {
     /// Modules named by the project's closed-world include declaration. They are compiled and
     /// retained as possible runtime entries, but are never evaluated at program startup.
     declared_includes: Arc<BTreeSet<PathBuf>>,
+    /// Explicit source preloads, evaluated before the entry in command-line order.
+    startup_modules: Arc<Vec<PathBuf>>,
     modules: Arc<BTreeMap<PathBuf, ModuleNode>>,
     /// Dependencies-first, deterministic (source-occurrence ordered) module order. CommonJS
     /// cycles appear once in the order, with the back-edge omitted from traversal.
@@ -193,6 +237,19 @@ pub struct ModuleGraph {
     dynamic_dependencies: Arc<HashMap<PathBuf, Vec<Dependency>>>,
     dynamic_failures: Arc<BTreeMap<(PathBuf, String), String>>,
     runtime_failures: Arc<BTreeMap<PathBuf, BTreeMap<(PathBuf, String), String>>>,
+    /// Resolver-verified public package specifiers for targets already compiled into this graph.
+    /// These let runtime-created modules import a linked target without pretending to be one of
+    /// the source modules whose static edges were available during graph construction.
+    runtime_package_aliases: Arc<Vec<RuntimePackageAlias>>,
+}
+
+/// A package-visible spelling for a linked module, scoped to the package that owns the runtime
+/// importer. This is resolution data only; the target still has to be present in this graph.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimePackageAlias {
+    pub package_root: PathBuf,
+    pub specifier: String,
+    pub target: PathBuf,
 }
 
 /// Link-time identity of one visible export.
@@ -375,6 +432,191 @@ impl ModuleGraph {
         &self.modules
     }
 
+    /// Return a graph that retains a builtin for a lazy loader created outside user modules.
+    ///
+    /// The builtin and its static builtin dependencies become available to the runtime loader,
+    /// but remain lazy: the synthetic edge is a `RuntimeDependency`, never a static import. This
+    /// is for trusted bootstraps such as global `fetch`, whose public facade needs to be loadable
+    /// by `process.getBuiltinModule()` even when the user's source contains no `node:` import.
+    pub fn with_lazy_node_builtin(
+        &self,
+        owner: impl AsRef<Path>,
+        importer: impl AsRef<Path>,
+        builtin: NodeBuiltin,
+    ) -> Result<Self, ModuleGraphError> {
+        let owner = owner.as_ref();
+        let owner = if self.modules.contains_key(owner) {
+            owner.to_path_buf()
+        } else {
+            fs::canonicalize(owner).map_err(|_| ModuleGraphError::InternalMissingModule {
+                path: owner.to_path_buf(),
+            })?
+        };
+        let importer = importer.as_ref().to_path_buf();
+        let target = builtin.virtual_path(&self.project_root);
+        if self.module_node(&target).is_some() {
+            let owner_node = self.module_node(&owner).ok_or_else(|| {
+                ModuleGraphError::InternalMissingModule {
+                    path: owner.clone(),
+                }
+            })?;
+            if owner_node.runtime_dependencies.iter().any(|dependency| {
+                dependency.importer == importer
+                    && dependency.specifier == builtin.specifier()
+                    && dependency.target == target
+            }) {
+                return Ok(self.clone());
+            }
+
+            // The linked builtin closure is already validated in this graph. A lazy runtime
+            // edge cannot change static export resolution, so update only the owner overlay
+            // instead of cloning and relinking the whole module table.
+            let mut extended = self.clone();
+            let mut patched_modules = (*self.patched_modules).clone();
+            let mut owner_node = owner_node.clone();
+            owner_node.runtime_dependencies.push(RuntimeDependency {
+                importer,
+                specifier: builtin.specifier().to_owned(),
+                target,
+                source: ModuleSource::NodeBuiltin(builtin),
+                resolve_only: false,
+            });
+            patched_modules.insert(owner, owner_node);
+            extended.patched_modules = Arc::new(patched_modules);
+            return Ok(extended);
+        }
+        let mut modules: BTreeMap<PathBuf, ModuleNode> = self
+            .order
+            .iter()
+            .filter_map(|path| {
+                self.module_node(path)
+                    .cloned()
+                    .map(|node| (path.clone(), node))
+            })
+            .collect();
+        let mut order = (*self.order).clone();
+        let mut visiting = HashSet::new();
+
+        fn add_builtin(
+            project_root: &Path,
+            builtin: NodeBuiltin,
+            modules: &mut BTreeMap<PathBuf, ModuleNode>,
+            order: &mut Vec<PathBuf>,
+            visiting: &mut HashSet<PathBuf>,
+        ) -> Result<PathBuf, ModuleGraphError> {
+            let path = builtin.virtual_path(project_root);
+            if modules.contains_key(&path) || !visiting.insert(path.clone()) {
+                return Ok(path);
+            }
+
+            let source = kiln_builtins::builtin_source(builtin);
+            let logical_path = kiln_builtins::builtin_logical_path(builtin);
+            let mut hir = kiln_frontend_oxc::parse(logical_path, source);
+            hir.module_id = Arc::from(graph_module_identity(project_root, &path));
+            let program =
+                compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                    path: path.clone(),
+                    diagnostics,
+                })?;
+            validate_exports(&path, &program)?;
+
+            let mut dependencies = Vec::with_capacity(program.dependencies.len());
+            for specifier in &program.dependencies {
+                let dependency_builtin = NodeBuiltin::parse(specifier).ok_or_else(|| {
+                    ModuleGraphError::Source {
+                        path: path.clone(),
+                        message: format!(
+                            "builtin `{}` has a dependency outside the Node builtin registry: `{specifier}`",
+                            builtin.specifier()
+                        ),
+                    }
+                })?;
+                let target =
+                    add_builtin(project_root, dependency_builtin, modules, order, visiting)?;
+                dependencies.push(Dependency {
+                    specifier: specifier.clone(),
+                    target,
+                });
+            }
+
+            let mut runtime_dependencies = Vec::new();
+            for request in &program.link_facts.node_runtime_requests {
+                // These requests are themselves lazy, but their targets must be present in the
+                // graph so the bootstrap's createRequire can resolve them when called. Unknown
+                // names retain the builtin's existing catchable runtime-failure behavior.
+                let Some(dependency_builtin) = NodeBuiltin::parse(&request.specifier) else {
+                    continue;
+                };
+                let target =
+                    add_builtin(project_root, dependency_builtin, modules, order, visiting)?;
+                runtime_dependencies.push(RuntimeDependency {
+                    importer: PathBuf::from(&request.importer),
+                    specifier: request.specifier.clone(),
+                    target,
+                    source: ModuleSource::NodeBuiltin(dependency_builtin),
+                    resolve_only: request.resolve_only,
+                });
+            }
+
+            let node = ModuleNode {
+                path: path.clone(),
+                source: ModuleSource::NodeBuiltin(builtin),
+                program,
+                data: None,
+                dependencies,
+                runtime_dependencies,
+            };
+            modules.insert(path.clone(), node);
+            visiting.remove(&path);
+            order.push(path.clone());
+            Ok(path)
+        }
+
+        add_builtin(
+            &self.project_root,
+            builtin,
+            &mut modules,
+            &mut order,
+            &mut visiting,
+        )?;
+        let owner_node =
+            modules
+                .get_mut(&owner)
+                .ok_or_else(|| ModuleGraphError::InternalMissingModule {
+                    path: owner.clone(),
+                })?;
+        if !owner_node.runtime_dependencies.iter().any(|dependency| {
+            dependency.importer == importer
+                && dependency.specifier == builtin.specifier()
+                && dependency.target == target
+        }) {
+            owner_node.runtime_dependencies.push(RuntimeDependency {
+                importer,
+                specifier: builtin.specifier().to_owned(),
+                target,
+                source: ModuleSource::NodeBuiltin(builtin),
+                resolve_only: false,
+            });
+        }
+
+        let export_resolutions = resolve_exports(&modules, &order)?;
+        validate_links(&modules, &order, &export_resolutions)?;
+        Ok(Self {
+            entry: self.entry.clone(),
+            project_root: self.project_root.clone(),
+            declared_includes: Arc::clone(&self.declared_includes),
+            startup_modules: Arc::clone(&self.startup_modules),
+            modules: Arc::new(modules),
+            order: Arc::new(order),
+            export_resolutions: Arc::new(export_resolutions),
+            patched_modules: Arc::new(BTreeMap::new()),
+            dynamic_dependencies: Arc::clone(&self.dynamic_dependencies),
+            dynamic_failures: Arc::clone(&self.dynamic_failures),
+            runtime_failures: Arc::clone(&self.runtime_failures),
+            runtime_package_aliases: Arc::clone(&self.runtime_package_aliases),
+        })
+    }
+
     pub fn export_resolutions(&self) -> &HashMap<PathBuf, BTreeMap<String, ResolvedExport>> {
         &self.export_resolutions
     }
@@ -431,6 +673,8 @@ impl ModuleGraph {
         L: SourceLoader,
         F: Frontend,
     {
+        let logical_root = fs::canonicalize(project_root.as_ref())
+            .unwrap_or_else(|_| project_root.as_ref().to_path_buf());
         let provider = move |path: &Path| -> Result<ModuleProgram, ModuleGraphError> {
             let source = loader
                 .load(path)
@@ -443,7 +687,8 @@ impl ModuleGraph {
                 .ok_or_else(|| ModuleGraphError::FrontendPath {
                     path: path.to_path_buf(),
                 })?;
-            let hir = frontend.parse(path_string, &source);
+            let mut hir = frontend.parse(path_string, &source);
+            hir.module_id = Arc::from(graph_module_identity(&logical_root, path));
             compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
                 path: path.to_path_buf(),
                 diagnostics,
@@ -466,11 +711,14 @@ impl ModuleGraph {
         P: FnMut(&Path) -> Result<Module, E>,
         E: fmt::Display,
     {
+        let logical_root = fs::canonicalize(project_root.as_ref())
+            .unwrap_or_else(|_| project_root.as_ref().to_path_buf());
         let mut provider = move |path: &Path| -> Result<ModuleProgram, ModuleGraphError> {
-            let hir = provider(path).map_err(|error| ModuleGraphError::Source {
+            let mut hir = provider(path).map_err(|error| ModuleGraphError::Source {
                 path: path.to_path_buf(),
                 message: error.to_string(),
             })?;
+            hir.module_id = Arc::from(graph_module_identity(&logical_root, path));
             compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
                 path: path.to_path_buf(),
                 diagnostics,
@@ -600,7 +848,30 @@ impl ModuleGraph {
         F: Frontend,
         R: ResolutionPolicy,
     {
-        Self::build_with_typed_policy(entry, resolver, Self::node_provider(loader, frontend))
+        let logical_root = resolver.project_root().to_path_buf();
+        Self::build_with_typed_policy(
+            entry,
+            resolver,
+            Self::node_provider(loader, frontend, logical_root),
+        )
+    }
+
+    /// Build with an explicit set of startup roots and the same typed module provider used by
+    /// the ordinary graph constructor. Startup roots run in order before the entry graph.
+    pub fn build_with_typed_policy_preloads_and_includes<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+        preloads: Vec<PathBuf>,
+        includes: Vec<(PathBuf, ModuleSource)>,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
+        Self::build_with_policy_provider_entry_and_preloads(
+            entry, resolver, provider, true, false, includes, preloads,
+        )
     }
 
     /// Node-format graph with already-resolved declared modules that may be loaded at runtime.
@@ -616,11 +887,65 @@ impl ModuleGraph {
         F: Frontend,
         R: ResolutionPolicy,
     {
+        let logical_root = resolver.project_root().to_path_buf();
         Self::build_with_typed_policy_includes(
             entry,
             resolver,
-            Self::node_provider(loader, frontend),
+            Self::node_provider(loader, frontend, logical_root),
             includes,
+        )
+    }
+
+    /// Build a Node-format graph whose source preloads are evaluated before `entry`.
+    ///
+    /// The preload paths are graph roots, not source concatenation: their modules retain their
+    /// own URL, `import.meta`, lexical environment, and static dependencies. They are visited in
+    /// argument order, followed by the entry graph.
+    pub fn build_node_with_preloads<L, F, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        loader: L,
+        frontend: F,
+        preloads: Vec<PathBuf>,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        L: SourceLoader,
+        F: Frontend,
+        R: ResolutionPolicy,
+    {
+        Self::build_node_with_preloads_and_includes(
+            entry,
+            resolver,
+            loader,
+            frontend,
+            preloads,
+            Vec::new(),
+        )
+    }
+
+    /// [`Self::build_node_with_preloads`] while retaining declared runtime includes.
+    pub fn build_node_with_preloads_and_includes<L, F, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        loader: L,
+        frontend: F,
+        preloads: Vec<PathBuf>,
+        includes: Vec<(PathBuf, ModuleSource)>,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        L: SourceLoader,
+        F: Frontend,
+        R: ResolutionPolicy,
+    {
+        let logical_root = resolver.project_root().to_path_buf();
+        Self::build_with_policy_provider_entry_and_preloads(
+            entry,
+            resolver,
+            Self::node_provider(loader, frontend, logical_root),
+            true,
+            false,
+            includes,
+            preloads,
         )
     }
 
@@ -649,10 +974,11 @@ impl ModuleGraph {
                 loader.load(path).map_err(|error| error.to_string())
             }
         };
+        let logical_root = resolver.project_root().to_path_buf();
         Self::build_with_policy_provider_entry(
             entry,
             resolver,
-            Self::node_provider(loader, frontend),
+            Self::node_provider(loader, frontend, logical_root),
             true,
             true,
             Vec::new(),
@@ -662,6 +988,7 @@ impl ModuleGraph {
     fn node_provider<L, F>(
         mut loader: L,
         mut frontend: F,
+        logical_root: PathBuf,
     ) -> impl FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>
     where
         L: SourceLoader,
@@ -697,12 +1024,17 @@ impl ModuleGraph {
                     })?;
                 return Ok(ModulePayload::JsonText(json_text));
             }
-            let commonjs = (source_kind == ModuleSource::CommonJs)
+            let mut commonjs = (source_kind == ModuleSource::CommonJs)
                 .then(|| frontend.parse_commonjs(path_string, &source));
-            let hir = commonjs.as_ref().map_or_else(
+            let mut hir = commonjs.as_ref().map_or_else(
                 || frontend.parse(path_string, &source),
                 |parsed| parsed.module.clone(),
             );
+            let module_id = Arc::<str>::from(graph_module_identity(&logical_root, path));
+            hir.module_id = module_id.clone();
+            if let Some(parsed) = &mut commonjs {
+                parsed.module.module_id = module_id;
+            }
             if source_kind == ModuleSource::CommonJs && hir.has_static_module_syntax() {
                 return Err(ModuleGraphError::CjsStaticModuleSyntax {
                     path: path.to_path_buf(),
@@ -804,6 +1136,30 @@ impl ModuleGraph {
         P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
         R: ResolutionPolicy,
     {
+        Self::build_with_policy_provider_entry_and_preloads(
+            entry,
+            resolver,
+            provider,
+            typed_sources,
+            virtual_entry,
+            includes,
+            Vec::new(),
+        )
+    }
+
+    fn build_with_policy_provider_entry_and_preloads<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+        typed_sources: bool,
+        virtual_entry: bool,
+        includes: Vec<(PathBuf, ModuleSource)>,
+        preloads: Vec<PathBuf>,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
         if !entry.as_ref().is_absolute() {
             return Err(ModuleGraphError::NonAbsoluteEntry {
                 path: entry.as_ref().to_path_buf(),
@@ -881,13 +1237,40 @@ impl ModuleGraph {
             }
             declared_includes.insert(path.clone());
         }
-        builder.visit_with_includes(entry_path.clone(), includes)?;
+        for preload in &preloads {
+            if !preload.is_absolute() || !preload.starts_with(&root) {
+                return Err(ModuleGraphError::Resolve {
+                    importer: entry_path.clone(),
+                    specifier: preload.display().to_string(),
+                    error: ResolveError::OutsideProject {
+                        path: preload.clone(),
+                        project_root: root.clone(),
+                    },
+                });
+            }
+        }
+        builder.visit_with_startup(entry_path.clone(), preloads.clone(), includes)?;
+        let runtime_package_aliases = builder
+            .resolver
+            .runtime_package_aliases_for_targets(
+                &builder.modules.keys().cloned().collect::<Vec<_>>(),
+            )
+            .into_iter()
+            .map(|(package_root, specifier, target)| RuntimePackageAlias {
+                package_root,
+                specifier,
+                target,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let export_resolutions = resolve_exports(&builder.modules, &builder.order)?;
         validate_links(&builder.modules, &builder.order, &export_resolutions)?;
         Ok(Self {
             entry: entry_path,
             project_root: builder.resolver.project_root().to_path_buf(),
             declared_includes: Arc::new(declared_includes),
+            startup_modules: Arc::new(preloads),
             modules: Arc::new(builder.modules),
             order: Arc::new(builder.order),
             export_resolutions: Arc::new(export_resolutions),
@@ -895,6 +1278,7 @@ impl ModuleGraph {
             dynamic_dependencies: Arc::new(builder.dynamic_dependencies),
             dynamic_failures: Arc::new(builder.dynamic_failures.into_iter().collect()),
             runtime_failures: Arc::new(builder.runtime_failures),
+            runtime_package_aliases: Arc::new(runtime_package_aliases),
         })
     }
 
@@ -920,6 +1304,11 @@ impl ModuleGraph {
 
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    /// Package aliases verified by the resolver for modules already present in this graph.
+    pub fn runtime_package_aliases(&self) -> &[RuntimePackageAlias] {
+        &self.runtime_package_aliases
     }
 
     pub fn declared_includes(&self) -> &BTreeSet<PathBuf> {
@@ -1000,7 +1389,13 @@ impl ModuleGraph {
     /// evaluation and may materialize dynamic targets lazily.
     pub fn statically_reachable(&self) -> BTreeSet<PathBuf> {
         let mut reachable = BTreeSet::new();
-        let mut pending = vec![self.entry.clone()];
+        let mut pending = self
+            .startup_modules
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        pending.push(self.entry.clone());
         while let Some(path) = pending.pop() {
             if !reachable.insert(path.clone()) {
                 continue;
@@ -1081,6 +1476,7 @@ impl ModuleGraph {
             entry: self.entry.clone(),
             project_root: self.project_root.clone(),
             declared_includes: Arc::clone(&self.declared_includes),
+            startup_modules: Arc::clone(&self.startup_modules),
             modules: Arc::new(modules),
             order: Arc::clone(&self.order),
             export_resolutions: Arc::new(export_resolutions),
@@ -1088,6 +1484,7 @@ impl ModuleGraph {
             dynamic_dependencies: Arc::clone(&self.dynamic_dependencies),
             dynamic_failures: Arc::clone(&self.dynamic_failures),
             runtime_failures: Arc::clone(&self.runtime_failures),
+            runtime_package_aliases: Arc::clone(&self.runtime_package_aliases),
         })
     }
 
@@ -1133,16 +1530,18 @@ impl ModuleGraph {
          -> Result<ModuleNode, ModuleGraphError> {
             let mut node = node.clone();
             let original_imports = std::mem::take(&mut node.program.imports);
+            let original_program_dependencies = std::mem::take(&mut node.program.dependencies);
             let original_dependencies = std::mem::take(&mut node.dependencies);
-            node.dependencies = original_dependencies
-                .iter()
-                .filter(|dependency| demand.live.contains(&dependency.target))
-                .cloned()
-                .collect();
+            let mut rewritten_requests = BTreeMap::<String, Vec<String>>::new();
+            let mut rewritten_dependencies = BTreeMap::<String, Vec<Dependency>>::new();
             node.runtime_dependencies = node
                 .runtime_dependencies
                 .iter()
-                .filter(|dependency| demand.live.contains(&dependency.target))
+                // A resolve-only request needs its canonical path in the reduced graph's
+                // resolver metadata, but its target is deliberately not a live module.
+                .filter(|dependency| {
+                    dependency.resolve_only || demand.live.contains(&dependency.target)
+                })
                 .cloned()
                 .collect();
             let mut imports = Vec::with_capacity(original_imports.len());
@@ -1150,12 +1549,35 @@ impl ModuleGraph {
                 let live = demand.live_imports.contains(&(node.path.clone(), index));
                 // An indirect re-export is an import into a synthetic slot
                 // plus an export of that slot. The module body does not read
-                // it, but resolve_exports still needs the binding metadata.
+                // it, but a demanded export still needs the binding metadata.
                 let links_export = node
                     .program
                     .exports
                     .iter()
                     .any(|export| export.local_slot == original_import.local_slot);
+                if !live && original_import.source != COMMONJS_WRAPPER_SOURCE {
+                    let undemanded_reexport_is_dropped = if links_export {
+                        let dependency = original_dependencies
+                            .iter()
+                            .find(|dependency| dependency.specifier == original_import.source)
+                            .ok_or_else(|| ModuleGraphError::UnresolvedImport {
+                                importer: node.path.clone(),
+                                source: original_import.source.clone(),
+                            })?;
+                        !demand.live.contains(&dependency.target)
+                    } else {
+                        true
+                    };
+                    if undemanded_reexport_is_dropped {
+                        // A re-export's import entry is retained only to support a demanded
+                        // export. Keeping its export row after its provider module was shaken
+                        // leaves a dangling dependency that fails relinking of the reduced graph.
+                        node.program
+                            .exports
+                            .retain(|export| export.local_slot != original_import.local_slot);
+                        continue;
+                    }
+                }
                 if !live && !links_export && original_import.source != COMMONJS_WRAPPER_SOURCE {
                     continue;
                 }
@@ -1176,14 +1598,25 @@ impl ModuleGraph {
                                     let imported = self
                                         .module(module)
                                         .and_then(|origin| {
-                                            origin.program.exports.iter().find(|export| {
-                                                export.local_slot == *local_slot
-                                                    && !export
-                                                        .exported
-                                                        .starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
-                                            })
+                                            // CommonJS's default is module.exports, represented
+                                            // virtually by slot zero rather than an ESM export row.
+                                            if origin.source == ModuleSource::CommonJs
+                                                && *local_slot == 0
+                                            {
+                                                return Some("default".to_owned());
+                                            }
+                                            origin
+                                                .program
+                                                .exports
+                                                .iter()
+                                                .find(|export| {
+                                                    export.local_slot == *local_slot
+                                                        && !export.exported.starts_with(
+                                                            kiln_ir::STAR_REEXPORT_PREFIX,
+                                                        )
+                                                })
+                                                .map(|export| export.exported.clone())
                                         })
-                                        .map(|export| export.exported.clone())
                                         .ok_or_else(|| ModuleGraphError::MissingExport {
                                             importer: node.path.clone(),
                                             provider: module.clone(),
@@ -1211,7 +1644,14 @@ impl ModuleGraph {
                         let specifier = format!("{}#kiln-live-{index}", import.source);
                         import.source = specifier.clone();
                         import.imported = imported;
-                        node.dependencies.push(Dependency { specifier, target });
+                        rewritten_requests
+                            .entry(original_import.source.clone())
+                            .or_default()
+                            .push(specifier.clone());
+                        rewritten_dependencies
+                            .entry(original_import.source.clone())
+                            .or_default()
+                            .push(Dependency { specifier, target });
                     }
                 }
 
@@ -1222,6 +1662,56 @@ impl ModuleGraph {
                 imports.push(import);
             }
             node.program.imports = imports;
+            if node.source == ModuleSource::CommonJs {
+                // CommonJS's dependency list also retains unresolved require literals so the
+                // runtime loader can throw at the original call site. Keep its source request
+                // inventory untouched; only ESM import requests are retargeted below.
+                node.dependencies = original_dependencies
+                    .iter()
+                    .filter(|dependency| demand.live.contains(&dependency.target))
+                    .cloned()
+                    .collect();
+                node.program.dependencies = original_program_dependencies;
+            } else {
+                // Retain dependency evaluation order from the original request list, replacing a
+                // dropped barrel in place with its live export providers. Multiple bindings from a
+                // barrel expand in import order.
+                for dependency in &original_dependencies {
+                    if demand.live.contains(&dependency.target) {
+                        node.dependencies.push(dependency.clone());
+                    } else if let Some(rewritten) =
+                        rewritten_dependencies.remove(&dependency.specifier)
+                    {
+                        node.dependencies.extend(rewritten);
+                    }
+                }
+                for remaining in rewritten_dependencies.into_values() {
+                    node.dependencies.extend(remaining);
+                }
+                // Preserve source request order while retargeting requests whose barrel was
+                // removed. Native async evaluation uses this list to await static dependencies;
+                // leaving the original specifier here makes it disagree with the synthetic edge
+                // in `node.dependencies`, so the provider can be read before it has finished.
+                let retained_requests = node
+                    .dependencies
+                    .iter()
+                    .map(|dependency| dependency.specifier.as_str())
+                    .collect::<BTreeSet<_>>();
+                for request in original_program_dependencies {
+                    if let Some(rewritten) = rewritten_requests.remove(&request) {
+                        node.program.dependencies.extend(rewritten);
+                    } else if retained_requests.contains(request.as_str()) {
+                        node.program.dependencies.push(request);
+                    }
+                }
+                // Include any edge without an original source request while retaining the ordered
+                // source-derived prefix above.
+                for dependency in &node.dependencies {
+                    if !node.program.dependencies.contains(&dependency.specifier) {
+                        node.program.dependencies.push(dependency.specifier.clone());
+                    }
+                }
+            }
             Ok(node)
         };
         for path in &order {
@@ -1281,6 +1771,12 @@ impl ModuleGraph {
             .filter(|(owner, _)| demand.live.contains(*owner))
             .map(|(owner, failures)| (owner.clone(), failures.clone()))
             .collect();
+        let runtime_package_aliases = self
+            .runtime_package_aliases
+            .iter()
+            .filter(|alias| demand.live.contains(&alias.target))
+            .cloned()
+            .collect();
         Ok((
             Self {
                 entry: self.entry.clone(),
@@ -1292,6 +1788,7 @@ impl ModuleGraph {
                         .cloned()
                         .collect(),
                 ),
+                startup_modules: Arc::clone(&self.startup_modules),
                 modules: Arc::new(modules),
                 order: Arc::new(order),
                 export_resolutions: Arc::new(export_resolutions),
@@ -1299,6 +1796,7 @@ impl ModuleGraph {
                 dynamic_dependencies: Arc::new(dynamic_dependencies),
                 dynamic_failures: Arc::new(dynamic_failures),
                 runtime_failures: Arc::new(runtime_failures),
+                runtime_package_aliases: Arc::new(runtime_package_aliases),
             },
             LiveDemand {
                 live: demand.live.clone(),
@@ -1527,10 +2025,23 @@ where
         path: PathBuf,
         includes: Vec<(PathBuf, ModuleSource)>,
     ) -> Result<(), ModuleGraphError> {
+        self.visit_with_startup(path, Vec::new(), includes)
+    }
+
+    fn visit_with_startup(
+        &mut self,
+        path: PathBuf,
+        startup: Vec<PathBuf>,
+        includes: Vec<(PathBuf, ModuleSource)>,
+    ) -> Result<(), ModuleGraphError> {
+        for preload in startup {
+            self.visit_static(preload, None)?;
+        }
         self.visit_static(path, None)?;
         for (path, source) in includes {
             self.visit_static(path, Some(source))?;
         }
+        self.visit_elided_runtime_alias_targets()?;
         let export_resolutions = resolve_exports(&self.modules, &self.order)?;
         validate_links(&self.modules, &self.order, &export_resolutions)?;
         loop {
@@ -1626,6 +2137,56 @@ where
                     runtime.specifier,
                     format!("runtime request failed: {error}"),
                 );
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep targets of authored TS value imports that lowering erased only when the resolver
+    /// confirms that a generated runtime package alias addresses the target. These targets are
+    /// graph candidates, not module edges, so demand analysis still leaves them unevaluated until
+    /// the generated runtime import is selected.
+    fn visit_elided_runtime_alias_targets(&mut self) -> Result<(), ModuleGraphError> {
+        let mut inspected = HashSet::<(PathBuf, String)>::new();
+        loop {
+            let mut candidates = Vec::new();
+            for (importer, node) in &self.modules {
+                let Some(provenance) = node.program.program.static_source_provenance.as_ref()
+                else {
+                    continue;
+                };
+                for specifier in provenance.authored_value_imports.iter() {
+                    let specifier = specifier.as_ref();
+                    if node.program.dependencies.iter().any(|dep| dep == specifier)
+                        || !inspected.insert((importer.clone(), specifier.to_owned()))
+                    {
+                        continue;
+                    }
+                    let Ok(resolved) = self.resolver.resolve_for_request(
+                        specifier,
+                        importer,
+                        NodeRequestKind::Import,
+                    ) else {
+                        continue;
+                    };
+                    if resolved.builtin().is_none()
+                        && !self
+                            .resolver
+                            .runtime_package_aliases(&resolved.path)
+                            .is_empty()
+                        && !self.modules.contains_key(&resolved.path)
+                    {
+                        candidates.push(resolved.path);
+                    }
+                }
+            }
+            if candidates.is_empty() {
+                break;
+            }
+            candidates.sort();
+            candidates.dedup();
+            for target in candidates {
+                self.visit_static(target, None)?;
             }
         }
         Ok(())
@@ -1925,21 +2486,26 @@ where
                             NodeRequestKind::Import
                         };
                         for specifier in &program.dependencies {
-                            let resolved = match self
-                                .resolver
-                                .resolve_for_request(specifier, &path, request)
-                            {
-                                Ok(resolved) => resolved,
-                                // CommonJS resolution is synchronous execution, not linking.
-                                // Keep unresolved literals out of the captured target map so an
-                                // executed `require()` throws where JavaScript can catch it.
-                                Err(_) if source == ModuleSource::CommonJs => continue,
-                                Err(error) => {
-                                    return Err(ModuleGraphError::Resolve {
-                                        importer: path.clone(),
-                                        specifier: specifier.clone(),
-                                        error,
-                                    });
+                            let resolved = if let Some(resolved) = compiler_generated_helper_target(
+                                specifier,
+                                program.program.static_source_provenance.as_deref(),
+                                self.resolver.project_root(),
+                            ) {
+                                resolved
+                            } else {
+                                match self.resolver.resolve_for_request(specifier, &path, request) {
+                                    Ok(resolved) => resolved,
+                                    // CommonJS resolution is synchronous execution, not linking.
+                                    // Keep unresolved literals out of the captured target map so an
+                                    // executed `require()` throws where JavaScript can catch it.
+                                    Err(_) if source == ModuleSource::CommonJs => continue,
+                                    Err(error) => {
+                                        return Err(ModuleGraphError::Resolve {
+                                            importer: path.clone(),
+                                            specifier: specifier.clone(),
+                                            error,
+                                        });
+                                    }
                                 }
                             };
                             let source = if let Some(builtin) = resolved.builtin() {
@@ -1998,25 +2564,35 @@ where
                             // even when the resolver's `node_builtins` gate is off (the daemon
                             // only enables Node builtins when package metadata says so, but an
                             // explicit `getBuiltinModule("os")` *is* a Node program).
-                            let resolved =
-                                if let Some(builtin) = NodeBuiltin::parse(&request.specifier) {
-                                    ResolvedModule::new(
-                                        builtin.virtual_path(self.resolver.project_root()),
-                                        ResolutionKind::Builtin,
-                                    )
-                                } else {
-                                    match self.resolver.resolve_for_request(
-                                        &request.specifier,
-                                        &importer,
-                                        NodeRequestKind::Require,
-                                    ) {
-                                        Ok(resolved) => resolved,
-                                        Err(error) => {
-                                            // `createRequire` and `getBuiltinModule` execute lazily. An
-                                            // unavailable literal is therefore a catchable runtime
-                                            // failure, just like a dynamic import that cannot be resolved;
-                                            // it must not make graph construction fail eagerly.
-                                            self.record_runtime_failure(
+                            // An engine-internal module (`kiln:actors/core`) is never named by a
+                            // program: it goes through the resolver, which refuses it for any
+                            // importer that is not an engine builtin.
+                            let resolved = if let Some(resolved) = compiler_generated_helper_target(
+                                &request.specifier,
+                                program.program.static_source_provenance.as_deref(),
+                                self.resolver.project_root(),
+                            ) {
+                                resolved
+                            } else if let Some(builtin) = NodeBuiltin::parse(&request.specifier)
+                                .filter(|builtin| !builtin.is_engine_internal())
+                            {
+                                ResolvedModule::new(
+                                    builtin.virtual_path(self.resolver.project_root()),
+                                    ResolutionKind::Builtin,
+                                )
+                            } else {
+                                match self.resolver.resolve_for_request(
+                                    &request.specifier,
+                                    &importer,
+                                    NodeRequestKind::Require,
+                                ) {
+                                    Ok(resolved) => resolved,
+                                    Err(error) => {
+                                        // `createRequire` and `getBuiltinModule` execute lazily. An
+                                        // unavailable literal is therefore a catchable runtime
+                                        // failure, just like a dynamic import that cannot be resolved;
+                                        // it must not make graph construction fail eagerly.
+                                        self.record_runtime_failure(
                                             path.clone(),
                                             importer.clone(),
                                             request.specifier.clone(),
@@ -2027,10 +2603,10 @@ where
                                                 error
                                             ),
                                         );
-                                            continue;
-                                        }
+                                        continue;
                                     }
-                                };
+                                }
+                            };
                             let runtime_source = if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
                             } else if !self.typed_sources {
@@ -2064,6 +2640,8 @@ where
                                 importer,
                                 specifier: request.specifier.clone(),
                                 target: resolved.path,
+                                source: runtime_source,
+                                resolve_only: request.resolve_only,
                             });
                             runtime_sources.push(runtime_source);
                         }
@@ -2175,6 +2753,9 @@ where
                             .cloned()
                             .zip(runtime_sources.iter().cloned())
                         {
+                            if dependency.resolve_only {
+                                continue;
+                            }
                             self.runtime_work.push(RuntimeWork {
                                 owner: path.clone(),
                                 importer: dependency.importer,
@@ -2214,11 +2795,15 @@ fn json_module_program() -> ModuleProgram {
     ModuleProgram {
         program: Program {
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![],
             code: vec![Instruction::Return],
             local_count: 1,
             functions: vec![],
             template_sites: vec![],
+            debug_call_sites: vec![],
             // The JSON text is the node's `data`, not a program the compiler produced.
             source: "".into(),
         },
@@ -2239,6 +2824,7 @@ fn json_module_program() -> ModuleProgram {
             new_function: false,
             dynamic_imports: vec![],
             removable_declarations: vec![],
+            module_instantiation_end: 0,
         },
     }
 }

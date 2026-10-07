@@ -56,6 +56,26 @@ fn shared_test_cache_root() -> PathBuf {
     static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
     CACHE_DIR
         .get_or_init(|| {
+            if let Some(configured) = std::env::var_os("KILN_NATIVE_TEST_CACHE_ROOT") {
+                let configured = PathBuf::from(configured);
+                assert!(
+                    !configured.as_os_str().is_empty(),
+                    "KILN_NATIVE_TEST_CACHE_ROOT must not be empty"
+                );
+                assert!(
+                    configured.is_absolute(),
+                    "KILN_NATIVE_TEST_CACHE_ROOT must be an absolute path: {}",
+                    configured.display()
+                );
+                fs::create_dir_all(&configured).unwrap_or_else(|error| {
+                    panic!(
+                        "cannot create KILN_NATIVE_TEST_CACHE_ROOT {}: {error}",
+                        configured.display()
+                    )
+                });
+                return configured;
+            }
+
             if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
                 let target_cache = Path::new(&manifest_dir).join("../../../target/kiln-test-cache");
                 if fs::create_dir_all(&target_cache).is_ok() {
@@ -91,6 +111,7 @@ impl TestDirectory {
             WORK_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).expect("create native test directory");
+        let path = fs::canonicalize(&path).unwrap_or(path);
         Self { path }
     }
 
@@ -416,6 +437,9 @@ fn one_module_graph(project: &Path, value: f64, export: &str) -> ModuleGraph {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(value.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -426,6 +450,7 @@ fn one_module_graph(project: &Path, value: f64, export: &str) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -449,6 +474,9 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![
                 Constant::String("dependency microtask".into()),
                 Constant::String("dependency timer".into()),
@@ -524,6 +552,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
                 },
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -535,6 +564,9 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::String("entry body".into()), Constant::Undefined],
             code: vec![
                 Instruction::Const(0),
@@ -549,6 +581,7 @@ fn realm_scheduling_graph(project: &Path) -> ModuleGraph {
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".to_owned()],
         imports: Vec::new(),
@@ -585,6 +618,9 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(42.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -595,6 +631,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -609,11 +646,15 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Undefined],
             code: vec![Instruction::Const(0), Instruction::Return],
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./origin.js".into()],
         imports: vec![ImportBinding {
@@ -633,6 +674,9 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::LoadLocal(0),
@@ -647,6 +691,7 @@ fn star_reexport_graph(project: &Path) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./barrel.js".into()],
         imports: vec![ImportBinding {
@@ -682,6 +727,9 @@ fn namespace_import_graph(project: &Path) -> ModuleGraph {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(42.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -692,6 +740,7 @@ fn namespace_import_graph(project: &Path) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -706,6 +755,9 @@ fn namespace_import_graph(project: &Path) -> ModuleGraph {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::String("answer".into())],
             code: vec![
                 Instruction::LoadLocal(0),
@@ -719,6 +771,7 @@ fn namespace_import_graph(project: &Path) -> ModuleGraph {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./origin.js".into()],
         imports: vec![ImportBinding {
@@ -1050,6 +1103,9 @@ fn stdout_program(text: &str, result: f64) -> Program {
     Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String(text.into()),
             Constant::Number(result.to_bits()),
@@ -1067,6 +1123,7 @@ fn stdout_program(text: &str, result: f64) -> Program {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     }
 }
 
@@ -1138,6 +1195,9 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
     let string_numeric_program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: string_numeric_inputs
             .into_iter()
             .map(|value| Constant::String(value.into()))
@@ -1146,6 +1206,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let number = |value: f64| Constant::Number(value.to_bits());
@@ -1244,11 +1305,15 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
     let operator_program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: operator_constants,
         code: operator_code,
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     vec![
@@ -1257,6 +1322,9 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
             Program {
                 source: "".into(),
                 version: BYTECODE_VERSION,
+                source_origin: None,
+                static_source_identity: None,
+                static_source_provenance: None,
                 constants: vec![
                     Constant::Number(0.0_f64.to_bits()),
                     Constant::Number(3.0_f64.to_bits()),
@@ -1286,6 +1354,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 local_count: 1,
                 functions: Vec::new(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
             },
         ),
         (
@@ -1293,6 +1362,9 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
             Program {
                 source: "".into(),
                 version: BYTECODE_VERSION,
+                source_origin: None,
+                static_source_identity: None,
+                static_source_provenance: None,
                 constants: vec![
                     Constant::String("value=".into()),
                     Constant::Number(40.0_f64.to_bits()),
@@ -1313,6 +1385,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 local_count: 0,
                 functions: Vec::new(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
             },
         ),
         (
@@ -1320,6 +1393,9 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
             Program {
                 source: "".into(),
                 version: BYTECODE_VERSION,
+                source_origin: None,
+                static_source_identity: None,
+                static_source_provenance: None,
                 constants: vec![
                     Constant::String("v=".into()),
                     Constant::Number(0.1_f64.to_bits()),
@@ -1401,6 +1477,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 local_count: 0,
                 functions: Vec::new(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
             },
         ),
         ("scalar-operators", operator_program),
@@ -1410,6 +1487,9 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
             Program {
                 source: "".into(),
                 version: BYTECODE_VERSION,
+                source_origin: None,
+                static_source_identity: None,
+                static_source_provenance: None,
                 constants: vec![
                     Constant::String("😀".into()),
                     Constant::String("\u{e000}".into()),
@@ -1427,6 +1507,7 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 local_count: 0,
                 functions: Vec::new(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
             },
         ),
         (
@@ -1434,6 +1515,9 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
             Program {
                 source: "".into(),
                 version: BYTECODE_VERSION,
+                source_origin: None,
+                static_source_identity: None,
+                static_source_provenance: None,
                 constants: vec![
                     Constant::Number(f64::NAN.to_bits()),
                     Constant::Number(f64::INFINITY.to_bits()),
@@ -1452,12 +1536,14 @@ fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {
                 local_count: 0,
                 functions: Vec::new(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
             },
         ),
     ]
 }
 
 mod compilation;
+mod emission_determinism;
 mod module_graph;
 mod node_builtins;
 mod node_http;

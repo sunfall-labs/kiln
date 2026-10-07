@@ -31,7 +31,7 @@ pub enum Value {
     /// built-ins move into JavaScript (design.md §5) and become ordinary objects.
     Native(Native, RealmId),
     /// A suspended generator: a frame that can stop and resume, which nothing else here needs.
-    Generator(Rc<RefCell<GeneratorState>>),
+    Generator(Rc<GeneratorData>),
     Promise(Rc<PromiseData>),
     RegExp(Rc<RegExpData>),
     /// A date: milliseconds since the epoch, behind an `Rc` because two dates built from the same
@@ -253,7 +253,9 @@ impl Value {
             Self::Native(Native::PrototypeOf(PrototypeTable::Function), _) => "function",
             Self::Native(Native::PrototypeOf(_), _) => "object",
             Self::Native(
-                Native::GeneratorFunctionPrototype | Native::AsyncGeneratorFunctionPrototype,
+                Native::AsyncFunctionPrototype
+                    | Native::GeneratorFunctionPrototype
+                    | Native::AsyncGeneratorFunctionPrototype,
                 _,
             ) => "object",
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
@@ -353,7 +355,9 @@ impl Value {
             Self::Native(Native::PrototypeOf(PrototypeTable::Function), _) => "function",
             Self::Native(Native::PrototypeOf(_), _) => "object",
             Self::Native(
-                Native::GeneratorFunctionPrototype | Native::AsyncGeneratorFunctionPrototype,
+                Native::AsyncFunctionPrototype
+                    | Native::GeneratorFunctionPrototype
+                    | Native::AsyncGeneratorFunctionPrototype,
                 _,
             ) => "object",
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
@@ -549,7 +553,7 @@ impl Value {
             // `Function.prototype.toString`: the text the program wrote. The span and the source
             // both travel on the program the closure already carries, so this is a slice rather
             // than a reconstruction -- there is no spelling to invent and none to get wrong.
-            Self::Function(closure) => closure.source_text().to_owned(),
+            Self::Function(closure) => closure.source_display_text(),
             // What `String({})` produces. `console.log` in a real console prints the contents
             // instead, which needs a formatter the host side does not have yet.
             Self::Object(_) | Self::Shared(_) => "[object Object]".to_owned(),
@@ -635,6 +639,8 @@ impl Value {
     pub(super) fn to_string_units_checked(&self) -> Result<StringUnits, ExecutionError> {
         match self {
             Self::String(value) => Ok(value.clone()),
+            Self::Symbol(symbol) => Ok(symbol.descriptive_string_units()),
+            Self::Function(closure) => Ok(closure.source_units()),
             Self::Array(items) => join_units(&items.borrow(), &StringUnits::from(",")),
             Self::TypedArray(view) => join_units(&view.items(), &StringUnits::from(",")),
             Self::RegExp(regexp) => Ok(regexp_string_units(regexp)),

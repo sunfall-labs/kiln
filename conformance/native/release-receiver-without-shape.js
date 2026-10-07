@@ -5,7 +5,7 @@
 // `Date` -- reads as having no shape, and an unclaimed row's key is no shape too, so it matched
 // the first empty row and read `slots[UINT32_MAX]`. `Date.prototype[Symbol.toPrimitive]` does
 // exactly this read (`this.valueOf`), so every `d < e`, `${d}` and `d == n` of a release build
-// with the specialized bootstrap crashed (.scratch/parallel-builtins issue 18).
+// with the specialized bootstrap crashed (docs/issues/parallel-builtins issue 18).
 const read = { m() { return typeof this.valueOf + " " + typeof this.toString; } }.m;
 console.log(read.call(new Date(1)), read.call({ valueOf() {}, toString: 1 }), read.call(new Date(2)));
 

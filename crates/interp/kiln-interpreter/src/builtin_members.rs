@@ -113,6 +113,12 @@ pub(crate) fn is_callable(value: &Value) -> bool {
         // a function at all -- and `typeof` said so too. The target survives revocation, which
         // is what keeps a revoked function proxy a function.
         Value::Proxy(proxy) => is_callable(&proxy.target),
+        Value::Native(
+            Native::AsyncFunctionPrototype
+            | Native::GeneratorFunctionPrototype
+            | Native::AsyncGeneratorFunctionPrototype,
+            _,
+        ) => false,
         other => {
             matches!(
                 other,
@@ -167,82 +173,78 @@ pub(super) fn literal_matches(subject: &[u16], needle: &[u16], all: bool) -> Vec
 /// against a megabyte-long match asks for a string in the tens of gigabytes -- from a single
 /// call, before the caller ever sees a byte of it.
 pub(super) fn expand_replacement(
-    template: &str,
+    template: &[u16],
     subject: &[u16],
     range: &std::ops::Range<usize>,
     groups: &[Option<std::ops::Range<usize>>],
     names: &[(String, Option<std::ops::Range<usize>>)],
-) -> Result<String, ExecutionError> {
-    let mut out = String::new();
-    let characters: Vec<char> = template.chars().collect();
+) -> Result<Vec<u16>, ExecutionError> {
+    let mut out = Vec::new();
     let mut at = 0;
-    while at < characters.len() {
-        if characters[at] != '$' || at + 1 >= characters.len() {
-            push_bounded_char(&mut out, characters[at])?;
+    while at < template.len() {
+        if template[at] != b'$' as u16 || at + 1 >= template.len() {
+            push_bounded_units(&mut out, &template[at..at + 1])?;
             at += 1;
             continue;
         }
-        match characters[at + 1] {
-            '$' => {
-                push_bounded_char(&mut out, '$')?;
+        match template[at + 1] {
+            x if x == b'$' as u16 => {
+                out.push(b'$' as u16);
                 at += 2;
             }
-            '&' => {
-                push_bounded(&mut out, &utf16_slice(subject, range.clone()))?;
+            x if x == b'&' as u16 => {
+                push_bounded_units(&mut out, &subject[range.clone()])?;
                 at += 2;
             }
-            '`' => {
-                push_bounded(&mut out, &utf16_slice(subject, 0..range.start))?;
+            x if x == b'`' as u16 => {
+                push_bounded_units(&mut out, &subject[..range.start])?;
                 at += 2;
             }
-            '\'' => {
-                push_bounded(&mut out, &utf16_slice(subject, range.end..subject.len()))?;
+            x if x == b'\'' as u16 => {
+                push_bounded_units(&mut out, &subject[range.end..])?;
                 at += 2;
             }
-            first if first.is_ascii_digit() => {
-                // Two digits are preferred when that names a group, which is why `$12` is group
-                // twelve where there are twelve and group one followed by "2" where there are not.
-                let two = characters
+            first if (b'0' as u16..=b'9' as u16).contains(&first) => {
+                let first_digit = usize::from(first - b'0' as u16);
+                let two = template
                     .get(at + 2)
-                    .filter(|second| second.is_ascii_digit())
-                    .and_then(|second| format!("{first}{second}").parse::<usize>().ok())
+                    .filter(|second| (b'0' as u16..=b'9' as u16).contains(second))
+                    .map(|second| first_digit * 10 + usize::from(*second - b'0' as u16))
                     .filter(|index| *index > 0 && *index < groups.len());
                 let (index, width) = match two {
                     Some(index) => (index, 3),
-                    None => match first.to_digit(10).map(|digit| digit as usize) {
-                        Some(index) if index > 0 && index < groups.len() => (index, 2),
-                        // Not a group reference at all, so the text stands as written.
-                        _ => {
-                            push_bounded_char(&mut out, '$')?;
-                            at += 1;
-                            continue;
-                        }
-                    },
+                    None if first_digit > 0 && first_digit < groups.len() => (first_digit, 2),
+                    None => {
+                        out.push(b'$' as u16);
+                        at += 1;
+                        continue;
+                    }
                 };
                 if let Some(Some(group)) = groups.get(index) {
-                    push_bounded(&mut out, &utf16_slice(subject, group.clone()))?;
+                    push_bounded_units(&mut out, &subject[group.clone()])?;
                 }
                 at += width;
             }
-            // `$<name>` is a group reference only for a pattern that *has* named groups: in
-            // one that does not, the specification leaves the text exactly as written, so
-            // `"x".replace(/x/, "$<a>")` is the literal `$<a>` rather than an empty string.
-            '<' if !names.is_empty() => {
-                let Some(end) = characters[at + 2..].iter().position(|c| *c == '>') else {
-                    push_bounded_char(&mut out, '$')?;
+            x if x == b'<' as u16 && !names.is_empty() => {
+                let Some(end) = template[at + 2..]
+                    .iter()
+                    .position(|unit| *unit == b'>' as u16)
+                else {
+                    out.push(b'$' as u16);
                     at += 1;
                     continue;
                 };
-                let name: String = characters[at + 2..at + 2 + end].iter().collect();
-                // A name the pattern does not declare expands to nothing, like a group that did
-                // not participate -- it is not an error, and not the literal text either.
-                if let Some((_, Some(group))) = names.iter().find(|(key, _)| *key == name) {
-                    push_bounded(&mut out, &utf16_slice(subject, group.clone()))?;
+                let name_units = &template[at + 2..at + 2 + end];
+                if let Some((_, Some(group))) = names
+                    .iter()
+                    .find(|(key, _)| key.encode_utf16().eq(name_units.iter().copied()))
+                {
+                    push_bounded_units(&mut out, &subject[group.clone()])?;
                 }
                 at += 3 + end;
             }
             _ => {
-                push_bounded_char(&mut out, '$')?;
+                out.push(b'$' as u16);
                 at += 1;
             }
         }
@@ -298,7 +300,7 @@ pub(super) fn named_group_object(
     for (name, range) in names {
         object.set(name, value(range.as_ref()));
     }
-    Value::Object(Rc::new(RefCell::new(object)))
+    Value::Object(tracked_object(object))
 }
 
 /// The array `exec` and `match` produce: the whole match, then each group, with `index` and
@@ -715,6 +717,11 @@ pub(super) fn inherited_object_property(
 /// the tables whose members are published by earlier, more specific arms -- `EventEmitter` and the
 /// two stream tables -- owning what they publish.
 pub(super) fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
+    if matches!(native, Native::TypedArrayConstructor(_)) && matches!(key, "from" | "of") {
+        // These are members of `%TypedArray%` inherited through the constructor's [[Prototype]],
+        // even though `Native::property` answers them for direct reads on concrete constructors.
+        return None;
+    }
     if matches!(native, Native::PrototypeOf(PrototypeTable::Array)) {
         if key == WellKnown::Unscopables.property_key() {
             return Some(Value::Null);
@@ -826,7 +833,7 @@ pub(super) fn bigint_method(name: &str) -> Value {
         ) => Value::Native(Native::BigIntToString, RealmId::PRIMARY),
         kiln_builtin_surface::SemanticBinding::BigIntMethod(
             kiln_builtin_surface::BigIntMethod::ValueOf,
-        ) => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
+        ) => Value::Native(Native::BigIntValueOf, RealmId::PRIMARY),
         kiln_builtin_surface::SemanticBinding::StringTag(tag) => {
             Value::String(tag.to_owned().into())
         }
@@ -914,6 +921,22 @@ pub(super) fn generator_prototype_table(closure: &Rc<Closure>) -> Option<Prototy
     }
 }
 
+/// The distinct built-in constructor inherited by each function kind. Async function bodies are
+/// lowered through the generator execution machinery, but that implementation detail must not
+/// make their observable constructor or `instanceof` chain a GeneratorFunction.
+pub(super) fn function_kind_prototype(closure: &Rc<Closure>) -> Option<Native> {
+    let proto = closure.program.functions.get(closure.function as usize)?;
+    if proto.async_generator {
+        Some(Native::AsyncGeneratorFunctionPrototype)
+    } else if proto.asynchronous {
+        Some(Native::AsyncFunctionPrototype)
+    } else if proto.generator {
+        Some(Native::GeneratorFunctionPrototype)
+    } else {
+        None
+    }
+}
+
 pub(super) fn prototype_object(closure: &Rc<Closure>) -> Value {
     let mut slot = closure.prototype.borrow_mut();
     if let Some(existing) = slot.as_ref() {
@@ -933,7 +956,7 @@ pub(super) fn prototype_object(closure: &Rc<Closure>) -> Value {
         // alone.
         None => data.set_non_enumerable("constructor", Value::Function(Rc::clone(closure))),
     }
-    let prototype = Value::Object(Rc::new(RefCell::new(data)));
+    let prototype = Value::Object(tracked_object(data));
     *slot = Some(prototype.clone());
     prototype
 }
@@ -1194,6 +1217,10 @@ pub(super) fn is_constructor(value: &Value) -> bool {
 /// The same question for a built-in.
 pub(super) fn native_is_constructor(native: Native) -> bool {
     match native {
+        // Byte text conversions are built-in methods, not function constructors. They have no
+        // [[Construct]] slot even though their observable properties are projected from a native
+        // marker in the interpreter.
+        Native::Uint8Text(_) => false,
         // `Proxy` is the one constructor with no `prototype` of its own -- a proxy inherits the
         // target's chain -- so the rule below cannot see it.
         Native::ProxyConstructor
@@ -1219,8 +1246,11 @@ pub(super) fn native_is_constructor(native: Native) -> bool {
         | Native::ConsoleConstructor
         | Native::NodeHttpServer
         | Native::NodeAsyncLocalStorage
+        | Native::NodeBufferGlobal
         | Native::WebStub(_) => true,
-        Native::GeneratorFunctionPrototype | Native::AsyncGeneratorFunctionPrototype => false,
+        Native::AsyncFunctionPrototype
+        | Native::GeneratorFunctionPrototype
+        | Native::AsyncGeneratorFunctionPrototype => false,
         // Each error kind's `prototype` is a per-realm object rather than a table, which the
         // marker alone cannot answer for.
         Native::Error(_) => true,
@@ -1439,9 +1469,29 @@ pub(super) fn machine_accessor(target: &Value, key: &str) -> Option<BuiltinAcces
     }
 }
 
-/// Whether this built-in defines `Symbol.species`, which is the eight the specification names
-/// and nothing else -- a constructor that does not define one inherits whatever its own
-/// prototype has, which for the nine view constructors is `%TypedArray%`'s.
+/// Whether a machine-backed accessor is an own property of `target`.
+///
+/// `machine_accessor` also follows the constructor inheritance that ordinary property reads
+/// need. In particular, concrete typed-array constructors inherit `%TypedArray%[@@species]`.
+/// Reflection over own keys and own descriptors must not turn that inherited getter into an own
+/// property of every concrete constructor (or of functions inheriting one of those constructors).
+pub(super) fn machine_own_accessor(target: &Value, key: &str) -> Option<BuiltinAccessor> {
+    if key == WellKnown::Species.property_key()
+        && matches!(
+            target,
+            Value::Native(Native::TypedArrayConstructor(_), _)
+                | Value::Function(_)
+                | Value::Bound(_)
+        )
+    {
+        return None;
+    }
+    machine_accessor(target, key)
+}
+
+/// Whether this built-in defines `Symbol.species` through the interpreter's native accessor.
+/// The typed-array abstract constructor installs its public getter in shared TypeScript instead;
+/// the concrete view constructors inherit that stored getter through their actual prototype link.
 pub(super) const fn defines_species(native: Native) -> bool {
     matches!(
         native,
@@ -1452,7 +1502,6 @@ pub(super) const fn defines_species(native: Native) -> bool {
             | Native::SetConstructor
             | Native::PromiseConstructor
             | Native::RegExpConstructor
-            | Native::TypedArrayIntrinsic
     )
 }
 

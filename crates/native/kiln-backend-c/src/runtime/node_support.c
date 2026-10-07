@@ -15,6 +15,117 @@ static int kiln_c99_buffer_from_bytes(kiln_value *out, const uint8_t *bytes, uin
     return KILN_C99_OK;
 }
 
+static int kiln_c99_buffer_encoding_is(const char *name, size_t length, const char *wanted) {
+    size_t index;
+    if (strlen(wanted) != length) return 0;
+    for (index = 0; index < length; ++index)
+        if (tolower((unsigned char)name[index]) != wanted[index]) return 0;
+    return 1;
+}
+
+/* Encode the string forms accepted by Buffer.from and Buffer.alloc's fill argument. The Node
+ * bootstrap has a richer TypeScript prototype surface, but the static Buffer methods are
+ * immutable backend intrinsics, so their byte-producing paths need the same encodings here. */
+static int kiln_c99_buffer_encode_string(kiln_value *out, kiln_value source,
+                                         kiln_value encoding, kiln_value *thrown) {
+    const kiln_string *text;
+    const char *name = "utf8";
+    size_t name_len = 4;
+    uint8_t *bytes = NULL;
+    size_t count = 0;
+    size_t index;
+    if (source.tag != KILN_VALUE_STRING || source.ptr == NULL) return KILN_C99_INVALID_ARGUMENT;
+    text = (const kiln_string *)source.ptr;
+    if (encoding.tag != KILN_VALUE_UNDEFINED && encoding.tag != KILN_VALUE_NULL) {
+        if (encoding.tag != KILN_VALUE_STRING || encoding.ptr == NULL)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Unknown encoding");
+        name = kiln_c99_string_ascii_bytes(encoding, &name_len);
+        if (name == NULL) return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                      "Unknown encoding");
+    }
+    if ((kiln_c99_buffer_encoding_is(name, name_len, "utf8")) ||
+        (kiln_c99_buffer_encoding_is(name, name_len, "utf-8"))) {
+        uint8_t *utf8 = NULL;
+        size_t utf8_len = 0;
+        int status = kiln_c99_string_to_utf8_lossy(source, &utf8, &utf8_len);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_buffer_from_bytes(out, utf8, utf8_len);
+        free(utf8);
+        return status;
+    }
+    if ((kiln_c99_buffer_encoding_is(name, name_len, "utf16le")) ||
+        (kiln_c99_buffer_encoding_is(name, name_len, "utf-16le")) ||
+        (kiln_c99_buffer_encoding_is(name, name_len, "ucs2")) ||
+        (kiln_c99_buffer_encoding_is(name, name_len, "ucs-2"))) {
+        if (text->unit_len > SIZE_MAX / 2) return KILN_C99_OUT_OF_MEMORY;
+        count = text->unit_len * 2;
+        bytes = count == 0 ? NULL : malloc(count);
+        if (count != 0 && bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (index = 0; index < text->unit_len; ++index) {
+            uint16_t unit = kiln_string_unit_at(text, index);
+            bytes[index * 2] = (uint8_t)unit;
+            bytes[index * 2 + 1] = (uint8_t)(unit >> 8);
+        }
+    } else if ((kiln_c99_buffer_encoding_is(name, name_len, "hex"))) {
+        size_t limit = text->unit_len / 2;
+        bytes = limit == 0 ? NULL : malloc(limit);
+        if (limit != 0 && bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (index = 0; index < limit; ++index) {
+            uint32_t a = kiln_string_unit_at(text, index * 2);
+            uint32_t b = kiln_string_unit_at(text, index * 2 + 1);
+            int high = a >= '0' && a <= '9' ? (int)(a - '0')
+                     : a >= 'a' && a <= 'f' ? (int)(a - 'a' + 10)
+                     : a >= 'A' && a <= 'F' ? (int)(a - 'A' + 10) : -1;
+            int low = b >= '0' && b <= '9' ? (int)(b - '0')
+                    : b >= 'a' && b <= 'f' ? (int)(b - 'a' + 10)
+                    : b >= 'A' && b <= 'F' ? (int)(b - 'A' + 10) : -1;
+            if (high < 0 || low < 0) break;
+            bytes[count++] = (uint8_t)(high * 16 + low);
+        }
+    } else if (kiln_c99_buffer_encoding_is(name, name_len, "base64") ||
+               kiln_c99_buffer_encoding_is(name, name_len, "base64url")) {
+        size_t capacity = text->unit_len / 4 * 3 + 3;
+        uint32_t bits = 0;
+        uint32_t accumulator = 0;
+        bytes = capacity == 0 ? NULL : malloc(capacity);
+        if (capacity != 0 && bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (index = 0; index < text->unit_len; ++index) {
+            uint32_t unit = kiln_string_unit_at(text, index);
+            int value = unit >= 'A' && unit <= 'Z' ? (int)(unit - 'A')
+                      : unit >= 'a' && unit <= 'z' ? (int)(unit - 'a' + 26)
+                      : unit >= '0' && unit <= '9' ? (int)(unit - '0' + 52)
+                      : unit == '+' || unit == '-' ? 62
+                      : unit == '/' || unit == '_' ? 63 : -1;
+            if (unit == '=') break;
+            if (value < 0) continue;
+            accumulator = (accumulator << 6) | (uint32_t)value;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                bytes[count++] = (uint8_t)(accumulator >> bits);
+                accumulator &= bits == 0 ? 0 : ((UINT32_C(1) << bits) - 1);
+            }
+        }
+    } else if ((kiln_c99_buffer_encoding_is(name, name_len, "latin1")) ||
+               (kiln_c99_buffer_encoding_is(name, name_len, "binary")) ||
+               (kiln_c99_buffer_encoding_is(name, name_len, "ascii"))) {
+        count = text->unit_len;
+        bytes = count == 0 ? NULL : malloc(count);
+        if (count != 0 && bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (index = 0; index < count; ++index)
+            bytes[index] = (uint8_t)kiln_string_unit_at(text, index);
+    } else {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Unknown encoding");
+    }
+    {
+        int status = kiln_c99_buffer_from_bytes(out, bytes, count);
+        free(bytes);
+        return status;
+    }
+}
+
 static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, const kiln_value *args,
                                 size_t argc, kiln_value *thrown) {
     kiln_value built;
@@ -41,13 +152,8 @@ static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, const kiln_v
         return KILN_C99_OK;
     }
     if (source.tag == KILN_VALUE_STRING) {
-        uint8_t *encoded = NULL;
-        size_t encoded_len = 0;
-        status = kiln_c99_string_to_utf8_lossy(source, &encoded, &encoded_len);
-        if (status != KILN_C99_OK) return status;
-        status = kiln_c99_buffer_from_bytes(out, encoded, encoded_len);
-        free(encoded);
-        return status;
+        return kiln_c99_buffer_encode_string(out, source,
+                                             argc > 1 ? args[1] : kiln_c99_undefined(), thrown);
     } else if (source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_ARRAY) {
         status = kiln_c99_new_typed_array(&built, KILN_TYPED_UINT8, source, 0, 0, 0, thrown);
         if (status != KILN_C99_OK) return status;
@@ -87,10 +193,46 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
     if (code == KILN_C99_METHOD_BUFFER_FROM) return kiln_c99_buffer_from(out, first, args, argc, thrown);
     if (code == KILN_C99_METHOD_BUFFER_ALLOC) {
         size_t length;
+        size_t index;
         int status = kiln_c99_to_index(first, &length, thrown);
         if (status != KILN_C99_OK) return status;
         status = kiln_c99_typed_alloc(out, KILN_TYPED_UINT8, length);
-        if (status == KILN_C99_OK) kiln_c99_typed_array_of(*out)->is_buffer = 1;
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_typed_array_of(*out)->is_buffer = 1;
+        if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED && length != 0) {
+            kiln_value fill = args[1];
+            if (fill.tag == KILN_VALUE_NUMBER) {
+                double number = kiln_c99_as_number(fill);
+                uint8_t byte = 0;
+                if (isfinite(number) && number != 0.0) {
+                    double reduced = fmod(trunc(number), 256.0);
+                    if (reduced < 0.0) reduced += 256.0;
+                    byte = (uint8_t)reduced;
+                }
+                memset(kiln_c99_typed_array_of(*out)->buffer->bytes, byte, length);
+            } else {
+                kiln_value pattern;
+                if (fill.tag == KILN_VALUE_STRING) {
+                    kiln_value encoding = argc > 2 ? args[2] : kiln_c99_undefined();
+                    status = kiln_c99_buffer_encode_string(&pattern, fill, encoding, thrown);
+                } else if (fill.tag == KILN_VALUE_TYPED_ARRAY || fill.tag == KILN_VALUE_ARRAY) {
+                    status = kiln_c99_new_typed_array(&pattern, KILN_TYPED_UINT8, fill, 0, 0,
+                                                      0, thrown);
+                    if (status == KILN_C99_OK) kiln_c99_typed_array_of(pattern)->is_buffer = 1;
+                } else {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                                "The \"value\" argument is invalid");
+                }
+                if (status != KILN_C99_OK) return status;
+                kiln_typed_array *source = kiln_c99_typed_array_of(pattern);
+                if (source->length == 0)
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                                "The argument 'value' is invalid");
+                for (index = 0; index < length; ++index)
+                    kiln_c99_typed_set(kiln_c99_typed_array_of(*out), index,
+                                       kiln_c99_typed_get(source, index % source->length));
+            }
+        }
         return status;
     }
     if (code == KILN_C99_METHOD_BUFFER_IS_BUFFER) {
@@ -210,4 +352,21 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
                                     "unsupported Buffer encoding");
     }
     KILN_C99_REFUSE("a Buffer method this backend has not implemented");
+}
+
+/* Shared legacy `Buffer(...)` and `new Buffer(...)` dispatch. A numeric first argument selects
+ * zero-filled allocation; a second numeric/nullish value is ignored, while a string second
+ * argument is the obsolete encoding overload Node rejects. Keep the allocation itself on the
+ * existing Buffer.alloc path. */
+static int kiln_c99_buffer_legacy(kiln_value *out, const kiln_value *args, size_t argc,
+                                  kiln_value *thrown) {
+    kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
+    if (first.tag == KILN_VALUE_NUMBER) {
+        if (argc > 1 && args[1].tag == KILN_VALUE_STRING)
+            return kiln_c99_throw_node_invalid_arg_type(
+                thrown, "The \"string\" argument must be of type string");
+        return kiln_c99_buffer_method(out, KILN_C99_METHOD_BUFFER_ALLOC,
+                                      kiln_c99_undefined(), &first, 1, thrown);
+    }
+    return kiln_c99_buffer_from(out, first, args, argc, thrown);
 }

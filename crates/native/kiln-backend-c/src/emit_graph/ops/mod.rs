@@ -64,6 +64,7 @@ pub(super) struct OpContext<'a> {
     /// suspension path; its generated runtime guard retains the generic fallback for other values.
     pub await_resolve_arg: Option<ValueId>,
     pub used: &'a HashSet<ValueId>,
+    pub prepared_method_properties: &'a HashSet<ValueId>,
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
@@ -185,7 +186,7 @@ pub(super) fn unary_fast_body(op: UnaryOp) -> Option<&'static str> {
         UnaryOp::BitwiseNot => "kiln_c99_val_unary_fast(5, value)",
         UnaryOp::Increment => "kiln_c99_val_from_double(a + 1.0)",
         UnaryOp::Decrement => "kiln_c99_val_from_double(a - 1.0)",
-        UnaryOp::Not | UnaryOp::TypeOf | UnaryOp::Void => return None,
+        UnaryOp::Not | UnaryOp::TypeOf | UnaryOp::Void | UnaryOp::ToString => return None,
     })
 }
 
@@ -200,6 +201,7 @@ pub(super) fn unary_code(op: UnaryOp) -> u16 {
         UnaryOp::ToNumeric => 7,
         UnaryOp::Increment => 8,
         UnaryOp::Decrement => 9,
+        UnaryOp::ToString => 10,
     }
 }
 
@@ -235,6 +237,8 @@ pub(super) fn emit_graph_op(
     boxed: Option<&HashSet<ValueId>>,
     await_resolve_arg: Option<ValueId>,
     used: &HashSet<ValueId>,
+    prepared_method_properties: &HashSet<ValueId>,
+    argument_length_values: &HashSet<ValueId>,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
@@ -277,6 +281,7 @@ pub(super) fn emit_graph_op(
         boxed,
         await_resolve_arg,
         used,
+        prepared_method_properties,
     };
     match op {
         GraphOp::Const { index, constant } => match constant {
@@ -513,6 +518,16 @@ pub(super) fn emit_graph_op(
                 writeln!(output, "    v{v} = v{};", value.0).unwrap();
             }
         }
+        GraphOp::LoadGlobalBuiltin(builtin) => {
+            let check = status_check(diagnostic_site, pc, label, unwind);
+            let name = crate::string::c_string(builtin.name());
+            writeln!(
+                output,
+                "    {{ kiln_value value; int status = kiln_c99_global_builtin(host, &value, {name}, {}, depth, thrown); {check} v{v} = kiln_val_from_boundary(value); }}",
+                builtin.name().len()
+            )
+            .unwrap();
+        }
         GraphOp::LoadBuiltin(builtin) => match builtin_load(*builtin) {
             // A built-in object or method is a constant in the box, not a boundary value to
             // build and convert on every mention: `Math` inside a hot method was doing both.
@@ -537,7 +552,7 @@ pub(super) fn emit_graph_op(
             BuiltinLoad::Global(name) => {
                 writeln!(
                     output,
-                    "    {{ kiln_value obj; int status = kiln_c99_bootstrap_global(&obj, \"{name}\", {}); if (status != KILN_C99_OK) return status; v{v} = kiln_val_from_boundary(obj); }}",
+                    "    {{ kiln_value obj; int status = kiln_c99_bootstrap_global(host, &obj, \"{name}\", {}, depth, thrown); if (status != KILN_C99_OK) return status; v{v} = kiln_val_from_boundary(obj); }}",
                     name.len()
                 )
                 .unwrap();
@@ -579,6 +594,15 @@ pub(super) fn emit_graph_op(
             // A sunk literal's spread or define: the fast clone's graph alone carries it as a
             // scalar object (`FunctionGraph::spread_sinks`).
             emit_sunk_bridge(output, vid, instruction, operands, &ctx);
+        }
+        GraphOp::Bridge {
+            instruction: Instruction::LoadArguments,
+            ..
+        } if argument_length_values.contains(&vid) => {
+            // The matching GetProperty reads argc directly. Keep a defined, unobservable slot
+            // for diagnostics and any conservative emitter bookkeeping, without allocating the
+            // arguments exotic object.
+            writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
         }
         GraphOp::Bridge {
             instruction: Instruction::HostCall { op, argc },
@@ -626,6 +650,22 @@ pub(super) fn emit_graph_op(
             operands,
             pushes,
         } => {
+            if matches!(
+                instruction,
+                Instruction::Apply
+                    | Instruction::SuperApply
+                    | Instruction::SuperCall { .. }
+                    | Instruction::ConstructSpread
+                    | Instruction::CallComputed { .. }
+                    | Instruction::DirectEval(_)
+            ) {
+                let function_span =
+                    (ctx.proto.span.end > ctx.proto.span.start).then_some(ctx.proto.span);
+                let (line, column) = program
+                    .debug_call_site(function_span, pc as usize)
+                    .map_or((0, 0), |site| (site.line, site.column));
+                writeln!(output, "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});").unwrap();
+            }
             // The operands go onto a local stack of exactly the depth the instruction wants,
             // the tail's lowering (`tail.rs`) runs on it, and the results come back off the top.
             let depth = operands.len() + usize::from(*pushes) + 2;
@@ -666,13 +706,23 @@ pub(super) fn emit_graph_op(
             if let Some(index) = crate::module_cells::compact_cell_slot(self_index, *slot) {
                 writeln!(
                     output,
-                    "    kiln_c99_val_make_unit_cell(&locals[{slot}], &{symbol}_cell_slots[{index}]);"
+                    "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) kiln_c99_val_make_unit_cell(&locals[{slot}], &{symbol}_cell_slots[{index}]);"
+                )
+                .unwrap();
+            } else if self_index.is_none() && crate::module_cells::is_linked_cell(*slot) {
+                /* The ESM graph linker seeds exported module locals with their live cells before
+                 * evaluation. Preserve those particular cells when their declaration executes;
+                 * every ordinary captured lexical binding needs a fresh cell each time control
+                 * enters its block (notably on each loop pass). */
+                writeln!(
+                    output,
+                    "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) {{ int status = kiln_c99_val_make_cell_owned(&locals[{slot}], host != NULL ? host->module_owner : NULL); if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             } else {
                 writeln!(
                     output,
-                    "    {{ int status = kiln_c99_val_make_cell(&locals[{slot}]); if (status != KILN_C99_OK) return status; }}"
+                    "    {{ int status = kiln_c99_val_make_cell_owned(&locals[{slot}], host != NULL ? host->module_owner : NULL); if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             }
@@ -814,10 +864,10 @@ pub(super) fn emit_graph_op(
                 }
             }
         }
-        GraphOp::Unary { op, value } if typed_int => {
+        GraphOp::Unary { op, value } if typed_int && *op != UnaryOp::ToString => {
             arithmetic::emit_unary_int(output, vid, op, value, &ctx)
         }
-        GraphOp::Unary { op, value } if typed => {
+        GraphOp::Unary { op, value } if typed && *op != UnaryOp::ToString => {
             arithmetic::emit_unary_typed(output, vid, op, value, &ctx)
         }
         GraphOp::Unary { op, value } => arithmetic::emit_unary_boxed(output, vid, op, value, &ctx),
@@ -854,14 +904,24 @@ pub(super) fn emit_graph_op(
         // A call is the direct path on `kiln_val`: a plain closure that
         // publishes no frame is entered directly, a body this unit compiled is called by name so
         // the C compiler may inline it, and everything else goes through the runtime.
-        GraphOp::Call { callee, args, .. }
-            if plan.known.get(callee).is_some_and(|&target| {
-                direct_callable(
-                    &program.functions[target as usize],
-                    plan.publishes_frame[target as usize],
-                )
-            }) =>
+        GraphOp::Call {
+            callee,
+            args,
+            line,
+            column,
+            ..
+        } if plan.known.get(callee).is_some_and(|&target| {
+            direct_callable(
+                &program.functions[target as usize],
+                plan.publishes_frame[target as usize],
+            )
+        }) =>
         {
+            writeln!(
+                output,
+                "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
+            )
+            .unwrap();
             // The callee is the closure of a proto this unit compiled, so the body is called by
             // name: no callable test, no body-pointer comparison, and the receiver the language
             // gives a plain function, decided here. A site that proved every argument a number
@@ -870,6 +930,28 @@ pub(super) fn emit_graph_op(
             let target = plan.known[callee];
             let target_proto = &program.functions[target as usize];
             let argc = args.len();
+            // A statically-known call may bypass `kiln_c99_val_call`, but it is still a
+            // JavaScript activation. Publish it while executing the direct body so native
+            // Error stack capture observes the same caller chain as the generic call path.
+            let call_frame = format!("call_frame_{}", vid.0);
+            let saved_diagnostic_depth = format!("call_saved_diagnostic_depth_{}", vid.0);
+            let js_frame = format!(
+                "int {saved_diagnostic_depth} = kiln_c99_diagnostic_active_depth; kiln_c99_diagnostic_active_depth = depth + 1; kiln_js_frame {call_frame}; kiln_c99_js_frame_enter(&{call_frame}, (const kiln_closure *)KILN_VAL_PTR(v{}));",
+                callee.0
+            );
+            let js_frame_leave = format!("kiln_c99_js_frame_leave(&{call_frame});");
+            let js_depth_restore =
+                format!("kiln_c99_diagnostic_active_depth = {saved_diagnostic_depth};");
+            let js_frame_failure = format!(
+                "kiln_c99_attribute_direct_body_result((const kiln_closure *)KILN_VAL_PTR(v{}), depth, status);",
+                callee.0
+            );
+            let typed_frame_failure = |failed: &str| {
+                format!(
+                    "if (KILN_UNLIKELY({failed})) kiln_c99_attribute_direct_body_result((const kiln_closure *)KILN_VAL_PTR(v{}), depth, kiln_c99_typed_status);",
+                    callee.0
+                )
+            };
             let init = if args.is_empty() {
                 "KILN_VAL_UNDEFINED".to_owned()
             } else {
@@ -890,6 +972,17 @@ pub(super) fn emit_graph_op(
                 "upvalues".to_owned()
             } else {
                 format!("((kiln_closure *)KILN_VAL_PTR(v{}))->upvalues", callee.0)
+            };
+            // The boxed fallback takes the generic closure ABI even when this is a typed
+            // self-call. A captureless proto's generic body has no upvalue table to read, so
+            // pass NULL instead of naming the typed entry's optional `upvalues` parameter.
+            // When the proto does capture, its typed body already carries that table as a
+            // parameter (the captured reads/closure creation require it) and the self-call
+            // fallback must pass the same table.
+            let boxed_upvalues = if own_call && target_proto.upvalues.is_empty() {
+                "NULL".to_owned()
+            } else {
+                upvalues.clone()
             };
             // An arrow has no `this` of its own: it always runs with the closure it is,
             // `captured_this`, exactly as `plain->arrow ? plain->captured_this : ..` decides it
@@ -1023,8 +1116,9 @@ pub(super) fn emit_graph_op(
                             String::new()
                         };
                         format!(
-                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {boxed_check}{proof} }}",
+                            " else if (KILN_UNLIKELY(!({guard}))) {{ kiln_val call_args[{n}] = {{ {boxed_init} }}; {receiver} {js_frame} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, NULL, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {boxed_upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {js_frame_leave} {js_frame_failure} {js_depth_restore} {boxed_check}{proof} }}",
                             n = argc.max(1),
+                            boxed_upvalues = boxed_upvalues,
                             fast = if plan.fast.get(target as usize).copied().unwrap_or(false) {
                                 "_f"
                             } else {
@@ -1048,6 +1142,8 @@ pub(super) fn emit_graph_op(
                 };
                 if plan.typed_returns[target as usize] {
                     if live_typed {
+                        let typed_frame_failure_code =
+                            typed_frame_failure(&format!("kiln_c99_typed_failed(d{v})"));
                         let int_twin = if live_typed_int {
                             format!(" i{v} = (int64_t)d{v};")
                         } else {
@@ -1055,10 +1151,12 @@ pub(super) fn emit_graph_op(
                         };
                         writeln!(
                             output,
-                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} d{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d{v}))) {failed} v{v} = kiln_c99_val_from_double(d{v});{int_twin} }}"
+                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} {js_frame} d{v} = {symbol}_fn_{target}_t({call_args}); {js_frame_leave} {typed_frame_failure_code} {js_depth_restore} if (KILN_UNLIKELY(kiln_c99_typed_failed(d{v}))) {failed} v{v} = kiln_c99_val_from_double(d{v});{int_twin} }}"
                         )
                         .unwrap();
                     } else {
+                        let typed_frame_failure_code =
+                            typed_frame_failure(&format!("kiln_c99_typed_failed(d_ret_{v})"));
                         let int_twin = if live_typed_int {
                             format!(" i{v} = (int64_t)d_ret_{v};")
                         } else {
@@ -1066,11 +1164,13 @@ pub(super) fn emit_graph_op(
                         };
                         writeln!(
                             output,
-                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} double d_ret_{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(kiln_c99_typed_failed(d_ret_{v}))) {failed} v{v} = kiln_c99_val_from_double(d_ret_{v});{int_twin} }}"
+                            "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} {js_frame} double d_ret_{v} = {symbol}_fn_{target}_t({call_args}); {js_frame_leave} {typed_frame_failure_code} {js_depth_restore} if (KILN_UNLIKELY(kiln_c99_typed_failed(d_ret_{v}))) {failed} v{v} = kiln_c99_val_from_double(d_ret_{v});{int_twin} }}"
                         )
                         .unwrap();
                     }
                 } else {
+                    let typed_frame_failure_code =
+                        typed_frame_failure(&format!("v{v} == KILN_VAL_TYPED_FAIL"));
                     let twin = if live_typed {
                         format!(" memcpy(&d{v}, &v{v}, sizeof(d{v}));")
                     } else {
@@ -1089,7 +1189,7 @@ pub(super) fn emit_graph_op(
                     };
                     writeln!(
                         output,
-                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(v{v} == KILN_VAL_TYPED_FAIL)) {failed}{twin}{int_twin} }}"
+                        "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow}{relies_fallback} else {{ {recv} {js_frame} v{v} = {symbol}_fn_{target}_t({call_args}); {js_frame_leave} {typed_frame_failure_code} {js_depth_restore} if (KILN_UNLIKELY(v{v} == KILN_VAL_TYPED_FAIL)) {failed}{twin}{int_twin} }}"
                     )
                     .unwrap();
                 }
@@ -1113,14 +1213,25 @@ pub(super) fn emit_graph_op(
                 let check = call_status_check(diagnostic_site, pc, label, unwind);
                 writeln!(
                     output,
-                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {check}{twin}{int_twin} }}",
+                    "    if (KILN_UNLIKELY(depth >= KILN_C99_MAX_CALL_DEPTH)) {overflow} else {{ kiln_val call_args[{n}] = {{ {init} }}; {receiver} {js_frame} kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, NULL, &call_host), thrown, NULL, depth + 1 }}; int status = {symbol}_fn_{target}{fast}(&ctx_call, &v{v}, {upvalues}, &recv, {argc} > 0 ? call_args : NULL, (size_t){argc}); {js_frame_leave} {js_frame_failure} {js_depth_restore} {check}{twin}{int_twin} }}",
                     fast = if plan.fast.get(target as usize).copied().unwrap_or(false) { "_f" } else { "" },
                     n = argc.max(1)
                 )
                 .unwrap();
             }
         }
-        GraphOp::Call { callee, args, .. } => {
+        GraphOp::Call {
+            callee,
+            args,
+            line,
+            column,
+            ..
+        } => {
+            writeln!(
+                output,
+                "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
+            )
+            .unwrap();
             let argc = args.len();
             let mut init = format!("v{}", callee.0);
             for arg in args {
@@ -1212,15 +1323,42 @@ pub(super) fn emit_graph_op(
             let closure_diagnostic = "if ((status == KILN_C99_THROWN || status == KILN_C99_CONTROL_ERROR) && kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_function_key == NULL && plain != NULL) { kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0; kiln_c99_diagnostic_function_key = plain->name; }";
             writeln!(
                 output,
-                "    {{ kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {indirect} {closure_diagnostic} {check} v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
+                "    {{ kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column}); kiln_val call_stack[{n}] = {{ {init} }}; const kiln_val *call_args = {argc} > 0 ? &call_stack[1] : NULL; kiln_closure *plain = KILN_VAL_IS_CLOSURE(call_stack[0]) ? (kiln_closure *)KILN_VAL_PTR(call_stack[0]) : NULL; if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; kiln_c99_normalize_closure_receiver(&recv, plain); kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; int status; kiln_js_frame js_frame; kiln_c99_js_frame_enter(&js_frame, plain); {indirect} kiln_c99_js_frame_leave(&js_frame); {closure_diagnostic} {check} v{v} = call_result; }} else {{ int status = kiln_c99_val_call(host, call_stack[0], call_args, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }} }}",
                 n = argc + 1
             )
             .unwrap();
         }
         GraphOp::CallMethod {
-            object, name, args, ..
-        } => call_method::emit_call_method(output, vid, object, name, args, &ctx),
-        GraphOp::New { callee, args, .. } => {
+            object,
+            name,
+            args,
+            prepared_callee,
+            line,
+            column,
+            ..
+        } => call_method::emit_call_method(
+            output,
+            vid,
+            object,
+            name,
+            args,
+            *line,
+            *column,
+            *prepared_callee,
+            &ctx,
+        ),
+        GraphOp::New {
+            callee,
+            args,
+            line,
+            column,
+            ..
+        } => {
+            writeln!(
+                output,
+                "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
+            )
+            .unwrap();
             let argc = args.len();
             let mut init = format!("v{}", callee.0);
             for arg in args {
@@ -1506,7 +1644,7 @@ pub(super) fn emit_graph_op(
                 };
                 writeln!(
                     output,
-                    "    {{ kiln_value built;{setup} int status = {construction}; if (status != KILN_C99_OK) return status;{publish} v{v} = kiln_val_from_boundary(built); }}"
+                    "    {{ kiln_value built;{setup} int status = {construction}; if (status != KILN_C99_OK) return status; kiln_c99_closure_of(built)->module_host = kiln_c99_module_host(host); kiln_c99_closure_set_external_owner(kiln_c99_closure_of(built), host != NULL ? host->module_owner : NULL);{publish} v{v} = kiln_val_from_boundary(built); }}"
                 )
                 .unwrap();
             }
@@ -1554,6 +1692,25 @@ pub(super) fn emit_graph_op(
         }
         // Property and element access call the value-shaped helpers directly: the same
         // functions the stack-shaped entry points wrap, without the one-element arrays.
+        GraphOp::GetProperty { object, name, .. }
+            if argument_length_values.contains(object)
+                && matches!(program.constants.get(*name as usize), Some(kiln_ir::Constant::String(units)) if units.to_scalar_string().as_deref() == Ok("length")) =>
+        {
+            // This operation can execute in either clone of a versioned function. Keep every
+            // representation the graph assigned to its result in sync: the fast clone may read
+            // the numeric twin without consulting `v{v}`, just as it does for a numeric
+            // constant or call result.
+            let need_box = ctx.boxed.map_or(true, |boxed| boxed.contains(&vid));
+            if need_box {
+                writeln!(output, "    v{v} = kiln_c99_val_from_double((double)argc);").unwrap();
+            }
+            if live_typed {
+                writeln!(output, "    d{v} = (double)argc;").unwrap();
+            }
+            if live_typed_int {
+                writeln!(output, "    i{v} = (int64_t)argc;").unwrap();
+            }
+        }
         GraphOp::GetProperty { object, name, .. } => {
             properties::emit_get_property(output, vid, object, name, &ctx)
         }
@@ -1569,6 +1726,12 @@ pub(super) fn emit_graph_op(
             value,
             ..
         } => properties::emit_set_property(output, vid, op, object, name, value, &ctx),
+        GraphOp::DefineOwnProperty {
+            object,
+            name,
+            value,
+            ..
+        } => properties::emit_define_own_property(output, vid, object, name, value, &ctx),
         GraphOp::GetComputed { object, key, .. } => {
             properties::emit_get_computed(output, vid, object, key, &ctx)
         }
@@ -1578,6 +1741,9 @@ pub(super) fn emit_graph_op(
         | GraphOp::SetComputedStrict {
             object, key, value, ..
         } => properties::emit_set_computed(output, vid, op, object, key, value, &ctx),
+        GraphOp::DefineOwnComputed {
+            object, key, value, ..
+        } => properties::emit_define_own_computed(output, vid, object, key, value, &ctx),
         GraphOp::Phi { .. } => {
             // A phi is assigned on the edge into its block, by the predecessor's jump or
             // branch, or by the landing that comes in from the dispatch switch.

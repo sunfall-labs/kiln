@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Installed with `git config core.hooksPath .githooks` (once per checkout; `mise run hooks` does
+# it). Runs the local blocking loop before anything leaves the machine: the HTTP close contract,
+# the native provider contract and the core crate tests, each only when the commits being pushed
+# touch what it checks. `KILN_SKIP_PRE_PUSH=1 git push` bypasses it for a deliberate exception;
+# the bypass is the record, not the habit.
+set -euo pipefail
+if [[ -n ${KILN_SKIP_PRE_PUSH:-} ]]; then
+	echo "pre-push: skipped (KILN_SKIP_PRE_PUSH is set)" >&2
+	exit 0
+fi
+cd "$(git rev-parse --show-toplevel)"
+# Apple's /usr/bin/git is an xcrun shim that exports SDKROOT (the Xcode SDK) to everything it runs,
+# hooks included; an interactive shell does not have it. With it set, native links in the checks
+# below fail with "tapi error: malformed file ... unknown architecture" on Xcode 27's .tbd files,
+# although the same checks pass from a shell (2026-10-02; docs/issues/toolchain-sdkroot). The
+# hook runs what a developer would run by hand, so it drops what git added.
+unset SDKROOT
+# Git also exports GIT_DIR (and, for some commands, GIT_INDEX_FILE and GIT_WORK_TREE) to hooks. A
+# test that builds a fixture repository and runs git inside it then talks to *this* repository
+# instead: two script_hygiene tests failed under the hook printing "On branch release/..." from
+# their fixtures (2026-10-02). The checks need none of them once the hook has cd'd to the top level.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+# `git -c key=value push` reaches every git the checks start through these, fixtures included.
+unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+[[ -f scripts/pre-push.sh ]] || exit 0
+exec bash scripts/pre-push.sh

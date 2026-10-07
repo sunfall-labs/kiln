@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
-pub use kiln_hir::{Span, TypeAnnotation, VariableKind};
+pub use kiln_hir::{SourceOrigin, Span, StaticSourceProvenance, TypeAnnotation, VariableKind};
 pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 8;
+pub const BYTECODE_VERSION: u16 = 18;
 mod source_types;
 pub use source_types::{SOURCE_TYPE_METADATA_VERSION, SourceTypeAnnotations, apply_source_types};
 
@@ -53,6 +53,9 @@ pub enum UnaryOp {
     Increment,
     /// `ToNumeric(x)` minus one, in the type the conversion produced.
     Decrement,
+    /// Abstract `ToString` used by template interpolation. Unlike calling the public `String`
+    /// function, this rejects symbols after string-hint primitive conversion.
+    ToString,
 }
 
 /// Binary operations understood by the bytecode runtime.
@@ -129,10 +132,10 @@ pub enum Instruction {
     MakeFunction(u32),
     /// `eval(...)` written as that exact name, with nothing shadowing it.
     ///
-    /// Its own instruction rather than a call to a value, because the eval'd source is compiled
-    /// against the *caller's* scope and no value can carry that: the site's [`EvalSite`] is the
-    /// only record of which names are visible here and where they live. Boxed so that the one
-    /// instruction that needs a whole scope description does not widen every other one.
+    /// Reads the callee before its arguments, as an ordinary call does. The intrinsic eval
+    /// compiles source against the caller's scope using [`EvalSite`]; replacements are called
+    /// normally with the captured callee. Consumes the callee and arguments, leaving one result.
+    /// Boxed so the scope description does not widen every other instruction.
     DirectEval(Box<EvalSite>),
     /// Call the value `argc` slots below the top of the stack, consuming it and its arguments
     /// and leaving the result.
@@ -156,11 +159,11 @@ pub enum Instruction {
     /// many `xs` yields.
     SpreadInto,
     /// `ToPropertyKey` of the key on top of the stack, replacing it. Stack is object, then key.
-    ///
-    /// This is the memoisation the specification performs on a Reference Record: a compound
-    /// assignment reads and writes through *one* reference, and `GetValue` stores the converted
-    /// key back into it so `PutValue` does not convert again. Without it a key object's
-    /// `toString` runs twice, which the program can see.
+    /// Computed property References retain their raw property-name value: `GetComputed` and
+    /// `SetComputed` each coerce it when performing GetValue and PutValue. This explicit
+    /// conversion is for bytecode sites that must materialize a property key before the property
+    /// operation (for example, a computed property definition or a prepared method call that
+    /// retains the canonical key for call-frame metadata).
     ///
     /// It reads the object beneath the key without consuming it, because the order is fixed:
     /// a nullish object throws *before* the key converts, so `null[k] += 1` never runs `k`'s
@@ -182,7 +185,15 @@ pub enum Instruction {
         name: u32,
         argc: u16,
     },
-    /// `object[key](...)`, the computed form of `CallMethod`.
+    /// Call a named property value already fetched from its receiver before argument evaluation.
+    CallMethodPrepared {
+        name: u32,
+        argc: u16,
+    },
+    /// Call a computed property whose receiver, canonical key and resolved method are already on
+    /// the stack, followed by its arguments. The compiler performs ToPropertyKey and Get before
+    /// evaluating args, preserving the captured method and its call-frame name without repeating
+    /// a user-defined key conversion.
     CallComputed {
         argc: u16,
     },
@@ -192,6 +203,11 @@ pub enum Instruction {
     SetComputedStrict {
         strict: bool,
     },
+    /// Create an own data property with all three attributes true. Used by public class fields,
+    /// whose DefineField semantics bypass inherited setters and readonly data properties.
+    DefineOwnProperty(u32),
+    /// Computed-key counterpart of `DefineOwnProperty`.
+    DefineOwnComputed,
     /// Push the current `this`.
     LoadThis,
     /// `new.target`. Follows the same rule as `this`: an ordinary call has none, a `new` call
@@ -444,6 +460,12 @@ pub enum Instruction {
     /// Own-only, and a miss is a TypeError rather than `undefined` -- which is the brand check:
     /// an object of another class simply does not carry the name.
     GetPrivate(u32),
+    /// Test `#name in object` without invoking public Proxy traps. The stack holds the receiver
+    /// and the expected class-evaluation brand: `[object, brand] -> [boolean]`.
+    HasPrivate {
+        name: u32,
+        brand_key: u32,
+    },
     /// Write `object.#name = value`. Stack: `[object, value] -> [value]`.
     SetPrivate(u32),
     /// Install a private method or accessor half. Stack: `[target, function] -> [target]`.
@@ -532,6 +554,9 @@ pub enum Instruction {
     /// Read the cell captured at this closure's upvalue index.
     LoadUpvalue(u32),
     StoreUpvalue(u32),
+    /// Mark an initialized captured cell as a named-function self binding. Its write behavior
+    /// differs from `const`: sloppy assignments are ignored, strict assignments throw.
+    MarkCellFunctionName(u32),
     /// Read a module-scope slot from inside a call frame.
     ///
     /// Distinct from `LoadLocal` because a frame's locals are its own: module bindings outlive
@@ -551,6 +576,9 @@ pub enum Instruction {
     /// A stack-neutral placeholder used by closed-world backends when a compiler-proven pure
     /// declaration is omitted while preserving bytecode PCs and jump targets.
     Nop,
+    /// Push the realm's intrinsic built-in directly, bypassing mutable global properties.
+    /// Used only to guard a bounded direct-eval inline against replacement of global `eval`.
+    LoadIntrinsicBuiltin(Builtin),
 }
 
 /// A template literal site for canonical template object caching (ECMA-262 §13.2.8.5).
@@ -558,6 +586,16 @@ pub enum Instruction {
 pub struct TemplateSite {
     pub cooked: Vec<Option<StringUnits>>,
     pub raw: Vec<StringUnits>,
+}
+
+/// Source coordinates for a call-like bytecode instruction, retained only at call sites.
+/// `function_span` identifies the containing function prototype; `None` is the program body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugCallSite {
+    pub function_span: Option<Span>,
+    pub instruction: u32,
+    pub line: u32,
+    pub column: u32,
 }
 
 /// A compiled module body.
@@ -584,9 +622,21 @@ pub struct Program {
     /// Shared with the [`Module`] it was compiled from rather than copied out of it, so a program
     /// and its HIR cost one buffer between them and not two.
     pub source: Arc<str>,
+    /// Optional lossless UTF-16 origin for sources transported through parser-safe UTF-8.
+    /// Spans remain parser-byte offsets; this shared map translates them back when reflecting
+    /// function source text. Ordinary modules leave it absent and pay no mapping cost.
+    pub source_origin: Option<Arc<SourceOrigin>>,
+    /// Identity of a static source transform and its source map, when present. Kept separate
+    /// from dynamic UTF-16 transport so reflection never has to interpret an empty fake map.
+    pub static_source_identity: Option<Arc<str>>,
+    /// Shared static TS source/map retained for prepared-source native DCE reparses. Ordinary
+    /// calls map diagnostics and call sites during compilation and carry no extra source owner.
+    pub static_source_provenance: Option<Arc<StaticSourceProvenance>>,
     /// Syntactic template literal sites compiled in this program, referenced by
     /// [`Instruction::LoadTemplateObject`].
     pub template_sites: Vec<TemplateSite>,
+    /// Sparse source coordinates for call-like instructions used by stack frames.
+    pub debug_call_sites: Vec<DebugCallSite>,
 }
 
 impl Default for Program {
@@ -598,12 +648,30 @@ impl Default for Program {
             local_count: 0,
             functions: Vec::new(),
             source: "".into(),
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         }
     }
 }
 
 impl Program {
+    /// Look up the sparse call-site coordinate table without scanning unrelated functions.
+    pub fn debug_call_site(
+        &self,
+        function_span: Option<Span>,
+        instruction: usize,
+    ) -> Option<DebugCallSite> {
+        self.debug_call_sites
+            .binary_search_by_key(&(function_span, instruction as u32), |site| {
+                (site.function_span, site.instruction)
+            })
+            .ok()
+            .map(|index| self.debug_call_sites[index])
+    }
+
     /// Whether this program or any nested function prototype contains [`Instruction::DirectEval`].
     pub fn has_direct_eval(&self) -> bool {
         self.code
@@ -757,214 +825,7 @@ impl FunctionProto {
     }
 }
 
-/// A global the compiler resolves by name and the runtime provides.
-///
-/// This is the native half of design.md §5, which wants built-ins written in JavaScript. Nothing
-/// can bootstrap a JS built-in yet -- that needs objects, prototypes and a loader, and two of
-/// those have only just arrived -- so the ones the corpus needs first are native. The set is
-/// deliberately tiny and each addition should be argued rather than assumed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Builtin {
-    Error,
-    Symbol,
-    String,
-    GlobalThis,
-    Set,
-    Map,
-    Array,
-    Object,
-    Json,
-    // Appended rather than inserted: the discriminant is hashed into the artifact cache key, so
-    // renumbering the existing ones would invalidate every cached native build.
-    Math,
-    Number,
-    Boolean,
-    /// `NaN` and `Infinity` are values rather than callables, but they reach the program the same
-    /// way -- as a name the compiler resolves to something the runtime supplies.
-    NotANumber,
-    Infinity,
-    ParseInt,
-    EncodeUri,
-    EncodeUriComponent,
-    DecodeUri,
-    DecodeUriComponent,
-    ParseFloat,
-    IsNaN,
-    IsFinite,
-    TypeError,
-    RangeError,
-    ReferenceError,
-    SyntaxError,
-    UriError,
-    SetTimeout,
-    SetInterval,
-    ClearTimeout,
-    ClearInterval,
-    QueueMicrotask,
-    Promise,
-    RegExp,
-    Date,
-    WeakMap,
-    WeakSet,
-    Performance,
-    Reflect,
-    BigInt,
-    /// `process`, in the minimal shape a bundle actually reads.
-    Process,
-    /// Node's global byte container. The interpreter installs the Node-compatible surface only;
-    /// native Node execution remains unadvertised until it shares that runtime adapter.
-    Buffer,
-    /// WHATWG URL, used by both web-compatible programs and Node servers.
-    Url,
-    /// `Function`, reached for its `prototype` and its `toString` rather than to construct.
-    Function,
-    Proxy,
-    Escape,
-    Unescape,
-    ArrayBuffer,
-    Int8Array,
-    Uint8Array,
-    Uint8ClampedArray,
-    Int16Array,
-    Uint16Array,
-    Int32Array,
-    Uint32Array,
-    Float32Array,
-    Float64Array,
-    /// `eval` reached as a *value* rather than by a direct call: `(0, eval)(src)`,
-    /// `globalThis.eval(src)`, or a reference stashed and called later. Every one of those is an
-    /// indirect eval, which runs in global scope; a direct call is [`Instruction::DirectEval`]
-    /// instead, because only the compiler knows what a caller's scope contains.
-    Eval,
-    /// Explicit resource management's two names. Appended, like everything after `Json`: the
-    /// discriminant is hashed into the artifact cache key, so inserting one in the middle would
-    /// invalidate every cached native build.
-    DisposableStack,
-    SuppressedError,
-    /// The asynchronous half of the same pair. Appended for the reason above: the discriminant
-    /// is part of the artifact cache key, so a new name goes at the end.
-    AsyncDisposableStack,
-    /// The error kind nothing throws any more. Appended for the same reason.
-    EvalError,
-    /// The shared-memory namespace. Appended for the same reason.
-    Atomics,
-    /// WHATWG UTF-8 decoder. Appended so existing artifact discriminants remain stable.
-    TextDecoder,
-    /// Node's check-phase task primitives. Appended to preserve existing artifact discriminants.
-    SetImmediate,
-    ClearImmediate,
-    /// The error kind that reports several failures as one, and what `Promise.any` rejects with.
-    /// Appended for the reason every name after `Json` is: the discriminant is hashed into the
-    /// artifact cache key, so inserting one in the middle would invalidate every cached build.
-    AggregateError,
-    /// Cancellation, which every modern asynchronous API takes as an argument. Appended for the
-    /// reason above.
-    AbortController,
-    AbortSignal,
-    /// The UTF-8 encoder half of the pair whose decoder is already here.
-    TextEncoder,
-    StructuredClone,
-}
-
-macro_rules! builtin_bindings {
-    ($( $variant:ident => $name:literal ),+ $(,)?) => {
-        /// The canonical global spelling for every compiler-provided builtin.
-        pub const GLOBAL_BINDINGS: &'static [(Self, &'static str)] = &[
-            $( (Self::$variant, $name), )+
-        ];
-
-        /// The global name that resolves to this built-in.
-        pub fn from_name(name: &str) -> Option<Self> {
-            match name {
-                $( $name => Some(Self::$variant), )+
-                "global" => Some(Self::GlobalThis),
-                _ => None,
-            }
-        }
-
-        pub fn name(self) -> &'static str {
-            match self {
-                $( Self::$variant => $name, )+
-            }
-        }
-    };
-}
-
-impl Builtin {
-    builtin_bindings! {
-        Error => "Error",
-        Symbol => "Symbol",
-        String => "String",
-        GlobalThis => "globalThis",
-        Set => "Set",
-        Map => "Map",
-        Array => "Array",
-        Object => "Object",
-        Json => "JSON",
-        Math => "Math",
-        Number => "Number",
-        Boolean => "Boolean",
-        NotANumber => "NaN",
-        Infinity => "Infinity",
-        ParseInt => "parseInt",
-        EncodeUri => "encodeURI",
-        EncodeUriComponent => "encodeURIComponent",
-        DecodeUri => "decodeURI",
-        DecodeUriComponent => "decodeURIComponent",
-        ParseFloat => "parseFloat",
-        IsNaN => "isNaN",
-        IsFinite => "isFinite",
-        TypeError => "TypeError",
-        RangeError => "RangeError",
-        ReferenceError => "ReferenceError",
-        SyntaxError => "SyntaxError",
-        UriError => "URIError",
-        SetTimeout => "setTimeout",
-        SetInterval => "setInterval",
-        ClearTimeout => "clearTimeout",
-        ClearInterval => "clearInterval",
-        QueueMicrotask => "queueMicrotask",
-        Promise => "Promise",
-        RegExp => "RegExp",
-        Date => "Date",
-        WeakMap => "WeakMap",
-        WeakSet => "WeakSet",
-        Performance => "performance",
-        Reflect => "Reflect",
-        BigInt => "BigInt",
-        Process => "process",
-        Buffer => "Buffer",
-        Url => "URL",
-        Function => "Function",
-        Proxy => "Proxy",
-        Escape => "escape",
-        Unescape => "unescape",
-        ArrayBuffer => "ArrayBuffer",
-        Int8Array => "Int8Array",
-        Uint8Array => "Uint8Array",
-        Uint8ClampedArray => "Uint8ClampedArray",
-        Int16Array => "Int16Array",
-        Uint16Array => "Uint16Array",
-        Int32Array => "Int32Array",
-        Uint32Array => "Uint32Array",
-        Float32Array => "Float32Array",
-        Float64Array => "Float64Array",
-        Eval => "eval",
-        DisposableStack => "DisposableStack",
-        SuppressedError => "SuppressedError",
-        AsyncDisposableStack => "AsyncDisposableStack",
-        EvalError => "EvalError",
-        Atomics => "Atomics",
-        TextDecoder => "TextDecoder",
-        SetImmediate => "setImmediate",
-        ClearImmediate => "clearImmediate",
-        AggregateError => "AggregateError",
-        AbortController => "AbortController",
-        AbortSignal => "AbortSignal",
-        TextEncoder => "TextEncoder",
-        StructuredClone => "structuredClone",
-    }
-}
+pub use kiln_builtin_surface::GlobalBuiltin as Builtin;
 
 /// Where a closure's captured cell is found when the closure is created.
 ///
@@ -1011,19 +872,21 @@ pub enum EvalDeclaration {
     Var,
     Let,
     Const,
+    /// The immutable inner name of a named function expression.
+    FunctionName,
 }
 
 /// One class's private names, as a direct `eval` written inside that class has to see them.
 ///
 /// The names alone would not do. A private element is stored under a key built from the class's
 /// *identity* -- `class A { #v } class B { #v }` declare two different fields -- and that
-/// identity is a counter belonging to the compiler that compiled the class. An eval'd source is
-/// compiled by a second compiler whose counter starts at zero, so a name resolved there against a
-/// fresh identity would name a slot no object of the enclosing class carries, and the brand check
-/// would report the class as not having declared its own field. The identity travels with the
-/// names for that reason.
+/// identity is a counter belonging to the compiler that compiled the class, qualified by its
+/// stable module identity. An eval'd source is compiled by a second compiler, so the enclosing
+/// module identity travels with its names when eval resolves an outer private name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateScope {
+    /// Stable source/module identity for the class declaration.
+    pub module_id: String,
     pub scope: u32,
     /// Sorted, because the bytecode is a cache key and a hash set has no order to promise.
     pub names: Vec<String>,
@@ -1066,9 +929,18 @@ pub struct EvalBinding {
 /// table would cost every program a field it never uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalSite {
+    /// Module containing the call site, used to make classes compiled by `eval` disjoint from
+    /// classes in other independently compiled modules.
+    pub module_id: String,
+    /// Byte offset of this call site; eval-created class scopes remain disjoint from other eval
+    /// sites in the same source.
+    pub source_offset: u32,
     /// The names in scope where the call is written, innermost binding first so a shadowed outer
     /// name never wins.
     pub bindings: Vec<EvalBinding>,
+    /// Active object environment records from enclosing `with` statements, outermost first.
+    /// Unlike ordinary bindings these resolve names dynamically through property lookup.
+    pub with_objects: Vec<EvalBinding>,
     /// Whether the calling code is strict, which decides whether the eval'd source gets its own
     /// scope for `var` declarations or shares the caller's bindings.
     pub strict: bool,
@@ -1109,8 +981,8 @@ pub struct EvalSite {
     pub blocked_var_names: Vec<String>,
 }
 
-/// A runtime import lowered to a local slot. The graph linker initializes the slot from the
-/// provider module before evaluation; cyclic graphs are rejected by this first implementation.
+/// A runtime import lowered to a local slot. The graph linker initializes the slot during module
+/// instantiation, before any module body starts evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportBinding {
     pub source: String,
@@ -1176,6 +1048,10 @@ pub struct ModuleLinkFacts {
     /// HIR still preserves declaration boundaries; a closed-world backend may then omit a row
     /// whose slots are not demanded without guessing those boundaries from flattened bytecode.
     pub removable_declarations: Vec<RemovableDeclaration>,
+    /// Exclusive bytecode end of ECMAScript module instantiation work: declaration setup and
+    /// hoisted function values, before the first top-level statement is evaluated.
+    /// Native graph execution runs this prefix for every module before evaluating any body.
+    pub module_instantiation_end: u32,
 }
 
 /// One side-effect-free top-level declaration owned by a module.

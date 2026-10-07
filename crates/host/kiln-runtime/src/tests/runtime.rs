@@ -1,6 +1,33 @@
 use crate::*;
 
 #[test]
+fn host_scheduler_origin_is_shared_and_virtual_policy_stays_unchanged() {
+    let capabilities = RealmCapabilities {
+        clock: ClockCapability::Host,
+        ..RealmCapabilities::default()
+    };
+    let mut runtime =
+        RealmRuntime::with_capabilities(capabilities).expect("host-clock runtime builds");
+    let mut scheduler = Realm::<WorkId, WorkId>::new();
+    runtime.initialize_host_clock_origin(1_725_000_000_000.0);
+    // A later module VM must not reset the common scheduler epoch.
+    runtime.initialize_host_clock_origin(1_725_000_500_000.0);
+    runtime.advance_host_clock(&mut scheduler, 1_725_000_000_030.0);
+    assert_eq!(scheduler.now(), std::time::Duration::from_millis(30));
+    // Backward wall-clock movement cannot move an already advanced scheduler backward.
+    runtime.advance_host_clock(&mut scheduler, 1_725_000_000_010.0);
+    assert_eq!(scheduler.now(), std::time::Duration::from_millis(30));
+    runtime.advance_host_clock(&mut scheduler, 1_725_000_000_050.0);
+    assert_eq!(scheduler.now(), std::time::Duration::from_millis(50));
+
+    let mut virtual_runtime = RealmRuntime::new().expect("virtual runtime builds");
+    let mut virtual_scheduler = Realm::<WorkId, WorkId>::new();
+    virtual_runtime.initialize_host_clock_origin(1_725_000_000_000.0);
+    virtual_runtime.advance_host_clock(&mut virtual_scheduler, 1_725_000_100_000.0);
+    assert_eq!(virtual_scheduler.now(), std::time::Duration::ZERO);
+}
+
+#[test]
 fn two_lanes_run_local_tasks_on_one_wall_reactor() {
     let reactor = Reactor::shared_wall().expect("shared reactor builds");
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -870,6 +897,81 @@ fn runtime_metrics_are_exposed_as_a_kiln_owned_snapshot() {
 }
 
 #[test]
+fn cancellation_retires_a_resource_in_an_undelivered_listen_completion() {
+    let mut runtime = RealmRuntime::new().expect("runtime");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let listener = runtime.enter(|| tokio::net::TcpListener::from_std(listener).unwrap());
+    let request = runtime.start_host_op(
+        AsyncHostOp::TcpListen {
+            host: "127.0.0.1".into(),
+            port: 0,
+        },
+        true,
+    );
+    let sequence = runtime.host_mut().pending[&request].sequence;
+    runtime.host_mut().promote_completion(HostCompletion {
+        request,
+        sequence,
+        lifecycle: None,
+        result: Ok(HostCompletionValue::TcpListener {
+            listener: HostListener::Tokio(listener),
+            referenced: true,
+        }),
+    });
+    assert_eq!(runtime.host_mut().resources.len(), 1);
+    assert!(runtime.cancel_host_op(request));
+    assert!(runtime.host_mut().resources.is_empty());
+    assert!(AsyncHostOps::next_completion(runtime.host_mut()).is_none());
+    assert!(!AsyncHostOps::has_referenced_work(runtime.host_mut()));
+}
+
+#[test]
+fn cancellation_closes_an_undelivered_connected_or_accepted_socket() {
+    use std::io::Read;
+    for accepted in [false, true] {
+        let mut runtime = RealmRuntime::new().expect("runtime");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut peer = std::net::TcpStream::connect(address).unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let (stream, peer_address) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let stream = runtime.enter(|| tokio::net::TcpStream::from_std(stream).unwrap());
+        let request = runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port: address.port(),
+            },
+            true,
+        );
+        let sequence = runtime.host_mut().pending[&request].sequence;
+        runtime.host_mut().promote_completion(HostCompletion {
+            request,
+            sequence,
+            lifecycle: None,
+            result: Ok(HostCompletionValue::TcpStream {
+                stream,
+                peer: peer_address,
+                referenced: true,
+                accepted,
+                ticket: None,
+            }),
+        });
+        assert_eq!(runtime.host_mut().resources.len(), 1);
+        assert!(runtime.cancel_host_op(request));
+        assert!(runtime.host_mut().resources.is_empty());
+        assert!(!AsyncHostOps::has_referenced_work(runtime.host_mut()));
+        assert_eq!(
+            peer.read(&mut [0u8; 1]).unwrap(),
+            0,
+            "cancelled socket closes its peer"
+        );
+    }
+}
+
+#[test]
 fn stale_completion_queued_after_cancellation_is_rejected() {
     let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
     let request = runtime.start_host_op(
@@ -1274,6 +1376,7 @@ fn scripted_runtime_cancellation_retires_stream_read_before_close() {
     };
     assert_eq!(close_operation, &close);
     assert!(runtime.cancel_host_op(request));
+    assert!(driver.cancelled(request));
     let close_request = runtime.start_host_op(close_operation.clone(), false);
     assert!(driver.started(close_operation, close_request));
     assert_eq!(
@@ -2407,6 +2510,155 @@ fn interval_rearms_before_callback_and_can_be_cleared() {
     assert!(!realm.has_pending_work());
 }
 
+/// `Timeout.prototype.refresh()`: the same timer restarted with its delay from the realm's
+/// current virtual time, still the same identity and still unreferenced if it was; a finished or
+/// cleared timer is not re-armed.
+#[test]
+fn refreshed_timers_restart_from_now() {
+    let mut realm: Realm = Realm::new();
+    let first = realm.set_timeout(Duration::from_millis(10), WorkId::new(1));
+    let slow = realm.set_timeout(Duration::from_millis(20), WorkId::new(2));
+    realm.set_timer_referenced(slow, false);
+    let next = |realm: &mut Realm| match realm.run_next_timer() {
+        Some(WorkItem::Timer { id, work }) => (id, work, realm.now()),
+        _ => panic!("a timer was due"),
+    };
+    assert_eq!(
+        next(&mut realm),
+        (first, WorkId::new(1), Duration::from_millis(10))
+    );
+    // Refreshed at 10 ms it is due at 30, behind a timer armed for 25.
+    assert!(realm.refresh_timer(slow));
+    let between = realm.set_timeout(Duration::from_millis(15), WorkId::new(3));
+    assert_eq!(
+        next(&mut realm),
+        (between, WorkId::new(3), Duration::from_millis(25))
+    );
+    assert!(!realm.has_referenced_timers());
+    assert_eq!(
+        next(&mut realm),
+        (slow, WorkId::new(2), Duration::from_millis(30))
+    );
+    // Finished: nothing to restart, and nothing is re-armed.
+    assert!(!realm.refresh_timer(slow));
+    assert!(!realm.has_pending_work());
+
+    // Cleared: the same.
+    let doomed = realm.set_timeout(Duration::from_millis(5), WorkId::new(4));
+    assert!(realm.refresh_timer(doomed));
+    assert!(realm.clear_timeout(doomed));
+    assert!(!realm.refresh_timer(doomed));
+    assert!(realm.next_timer_deadline().is_none());
+
+    // An interval restarts its current period, and keeps ticking at its period after.
+    let start = realm.now();
+    let tick = realm.set_interval(Duration::from_millis(10), WorkId::new(5));
+    assert_eq!(next(&mut realm).2, start + Duration::from_millis(10));
+    let before = realm.now();
+    realm.set_timeout(Duration::from_millis(4), WorkId::new(6));
+    assert_eq!(next(&mut realm).1, WorkId::new(6));
+    assert!(realm.refresh_timer(tick));
+    assert_eq!(
+        next(&mut realm),
+        (tick, WorkId::new(5), before + Duration::from_millis(4 + 10))
+    );
+    assert_eq!(next(&mut realm).2, before + Duration::from_millis(4 + 20));
+    assert!(realm.clear_timeout(tick));
+}
+
+/// A timeout that already ran is armed again under its own identity (`Timeout.refresh()` after
+/// it fired, or from inside its callback), and one that was cleared or is still pending is not.
+#[test]
+fn a_timeout_that_ran_can_be_armed_again_under_its_identity() {
+    let mut realm: Realm = Realm::new();
+    let id = realm.set_timeout(Duration::from_millis(10), WorkId::new(1));
+    assert!(!realm.is_rearmable(id), "pending");
+    let Some(WorkItem::Timer { id: ran, .. }) = realm.run_next_timer() else {
+        panic!("a timer was due");
+    };
+    assert_eq!(ran, id);
+    assert!(realm.is_rearmable(id), "ran");
+    realm.rearm_timeout(id, Duration::from_millis(10), WorkId::new(2));
+    assert!(!realm.is_rearmable(id), "pending again");
+    assert!(realm.refresh_timer(id));
+    let Some(WorkItem::Timer { id: again, work }) = realm.run_next_timer() else {
+        panic!("it runs a second time");
+    };
+    assert_eq!((again, work), (id, WorkId::new(2)));
+    assert_eq!(realm.now(), Duration::from_millis(20));
+    // Cleared before it ran: never again.
+    let doomed = realm.set_timeout(Duration::from_millis(5), WorkId::new(3));
+    assert!(realm.clear_timeout(doomed));
+    assert!(!realm.is_rearmable(doomed));
+}
+
+/// An unreferenced timer never keeps the loop open and never moves the virtual clock by
+/// itself, but runs in its turn while a referenced one keeps the loop going.
+#[test]
+fn unreferenced_timers_do_not_keep_the_loop_alive() {
+    let drive = |realm: &mut Realm| {
+        let mut ran = Vec::new();
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime
+            .drive(
+                realm,
+                |_, work| {
+                    if let WorkItem::Timer { work, .. } = work {
+                        ran.push(work);
+                    }
+                    Ok::<_, ()>(())
+                },
+                |_| Ok::<_, ()>(()),
+            )
+            .expect("realm drive succeeds");
+        ran
+    };
+
+    // Alone, one is never run, though it is due, and the clock stays where it was.
+    let mut realm: Realm = Realm::new();
+    let lone = realm.set_timeout(Duration::from_millis(5), WorkId::new(1));
+    assert!(realm.set_timer_referenced(lone, false));
+    assert!(!realm.has_referenced_timers());
+    assert!(drive(&mut realm).is_empty());
+    assert_eq!(realm.now(), Duration::ZERO);
+
+    // Beside a referenced timer it runs if it is due first, and not after the last one.
+    let mut realm: Realm = Realm::new();
+    let early = realm.set_timeout(Duration::from_millis(5), WorkId::new(1));
+    realm.set_timeout(Duration::from_millis(10), WorkId::new(2));
+    let late = realm.set_timeout(Duration::from_millis(50), WorkId::new(3));
+    realm.set_timer_referenced(early, false);
+    realm.set_timer_referenced(late, false);
+    assert_eq!(drive(&mut realm), vec![WorkId::new(1), WorkId::new(2)]);
+    assert_eq!(realm.now(), Duration::from_millis(10));
+
+    // `ref` undoes it, a cleared or finished timer is no longer there to mark, and an
+    // unreferenced interval stops holding the loop once the referenced work is gone.
+    let mut realm: Realm = Realm::new();
+    let id = realm.set_timeout(Duration::from_millis(5), WorkId::new(1));
+    realm.set_timer_referenced(id, false);
+    realm.set_timer_referenced(id, true);
+    assert!(realm.has_referenced_timers());
+    assert_eq!(drive(&mut realm), vec![WorkId::new(1)]);
+    assert!(!realm.set_timer_referenced(id, false));
+    let interval = realm.set_interval(Duration::from_millis(2), WorkId::new(2));
+    realm.set_timer_referenced(interval, false);
+    realm.set_timeout(Duration::from_millis(7), WorkId::new(3));
+    assert_eq!(
+        drive(&mut realm),
+        vec![
+            WorkId::new(2),
+            WorkId::new(2),
+            WorkId::new(2),
+            WorkId::new(3)
+        ]
+    );
+    let cleared = realm.set_timeout(Duration::from_millis(1), WorkId::new(4));
+    realm.set_timer_referenced(cleared, false);
+    assert!(realm.clear_timeout(cleared));
+    assert!(!realm.has_referenced_timers());
+}
+
 #[test]
 fn zero_interval_has_immediate_first_run_then_advances() {
     let mut realm: Realm = Realm::new();
@@ -2636,6 +2888,44 @@ fn captures_console_style_lines() {
 }
 
 #[test]
+fn capture_host_clock_is_synthetic_unless_host_time_is_selected() {
+    let mut deterministic = CaptureHost::new();
+    for step in 0..3 {
+        assert_eq!(
+            deterministic.call(HostOp::ClockNow, &[]).expect("clock"),
+            HostValue::number(CAPTURE_HOST_CLOCK_START_MS + f64::from(step)),
+        );
+    }
+
+    let epoch_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current epoch")
+            .as_secs_f64()
+            * 1000.0
+    };
+    let before = epoch_ms();
+    let mut host = CaptureHost::new().with_clock(ClockCapability::Host);
+    for _ in 0..1000 {
+        let reading = host
+            .call(HostOp::ClockNow, &[])
+            .expect("clock")
+            .as_number()
+            .expect("numeric clock");
+        let after = epoch_ms();
+        assert!(
+            reading >= before && reading <= after,
+            "{reading} outside {before}..={after}"
+        );
+    }
+    host = host.with_clock(ClockCapability::Virtual);
+    assert_eq!(
+        host.call(HostOp::ClockNow, &[]).expect("clock"),
+        HostValue::number(CAPTURE_HOST_CLOCK_START_MS)
+    );
+}
+
+#[test]
 fn empty_write_still_terminates_a_line() {
     let mut host = CaptureHost::default();
     host.call(HostOp::WriteStdout, &[]).expect("write succeeds");
@@ -2721,6 +3011,27 @@ fn scripted_runtime_with(
     let host = ScriptedHost::new([]).with_transport(resource, transport);
     let runtime = RealmRuntime::with_host(host).expect("scripted runtime builds");
     (runtime, log)
+}
+
+#[test]
+fn unattached_http_resource_cannot_be_closed_or_keep_the_realm_alive() {
+    let resource = ResourceId::new(49);
+    let (mut runtime, _log) = scripted_http_runtime(resource, &[], false);
+
+    assert!(!runtime.http_owns(resource));
+    for mode in [HttpCloseMode::Graceful, HttpCloseMode::Abort] {
+        assert!(
+            !runtime.http_close(resource, mode),
+            "only an HTTP engine that owns the resource may close it"
+        );
+    }
+
+    // A raw CloseResource fallback would be recorded by ScriptedHost as pending unexpected
+    // work. Rejection must leave both transport ownership and scheduler liveness untouched.
+    assert!(!runtime.has_pending_host_work());
+    assert!(!runtime.has_referenced_host_work());
+    assert!(!runtime.has_live_http_work());
+    assert!(!runtime.http_owns(resource));
 }
 
 /// Let the runtime's real turn selector drive engine tasks and collect what they queued.
@@ -2936,7 +3247,7 @@ fn realm_shutdown_aborts_engine_connections_and_rejects_new_admission() {
         AgentRelease::Retire
     );
     assert_eq!(
-        runtime.client_connection_failed(&origin),
+        runtime.client_connection_failed(&origin, 1),
         AgentFailure::Empty
     );
     assert_eq!(runtime.client_connection_closed(resource), None);
@@ -3503,5 +3814,102 @@ fn tokio_host_intercepts_vfs_overlay_operations_fast_path() {
             is_directory: false,
             is_symlink: false,
         }]))
+    );
+}
+
+#[test]
+fn pending_only_cancel_preserves_ready_results_and_cancels_unfinished_accept() {
+    let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+    runtime.start_host_op(
+        AsyncHostOp::TcpListen {
+            host: "127.0.0.1".into(),
+            port: 0,
+        },
+        true,
+    );
+    let listener = match next_host_completion(&mut runtime)
+        .expect("listen completes")
+        .result
+        .expect("listen succeeds")
+    {
+        AsyncHostValue::Resource(resource) => resource.id,
+        other => panic!("expected listener, got {other:?}"),
+    };
+    let query = runtime.start_host_op(AsyncHostOp::ResourceState { resource: listener }, false);
+    assert_eq!(
+        runtime.state.cancel_host_op_if_pending(query),
+        PendingCancellation::CompletionReady
+    );
+    let result = next_host_completion(&mut runtime).expect("ready result remains deliverable");
+    assert_eq!(result.request, query);
+    assert!(
+        matches!(result.result, Ok(AsyncHostValue::ResourceState(state)) if state.info.id == listener)
+    );
+    assert_eq!(
+        runtime.state.cancel_host_op_if_pending(query),
+        PendingCancellation::Unknown
+    );
+
+    // There is no peer: this accept cannot have a ready success hidden behind delivery.
+    let accept = runtime.start_host_op(AsyncHostOp::TcpAccept { listener }, true);
+    assert_eq!(
+        runtime.state.cancel_host_op_if_pending(accept),
+        PendingCancellation::Cancelled
+    );
+    assert_eq!(
+        runtime.state.cancel_host_op_if_pending(accept),
+        PendingCancellation::Unknown
+    );
+    runtime.start_host_op(AsyncHostOp::CloseResource { resource: listener }, false);
+    let closed = next_host_completion(&mut runtime).expect("listener close completes");
+    assert_eq!(closed.result, Ok(AsyncHostValue::Undefined));
+    assert!(!runtime.state.has_pending_host_work());
+}
+
+#[test]
+fn pending_only_cancel_preserves_synchronous_tcp_write_success() {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener binds");
+    let mut runtime = RealmRuntime::new().expect("runtime builds");
+    runtime.start_host_op(
+        AsyncHostOp::TcpConnect {
+            host: "127.0.0.1".into(),
+            port: listener.local_addr().expect("listener address").port(),
+        },
+        true,
+    );
+    let stream = match next_host_completion(&mut runtime)
+        .expect("connect completes")
+        .result
+        .expect("connect succeeds")
+    {
+        AsyncHostValue::Resource(resource) => resource.id,
+        other => panic!("expected stream, got {other:?}"),
+    };
+    let (mut peer, _) = listener.accept().expect("peer accepts");
+    peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("bounded read");
+    let write = runtime.start_host_op(
+        AsyncHostOp::TcpWrite {
+            stream,
+            data: b"x".to_vec(),
+        },
+        true,
+    );
+    assert_eq!(
+        runtime.state.cancel_host_op_if_pending(write),
+        PendingCancellation::CompletionReady
+    );
+    let completion = next_host_completion(&mut runtime).expect("write result retained");
+    assert_eq!(completion.request, write);
+    assert_eq!(completion.result, Ok(AsyncHostValue::Undefined));
+    let mut received = [0];
+    peer.read_exact(&mut received)
+        .expect("actual byte delivered");
+    assert_eq!(&received, b"x");
+    runtime.start_host_op(AsyncHostOp::CloseResource { resource: stream }, false);
+    assert_eq!(
+        next_host_completion(&mut runtime).expect("close").result,
+        Ok(AsyncHostValue::Undefined)
     );
 }

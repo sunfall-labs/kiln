@@ -129,6 +129,126 @@ static uint64_t kiln_c99_array_prototype_method(const char *key, size_t key_len)
     return code;
 }
 
+/* `Array.prototype.map`/`reduce` are shared TypeScript now. Their sparse-array loop asks for a
+ * candidate only on a concrete array whose indexed prototype chain is unchanged. In that case
+ * HasProperty for a hole is false and the dense backing can skip a run of holes without one VM
+ * instruction per index. Any array side store, index descriptor, indexed prototype mutation, or
+ * custom prototype chain asks TypeScript to use ordinary `in` instead. */
+static int kiln_c99_store_has_indexed_property(kiln_value store, int *answer) {
+    kiln_object *object;
+    size_t index;
+    *answer = 0;
+    if (store.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
+    if (store.tag != KILN_VALUE_OBJECT) return KILN_C99_INVALID_ARGUMENT;
+    object = kiln_c99_object_of(store);
+    if (object->prototype.tag != KILN_VALUE_UNDEFINED) {
+        *answer = 1;
+        return KILN_C99_OK;
+    }
+    for (index = 0; index < object->count; ++index) {
+        if (object->properties[index].key != NULL &&
+            kiln_c99_key_index_key(object->properties[index].key) >= 0.0) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
+    }
+    return KILN_C99_OK;
+}
+
+int kiln_c99_array_next_present_index(kiln_value value, kiln_value cursor_value,
+                                      kiln_value limit_value, kiln_value reverse_value,
+                                      kiln_value *result) {
+    kiln_array *array;
+    double cursor_number;
+    double limit_number;
+    int reverse;
+    int has_index = 0;
+    size_t index;
+    size_t stop;
+    kiln_value prototype_store;
+    int status;
+    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *result = kiln_c99_boolean(0);
+    if (value.tag != KILN_VALUE_ARRAY || cursor_value.tag != KILN_VALUE_NUMBER ||
+        limit_value.tag != KILN_VALUE_NUMBER || reverse_value.tag != KILN_VALUE_BOOLEAN) {
+        return KILN_C99_OK;
+    }
+    cursor_number = kiln_c99_as_number(cursor_value);
+    limit_number = kiln_c99_as_number(limit_value);
+    reverse = kiln_c99_truthy(reverse_value);
+    if (!isfinite(cursor_number) || cursor_number < 0.0 || floor(cursor_number) != cursor_number ||
+        !isfinite(limit_number) || floor(limit_number) != limit_number) {
+        return KILN_C99_OK;
+    }
+    array = kiln_c99_array_of(value);
+    if (!reverse && cursor_number < (double)array->count &&
+        array->elements[(size_t)cursor_number] != KILN_VAL_HOLE) {
+        *result = kiln_c99_number(cursor_number);
+        return KILN_C99_OK;
+    }
+    if (reverse && cursor_number < (double)array->count) {
+        size_t current = (size_t)cursor_number;
+        if (array->elements[current] != KILN_VAL_HOLE) {
+            *result = kiln_c99_number(cursor_number);
+            return KILN_C99_OK;
+        }
+    }
+    if (array->properties.tag != KILN_VALUE_UNDEFINED || array->has_index_descriptors) {
+        return KILN_C99_OK;
+    }
+    /* These two tables make up every default indexed-prototype lookup for an array in this
+     * representation. If a program added an index, or moved either prototype onto a custom
+     * chain, the fast query declines and the ordinary `in` operator remains authoritative. */
+    status = kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE),
+                                     &prototype_store, 0);
+    if (status != KILN_C99_OK) return KILN_C99_OK;
+    status = kiln_c99_store_has_indexed_property(prototype_store, &has_index);
+    if (status != KILN_C99_OK || has_index) return KILN_C99_OK;
+    status = kiln_c99_callable_store(kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
+                                     &prototype_store, 0);
+    if (status != KILN_C99_OK) return KILN_C99_OK;
+    status = kiln_c99_store_has_indexed_property(prototype_store, &has_index);
+    if (status != KILN_C99_OK || has_index) return KILN_C99_OK;
+    if (!reverse) {
+        if (limit_number <= cursor_number) {
+            *result = kiln_c99_null();
+            return KILN_C99_OK;
+        }
+        if (cursor_number > (double)SIZE_MAX || limit_number > (double)SIZE_MAX) {
+            *result = kiln_c99_null();
+            return KILN_C99_OK;
+        }
+        index = (size_t)cursor_number;
+        stop = (size_t)limit_number;
+        if (stop > array->count) stop = array->count;
+        while (index < stop) {
+            if (array->elements[index] != KILN_VAL_HOLE) {
+                *result = kiln_c99_number((double)index);
+                return KILN_C99_OK;
+            }
+            ++index;
+        }
+        *result = kiln_c99_null();
+        return KILN_C99_OK;
+    }
+    if (limit_number != -1.0) return KILN_C99_OK;
+    if (array->count == 0) {
+        *result = kiln_c99_null();
+        return KILN_C99_OK;
+    }
+    index = cursor_number >= (double)array->count ? array->count - 1 : (size_t)cursor_number;
+    for (;;) {
+        if (array->elements[index] != KILN_VAL_HOLE) {
+            *result = kiln_c99_number((double)index);
+            return KILN_C99_OK;
+        }
+        if (index == 0) break;
+        --index;
+    }
+    *result = kiln_c99_null();
+    return KILN_C99_OK;
+}
+
 static kiln_value kiln_c99_method(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_METHOD, code, NULL, 0);
 }
@@ -137,18 +257,20 @@ static kiln_value kiln_c99_method(uint64_t code) {
  * context belongs to this anchor's complete registered root inventory. The launcher supplies
  * the same visitor it registers for collection. Context and anchor outlive the callable;
  * this constructor neither registers roots nor creates a second module-root field list. */
-static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
-    kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context,
-    void *root_context) {
+int kiln_c99_commonjs_require_value_with_resolver(kiln_value *out,
+    kiln_commonjs_require_fn call, kiln_commonjs_resolve_fn resolve, void *context,
+    kiln_gc_visit_roots_fn visit_context, void *root_context) {
     kiln_commonjs_require *require;
     if (out == NULL || call == NULL || (visit_context != NULL && root_context == NULL))
         return KILN_C99_INVALID_ARGUMENT;
     /* Context storage is owned by the launcher and traced by its registered root inventory.
      * These fields are initialized before publication; no GC heap edge is hidden from transfer. */
-    require = (kiln_commonjs_require *)kiln_c99_gc_alloc_pointer_free(KILN_GC_COMMONJS_REQUIRE,
-                                                                      sizeof *require);
+    require = (kiln_commonjs_require *)kiln_c99_gc_alloc(KILN_GC_COMMONJS_REQUIRE,
+                                                         sizeof *require);
     if (require == NULL) return KILN_C99_OUT_OF_MEMORY;
     require->call = call;
+    require->resolve = resolve;
+    kiln_c99_heap_store_value(require, &require->properties, kiln_c99_undefined());
     kiln_c99_heap_store_pointer(require, &require->context, context);
     require->visit_context = visit_context;
     kiln_c99_heap_store_pointer(require, &require->root_context, root_context);
@@ -156,7 +278,44 @@ static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
         return KILN_C99_OUT_OF_MEMORY;
     kiln_c99_candidate_record_owner_layout(kiln_c99_gc_heap(), ((kiln_gc_block *)require) - 1);
     *out = kiln_c99_value(KILN_VALUE_COMMONJS_REQUIRE, (uint64_t)(uintptr_t)require, NULL, 0);
+    if (resolve != NULL) {
+        kiln_value *process_slot;
+        kiln_value process = kiln_c99_undefined();
+        kiln_value native_modules = kiln_c99_undefined();
+        kiln_value decorator = kiln_c99_undefined();
+        kiln_value decorated = kiln_c99_undefined();
+        int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process_slot);
+        if (status == KILN_C99_OK) process = *process_slot;
+        if (status == KILN_C99_OK && process.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_get(NULL, process, "__kilnNativeModules", 19,
+                                  &native_modules, 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_get(NULL, native_modules, "__kilnDecorateCommonJsRequire", 29,
+                                      &decorator, 0, NULL);
+            kiln_c99_gc_keep_alive(&process);
+            kiln_c99_gc_keep_alive(&native_modules);
+        } else if (status == KILN_C99_OK) {
+            decorator = kiln_c99_undefined();
+        }
+        if (status != KILN_C99_OK) return status;
+        int found = decorator.tag != KILN_VALUE_UNDEFINED;
+        if (found) {
+            status = kiln_c99_call(NULL, &decorated, decorator, kiln_c99_undefined(), out, 1, 0, NULL);
+            kiln_c99_gc_keep_alive(out);
+            kiln_c99_gc_keep_alive(&decorator);
+            kiln_c99_gc_keep_alive(&decorated);
+            if (status != KILN_C99_OK) return status;
+            *out = decorated;
+        }
+    }
     return KILN_C99_OK;
+}
+
+static int kiln_c99_commonjs_require_value_with_roots(kiln_value *out,
+    kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context,
+    void *root_context) {
+    return kiln_c99_commonjs_require_value_with_resolver(out, call, NULL, context,
+                                                         visit_context, root_context);
 }
 
 static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call,
@@ -191,11 +350,18 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET: return "headers";
     case KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET: return "headers";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
+    case KILN_C99_METHOD_NODE_SERVER_IS_LISTENING: return "__serverIsListening";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER: return "createFetchServer";
     case KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND: return "fetchRespond";
+    case KILN_C99_METHOD_NODE_HTTP_CANCEL_REQUEST: return "__cancelRequest";
+    case KILN_C99_METHOD_NODE_CLIENT_SOCKET_ASSIGN: return "__kilnNodeClientSocketAssign";
+    case KILN_C99_METHOD_NODE_SOCKET_CLOSE_TICK: return "__kilnNodeSocketCloseTick";
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
     case KILN_C99_METHOD_PROCESS_KILL: return "kill";
     case KILN_C99_METHOD_PROCESS_EXIT: return "exit";
+    case KILN_C99_METHOD_PROCESS_EXIT_CODE_GET: return "processExitCodeGet";
+    case KILN_C99_METHOD_PROCESS_EXIT_CODE_SET: return "processExitCodeSet";
+    case KILN_C99_METHOD_GC_REQUEST: return "gcRequest";
     case KILN_C99_METHOD_NODE_FS_READ_FILE_SYNC: return "readFileSync";
     case KILN_C99_METHOD_NODE_FS_WRITE_FILE_SYNC: return "writeFileSync";
     case KILN_C99_METHOD_NODE_FS_MKDIR_SYNC: return "mkdirSync";
@@ -209,17 +375,38 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_PROCESS_START_RAW: return "__kilnHostProcessStart";
     case KILN_C99_METHOD_PROCESS_CANCEL_RAW: return "__kilnHostProcessCancel";
     case KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE: return "__kilnHostModuleCreateRequire";
+    case KILN_C99_METHOD_MODULE_LOADER_RAW: return "__kilnHostModuleLoader";
+    case KILN_C99_METHOD_COMMONJS_REQUIRE_RESOLVE: return "__kilnHostModuleRequireResolve";
     case KILN_C99_METHOD_INTL_SEGMENT_RAW: return "__kilnIntlSegment";
+    case KILN_C99_METHOD_STRING_LOCALE_CASE_RAW: return "__kilnHostStringLocaleCase";
+    case KILN_C99_METHOD_INTL_DATETIME_FORMAT_RAW: return "__kilnIntlDateTimeFormat";
+    case KILN_C99_METHOD_CRYPTO_KEY_IMPORT_RAW: return "__kilnCryptoKeyImport";
+    case KILN_C99_METHOD_CRYPTO_KEY_PUBLIC_RAW: return "__kilnCryptoKeyPublic";
+    case KILN_C99_METHOD_CRYPTO_KEY_INFO_RAW: return "__kilnCryptoKeyInfo";
+    case KILN_C99_METHOD_CRYPTO_KEY_EXPORT_RAW: return "__kilnCryptoKeyExport";
+    case KILN_C99_METHOD_CRYPTO_KEY_FREE_RAW: return "__kilnCryptoKeyFree";
     case KILN_C99_METHOD_UINT8_TO_HEX_RAW: return "__kilnUint8ToHex";
     case KILN_C99_METHOD_BUFFER_TO_STRING_RAW: return "__kilnBufferToString";
     case KILN_C99_METHOD_URL_PARSE_RAW: return "__kilnUrlParse";
     case KILN_C99_METHOD_ARRAY_BUFFER_DETACH_RAW: return "__kilnArrayBufferDetach";
+    case KILN_C99_METHOD_ARRAY_BUFFER_BYTE_LENGTH_RAW: return "__kilnArrayBufferByteLength";
     case KILN_C99_METHOD_CLONE_DATA_RAW: return "__kilnCloneData";
     case KILN_C99_METHOD_SHARE_RAW: return "__kilnShare";
     case KILN_C99_METHOD_SHARED_IS_RAW: return "__kilnSharedIs";
     case KILN_C99_METHOD_SHARED_WEAK_RAW: return "__kilnSharedWeak";
+    case KILN_C99_METHOD_COLLECTION_SIZE_RAW: return "__kilnCollectionSize";
+    case KILN_C99_METHOD_JSON_UNBOX_RAW: return "__kilnJsonUnbox";
+    case KILN_C99_METHOD_JSON_RAW_CREATE: return "__kilnJsonRawCreate";
+    case KILN_C99_METHOD_JSON_IS_RAW: return "__kilnJsonIsRaw";
+    case KILN_C99_METHOD_FUNCTION_KIND_PROTOTYPE: return "__kilnFunctionKindPrototype";
+    case KILN_C99_METHOD_FUNCTION_KIND_CONSTRUCTOR: return "__kilnFunctionKindConstructor";
+    case KILN_C99_METHOD_REGEXP_LEGACY_CAPTURE_RAW: return "__kilnRegExpLegacyCapture";
     case KILN_C99_METHOD_TYPED_ARRAY_COPY_RAW: return "__kilnTypedArrayCopy";
     case KILN_C99_METHOD_TYPED_ARRAY_SORT_RAW: return "__kilnTypedArraySort";
+    case KILN_C99_METHOD_DATA_VIEW_STATE_RAW: return "__kilnDataViewState";
+    case KILN_C99_METHOD_IS_CONSTRUCTOR_RAW: return "__kilnIsConstructor";
+    case KILN_C99_METHOD_IS_OTHER_REALM_ARRAY_CONSTRUCTOR_RAW: return "__kilnIsOtherRealmArrayConstructor";
+    case KILN_C99_METHOD_ARRAY_NEXT_PRESENT_INDEX_RAW: return "__kilnArrayNextPresentIndex";
     case KILN_C99_METHOD_WORKER_OP_RAW: return "__kilnWorkerOp";
     case KILN_C99_METHOD_PORT_WAIT_RAW: return "__kilnPortWait";
     case KILN_C99_METHOD_SHARED_BUFFER_RAW: return "__kilnSharedBuffer";
@@ -227,10 +414,13 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_FS_DESCRIPTOR_RAW: return "__kilnFsDescriptor";
     case KILN_C99_METHOD_JOBS_PENDING_RAW: return "__kilnJobsPending";
     case KILN_C99_METHOD_QUEUE_IO_RAW: return "__kilnQueueIo";
+    case KILN_C99_METHOD_TIMER_REF_RAW: return "__kilnTimerRef";
     case KILN_C99_METHOD_PROMISE_REJECTIONS_RAW: return "__kilnPromiseRejections";
     case KILN_C99_METHOD_URL_SET_RAW: return "__kilnUrlSet";
     case KILN_C99_METHOD_URL_FAST_RAW: return "__kilnUrlFast";
     case KILN_C99_METHOD_URL_ADOPT_RAW: return "__kilnUrlAdopt";
+    case KILN_C99_METHOD_WEBCRYPTO_PRIMITIVE_RAW: return "__kilnWebCryptoPrimitive";
+    case KILN_C99_METHOD_COMPRESSION_PRIMITIVE_RAW: return "__kilnCompressionPrimitive";
     case KILN_C99_METHOD_UINT8_TO_BASE64_RAW: return "__kilnUint8ToBase64";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
         return "fromEpochMilliseconds";
@@ -293,7 +483,6 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_ARRAY_TO_SPLICED: return "toSpliced";
     case KILN_C99_METHOD_ARRAY_WITH: return "with";
     case KILN_C99_METHOD_MAP: return "map";
-    case KILN_C99_METHOD_ARRAY_PARALLEL_MAP: return "parallelMap";
     case KILN_C99_METHOD_FILTER: return "filter";
     case KILN_C99_METHOD_ARRAY_GENERIC_MAP: return "map";
     case KILN_C99_METHOD_ARRAY_GENERIC_FILTER: return "filter";
@@ -413,6 +602,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_OBJECT_TO_STRING: return "toString";
     case KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING: return "toLocaleString";
     case KILN_C99_METHOD_OBJECT_VALUE_OF: return "valueOf";
+    case KILN_C99_METHOD_BOOLEAN_VALUE_OF: return "valueOf";
+    case KILN_C99_METHOD_SYMBOL_VALUE_OF: return "valueOf";
     case KILN_C99_METHOD_COLLECTION_GET: return "get";
     case KILN_C99_METHOD_COLLECTION_SET: return "set";
     case KILN_C99_METHOD_COLLECTION_ADD: return "add";

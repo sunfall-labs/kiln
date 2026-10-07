@@ -3,6 +3,9 @@ use kiln_module_resolver::NodeBuiltin;
 #[derive(Debug, Default)]
 pub(super) struct NativeGraphPlan {
     pub(super) excluded: BTreeSet<PathBuf>,
+    /// Resolver-approved runtime alias targets and their static dependency closures. These are
+    /// linked lazily so runtime-generated ESM can import them without making them entry-evaluated.
+    pub(super) runtime_alias_live: BTreeSet<PathBuf>,
     pub(super) failures: BTreeMap<(PathBuf, String), String>,
     pub(super) runtime_failures: BTreeMap<(PathBuf, PathBuf, String), String>,
 }
@@ -22,6 +25,7 @@ pub(super) fn native_graph_plan_with_validator(
         captured_importer: PathBuf,
         target: PathBuf,
         runtime: bool,
+        runtime_alias: bool,
     }
 
     let mut static_reachable = graph.statically_reachable();
@@ -48,6 +52,7 @@ pub(super) fn native_graph_plan_with_validator(
     validate_native_builtins_in_paths(graph, &static_reachable, validate)?;
     let mut plan = NativeGraphPlan::default();
     let mut retained = static_reachable.clone();
+    let mut runtime_alias_live = BTreeSet::new();
     let mut pending = static_reachable
         .iter()
         .flat_map(|path| {
@@ -60,28 +65,50 @@ pub(super) fn native_graph_plan_with_validator(
                     captured_importer: path.clone(),
                     target: dependency.target.clone(),
                     runtime: false,
+                    runtime_alias: false,
                 });
             let runtime = graph.module(path).into_iter().flat_map(move |node| {
                 node.runtime_dependencies
                     .iter()
+                    .filter(|dependency| !dependency.resolve_only)
                     .map(move |dependency| LazyEdge {
                         owner: path.clone(),
                         specifier: dependency.specifier.clone(),
                         captured_importer: dependency.importer.clone(),
                         target: dependency.target.clone(),
                         runtime: true,
+                        runtime_alias: false,
                     })
             });
             dynamic.chain(runtime)
         })
         .collect::<Vec<_>>();
+    // Runtime-generated module source can import a resolver-approved alias whose target is in
+    // the graph but has no static value edge (for example a type-only source dependency used by
+    // a compiler that emits JavaScript ESM). Treat those aliases like lazy imports so their
+    // target and ordinary dependency closure remain available to the native graph loader.
+    pending.extend(
+        graph
+            .runtime_package_aliases()
+            .iter()
+            .map(|alias| LazyEdge {
+                owner: graph.entry().to_path_buf(),
+                specifier: alias.specifier.clone(),
+                captured_importer: alias.package_root.clone(),
+                target: alias.target.clone(),
+                runtime: true,
+                runtime_alias: true,
+            }),
+    );
     let mut processed = BTreeSet::new();
     while let Some(edge) = pending.pop() {
         if !processed.insert((
             edge.owner.clone(),
             edge.captured_importer.clone(),
             edge.specifier.clone(),
+            edge.target.clone(),
             edge.runtime,
+            edge.runtime_alias,
         )) {
             continue;
         }
@@ -114,6 +141,9 @@ pub(super) fn native_graph_plan_with_validator(
             }
             continue;
         }
+        if edge.runtime_alias {
+            runtime_alias_live.extend(closure.iter().cloned());
+        }
         for path in &closure {
             retained.insert(path.clone());
             for nested in graph.dynamic_dependencies(path) {
@@ -123,16 +153,21 @@ pub(super) fn native_graph_plan_with_validator(
                     captured_importer: path.clone(),
                     target: nested.target.clone(),
                     runtime: false,
+                    runtime_alias: false,
                 });
             }
             if let Some(node) = graph.module(path) {
                 for nested in &node.runtime_dependencies {
+                    if nested.resolve_only {
+                        continue;
+                    }
                     pending.push(LazyEdge {
                         owner: path.clone(),
                         specifier: nested.specifier.clone(),
                         captured_importer: nested.importer.clone(),
                         target: nested.target.clone(),
                         runtime: true,
+                        runtime_alias: false,
                     });
                 }
             }
@@ -143,7 +178,34 @@ pub(super) fn native_graph_plan_with_validator(
         .map(|node| node.path.clone())
         .filter(|path| !retained.contains(path))
         .collect();
+    plan.runtime_alias_live = runtime_alias_live;
     Ok(plan)
+}
+
+/// Keep resolver-approved runtime alias targets linked and fully addressable, while preserving
+/// their lazy evaluation: module selection only creates namespaces and evaluates the graph entry.
+pub(super) fn include_runtime_aliases_in_demand(
+    graph: &ModuleGraph,
+    demand: &mut kiln_module_graph::LiveDemand,
+    paths: &BTreeSet<PathBuf>,
+) {
+    for path in paths {
+        let Some(node) = graph.module(path) else {
+            continue;
+        };
+        demand.live.insert(path.clone());
+        demand.slots.insert(
+            path.clone(),
+            node.program
+                .exports
+                .iter()
+                .map(|export| export.local_slot)
+                .collect(),
+        );
+        demand
+            .live_imports
+            .extend((0..node.program.imports.len()).map(|index| (path.clone(), index)));
+    }
 }
 
 pub(super) fn validate_native_builtins_in_paths(
@@ -197,6 +259,30 @@ pub(super) fn native_builtin_supports_export(
 }
 
 pub(super) const NATIVE_BUILTIN_BOOTSTRAP_SOURCE: &str = r#"
+const __kilnRuntimeModules = globalThis.process.__kilnNativeModules;
+const __kilnModuleRequireResolve = __kilnRuntimeModules.__kilnHostModuleRequireResolve;
+delete __kilnRuntimeModules.__kilnHostModuleRequireResolve;
+
+function __kilnDecorateCommonJsRequire(require) {
+    const resolve = function resolve(specifier, options) {
+        if (typeof specifier !== "string") {
+            throw new TypeError("The module specifier must be a string");
+        }
+        return __kilnModuleRequireResolve(require, specifier);
+    };
+    Object.defineProperty(require, "resolve", {
+        value: resolve,
+        enumerable: true,
+        writable: true,
+        configurable: true
+    });
+    return require;
+}
+Object.defineProperty(__kilnRuntimeModules, "__kilnDecorateCommonJsRequire", {
+    value: __kilnDecorateCommonJsRequire,
+    configurable: true
+});
+
 const __kilnSegmentBoundaries = globalThis.__kilnIntlSegment;
 delete globalThis.__kilnIntlSegment;
 
@@ -257,44 +343,10 @@ Segmenter.supportedLocalesOf = function (locales) {
 Intl.Segmenter = Segmenter;
 
 
-const __kilnUint8ToHex = globalThis.__kilnUint8ToHex;
+// The shared typedarray.ts bootstrap owns Uint8Array's public codecs on both engines.
+// Remove the native-only backing hooks after that bootstrap has captured any it needs.
 delete globalThis.__kilnUint8ToHex;
-const __kilnUint8ToBase64 = globalThis.__kilnUint8ToBase64;
 delete globalThis.__kilnUint8ToBase64;
-
-if (typeof Uint8Array !== "undefined" && Uint8Array.prototype) {
-    Uint8Array.prototype.toHex = function toHex() {
-        if (!(this instanceof Uint8Array)) {
-            throw new TypeError("toHex called on incompatible receiver");
-        }
-        return __kilnUint8ToHex(this);
-    };
-
-    Uint8Array.prototype.toBase64 = function toBase64(options) {
-        if (!(this instanceof Uint8Array)) {
-            throw new TypeError("toBase64 called on incompatible receiver");
-        }
-        let url = false;
-        let omitPadding = false;
-        if (options !== undefined) {
-            if (typeof options !== "object" || options === null) {
-                throw new TypeError("options must be an object");
-            }
-            if (options.alphabet !== undefined) {
-                const alphabet = String(options.alphabet);
-                if (alphabet === "base64url") {
-                    url = true;
-                } else if (alphabet === "base64") {
-                    url = false;
-                } else {
-                    throw new TypeError('alphabet must be "base64" or "base64url"');
-                }
-            }
-            omitPadding = Boolean(options.omitPadding);
-        }
-        return __kilnUint8ToBase64(this, url, omitPadding);
-    };
-}
 
 if (typeof JSON !== "undefined") {
     const __kilnOriginalParse = JSON.parse;
@@ -513,14 +565,26 @@ if (typeof JSON !== "undefined") {
     };
     Object.defineProperty(String.prototype, "length", { value: 0, writable: false,
                                                         configurable: false, enumerable: false });
+    // Preserve the low-level native algorithms before the public TypeScript protocol methods
+    // are installed. RegExp's @@ methods use these directly to avoid redispatching to themselves.
+    globalThis.__kilnRawStringProtocols = {
+        match: String.prototype.match,
+        matchAll: String.prototype.matchAll,
+        replace: String.prototype.replace,
+        replaceAll: String.prototype.replaceAll,
+        search: String.prototype.search,
+        split: String.prototype.split,
+    };
+    const intrinsicApply = Reflect.apply;
+    const rawStringProtocols = globalThis.__kilnRawStringProtocols;
     data(ArrayBuffer.prototype, Symbol.toStringTag, "ArrayBuffer");
     data(DataView.prototype, Symbol.toStringTag, "DataView");
     const methods = {
-        [Symbol.match](string) { return String(string).match(this); },
-        [Symbol.matchAll](string) { return String(string).matchAll(this); },
-        [Symbol.replace](string, replacement) { return String(string).replace(this, replacement); },
-        [Symbol.search](string) { return String(string).search(this); },
-        [Symbol.split](string, limit) { return String(string).split(this, limit); },
+        [Symbol.match](string) { return intrinsicApply(rawStringProtocols.match, string, [this]); },
+        [Symbol.matchAll](string) { return intrinsicApply(rawStringProtocols.matchAll, string, [this]); },
+        [Symbol.replace](string, replacement) { return intrinsicApply(rawStringProtocols.replace, string, [this, replacement]); },
+        [Symbol.search](string) { return intrinsicApply(rawStringProtocols.search, string, [this]); },
+        [Symbol.split](string, limit) { return intrinsicApply(rawStringProtocols.split, string, [this, limit]); },
     };
     data(RegExp.prototype, Symbol.match, methods[Symbol.match], true);
     data(RegExp.prototype, Symbol.matchAll, methods[Symbol.matchAll], true);
@@ -696,6 +760,10 @@ if (typeof JSON !== "undefined") {
 }
 "#;
 
+/// Non-filesystem base reserved for the realm-wide `process.getBuiltinModule` loader. Unlike
+/// source modules, this identity must never select an importer-scoped `createRequire` table.
+const NATIVE_BUILTIN_LOADER_BASE: &str = "kiln:runtime-builtin-loader";
+
 #[cfg(test)]
 pub(super) fn emit_native_graph_module(
     node: &kiln_module_graph::ModuleNode,
@@ -715,6 +783,7 @@ pub(super) fn cached_graph_module(
     logical_path: &str,
     policy: &EmissionPolicy,
     profile: NativeProfile,
+    instantiate: bool,
     emit: impl FnOnce() -> Result<kiln_backend_c::CModule, NativeError>,
 ) -> Result<(kiln_backend_c::CModule, bool), NativeError> {
     if !policy.decoupled_prelude
@@ -728,12 +797,13 @@ pub(super) fn cached_graph_module(
     // type profiles and closed-world liveness. This is a versioned internal cache encoding,
     // not a public serialization format. Representation changes can only cause cache misses.
     let (input, effective_policy) = source_module_input_id(node, logical_path, policy, profile);
+    let input = Digest::hash(&[input.as_bytes().as_slice(), &[u8::from(instantiate)]].concat());
     cached_emitted_module(
         cache,
         target,
         input,
         *graph_source_emitter::SOURCE_EMITTER_ID,
-        || graph_source_emitter::emit(node, logical_path, &effective_policy),
+        || graph_source_emitter::emit(node, logical_path, &effective_policy, instantiate),
     )
 }
 
@@ -771,7 +841,7 @@ fn cached_emitted_module(
 ) -> Result<(kiln_backend_c::CModule, bool), NativeError> {
     let cache_key = NativeArtifactFamily::ModuleSource.source_key(
         target,
-        Digest::hash(b"native-graph-emission-input-v6"),
+        Digest::hash(b"native-graph-emission-input-v7"),
         [
             input,
             prelude_header_digest(),
@@ -781,13 +851,26 @@ fn cached_emitted_module(
     );
     match cache.lookup(&cache_key)? {
         Lookup::Hit(artifact) => {
-            let (program_hash, symbol, source, generic_only, chunks, parallel_workers): (
+            let (
+                program_hash,
+                symbol,
+                source,
+                generic_only,
+                generic_mixed_optimization,
+                chunks,
+                chunk_generic_mixed_optimization,
+                parallel_workers,
+                instantiation,
+            ): (
                 u64,
                 String,
                 String,
                 bool,
+                bool,
                 Vec<String>,
+                Vec<bool>,
                 Option<String>,
+                Option<kiln_backend_c::CModuleUnit>,
             ) = serde_json::from_slice(&artifact.bytes).map_err(|error| CacheError::Corrupt {
                 path: artifact.path,
                 reason: format!("invalid cached C module: {error}"),
@@ -798,8 +881,11 @@ fn cached_emitted_module(
                     symbol,
                     source,
                     generic_only,
+                    generic_mixed_optimization,
                     chunks,
+                    chunk_generic_mixed_optimization,
                     parallel_workers,
+                    instantiation,
                 },
                 true,
             ))
@@ -811,8 +897,11 @@ fn cached_emitted_module(
                 &module.symbol,
                 &module.source,
                 module.generic_only,
+                module.generic_mixed_optimization,
                 &module.chunks,
+                &module.chunk_generic_mixed_optimization,
                 &module.parallel_workers,
+                &module.instantiation,
             ))
             .expect("C module contains only strings and an integer");
             cache.put(&cache_key, &bytes)?;
@@ -821,17 +910,41 @@ fn cached_emitted_module(
     }
 }
 
+#[cfg(test)]
 pub(super) fn emit_native_graph_module_with_policy(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
     policy: &EmissionPolicy,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
+    emit_native_graph_module_with_policy_and_instantiation(node, logical_path, policy, false)
+}
+
+/// About this many bytes of C per unit of engine code emitted generic-only: the runtime bootstrap
+/// and the builtin modules. Small enough that a cold build's units fill the cores; large enough
+/// that the per-unit header does not dominate, and that a module this size stays one unit.
+const GENERIC_BUILTIN_UNIT_BYTES: usize = 1 << 20;
+
+pub(super) fn emit_native_graph_module_with_policy_and_instantiation(
+    node: &kiln_module_graph::ModuleNode,
+    logical_path: &str,
+    policy: &EmissionPolicy,
+    instantiate: bool,
+) -> Result<kiln_backend_c::CModule, NativeError> {
     match node.source {
-        ModuleSource::NodeBuiltin(_builtin) => Ok(emit_module_with_logical_path_and_policy(
-            &node.program,
-            logical_path,
-            policy.clone(),
-        )?),
+        ModuleSource::NodeBuiltin(_builtin) => {
+            // Engine code, like the bootstrap: split by bytes so a large builtin (`kiln:gui` is
+            // 1.9 MB of C) compiles as parallel units instead of being a cold build's critical
+            // path. A builtin smaller than one unit renders as a single unit as before.
+            let mut builtin_policy = policy.clone();
+            if builtin_policy.unit_chunk_bytes.is_none() {
+                builtin_policy.unit_chunk_bytes = Some(GENERIC_BUILTIN_UNIT_BYTES);
+            }
+            Ok(emit_module_with_logical_path_and_policy(
+                &node.program,
+                logical_path,
+                builtin_policy,
+            )?)
+        }
         ModuleSource::CommonJs => Ok(emit_commonjs_module_with_logical_path_and_policy(
             &node.program,
             logical_path,
@@ -909,11 +1022,14 @@ pub(super) fn emit_native_graph_module_with_policy(
                 policy.clone(),
             )?)
         }
-        ModuleSource::Source => Ok(emit_module_with_logical_path_and_policy(
-            &node.program,
-            logical_path,
-            policy.clone(),
-        )?),
+        ModuleSource::Source => Ok(
+            kiln_backend_c::emit_module_with_logical_path_and_policy_and_instantiation(
+                &node.program,
+                logical_path,
+                policy.clone(),
+                instantiate,
+            )?,
+        ),
     }
 }
 
@@ -939,7 +1055,8 @@ static NATIVE_BOOTSTRAPS: OnceLock<std::sync::Mutex<NativeBootstrapCache>> = Onc
 /// or without the `node:` prefix, returns the linked builtin's namespace; anything else
 /// returns `undefined`; a non-string id throws a TypeError like node's `validateString`.
 /// The filename handed to the create-require intrinsic is never used for relative resolution
-/// here -- only `node:` specifiers are ever required through it -- so it names this bootstrap.
+/// here -- only `node:` specifiers are ever required through it. Its reserved non-filesystem
+/// identity keeps it separate from importer-scoped tables owned by the runtime bootstrap.
 fn native_get_builtin_module_bootstrap() -> String {
     let mut names: Vec<&str> = kiln_builtins::ts_builtin_specifiers()
         .into_iter()
@@ -956,6 +1073,7 @@ fn native_get_builtin_module_bootstrap() -> String {
         r#"
 if (typeof globalThis.process !== "undefined" && globalThis.process !== null && !globalThis.process.getBuiltinModule) {{
     const __kilnBuiltinModuleNames = new Set([{list}]);
+    const __kilnBuiltinCreateRequire = process.__kilnNativeModules.__kilnHostModuleCreateRequire;
     let __kilnBuiltinRequire;
     globalThis.process.getBuiltinModule = function getBuiltinModule(id) {{
         if (typeof id !== "string") {{
@@ -965,32 +1083,41 @@ if (typeof globalThis.process !== "undefined" && globalThis.process !== null && 
         if (!__kilnBuiltinModuleNames.has(name)) return undefined;
         if (__kilnBuiltinRequire === undefined) {{
             __kilnBuiltinRequire =
-                globalThis.__kilnHostModuleCreateRequire("/kiln/runtime-bootstrap.ts");
+                __kilnBuiltinCreateRequire({builtin_loader_base:?});
         }}
         return __kilnBuiltinRequire("node:" + name);
     }};
 }}
-"#
+"#,
+        builtin_loader_base = NATIVE_BUILTIN_LOADER_BASE,
     )
 }
 
-/// `import.meta` for native binaries, written in TypeScript over the already-exposed
-/// `process.execPath` (ADR 0005: builtins are TypeScript, not C). Follows Node's
-/// single-executable-application semantics: `filename` is the executable path, `url` is its
-/// `file:` URL, `dirname` is its directory, and `main` is true for the entry module.
-/// The frontend lowers `import.meta` to a `__kilnNativeImportMeta(isEntry)` call when
-/// compiling for a native target; this snippet defines that function.
+/// `import.meta` for native graph modules, written in TypeScript over the captured source
+/// identity. The entry's URL must be the source URL used during graph planning: relative dynamic
+/// imports and `new URL(..., import.meta.url)` resolve from that module, not from the generated
+/// executable's location. `process.execPath` remains the executable path independently.
 fn native_import_meta_bootstrap() -> String {
     r#"
-if (typeof globalThis.__kilnNativeImportMeta === "undefined") {
-    const __kilnExecPath = globalThis.process.execPath;
-    const __kilnExecUrl = "file://" + __kilnExecPath;
-    const __kilnExecDir = __kilnExecPath.slice(0, __kilnExecPath.lastIndexOf("/"));
-    globalThis.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry) {
+const __kilnImportMetaModules = globalThis.process.__kilnNativeModules;
+if (typeof __kilnImportMetaModules.__kilnNativeImportMeta === "undefined") {
+    const __kilnEncodeURIComponent = encodeURIComponent;
+    const __kilnApply = Reflect.apply;
+    const __kilnReplace = String.prototype.replace;
+    const __kilnPathEscapes = {"%2F":"/", "%24":"$", "%26":"&", "%2B":"+", "%2C":",", "%3B":";", "%3D":"=", "%3A":":", "%40":"@"};
+    const __kilnPathEscapePattern = /%(2F|24|26|2B|2C|3B|3D|3A|40)/g;
+    function __kilnPathToFileURL(path) {
+        const encoded = __kilnEncodeURIComponent(path);
+        const pathEncoded = __kilnApply(__kilnReplace, encoded, [__kilnPathEscapePattern, escape => __kilnPathEscapes[escape]]);
+        return "file://" + pathEncoded;
+    }
+    __kilnImportMetaModules.__kilnNativeImportMeta = function __kilnNativeImportMeta(isEntry, sourceFilename) {
         return {
-            url: __kilnExecUrl,
-            filename: __kilnExecPath,
-            dirname: __kilnExecDir,
+            // Encode the raw filesystem path before assembling its URL. URL construction from
+            // `file://` + path treats `#` and `?` as URL syntax instead of path characters.
+            url: __kilnPathToFileURL(sourceFilename),
+            filename: sourceFilename,
+            dirname: sourceFilename.slice(0, sourceFilename.lastIndexOf("/")),
             main: isEntry,
         };
     };
@@ -1013,14 +1140,17 @@ fn compile_native_builtin_bootstrap(
     let common_ts_builtins = kiln_builtins::common_bootstrap_source_selected(families);
     let get_builtin_module = native_get_builtin_module_bootstrap();
     let import_meta = native_import_meta_bootstrap();
+    // WHATWG web standards (fetch, Headers, Request, Response, etc.) are global,
+    // not gated behind the node adapter: the HTTP host capability
+    // (process.__kilnNativeModules.http.request) exists in both modes.
+    let web = kiln_builtins::WEB_BOOTSTRAP_SOURCE;
     let source = if node {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{}\n{get_builtin_module}\n{import_meta}",
-            kiln_builtins::WEB_BOOTSTRAP_SOURCE
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{web}\n{get_builtin_module}\n{import_meta}"
         )
     } else {
         format!(
-            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\ndelete globalThis.__kilnBufferToString;\n{get_builtin_module}\n{import_meta}"
+            "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{web}\ndelete globalThis.__kilnBufferToString;\n{get_builtin_module}\n{import_meta}"
         )
     };
     let source_digest = Digest::hash(source.as_bytes());
@@ -1041,6 +1171,12 @@ fn compile_native_builtin_bootstrap(
         provider_capabilities,
     }
 }
+
+/// The unconditional web-global bootstrap uses Math/Number in its stream, buffer, ArrayBuffer,
+/// and typed-array implementations. Preserve that dispatch group even when the user graph does
+/// not directly demand those globals; family pruning and method-group pruning have separate
+/// liveness inputs.
+pub(super) const NATIVE_WEB_BOOTSTRAP_METHOD_GROUPS: u32 = kiln_graph::method_groups::MATH_NUMBER;
 
 /// A native executable with no open-world access constructs only the intrinsic families it can
 /// reach. Unknown computed/global access keeps the full surface. The remaining conditions are
@@ -1073,11 +1209,24 @@ pub(super) fn native_bootstrap_families(
             .iter()
             .any(|name| members.builtins.contains(*name) || members.globals.contains(*name))
     };
-    let mut selected = 0;
+    // WEB_BOOTSTRAP_SOURCE is emitted unconditionally and its MessagePort implementation
+    // captures structuredClone; structuredClone uses ArrayBuffer's transfer/detach support.
+    // These are bootstrap dependencies rather than user-code demands, so seed them here
+    // instead of retaining every native builtin family.
+    let mut selected = family::WEB_BOOTSTRAP_DEPENDENCIES;
+    if builtin(&["JSON"]) || names(&["stringify"]) {
+        selected |= family::JSON;
+    }
+    if names(&["toLocaleLowerCase", "toLocaleUpperCase"]) {
+        selected |= family::STRING_LOCALE;
+    }
+    if builtin(&["Intl"]) || names(&["DateTimeFormat", "formatToParts", "resolvedOptions"]) {
+        selected |= family::INTL_DATETIME;
+    }
     if builtin(&["Date", "Intl"]) || names(&["getTime", "setTime", "toISOString", "toUTCString"]) {
         selected |= family::DATE;
     }
-    let typed_array = builtin(&[
+    let mut typed_array = builtin(&[
         "Int8Array",
         "Uint8Array",
         "Uint8ClampedArray",
@@ -1101,6 +1250,40 @@ pub(super) fn native_bootstrap_families(
         "subarray",
         "copyWithin",
     ]);
+    // `Math.f16round` delegates conversion to the existing Float16Array element store, so its
+    // bootstrap dependency is the typed-array runtime. Keep ordinary statically named Math
+    // operations (for example Math.floor) free of that chunk. Since member demand is aggregated
+    // across receivers, preserve the augmentation when Math and an operation that can observe
+    // its own-property surface are both retained. Open-world and computed access already took
+    // the full-family path above.
+    let observes_own_properties = names(&[
+        "assign",
+        "defineProperty",
+        "entries",
+        "freeze",
+        "getOwnPropertyDescriptor",
+        "getOwnPropertyDescriptors",
+        "getOwnPropertyNames",
+        "getOwnPropertySymbols",
+        "hasOwn",
+        "hasOwnProperty",
+        "isExtensible",
+        "isFrozen",
+        "isSealed",
+        "keys",
+        "ownKeys",
+        "preventExtensions",
+        "propertyIsEnumerable",
+        "seal",
+        "values",
+    ]);
+    if names(&["f16round"]) || (builtin(&["Math"]) && observes_own_properties) {
+        selected |= family::NUMERIC_MATH;
+        typed_array = true;
+    }
+    if builtin(&["BigInt"]) || names(&["asIntN", "asUintN"]) {
+        selected |= family::NUMERIC_BIGINT;
+    }
     if typed_array {
         selected |= family::TYPED_ARRAY;
     }
@@ -1122,7 +1305,10 @@ pub(super) fn native_bootstrap_families(
     if builtin(&["structuredClone"]) || members.globals.contains("structuredClone") {
         selected |= family::STRUCTURED_CLONE;
     }
-    if builtin(&["Map"]) || names(&["getOrInsert", "getOrInsertComputed"]) {
+    // The WHATWG web bootstrap (fetch, streams, events) is included unconditionally and
+    // web_events_streams.ts calls __kilnStructuredClone, so the family must always be present.
+    selected |= family::STRUCTURED_CLONE;
+    if builtin(&["Map", "Set"]) || names(&["getOrInsert", "getOrInsertComputed"]) {
         selected |= family::MAP_UPSERT;
     }
     if builtin(&["Promise"]) || names(&["try", "allKeyed", "allSettledKeyed"]) {
@@ -1202,9 +1388,17 @@ pub(super) fn native_builtin_bootstrap_module(
     // instead -- the `%TypedArray%` and `Date` methods are hot loops, 4-12x slower generic at
     // -O0 -- with its C split into units of about this many bytes, so the one-time -O2 compile
     // runs as parallel units rather than one minute-long one.
+    //
+    // The generic-only default is split by bytes too. Split by function count it came out as one
+    // unit of 6.9 MB (a hello world; 8.9 MB plus 0.9 MB for a GUI program) that took clang 11.8 s
+    // at -O0 on its own while every other unit finished in under 2 s: the cold compile of *every*
+    // program was that one unit, 11.5-16.8 s of a 12-17 s build. Its own text -- body, key table,
+    // constants -- is only 75 KB; the rest is 774 or more functions, so units of about a megabyte
+    // compile side by side on the ordinary pool instead.
     let mut bootstrap_policy = policy.clone();
     bootstrap_policy.generic_only = specialized_unit_bytes.is_none();
-    bootstrap_policy.unit_chunk_bytes = specialized_unit_bytes;
+    bootstrap_policy.unit_chunk_bytes =
+        Some(specialized_unit_bytes.unwrap_or(GENERIC_BUILTIN_UNIT_BYTES));
     if !bootstrap_policy.decoupled_prelude {
         let module =
             emit_module_with_logical_path_and_policy(&program, LOGICAL_PATH, bootstrap_policy)?;
@@ -1492,6 +1686,7 @@ pub(super) fn append_runtime_digest(
             bytes.push(0);
             bytes.extend_from_slice(dependency.specifier.as_bytes());
             bytes.push(0);
+            bytes.push(u8::from(dependency.resolve_only));
             bytes.extend_from_slice(digest_graph_path(graph, &dependency.target).as_bytes());
             bytes.push(0);
             bytes.extend_from_slice(
@@ -1589,6 +1784,25 @@ pub(super) fn graph_topology_digest(
             bytes.push(0);
         }
     }
+    // Runtime-generated ESM imports are not represented by static module edges. Their alias
+    // table is emitted in the shared graph wrapper, so include the complete resolver-approved
+    // alias-to-linked-module mapping in its cache identity. Omitting this metadata can reuse a
+    // wrapper compiled before the alias existed, even though all module bodies are unchanged.
+    for alias in graph.runtime_package_aliases() {
+        bytes.extend_from_slice(b"runtime-package-alias:");
+        bytes.extend_from_slice(alias.package_root.to_string_lossy().as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(alias.specifier.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(alias.target.to_string_lossy().as_bytes());
+        bytes.push(0);
+        let index = modules
+            .iter()
+            .position(|(node, _)| node.path == alias.target)
+            .unwrap_or(usize::MAX);
+        bytes.extend_from_slice(index.to_string().as_bytes());
+        bytes.push(0);
+    }
     for ((importer, specifier), message) in graph.dynamic_failures() {
         bytes.extend_from_slice(b"dynamic-failure:");
         bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
@@ -1668,6 +1882,21 @@ pub(super) fn graph_shared_topology_digest(
             bytes.push(0);
         }
     }
+    // Runtime-generated ESM imports are not represented by static module edges. Their alias
+    // table is emitted in the shared graph wrapper, so include the resolver-approved mapping
+    // in the wrapper's cache identity.
+    for alias in graph.runtime_package_aliases() {
+        bytes.extend_from_slice(b"runtime-package-alias:");
+        bytes.extend_from_slice(alias.package_root.to_string_lossy().as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(alias.specifier.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(alias.target.to_string_lossy().as_bytes());
+        bytes.push(0);
+        let index = indices.get(&alias.target).copied().unwrap_or(usize::MAX);
+        bytes.extend_from_slice(index.to_string().as_bytes());
+        bytes.push(0);
+    }
     for ((importer, specifier), message) in graph.dynamic_failures() {
         bytes.extend_from_slice(b"dynamic-failure:");
         bytes.extend_from_slice(importer.to_string_lossy().as_bytes());
@@ -1730,6 +1959,7 @@ pub(super) enum NativeGraphImport {
     Binding {
         provider_index: usize,
         export_index: usize,
+        live_cell: bool,
     },
     Namespace {
         provider_index: usize,
@@ -1740,11 +1970,172 @@ pub(super) enum NativeGraphImport {
     },
 }
 
+/// ESM source modules requiring live bindings need an instantiation entrypoint. Keep the cycle
+/// decision independent of source order: a self-edge is a cycle too.
+pub(super) fn preinstantiated_module_paths(
+    graph: &ModuleGraph,
+) -> std::collections::HashSet<PathBuf> {
+    // Modules participating in a cycle and their ESM dependencies are instantiated before any
+    // evaluation. Modules whose ESM namespace is observed also need preallocated export cells:
+    // a namespace keeps live views of exports even when its provider is acyclic. The dependency
+    // closure supplies live cells for imports captured by closures created in these modules.
+    let nodes = graph
+        .modules()
+        .filter(|node| node.source == ModuleSource::Source)
+        .collect::<Vec<_>>();
+    let indices = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.path.clone(), index))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut edges = vec![Vec::new(); nodes.len()];
+    let mut reverse = vec![Vec::new(); nodes.len()];
+    for (index, node) in nodes.iter().enumerate() {
+        for dependency in &node.dependencies {
+            if let Some(&target) = indices.get(&dependency.target) {
+                edges[index].push(target);
+                reverse[target].push(index);
+            }
+        }
+    }
+    // Iterative Kosaraju keeps stack use bounded even for a deeply nested package graph.
+    let mut seen = vec![false; nodes.len()];
+    let mut finish_order = Vec::with_capacity(nodes.len());
+    for start in 0..nodes.len() {
+        if seen[start] {
+            continue;
+        }
+        seen[start] = true;
+        let mut stack = vec![(start, 0usize)];
+        while let Some((index, next_edge)) = stack.last_mut() {
+            if *next_edge < edges[*index].len() {
+                let target = edges[*index][*next_edge];
+                *next_edge += 1;
+                if !seen[target] {
+                    seen[target] = true;
+                    stack.push((target, 0));
+                }
+            } else {
+                finish_order.push(*index);
+                stack.pop();
+            }
+        }
+    }
+    let mut component_seen = vec![false; nodes.len()];
+    let mut cyclic = std::collections::HashSet::new();
+    for start in finish_order.into_iter().rev() {
+        if component_seen[start] {
+            continue;
+        }
+        component_seen[start] = true;
+        let mut members = Vec::new();
+        let mut stack = vec![start];
+        while let Some(index) = stack.pop() {
+            members.push(index);
+            for &source in &reverse[index] {
+                if !component_seen[source] {
+                    component_seen[source] = true;
+                    stack.push(source);
+                }
+            }
+        }
+        if members.len() > 1 || edges[start].contains(&start) {
+            cyclic.extend(members.into_iter().map(|index| nodes[index].path.clone()));
+        }
+    }
+    // Namespace providers cannot publish snapshots. Namespace imports and CommonJS `require`
+    // of ESM both expose namespace objects; dynamic imports can target any ESM module retained
+    // by the graph, so preserve cells for all of them when one is present.
+    let mut namespace_providers = std::collections::HashSet::new();
+    let has_dynamic_import = graph
+        .modules()
+        .any(|node| node.program.program.has_dynamic_import());
+    if has_dynamic_import {
+        namespace_providers.extend(nodes.iter().map(|node| node.path.clone()));
+    }
+    for node in graph.modules() {
+        for import in &node.program.imports {
+            if import.imported != kiln_ir::NAMESPACE_IMPORT {
+                continue;
+            }
+            let internal_star_table = node.program.exports.iter().any(|export| {
+                export.local_slot == import.local_slot
+                    && export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+            });
+            if internal_star_table {
+                continue;
+            }
+            if let Some(dependency) = node
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == import.source)
+                && graph
+                    .module(&dependency.target)
+                    .is_some_and(|provider| provider.source == ModuleSource::Source)
+            {
+                namespace_providers.insert(dependency.target.clone());
+            }
+        }
+        // CommonJS `require(esm)` returns the provider's namespace object as well.
+        if node.source == ModuleSource::CommonJs {
+            for dependency in &node.dependencies {
+                if graph
+                    .module(&dependency.target)
+                    .is_some_and(|provider| provider.source == ModuleSource::Source)
+                {
+                    namespace_providers.insert(dependency.target.clone());
+                }
+            }
+        }
+        for dependency in &node.runtime_dependencies {
+            if dependency.resolve_only {
+                continue;
+            }
+            if graph
+                .module(&dependency.target)
+                .is_some_and(|provider| provider.source == ModuleSource::Source)
+            {
+                namespace_providers.insert(dependency.target.clone());
+            }
+        }
+    }
+    for path in graph.declared_includes() {
+        if graph
+            .module(path)
+            .is_some_and(|provider| provider.source == ModuleSource::Source)
+        {
+            namespace_providers.insert(path.clone());
+        }
+    }
+    let mut pending = cyclic
+        .iter()
+        .chain(namespace_providers.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    cyclic.extend(namespace_providers);
+    while let Some(path) = pending.pop() {
+        let Some(node) = graph.module(&path) else {
+            continue;
+        };
+        for dependency in &node.dependencies {
+            if graph
+                .module(&dependency.target)
+                .is_some_and(|target| target.source == ModuleSource::Source)
+                && cyclic.insert(dependency.target.clone())
+            {
+                pending.push(dependency.target.clone());
+            }
+        }
+    }
+    cyclic
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum NativeNamespaceValue {
     Binding {
         provider_index: usize,
         export_index: usize,
+        live_cell: bool,
     },
     Namespace {
         provider_index: usize,
@@ -1846,7 +2237,7 @@ pub(super) fn graph_import_value(
                 path: node.path.clone(),
             })
         })?;
-        if provider_index >= importer_index {
+        if provider_index >= importer_index && modules[provider_index].1.instantiation.is_none() {
             return Err(NativeError::Emit(EmitError::Unsupported {
                 feature: "self or cyclic namespace imports in native module graphs".to_owned(),
             }));
@@ -1866,7 +2257,8 @@ pub(super) fn graph_import_value(
                     path: node.path.clone(),
                 })
             })?;
-            if provider_index >= importer_index {
+            if provider_index >= importer_index && modules[provider_index].1.instantiation.is_none()
+            {
                 return Err(NativeError::Emit(EmitError::Unsupported {
                     feature: format!(
                         "`{}`, imported across a module cycle before `{}` has run, in native module graphs",
@@ -1892,7 +2284,8 @@ pub(super) fn graph_import_value(
                     path: node.path.clone(),
                 })
             })?;
-            if provider_index >= importer_index {
+            if provider_index >= importer_index && modules[provider_index].1.instantiation.is_none()
+            {
                 return Err(NativeError::Emit(EmitError::Unsupported {
                     feature: "self or cyclic namespace re-exports in native module graphs"
                         .to_owned(),
@@ -1923,19 +2316,15 @@ pub(super) fn graph_import_value(
         local_slot,
         &import.imported,
     )?;
-    /* The launcher is straight-line C: it calls each module in order and takes an importer's
-     * values out of the export array the provider already returned. A cycle can make the origin
-     * of a name come *after* the module that imports it, and there is no array to read then --
-     * the generated code would read one that has not been filled. The interpreter answers that
-     * with a binding cell it fills in later; this backend has no such thing, so it refuses by
-     * name. A cyclic graph whose back edges carry no binding still compiles, because nothing in
-     * it reads forward. */
+    /* A forward binding is available only when its source module participates in the graph's
+     * instantiation phase, which preallocates export cells before any body runs. */
     let importer_index = *indices.get(&node.path).ok_or_else(|| {
         NativeError::Graph(ModuleGraphError::InternalMissingModule {
             path: node.path.clone(),
         })
     })?;
-    if provider_index >= importer_index {
+    let live_cell = modules[provider_index].1.instantiation.is_some();
+    if provider_index >= importer_index && !live_cell {
         return Err(NativeError::Emit(EmitError::Unsupported {
             feature: format!(
                 "`{}`, imported across a module cycle before `{}` has run, in native module \
@@ -1948,6 +2337,7 @@ pub(super) fn graph_import_value(
     Ok(NativeGraphImport::Binding {
         provider_index,
         export_index,
+        live_cell,
     })
 }
 
@@ -1975,6 +2365,38 @@ pub(super) fn graph_namespace_plans(
             {
                 required[provider_index] = true;
             }
+        }
+        // Synchronous `require(esm)` returns the module namespace on Node versions that support
+        // it. The namespace must exist even though this edge is a runtime require rather than an
+        // ESM namespace import.
+        for dependency in &node.dependencies {
+            if node.source != ModuleSource::CommonJs {
+                continue;
+            }
+            let Some(&provider_index) = indices.get(&dependency.target) else {
+                continue;
+            };
+            if modules[provider_index].0.source == ModuleSource::Source {
+                required[provider_index] = true;
+            }
+        }
+        for dependency in &node.runtime_dependencies {
+            if dependency.resolve_only {
+                continue;
+            }
+            let Some(&provider_index) = indices.get(&dependency.target) else {
+                continue;
+            };
+            if modules[provider_index].0.source == ModuleSource::Source {
+                required[provider_index] = true;
+            }
+        }
+    }
+    for path in graph.declared_includes() {
+        if let Some(&provider_index) = indices.get(path)
+            && modules[provider_index].0.source == ModuleSource::Source
+        {
+            required[provider_index] = true;
         }
     }
     if has_any_dynamic_import {
@@ -2028,6 +2450,7 @@ pub(super) fn graph_namespace_plans(
                         NativeNamespaceValue::Binding {
                             provider_index,
                             export_index,
+                            live_cell: modules[provider_index].1.instantiation.is_some(),
                         }
                     }
                     Some(ResolvedExport::CommonJsNamed { module, .. }) => {
@@ -2036,6 +2459,7 @@ pub(super) fn graph_namespace_plans(
                         NativeNamespaceValue::Binding {
                             provider_index,
                             export_index,
+                            live_cell: modules[provider_index].1.instantiation.is_some(),
                         }
                     }
                     Some(ResolvedExport::Namespace { module }) => {
@@ -2044,7 +2468,9 @@ pub(super) fn graph_namespace_plans(
                                 path: module.clone(),
                             })
                         })?;
-                        if provider_index >= module_index {
+                        if provider_index >= module_index
+                            && modules[provider_index].1.instantiation.is_none()
+                        {
                             return Err(NativeError::Emit(EmitError::Unsupported {
                                 feature:
                                     "self or cyclic namespace re-exports in native module graphs"
@@ -2068,6 +2494,62 @@ pub(super) fn graph_namespace_plans(
         plans[module_index] = Some(entries);
     }
     Ok(plans)
+}
+
+/// Whether synchronously requiring this ESM module would encounter top-level await anywhere in
+/// its static ESM dependency graph. `require(esm)` must reject before evaluation, including when
+/// the awaited module is several imports away.
+fn module_transitive_top_level_await(
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    indices: &std::collections::HashMap<PathBuf, usize>,
+) -> Vec<bool> {
+    // Reverse the static ESM edges and spread asynchrony backwards from top-level Await nodes.
+    // This is linear in the graph size and handles SCCs without an order-sensitive DFS cache.
+    let mut importers = vec![Vec::new(); modules.len()];
+    let mut asynchronous = vec![false; modules.len()];
+    for index in 0..modules.len() {
+        let node = modules[index].0;
+        if node.source != ModuleSource::Source {
+            continue;
+        }
+        asynchronous[index] = node
+            .program
+            .program
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, kiln_ir::Instruction::Await));
+        let static_specifiers = node
+            .program
+            .dependencies
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        for dependency in &node.dependencies {
+            if !static_specifiers.contains(dependency.specifier.as_str()) {
+                continue;
+            }
+            let Some(&provider) = indices.get(&dependency.target) else {
+                continue;
+            };
+            if modules[provider].0.source == ModuleSource::Source {
+                importers[provider].push(index);
+            }
+        }
+    }
+    let mut pending = asynchronous
+        .iter()
+        .enumerate()
+        .filter_map(|(index, async_module)| async_module.then_some(index))
+        .collect::<std::collections::VecDeque<_>>();
+    while let Some(provider) = pending.pop_front() {
+        for importer in &importers[provider] {
+            if !asynchronous[*importer] {
+                asynchronous[*importer] = true;
+                pending.push_back(*importer);
+            }
+        }
+    }
+    asynchronous
 }
 
 pub(super) fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
@@ -2219,17 +2701,24 @@ pub(super) fn write_launcher_dynamic_import(
     output.push_str(
         &r#"
 typedef struct kiln_graph_context kiln_graph_context;
+static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value specifier,
+                                        kiln_value *namespace_value, kiln_value *thrown,
+                                        int depth);
 static kiln_value *kiln_graph_module_result(kiln_graph_context *graph, size_t index);
 static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);
 static kiln_value *kiln_graph_module_promise(kiln_graph_context *graph, size_t index);
+static int kiln_graph_load_generation(kiln_graph_context *graph, size_t target, kiln_value *result);
 int kiln_graph_module_completion(kiln_host *host, uint32_t index, int rejected, const kiln_value *value, kiln_value *result, int depth, kiln_value *thrown);
 extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_value *, int, kiln_value *);
 extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
+extern void kiln_c99_gc_enter_job(void);
+extern void kiln_c99_gc_leave_job(void);
 #define KILN_C99_METHOD_THEN 107
 extern int kiln_c99_validate_dynamic_import_options(kiln_host *, kiln_value, int, kiln_value *, int *);
 int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {
     /* The graph whose host this is: its namespaces are the realm's. */
     kiln_graph_context *graph = host != NULL ? (kiln_graph_context *)host->context : NULL;
+    kiln_graph_context *target_graph = graph;
     if (promise == NULL || graph == NULL) return KILN_C99_CONTROL_ERROR;
     if (specifier.tag != KILN_VALUE_STRING) {
         kiln_value primitive = kiln_c99_undefined();
@@ -2365,9 +2854,15 @@ import_attributes_valid:
         }
         if graph.declared_includes().contains(&node.path) {
             resolutions.insert((node.path.to_string_lossy().into_owned(), modules.len()));
-            if let Ok(url) = Url::from_file_path(&node.path) {
-                resolutions.insert((url.to_string(), modules.len()));
-            }
+        }
+        // A runtime-computed file URL can still name a module that is already part of the
+        // closed graph. Route it to that module's original namespace so runtime import observes
+        // the same instance and live bindings as its static imports, instead of reparsing source
+        // from disk in the restricted runtime-module evaluator.
+        if (node.source == ModuleSource::Source || graph.declared_includes().contains(&node.path))
+            && let Ok(url) = Url::from_file_path(&node.path)
+        {
+            resolutions.insert((url.to_string(), modules.len()));
         }
         // `spawnActor({ module })` includes its statically named target as a lazy graph node.
         // The actor worker loads that node by the absolute URL passed from the spawning realm;
@@ -2403,11 +2898,37 @@ import_attributes_valid:
                 "    if ({importer_guard}{attribute_guard} && kiln_c99_string_equals_ascii(specifier, {c_spec}, (size_t){len})) {{"
             )
             .unwrap();
+            output.push_str("        kiln_host *request_host = host;\n");
+            // A realm-shared builtin may initiate a lazy import while serving a worker entry.
+            // Such source targets belong to that worker's graph, so keep graph selection with
+            // the worker while retaining the original request host for promise operations.
+            if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs)
+                && native_graph_export_count(node) != 0
+            {
+                output.push_str("        if (graph->is_builtin_graph && graph->realm != NULL && graph->realm->current_graph != NULL && graph->realm->current_graph->instance->worker_entry != 0) { graph = graph->realm->current_graph; host = &graph->host; }\n");
+            }
+            if importer_index < modules.len()
+                && matches!(
+                    modules[importer_index].0.source,
+                    ModuleSource::Source | ModuleSource::CommonJs
+                )
+                && matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs)
+            {
+                writeln!(output, "        if (graph->realm->runner_referrer_index == (size_t){importer_index}) {{ kiln_value loaded = kiln_c99_undefined(); int status = kiln_graph_load_generation(graph, (size_t){index}, &loaded); if (status != KILN_C99_OK) {{ kiln_value failure = loaded; if (failure.tag == KILN_VALUE_UNDEFINED) (void)kiln_c99_new_type_error(&failure, \"module loader target failed\"); return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &failure, 1, depth, thrown); }} if (loaded.tag == 16 /* KILN_VALUE_PROMISE */) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_THEN, loaded, NULL, 0, depth, thrown); return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE, kiln_c99_undefined(), &loaded, 1, depth, thrown); }}").unwrap();
+            }
             writeln!(
                 output,
-                "        int status = kiln_graph_ensure_module((kiln_graph_context *)host->context, (size_t){index});\n        if (status != KILN_C99_OK) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), kiln_graph_module_result((kiln_graph_context *)host->context, (size_t){index}), 1, depth, thrown);\n        if (kiln_graph_module_promise((kiln_graph_context *)host->context, (size_t){index})->tag == 16 /* KILN_VALUE_PROMISE */) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_THEN, *kiln_graph_module_promise((kiln_graph_context *)host->context, (size_t){index}), NULL, 0, depth, thrown);"
+                "        target_graph = graph; int status = kiln_graph_ensure_module(target_graph, (size_t){index});"
             )
             .unwrap();
+            output.push_str("        host = request_host;\n");
+            output.push_str("        if (status != KILN_C99_OK) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), kiln_graph_module_result(target_graph, (size_t)");
+            output.push_str(&index.to_string());
+            output.push_str("), 1, depth, thrown);\n        if (kiln_graph_module_promise(target_graph, (size_t)");
+            output.push_str(&index.to_string());
+            output.push_str(")->tag == 16 /* KILN_VALUE_PROMISE */) return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_THEN, *kiln_graph_module_promise(target_graph, (size_t)");
+            output.push_str(&index.to_string());
+            output.push_str("), NULL, 0, depth, thrown);");
             if modules[index].0.source == ModuleSource::CommonJs {
                 writeln!(
                     output,
@@ -2422,15 +2943,57 @@ import_attributes_valid:
             .unwrap();
         }
     }
+    write_actor_module_not_linked(output, modules);
     output.push_str(
         r#"    {
+        kiln_value runtime_namespace = kiln_c99_undefined();
+        kiln_value runtime_failure = kiln_c99_undefined();
+        int runtime_status = kiln_graph_runtime_load_file(
+            graph, specifier, &runtime_namespace, &runtime_failure, depth);
+        if (runtime_status == KILN_C99_OK)
+            return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_RESOLVE,
+                                          kiln_c99_undefined(), &runtime_namespace, 1, depth, thrown);
+        if (runtime_status == KILN_C99_THROWN)
+            return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT,
+                                          kiln_c99_undefined(), &runtime_failure, 1, depth, thrown);
         kiln_value err = kiln_c99_undefined();
-        (void)kiln_c99_new_type_error(&err, "no module loader is installed");
+        (void)kiln_c99_new_type_error(&err, "runtime module loading failed");
         return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);
     }
 }
 "#,
     );
+}
+
+/// The actor worker's answer for a module this build did not link (ADR 0072).
+///
+/// The worker reaches every linked module by absolute path or file URL (above), so a name that
+/// falls through to here is one `spawnActor` was given at run time that the compiler could not
+/// see. Say so, naming the module and why, rather than the generic dynamic-import refusal: the
+/// spawn rejects with this `TypeError`.
+fn write_actor_module_not_linked(
+    output: &mut String,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+) {
+    let Some(actor_worker) = modules.iter().position(|(candidate, _)| {
+        candidate.source == ModuleSource::NodeBuiltin(NodeBuiltin::ActorsWorker)
+    }) else {
+        return;
+    };
+    const PREFIX: &str = "actor module `";
+    const SUFFIX: &str = "` was not linked into this build: a native build links only the actor \
+        modules a spawnActor call names at compile time (a string literal, new URL(literal, \
+        import.meta.url), or a const holding one); this name was computed at run time";
+    writeln!(
+        output,
+        "    if (importer != NULL && strcmp(importer, {importer}) == 0) {{\n        kiln_value message = kiln_c99_concat(kiln_c99_concat(kiln_c99_copy_text({prefix}, (size_t){prefix_len}), specifier), kiln_c99_copy_text({suffix}, (size_t){suffix_len}));\n        kiln_value err = kiln_c99_undefined();\n        (void)kiln_c99_new_type_error(&err, \"actor module was not linked into this build\");\n        (void)kiln_c99_put(host, err, \"message\", 7, message, depth, thrown);\n        return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n    }}",
+        importer = native_c_string(&modules[actor_worker].1.symbol),
+        prefix = native_c_string(PREFIX),
+        prefix_len = PREFIX.len(),
+        suffix = native_c_string(SUFFIX),
+        suffix_len = SUFFIX.len(),
+    )
+    .unwrap();
 }
 
 pub(super) fn write_shared_wrapper_dynamic_import(
@@ -2641,7 +3204,7 @@ pub(super) fn write_graph_commonjs_realm_setup(
 ) {
     writeln!(
         output,
-        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, graph, kiln_graph_gc_visit_roots, graph);\n    if (status != 0) {{ *result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); return status; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
+        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, kiln_commonjs_resolve_{index}, graph, kiln_graph_gc_visit_registered_roots, graph);\n    if (status != 0) {{ *result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); return status; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
         native_c_string(filename.as_str()),
         filename.as_str().len(),
         native_c_string(dirname.as_str()),
@@ -2660,7 +3223,7 @@ pub(super) fn write_graph_commonjs_shared_setup(
 ) {
     writeln!(
         output,
-        "    status = {module_symbol}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, commonjs_graph, commonjs_graph->visit_roots, commonjs_graph->root_context);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {module_symbol}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
+        "    status = {module_symbol}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, kiln_commonjs_resolve_{index}, commonjs_graph, commonjs_graph->visit_roots, commonjs_graph->root_context);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {module_symbol}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
         native_c_string(filename.as_str()),
         filename.as_str().len(),
         native_c_string(dirname.as_str()),
@@ -2687,6 +3250,9 @@ pub(super) fn write_graph_namespace_build(
             "    status = {module_symbol}_namespace_wrapper(&{namespaces}[{module_index}], NULL, NULL, NULL, (size_t)0);"
         )
         .unwrap();
+        if !shared {
+            writeln!(output, "    if (status == KILN_C99_OK) status = kiln_c99_object_set_external_owner({namespaces}[{module_index}], graph->host.module_owner);").unwrap();
+        }
         return;
     }
     let names = entries
@@ -2705,11 +3271,27 @@ pub(super) fn write_graph_namespace_build(
             NativeNamespaceValue::Binding {
                 provider_index,
                 export_index,
+                live_cell: true,
             } if shared => format!("export_arrays[{provider_index}][{export_index}]"),
             NativeNamespaceValue::Binding {
                 provider_index,
                 export_index,
-            } => format!("kiln_exports_{provider_index}[{export_index}]"),
+                live_cell: true,
+            } => format!("kiln_cells_{provider_index}[{export_index}]"),
+            NativeNamespaceValue::Binding {
+                provider_index,
+                export_index,
+                ..
+            } if shared => {
+                format!("export_arrays[{provider_index}][{export_index}]")
+            }
+            NativeNamespaceValue::Binding {
+                provider_index,
+                export_index,
+                ..
+            } => {
+                format!("kiln_exports_{provider_index}[{export_index}]")
+            }
             NativeNamespaceValue::Namespace { provider_index } => {
                 format!("{namespaces}[{provider_index}]")
             }
@@ -2722,6 +3304,9 @@ pub(super) fn write_graph_namespace_build(
         entries.len()
     )
     .unwrap();
+    if !shared {
+        writeln!(output, "    if (status == KILN_C99_OK) status = kiln_c99_object_set_external_owner({namespaces}[{module_index}], graph->host.module_owner);").unwrap();
+    }
 }
 
 /// The graph launcher's root function (ADR 0041): the export, import and namespace arrays it
@@ -2731,27 +3316,57 @@ pub(super) fn render_graph_roots(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
 ) {
     output.push_str(
-        "static int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (graph == NULL) return 0;\n",
+        "static int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_value generation_owner;\n    size_t index;\n    if (graph == NULL || graph->realm == NULL) return 0;\n    if (graph->runtime_module_generation != NULL && graph->runtime_module_generation != graph && graph->runtime_module_generation->host.module_owner != NULL) { generation_owner = (kiln_value){ .tag = 9 /* KILN_VALUE_OBJECT */, .flags = 0, .len = 0, .bits = (uint64_t)(uintptr_t)graph->runtime_module_generation->host.module_owner }; if (visit(visit_context, &generation_owner, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR; }\n",
     );
     for (index, (node, _)) in modules.iter().enumerate() {
         let export_count = native_graph_export_count(node);
+        let node_builtin = matches!(node.source, ModuleSource::NodeBuiltin(_));
+        writeln!(
+            output,
+            "    if (graph->is_builtin_graph == {}) {{",
+            usize::from(node_builtin)
+        )
+        .unwrap();
         if export_count != 0 {
             writeln!(output, "    for (index = 0; index < (size_t){export_count}; ++index) if (visit(visit_context, &kiln_exports_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
+            if modules[index].1.instantiation.is_some() {
+                writeln!(output, "    for (index = 0; index < (size_t){export_count}; ++index) if (visit(visit_context, &kiln_cells_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
+            }
         }
         if !node.program.imports.is_empty() {
             writeln!(output, "    for (index = 0; index < (size_t){}; ++index) if (visit(visit_context, &kiln_imports_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;", node.program.imports.len()).unwrap();
         }
+        output.push_str("    }\n");
     }
-    writeln!(output, "    for (index = 0; index < (size_t){}; ++index) if (visit(visit_context, &kiln_namespaces[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;", modules.len()).unwrap();
+    for (index, (node, _)) in modules.iter().enumerate() {
+        let node_builtin = matches!(node.source, ModuleSource::NodeBuiltin(_));
+        writeln!(output, "    if (graph->is_builtin_graph == {} && visit(visit_context, &kiln_namespaces[{index}], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;", usize::from(node_builtin)).unwrap();
+    }
     if modules
         .iter()
         .any(|(node, _)| node.program.program.has_dynamic_import())
     {
         output.push_str("    if (visit(visit_context, &kiln_opentui_namespace, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &kiln_node_ffi_namespace, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n");
     }
-    writeln!(output, "    if (visit(visit_context, &graph->result, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &graph->entry_result, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    for (index = 0; index < (size_t){}; ++index) {{\n        if (visit(visit_context, &graph->module_states[index].result, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].active_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].completion_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].completion_resolve, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->module_states[index].completion_reject, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    }}\n    return 0;\n}}", modules.len()).unwrap();
+    output.push_str("    { kiln_graph_unit_store *store; for (store = graph->instance->unit_stores; store != NULL; store = store->next) { size_t slot; for (slot = 0; slot < store->unit->val_count; ++slot) if (visit(visit_context, &store->values[slot], KILN_GC_VISIT_COMPACT) != 0) return KILN_C99_HOST_ERROR; } }\n");
+    output.push_str("    { kiln_graph_runtime_module *module; for (module = graph->realm->runtime_modules; module != NULL; module = module->next) if (module->generation == graph->instance->instance_id && (visit(visit_context, &module->namespace_value, KILN_GC_VISIT_VALUE) != 0 || visit(visit_context, &module->failure, KILN_GC_VISIT_VALUE) != 0)) return KILN_C99_HOST_ERROR; }\n");
+    let builtin_skip = modules
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (node, _))| {
+            matches!(node.source, ModuleSource::NodeBuiltin(_))
+                .then_some(format!("index != (size_t){index}"))
+        })
+        .collect::<Vec<_>>();
+    let builtin_skip = if builtin_skip.is_empty() {
+        "graph->is_builtin_graph".to_owned()
+    } else {
+        format!("graph->is_builtin_graph && ({})", builtin_skip.join(" && "))
+    };
+    writeln!(output, "    if (visit(visit_context, &graph->instance->result, KILN_GC_VISIT_VALUE) != 0 ||\n        visit(visit_context, &graph->instance->entry_result, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    for (index = 0; index < (size_t){}; ++index) {{\n        if ({builtin_skip}) continue;\n        if (visit(visit_context, &graph->instance->module_states[index].result, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].active_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_promise, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_resolve, KILN_GC_VISIT_VALUE) != 0 ||\n            visit(visit_context, &graph->instance->module_states[index].completion_reject, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n    }}\n    return 0;\n}}", modules.len()).unwrap();
+    output.push_str("static int kiln_graph_gc_visit_registered_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context) { kiln_graph_context *graph = (kiln_graph_context *)context; if (graph == NULL) return 0; if (!graph->is_builtin_graph && graph->realm != NULL && graph->realm->current_graph != graph && graph->instance->active_calls == 0 && !graph->instance->weak_job_active) return 0; return kiln_graph_gc_visit_roots(context, visit, visit_context); }\n");
     // Collection and ownership inspection enumerate precisely the same root slots.
-    output.push_str("\nstatic int kiln_graph_gc_mark_root(void *heap, const void *pointer, uint32_t kind) {\n    if (kind != KILN_GC_VISIT_VALUE) return KILN_C99_INVALID_ARGUMENT;\n    (void)kiln_realm_gc_mark_value(heap, pointer);\n    return KILN_C99_OK;\n}\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || context == NULL) return;\n    (void)kiln_graph_gc_visit_roots(context, kiln_graph_gc_mark_root, heap);\n}\n");
+    output.push_str("\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase);\nstatic void kiln_graph_runtime_modules_release_generation(kiln_graph_realm_state *realm, uint64_t generation) {\n    kiln_graph_runtime_module **link;\n    if (realm == NULL) return;\n    link = &realm->runtime_modules;\n    while (*link != NULL) {\n        kiln_graph_runtime_module *module = *link;\n        if (module->generation == generation) { *link = module->next; free(module->path); free(module); }\n        else link = &module->next;\n    }\n}\nstatic void kiln_graph_release_module_instance(void *context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_graph_context **link;\n    if (graph == NULL) return;\n    if (graph->realm != NULL) {\n        link = &graph->realm->instances;\n        while (*link != NULL && *link != graph) link = &(*link)->next_instance;\n        if (*link == graph) *link = graph->next_instance;\n        if (graph->realm->current_graph == graph) graph->realm->current_graph = graph->realm->instances;\n    }\n    if (graph->instance != NULL && graph->instance->roots_registered)\n        (void)kiln_realm_gc_unregister_roots(kiln_graph_gc_roots, graph);\n    if (graph->instance != NULL && graph->realm != NULL)\n        kiln_graph_runtime_modules_release_generation(graph->realm, graph->instance->instance_id);\n    kiln_graph_free_unit_stores(graph->instance);\n    if (graph->realm != NULL && graph->realm->instances == NULL) {\n        kiln_graph_runtime_module *module = graph->realm->runtime_modules;\n        while (module != NULL) {\n            kiln_graph_runtime_module *next = module->next;\n            free(module->path);\n            free(module);\n            module = next;\n        }\n        graph->realm->runtime_modules = NULL;\n    }\n    free(graph->instance);\n    free(graph);\n}\nstatic void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_value owner_root;\n    if (phase == KILN_GC_PHASE_RESET || phase == KILN_GC_PHASE_LANE_RESET || graph == NULL ||\n        graph->realm == NULL || graph->host.module_owner == NULL ||\n        (!graph->is_builtin_graph && graph->realm->current_graph != graph && graph->instance->active_calls == 0 && !graph->instance->weak_job_active)) return;\n    owner_root = (kiln_value){ .tag = 9 /* KILN_VALUE_OBJECT */, .flags = 0, .len = 0, .bits = (uint64_t)(uintptr_t)graph->host.module_owner };\n    (void)kiln_realm_gc_mark_value(heap, &owner_root);\n}\n");
 }
 
 #[cfg(test)]
@@ -2767,7 +3382,7 @@ pub(super) fn graph_launcher_source(
 /// completion handler's derived promise instead, and waiting for quiescence hangs beside a live
 /// server. The launcher maps this private status back to an uncaught throw at realm teardown.
 pub(super) const FATAL_UNHANDLED_REJECTION: &str =
-    r#"{ graph->result = *value; return KILN_GRAPH_FATAL_REJECTION; }"#;
+    r#"{ graph->instance->result = *value; return KILN_GRAPH_FATAL_REJECTION; }"#;
 
 pub(super) fn graph_launcher_source_with_imports(
     graph: &ModuleGraph,
@@ -2787,6 +3402,16 @@ pub(super) fn graph_launcher_source_with_imports(
             },
         ));
     }
+    // Runner referrer tables contain filesystem URLs and paths. They are needed only by the
+    // explicitly private loader policy used by test adapters; ordinary application graphs must
+    // remain relocatable and share launcher artifacts across equivalent project roots.
+    let needs_runner_policy = modules.iter().any(|(node, _)| {
+        matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs)
+            && node.program.program.constants.iter().any(|constant| {
+                matches!(constant, kiln_ir::Constant::String(value)
+                    if value.to_scalar_string().ok().as_deref() == Some("__kilnHostModuleLoader"))
+            })
+    });
     // Diagnostic names remain project-relative, while CommonJS path roles are constructed as
     // distinct types below so observable runtime paths cannot be replaced with diagnostics by a
     // broad path-normalization refactor.
@@ -2823,6 +3448,7 @@ pub(super) fn graph_launcher_source_with_imports(
         .iter()
         .position(|(node, _)| node.path == graph.entry())
         .expect("entry module is present in the graph");
+    let synchronous_require_async = module_transitive_top_level_await(modules, &indices);
     // The entry is the sole startup root. Its static dependency walk recursively ensures every
     // reachable provider, while the realm turn loop drives any pending top-level-await
     // continuations. Starting every reachable module independently can evaluate a cycle from the
@@ -2853,6 +3479,7 @@ pub(super) fn graph_launcher_source_with_imports(
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
@@ -2894,11 +3521,24 @@ enum kiln_value_tag {
     output.push_str(kiln_native_runtime::kiln_value_abi_declaration!());
     output.push_str(kiln_native_runtime::kiln_string_abi_declaration!());
     output.push_str(kiln_native_runtime::kiln_cli_host_state_declaration!());
+    // Runtime-created modules are available to every native graph, even when the graph has no
+    // static node:fs import or import() expression. Declare their provider ABI before the shared
+    // loader call sites below; the optional import() block is emitted later in the file.
+    output.push_str(
+        r#"
+typedef struct kiln_host kiln_host;
+extern int kiln_node_fs_read_file_sync(const uint8_t *, uint64_t, uint8_t **, uint64_t *, int32_t *);
+extern int kiln_node_fs_realpath_sync(const uint8_t *, uint64_t, uint8_t **, uint64_t *, int32_t *);
+extern void kiln_node_fs_free_bytes(uint8_t *, uint64_t);
+extern int kiln_c99_dynamic_eval_module(kiln_host *, kiln_value, kiln_value, kiln_value *, int, kiln_value *);
+extern int kiln_c99_dynamic_module_text(kiln_value, uint8_t **, size_t *);
+"#,
+    );
     output.push_str(r#"/* The trusted builtin bootstrap installs methods onto built-ins; once it has run, the realm takes
  * those writes back out of the prelude's process-wide summary of modified built-ins, before any
  * user module can observe or mutate the realm (`kiln_c99_builtin_store_epoch`). */
 extern void kiln_c99_builtin_bootstrap_done(void) __attribute__((visibility("hidden")));
-extern int kiln_realm_kiln_shared_hooks(int begin);
+extern int kiln_realm_private_window(int begin);
 
 static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
     kiln_value value = { .tag = KILN_VALUE_STRING, .flags = 0, .len = 0, .bits = 0 };
@@ -2944,24 +3584,104 @@ static inline int kiln_c99_string_starts_ascii(kiln_value value, const char *asc
 
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
                                  const kiln_value *arguments, kiln_value *result);
+typedef uint64_t kiln_val;
+typedef struct kiln_c99_unit { uint32_t id; uint32_t val_count; } kiln_c99_unit;
+typedef kiln_val *(*kiln_host_unit_values_fn)(void *module_context,
+                                              const kiln_c99_unit *unit);
 typedef struct kiln_host {
     kiln_host_call_fn call;
     void *context;
+    void *module_context;
+    void *module_owner;
+    kiln_host_unit_values_fn module_unit_values;
+    uint64_t module_instance_id;
 } kiln_host;
+
+static int kiln_c99_file_url_matches_path(const kiln_string *url, const char *path, size_t path_len) {
+    static const char scheme[] = "file://";
+    if (url == NULL || path == NULL || url->unit_len < sizeof(scheme) - 1) return 0;
+    for (size_t i = 0; i < sizeof(scheme) - 1; ++i) {
+        if (kiln_string_unit_at(url, i) != (uint8_t)scheme[i]) return 0;
+    }
+    size_t unit = 7;
+    size_t byte = 0;
+    while (unit < url->unit_len && byte < path_len) {
+        uint16_t current = kiln_string_unit_at(url, unit++);
+        unsigned char decoded;
+        if (current == '%') {
+            if (unit + 1 >= url->unit_len) return 0;
+            uint16_t high = kiln_string_unit_at(url, unit++);
+            uint16_t low = kiln_string_unit_at(url, unit++);
+            int high_value = high >= '0' && high <= '9' ? (int)(high - '0') :
+                             high >= 'A' && high <= 'F' ? (int)(high - 'A') + 10 :
+                             high >= 'a' && high <= 'f' ? (int)(high - 'a') + 10 : -1;
+            int low_value = low >= '0' && low <= '9' ? (int)(low - '0') :
+                            low >= 'A' && low <= 'F' ? (int)(low - 'A') + 10 :
+                            low >= 'a' && low <= 'f' ? (int)(low - 'a') + 10 : -1;
+            if (high_value < 0 || low_value < 0) return 0;
+            decoded = (unsigned char)((high_value << 4) | low_value);
+        } else {
+            if (current > 0x7f) return 0;
+            decoded = (unsigned char)current;
+        }
+        if ((unsigned char)path[byte++] != decoded) return 0;
+    }
+    return unit == url->unit_len && byte == path_len;
+}
+
+static int kiln_c99_string_matches_utf8(const kiln_string *s, const char *path, size_t path_len) {
+    if (s == NULL || (path == NULL && path_len != 0)) return 0;
+    size_t unit = 0;
+    size_t byte = 0;
+    while (unit < s->unit_len && byte < path_len) {
+        unsigned char b0 = (unsigned char)path[byte++];
+        uint32_t cp = 0;
+        if (b0 < 0x80) {
+            cp = b0;
+        } else if ((b0 & 0xe0) == 0xc0) {
+            if (byte >= path_len) return 0;
+            unsigned char b1 = (unsigned char)path[byte++];
+            if ((b1 & 0xc0) != 0x80) return 0;
+            cp = ((b0 & 0x1f) << 6) | (b1 & 0x3f);
+        } else if ((b0 & 0xf0) == 0xe0) {
+            if (byte + 1 >= path_len) return 0;
+            unsigned char b1 = (unsigned char)path[byte++];
+            unsigned char b2 = (unsigned char)path[byte++];
+            if ((b1 & 0xc0) != 0x80 || (b2 & 0xc0) != 0x80) return 0;
+            cp = ((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f);
+        } else if ((b0 & 0xf8) == 0xf0) {
+            if (byte + 2 >= path_len) return 0;
+            unsigned char b1 = (unsigned char)path[byte++];
+            unsigned char b2 = (unsigned char)path[byte++];
+            unsigned char b3 = (unsigned char)path[byte++];
+            if ((b1 & 0xc0) != 0x80 || (b2 & 0xc0) != 0x80 || (b3 & 0xc0) != 0x80) return 0;
+            cp = ((b0 & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f);
+        } else {
+            return 0;
+        }
+
+        if (cp < 0x10000) {
+            if (kiln_string_unit_at(s, unit++) != (uint16_t)cp) return 0;
+        } else {
+            uint32_t sub = cp - 0x10000;
+            uint16_t high = (uint16_t)(0xd800 + (sub >> 10));
+            uint16_t low = (uint16_t)(0xdc00 + (sub & 0x3ff));
+            if (unit + 1 >= s->unit_len) return 0;
+            if (kiln_string_unit_at(s, unit++) != high) return 0;
+            if (kiln_string_unit_at(s, unit++) != low) return 0;
+        }
+    }
+    return unit == s->unit_len && byte == path_len;
+}
 
 static int kiln_c99_filename_matches(kiln_value value, const char *path, size_t path_len) {
     if (path == NULL || value.tag != KILN_VALUE_STRING || (value.len != 0 && value.ptr == NULL)) return 0;
     const kiln_string *s = (const kiln_string *)value.ptr;
     if (s == NULL) return 0;
     if (s->unit_len == path_len && (path_len == 0 || kiln_string_equals_ascii(s, path, path_len))) return 1;
-    if (s->unit_len >= 7 && kiln_string_starts_ascii(s, "file://", 7) && s->unit_len - 7 == path_len) {
-        if (path_len == 0) return 1;
-        for (size_t i = 0; i < path_len; ++i) {
-            if (kiln_string_unit_at(s, i + 7) != (uint8_t)path[i]) return 0;
-        }
-        return 1;
-    }
-    return 0;
+    if (s->unit_len >= 7 && kiln_string_starts_ascii(s, "file://", 7))
+        return kiln_c99_file_url_matches_path(s, path, path_len);
+    return kiln_string_equals_utf8(s, path, path_len);
 }
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
@@ -2969,6 +3689,8 @@ typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
                                     kiln_value *exports, size_t export_count);
 typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
                                        kiln_value *result, kiln_value *thrown);
+typedef int (*kiln_commonjs_resolve_fn)(void *context, kiln_host *host, kiln_value specifier,
+                                        kiln_value *result, kiln_value *thrown);
 typedef int (*kiln_realm_entry_fn)(void *context);
 
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
@@ -2980,13 +3702,42 @@ extern void kiln_cli_warn(const char *message, const kiln_cli_host_state *host_s
 extern kiln_value kiln_cli_describe_error(kiln_value value);
 extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
+extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint,
+                                 kiln_value *out, int depth, kiln_value *thrown);
+/* Error.stack can be an inherited lazy accessor (not an own data property).  Reporting must
+ * read it through the language property path while the failing realm's host is still active;
+ * the hostless launcher fallback only sees raw own data properties. */
+static kiln_value kiln_graph_describe_error(kiln_host *host, kiln_value value) {
+    if (value.tag == 9 /* KILN_VALUE_OBJECT */) {
+        kiln_value stack = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
+        kiln_value getter_error = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
+        int status = kiln_c99_get(host, value, "stack", 5, &stack, 0, &getter_error);
+        if (status == 0 && stack.tag == KILN_VALUE_STRING && stack.ptr != NULL) return stack;
+        /* If stack is absent or its accessor throws, use the language's ordinary
+         * ToPrimitive(string) path. This preserves `ReferenceError: ...` via Error#toString
+         * instead of reducing every error to its message field. */
+        kiln_value primitive = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
+        kiln_value conversion_error = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
+        status = kiln_c99_to_primitive(host, value, 1 /* string */, &primitive, 0,
+                                       &conversion_error);
+        if (status == 0 && primitive.tag == KILN_VALUE_STRING && primitive.ptr != NULL)
+            return primitive;
+    }
+    return kiln_cli_describe_error(value);
+}
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
+extern int kiln_realm_argv_at(uint64_t index, const uint8_t **bytes, uint64_t *length);
 extern int kiln_realm_use_wall_clock(uint64_t realm);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_drive_step(uint64_t realm, void *host, void *thrown,
                                   uint32_t *kind, uint64_t *delay_ns);
+extern int kiln_c99_graph_drive_boundary_push(uintptr_t stack_low, const void *registers,
+                                               size_t registers_size, uint64_t *out_token)
+    __attribute__((visibility("hidden")));
+extern void kiln_c99_graph_drive_boundary_pop(uint64_t token)
+    __attribute__((visibility("hidden")));
 extern int kiln_realm_destroy(uint64_t realm);
 extern int kiln_realm_run_pinned(uint64_t count, int (*run)(void *context, uint64_t index),
                                  void *context, int *statuses);
@@ -3037,15 +3788,21 @@ typedef struct kiln_worker_token {
 extern int kiln_worker_post(uint32_t op, uint64_t port, uint32_t kind, kiln_worker_token *tokens, uint64_t count);
 extern int kiln_c99_worker_report_error(kiln_value error) __attribute__((visibility("hidden")));
 extern int kiln_realm_kiln_extensions_on(void);
+extern int kiln_realm_set_string_code_generation(uint64_t realm, int allowed);
 typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 typedef int (*kiln_gc_visit_root_fn)(void *context, const void *pointer, uint32_t kind);
 typedef int (*kiln_gc_visit_roots_fn)(void *context, kiln_gc_visit_root_fn visit, void *visit_context);
 extern int kiln_realm_gc_register_roots_with_visitor(kiln_gc_roots_fn roots,
              kiln_gc_visit_roots_fn visit_roots, void *context, uint32_t flags);
-#define KILN_GC_VISIT_VALUE 2u
+extern void *kiln_c99_external_owner_create(void *context,
+             kiln_gc_visit_roots_fn visit_roots, void (*release_instance)(void *context));
+extern void kiln_c99_external_owner_detach(void *owner);
+extern int kiln_c99_object_set_external_owner(kiln_value object_value, void *owner);
 extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
 extern int kiln_realm_gc_mark_value(void *heap, const void *value);
+#define KILN_GC_VISIT_VALUE 2u
+#define KILN_GC_VISIT_COMPACT 3u
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_PHASE_RESET 2
 #define KILN_GC_PHASE_LANE_RESET 3
@@ -3056,13 +3813,18 @@ extern int kiln_realm_gc_mark_value(void *heap, const void *value);
  * ends the checkpoint without turning the failure into another rejected promise. */
 #define KILN_GRAPH_FATAL_REJECTION (-1000)
 extern int kiln_c99_process_object(kiln_value *result);
+extern int kiln_c99_node_incoming_message_prototype(kiln_value *result);
 #define KILN_C99_INVALID_ARGUMENT (-1)
 #define KILN_C99_HOST_MODULE_CREATE_REQUIRE UINT16_C(0x7FF0)
+#define KILN_C99_HOST_MODULE_LOADER UINT16_C(0x7FF1)
+#define KILN_C99_HOST_RUNTIME_MODULE_IMPORT UINT16_C(0x7FF2)
 #define KILN_C99_HINT_STRING 1
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
 extern int kiln_c99_commonjs_require_value_with_roots(kiln_value *out, kiln_commonjs_require_fn call, void *context, kiln_gc_visit_roots_fn visit_context, void *root_context);
+extern int kiln_c99_commonjs_require_value_with_resolver(kiln_value *out, kiln_commonjs_require_fn call, kiln_commonjs_resolve_fn resolve, void *context, kiln_gc_visit_roots_fn visit_context, void *root_context);
 extern int kiln_c99_default_require(void *context, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown);
 extern int kiln_c99_new_object(kiln_value *result);
+extern int kiln_c99_make_cell(kiln_value *slot);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_copy_text(const char *text, size_t len);
@@ -3074,6 +3836,11 @@ extern int kiln_c99_diagnostic_available(void);
 extern kiln_value kiln_c99_concat(kiln_value left, kiln_value right);
 extern int kiln_c99_throw_error(kiln_value *out, uint64_t kind, const char *message);
 extern int kiln_c99_new_type_error(kiln_value *out, const char *message);
+static int kiln_graph_async_require_error(kiln_host *host, kiln_value *out, kiln_value *thrown) {
+    int status = kiln_c99_new_type_error(out, "require() cannot load an ES module with top-level await");
+    if (status != 0 && status != KILN_C99_THROWN) return status;
+    return kiln_c99_put(host, *out, "code", 4, kiln_c99_copy_text("ERR_REQUIRE_ASYNC_MODULE", 24), 0, thrown);
+}
 extern int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
@@ -3082,19 +3849,42 @@ extern int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          int depth, kiln_value *thrown);
 extern int kiln_c99_module_completion(kiln_host *, kiln_value, uint32_t, kiln_value *, int, kiln_value *);
 extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
+extern void kiln_c99_gc_enter_job(void);
+extern void kiln_c99_gc_leave_job(void);
 #define KILN_C99_OK 0
+#define KILN_C99_OUT_OF_MEMORY (-4)
 #define KILN_C99_METHOD_PROMISE_RESOLVE 110
 #define KILN_C99_METHOD_PROMISE_REJECT 111
 #define KILN_C99_METHOD_PROMISE_WITH_RESOLVERS 411
 "#,
     );
     for (node, module) in modules {
+        if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs)
+            && (module
+                .source
+                .contains(&format!("kiln_c99_unit {}_unit", module.symbol))
+                || module
+                    .chunks
+                    .iter()
+                    .any(|chunk| chunk.contains(&format!("kiln_c99_unit {}_unit", module.symbol))))
+        {
+            writeln!(output, "extern kiln_c99_unit {}_unit;", module.symbol).unwrap();
+        }
         writeln!(
             output,
             "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
             module.symbol
         )
         .unwrap();
+        if let Some(instantiation) = &module.instantiation {
+            writeln!(
+                output,
+                "extern int {}(kiln_host *host, kiln_value *cells, size_t count);\nextern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
+                instantiation.prepare_symbol,
+                instantiation.symbol,
+            )
+            .unwrap();
+        }
         writeln!(
             output,
             "extern int {}_namespace_wrapper(kiln_value *result, const char *const *names, const size_t *name_lengths, const kiln_value *values, size_t count);",
@@ -3110,7 +3900,7 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
         {
             writeln!(
                 output,
-                "__attribute__((weak)) void {}_publish_exports(kiln_value *exports) {{ (void)exports; }}",
+                "__attribute__((weak)) void {}_publish_exports(kiln_host *host, kiln_value *exports) {{ (void)host; (void)exports; }}",
                 module.symbol
             )
             .unwrap();
@@ -3128,7 +3918,7 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
         if node.source == ModuleSource::CommonJs {
             writeln!(
                 output,
-                "extern int {}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, void *require_context, kiln_gc_visit_roots_fn require_visit_roots, void *require_root_context);",
+                "extern int {}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, kiln_commonjs_resolve_fn require_resolve, void *require_context, kiln_gc_visit_roots_fn require_visit_roots, void *require_root_context);",
                 module.symbol
             )
             .unwrap();
@@ -3140,7 +3930,7 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
     // names the rest of this launcher always used, through macros that read the `graph` in scope.
     let mut linkage_fields = String::new();
     let mut linkage_names = String::new();
-    for (index, (node, _)) in modules.iter().enumerate() {
+    for (index, (node, module)) in modules.iter().enumerate() {
         let export_count = native_graph_export_count(node);
         if export_count != 0 {
             writeln!(
@@ -3150,9 +3940,21 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
             .unwrap();
             writeln!(
                 linkage_names,
-                "#define kiln_exports_{index} (graph->exports_{index})"
+                "#define kiln_exports_{index} (graph->instance->exports_{index})"
             )
             .unwrap();
+            if module.instantiation.is_some() {
+                writeln!(
+                    linkage_fields,
+                    "    kiln_value cells_{index}[{export_count}];"
+                )
+                .unwrap();
+                writeln!(
+                    linkage_names,
+                    "#define kiln_cells_{index} (graph->instance->cells_{index})"
+                )
+                .unwrap();
+            }
         }
         if !node.program.imports.is_empty() {
             writeln!(
@@ -3163,7 +3965,7 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
             .unwrap();
             writeln!(
                 linkage_names,
-                "#define kiln_imports_{index} (graph->imports_{index})"
+                "#define kiln_imports_{index} (graph->instance->imports_{index})"
             )
             .unwrap();
         }
@@ -3174,14 +3976,14 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
         modules.len()
     )
     .unwrap();
-    linkage_names.push_str("#define kiln_namespaces (graph->namespaces)\n");
+    linkage_names.push_str("#define kiln_namespaces (graph->instance->namespaces)\n");
     if modules
         .iter()
         .any(|(node, _)| node.program.program.has_dynamic_import())
     {
         linkage_fields
             .push_str("    kiln_value opentui_namespace;\n    kiln_value node_ffi_namespace;\n");
-        linkage_names.push_str("#define kiln_opentui_namespace (graph->opentui_namespace)\n#define kiln_node_ffi_namespace (graph->node_ffi_namespace)\n");
+        linkage_names.push_str("#define kiln_opentui_namespace (graph->instance->opentui_namespace)\n#define kiln_node_ffi_namespace (graph->instance->node_ffi_namespace)\n");
     }
     for (index, (node, _)) in modules.iter().enumerate() {
         if node.source == ModuleSource::CommonJs {
@@ -3192,7 +3994,7 @@ extern int kiln_c99_finish_module_checkpoint(kiln_host *, kiln_value *);
             .unwrap();
             writeln!(
                 linkage_names,
-                "#define kiln_commonjs_{index} (graph->commonjs_{index})"
+                "#define kiln_commonjs_{index} (graph->instance->commonjs_{index})"
             )
             .unwrap();
         }
@@ -3252,8 +4054,12 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
     int status;
     if (context == NULL || result == NULL || context->exports == NULL) return -1;
     if (context->state != 0) {
-        *result = context->exports[0];
-        return 0;
+        /* `module.exports = value` may have happened before this back-edge, while the module is
+         * still evaluating. Read the wrapper's current property so circular `require()` observes
+         * that assignment, just as it observes mutations to the initial exports object. */
+        if (context->imports == NULL || context->import_count < (size_t)3)
+            return KILN_C99_CONTROL_ERROR;
+        return kiln_c99_get(context->host, context->imports[2], "exports", 7, result, 0, thrown);
     }
     context->state = 1;
     status = context->module(context->host, result, context->imports, context->import_count,
@@ -3271,22 +4077,97 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
 "#,
     );
     let context = format!(
-        "typedef struct kiln_graph_context kiln_graph_context;\n\
+        "typedef struct kiln_graph_launch {{ const char *entry; int flag_count; char **flags; size_t *preloads; size_t preload_count; int disallow_strings; }} kiln_graph_launch;\n\
+         typedef struct kiln_graph_context kiln_graph_context;\n\
          typedef struct kiln_graph_require_context {{\n    kiln_graph_context *graph;\n    size_t base_index;\n}} kiln_graph_require_context;\n\
+         typedef struct kiln_graph_runtime_module {{ char *path; size_t suffix_len; uint64_t generation; kiln_value namespace_value; kiln_value failure; int state; struct kiln_graph_runtime_module *next; }} kiln_graph_runtime_module;\n\
+         typedef struct kiln_graph_unit_store {{ const kiln_c99_unit *unit; kiln_val *values; struct kiln_graph_unit_store *next; }} kiln_graph_unit_store;\n\
          /* One realm's graph, allocated by `kiln_cli_run_realm` for its realm and freed after it. */\n\
-         struct kiln_graph_context {{\n    kiln_host host;\n    /* The CLI host's state for this realm: its last refusal. */\n    kiln_cli_host_state cli;\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    /* The entry's top-level await never settled with the loop out of work (node: warn, exit 13). */\n    int unsettled_entry;\n    /* In a worker's realm (`node:worker_threads`), one plus the index of the module it runs as its entry; 0 in the program's own. */\n    size_t worker_entry;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}};\n{linkage_names}",
+         typedef struct kiln_graph_realm_state {{\n    /* CLI-owned host state belongs to the realm shared by all its module instances. */\n    kiln_cli_host_state cli;\n    kiln_graph_context *current_graph;\n    kiln_graph_context *builtin_graph;\n    kiln_graph_context *instances;\n    kiln_graph_runtime_module *runtime_modules;\n    int host_initialized;\n    size_t runner_referrer_index;\n    size_t spy_adapter_referrer_index;\n    int reset_requested;\n    uint64_t next_module_instance_id;\n}} kiln_graph_realm_state;\n\n\
+         typedef struct kiln_graph_module_instance {{\n    /* Mutable module state and linkage are isolated per generation. */\n    kiln_value result;\n    kiln_value entry_result;\n    kiln_graph_module_state module_states[{}];\n    size_t current_module;\n    int roots_registered;\n    int linkage_ready;\n    int defer_startup;\n    int active_calls;\n    int weak_job_active;\n    int unsettled_entry;\n    size_t worker_entry;\n    const kiln_graph_launch *launch;\n    size_t preload_next;\n    int launch_configured;\n    uint64_t instance_id;\n    kiln_graph_unit_store *unit_stores;\n    struct kiln_graph_require_context require_contexts[{}];\n{linkage_fields}}} kiln_graph_module_instance;\n\n\
+         struct kiln_graph_context {{\n    kiln_host host;\n    kiln_graph_realm_state *realm;\n    kiln_graph_module_instance *instance;\n    kiln_graph_context *next_instance;\n    kiln_graph_context *runtime_module_generation;\n    int runtime_module_reset_requested;\n    int is_builtin_graph;\n}};\n{linkage_names}",
         modules.len(),
         runtime_importers.len().max(1),
     );
     output = output.replace("/* KILN_GRAPH_CONTEXT */\n", &context);
-    output.push_str("static int kiln_graph_declared_require(kiln_graph_context *graph, kiln_value specifier, kiln_value *result, kiln_value *thrown, int *matched) {\n    *matched = 0;\n");
+    output.push_str(
+        r#"
+typedef struct kiln_graph_error_read_context {
+    kiln_graph_context *graph;
+    kiln_value value;
+} kiln_graph_error_read_context;
+
+static int kiln_graph_read_error_in_realm(void *opaque) {
+    kiln_graph_error_read_context *context = (kiln_graph_error_read_context *)opaque;
+    context->graph->instance->result =
+        kiln_graph_describe_error(&context->graph->host, context->value);
+    return 0;
+}
+
+static kiln_value kiln_graph_describe_error_in_realm(uint64_t realm,
+                                                      kiln_graph_context *graph,
+                                                      kiln_value value) {
+    kiln_graph_error_read_context context = { graph, value };
+    if (kiln_realm_enter(realm, kiln_graph_read_error_in_realm, &context) == 0)
+        return graph->instance->result;
+    return kiln_cli_describe_error(value);
+}
+"#,
+    );
+    output.push_str(
+        r#"
+static kiln_val *kiln_graph_unit_values(void *opaque, const kiln_c99_unit *unit) {
+    kiln_graph_context *graph = (kiln_graph_context *)opaque;
+    kiln_graph_unit_store *store;
+    if (graph == NULL || graph->instance == NULL || unit == NULL || graph->is_builtin_graph) return NULL;
+    if (!("#,
+    );
+    let reloadable_units = modules
+        .iter()
+        .filter(|(node, _)| matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs))
+        // A source module does not necessarily emit a unit descriptor: modules with no module
+        // locals, template sites, or compact cells have nothing to store. Keep this whitelist in
+        // lockstep with the extern declarations above rather than naming nonexistent `_unit`s.
+        .filter(|(_, module)| {
+            let unit_declaration = format!("kiln_c99_unit {}_unit", module.symbol);
+            module.source.contains(&unit_declaration)
+                || module
+                    .chunks
+                    .iter()
+                    .any(|chunk| chunk.contains(&unit_declaration))
+        })
+        .map(|(_, module)| format!("unit == &{}_unit", module.symbol))
+        .collect::<Vec<_>>();
+    if reloadable_units.is_empty() {
+        output.push_str("0)) return NULL;\n");
+    } else {
+        writeln!(output, "{})) return NULL;", reloadable_units.join(" || ")).unwrap();
+    }
+    output.push_str(r#"
+    for (store = graph->instance->unit_stores; store != NULL; store = store->next)
+        if (store->unit == unit) return store->values;
+    store = (kiln_graph_unit_store *)calloc(1, sizeof *store);
+    if (store == NULL) { fputs("kiln: out of memory for a module instance's unit state\n", stderr); abort(); }
+    store->values = (kiln_val *)calloc(unit->val_count == 0 ? 1 : unit->val_count, sizeof *store->values);
+    if (store->values == NULL) { free(store); fputs("kiln: out of memory for a module instance's unit state\n", stderr); abort(); }
+    store->unit = unit;
+    store->next = graph->instance->unit_stores;
+    graph->instance->unit_stores = store;
+    return store->values;
+}
+static void kiln_graph_free_unit_stores(kiln_graph_module_instance *instance) {
+    kiln_graph_unit_store *store;
+    if (instance == NULL) return;
+    store = instance->unit_stores;
+    instance->unit_stores = NULL;
+    while (store != NULL) { kiln_graph_unit_store *next = store->next; free(store->values); free(store); store = next; }
+}
+"#);
+    output.push_str("static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\nstatic int kiln_graph_declared_require(kiln_graph_context *graph, kiln_value specifier, kiln_value *result, kiln_value *thrown, int *matched) {\n    *matched = 0;\n");
     for path in graph.declared_includes() {
         let Some(&provider_index) = indices.get(path) else {
             continue;
         };
-        if modules[provider_index].0.source != ModuleSource::CommonJs {
-            continue;
-        }
         let matches = std::iter::once(path.to_string_lossy().into_owned())
             .chain(Url::from_file_path(path).ok().map(|url| url.to_string()))
             .map(|specifier| {
@@ -3298,12 +4179,24 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
             })
             .collect::<Vec<_>>()
             .join(" || ");
-        writeln!(output, "    if ({matches}) {{ *matched = 1; return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown); }}").unwrap();
+        match modules[provider_index].0.source {
+            ModuleSource::CommonJs => {
+                writeln!(output, "    if ({matches}) {{ *matched = 1; return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown); }}").unwrap();
+            }
+            ModuleSource::Source if synchronous_require_async[provider_index] => {
+                writeln!(output, "    if ({matches}) {{ *matched = 1; return kiln_graph_async_require_error(&graph->host, result, thrown); }}").unwrap();
+            }
+            ModuleSource::Source => {
+                writeln!(output, "    if ({matches}) {{ *matched = 1; int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{provider_index}].result; return status; }} *result = graph->instance->namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
+            }
+            _ => {}
+        }
     }
     output.push_str("    (void)graph; (void)specifier; (void)result; (void)thrown;\n    return KILN_C99_OK;\n}\n");
     output.push_str(
         "static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\n",
     );
+    output.push_str("static int kiln_graph_enter(void *opaque);\nstatic int kiln_graph_initialize_builtins(kiln_graph_context *graph);\nstatic void kiln_graph_alias_builtins(kiln_graph_context *graph);\n");
     for (index, (node, _)) in modules.iter().enumerate() {
         writeln!(
             output,
@@ -3329,6 +4222,13 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
                     "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);"
                 )
                 .unwrap();
+            } else if modules[provider_index].0.source == ModuleSource::Source {
+                let has_top_level_await = synchronous_require_async[provider_index];
+                if has_top_level_await {
+                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_graph_async_require_error(host, &error, thrown); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+                } else {
+                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
+                }
             } else {
                 let Some(commonjs_export) =
                     native_commonjs_projection_index(modules[provider_index].0)
@@ -3337,12 +4237,75 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
                 };
                 writeln!(
                     output,
-                    "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{commonjs_export}]; return KILN_C99_OK; }}"
+                    "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{commonjs_export}]; return KILN_C99_OK; }}"
                 )
                 .unwrap();
             }
         }
+        // Bounded direct eval can contain literal `require()` calls which are not ordinary
+        // syntax-tree dependencies. They remain lazy runtime edges on the owning module, but
+        // the wrapper's lexical `require` still needs to dispatch them when eval reaches them.
+        for dependency in &node.runtime_dependencies {
+            if dependency.resolve_only || dependency.importer != node.path {
+                continue;
+            }
+            let Some(&provider_index) = indices.get(&dependency.target) else {
+                continue;
+            };
+            let specifier = native_c_string(&dependency.specifier);
+            let specifier_len = dependency.specifier.len();
+            if modules[provider_index].0.source == ModuleSource::CommonJs {
+                writeln!(
+                    output,
+                    "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);"
+                )
+                .unwrap();
+            } else if modules[provider_index].0.source == ModuleSource::Source {
+                if synchronous_require_async[provider_index] {
+                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_graph_async_require_error(host, &error, thrown); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+                } else {
+                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
+                }
+            } else if let Some(projection) =
+                native_commonjs_projection_index(modules[provider_index].0)
+            {
+                writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{projection}]; return KILN_C99_OK; }}").unwrap();
+            }
+        }
         output.push_str("    { int matched = 0; int status = kiln_graph_declared_require(graph, specifier, result, thrown, &matched); if (matched) return status; }\n    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n");
+        if node.source == ModuleSource::CommonJs {
+            writeln!(output, "\nstatic int kiln_commonjs_resolve_{index}(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {{\n    kiln_graph_context *graph = (kiln_graph_context *)opaque;\n    (void)host;\n    if (graph == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;").unwrap();
+            for dependency in &node.runtime_dependencies {
+                if dependency.importer != node.path {
+                    continue;
+                }
+                let resolved = if matches!(dependency.source, ModuleSource::NodeBuiltin(_)) {
+                    dependency.specifier.clone()
+                } else {
+                    dependency.target.to_string_lossy().into_owned()
+                };
+                writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ *result = kiln_c99_copy_text({}, (size_t){}); return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY; }}", native_c_string(&dependency.specifier), dependency.specifier.len(), native_c_string(&resolved), resolved.len()).unwrap();
+            }
+            for ((failure_importer, failure_specifier), message) in
+                graph.runtime_failures(&node.path)
+            {
+                if failure_importer != &node.path {
+                    continue;
+                }
+                writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ (void)kiln_c99_new_type_error(thrown, {}); return KILN_C99_THROWN; }}", native_c_string(failure_specifier), failure_specifier.len(), native_c_string(message)).unwrap();
+            }
+            if let Some(native_runtime_failures) = native_runtime_failures {
+                for ((owner, failure_importer, failure_specifier), message) in
+                    native_runtime_failures
+                {
+                    if owner != &node.path || failure_importer != &node.path {
+                        continue;
+                    }
+                    writeln!(output, "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ (void)kiln_c99_new_type_error(thrown, {}); return KILN_C99_THROWN; }}", native_c_string(failure_specifier), failure_specifier.len(), native_c_string(message)).unwrap();
+                }
+            }
+            output.push_str("    if (thrown != NULL) { (void)kiln_c99_new_type_error(thrown, \"Cannot find module\"); return KILN_C99_THROWN; }\n    return KILN_C99_HOST_ERROR;\n}\n");
+        }
     }
     if modules
         .iter()
@@ -3359,13 +4322,13 @@ typedef struct kiln_launcher_promise_view {
 
 
 static kiln_value *kiln_graph_module_result(kiln_graph_context *graph, size_t index) {
-    return &graph->module_states[index].result;
+    return &graph->instance->module_states[index].result;
 }
 
 static kiln_value *kiln_graph_module_promise(kiln_graph_context *graph, size_t index) {
     static kiln_value undefined = { .tag = KILN_VALUE_UNDEFINED, .flags = 0, .len = 0, .bits = 0 };
-    return graph->module_states[index].completion_promise.tag == 16 /* KILN_VALUE_PROMISE */
-        ? &graph->module_states[index].completion_promise
+    return graph->instance->module_states[index].completion_promise.tag == 16 /* KILN_VALUE_PROMISE */
+        ? &graph->instance->module_states[index].completion_promise
         : &undefined;
 }
 
@@ -3374,7 +4337,7 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
     kiln_value deferred;
     int status;
     if (graph == NULL || index >= (size_t)MODULE_COUNT) return KILN_C99_CONTROL_ERROR;
-    state = &graph->module_states[index];
+    state = &graph->instance->module_states[index];
     if (state->completion_promise.tag == 16 /* KILN_VALUE_PROMISE */) return KILN_C99_OK;
     status = kiln_c99_invoke_method(&graph->host,
                                     &deferred,
@@ -3399,13 +4362,16 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         ),
     );
     output.push_str(
-        "static int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result);\nstatic int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context);\nstatic int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\n",
+        "static int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result);\nstatic int kiln_graph_gc_visit_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context);\nstatic int kiln_graph_gc_visit_registered_roots(void *context, kiln_gc_visit_root_fn visit, void *visit_context);\nstatic int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index);\nstatic int kiln_graph_runtime_resolve(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown);\nstatic int kiln_graph_runtime_module_import(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result);\n",
     );
     output.push_str("static int kiln_graph_runtime_require(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {\n    kiln_graph_require_context *context = (kiln_graph_require_context *)opaque;\n    kiln_graph_context *graph;\n    if (context == NULL || (graph = context->graph) == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n    (void)host;\n    switch (context->base_index) {\n");
     for (base_index, importer) in runtime_importers.keys().enumerate() {
         output.push_str(&format!("        case {base_index}:\n"));
         for node in modules.iter().map(|(node, _)| node) {
             for dependency in &node.runtime_dependencies {
+                if dependency.resolve_only {
+                    continue;
+                }
                 if dependency.importer != *importer {
                     continue;
                 }
@@ -3416,10 +4382,17 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
                 let specifier_len = dependency.specifier.len();
                 if modules[provider_index].0.source == ModuleSource::CommonJs {
                     writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);").unwrap();
+                } else if modules[provider_index].0.source == ModuleSource::Source {
+                    let has_top_level_await = synchronous_require_async[provider_index];
+                    if has_top_level_await {
+                        writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_graph_async_require_error(host, &error, thrown); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+                    } else {
+                        writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
+                    }
                 } else if let Some(projection) =
                     native_commonjs_projection_index(modules[provider_index].0)
                 {
-                    writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{projection}]; return KILN_C99_OK; }}").unwrap();
+                    writeln!(output, "            if (kiln_c99_string_equals_ascii(specifier, {specifier}, (size_t){specifier_len})) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{projection}]; return KILN_C99_OK; }}").unwrap();
                 }
             }
         }
@@ -3479,14 +4452,63 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
                 "    if ({matches}) return kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, thrown);"
             )
             .unwrap();
+        } else if modules[provider_index].0.source == ModuleSource::Source {
+            let has_top_level_await = synchronous_require_async[provider_index];
+            if has_top_level_await {
+                writeln!(output, "    if ({matches}) {{ kiln_value error = kiln_c99_undefined(); (void)kiln_graph_async_require_error(host, &error, thrown); if (thrown != NULL) *thrown = error; return KILN_C99_THROWN; }}").unwrap();
+            } else {
+                writeln!(output, "    if ({matches}) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{provider_index}].result; return status; }} *result = kiln_namespaces[{provider_index}]; return KILN_C99_OK; }}").unwrap();
+            }
         } else if let Some(projection) = native_commonjs_projection_index(modules[provider_index].0)
         {
-            writeln!(output, "    if ({matches}) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{projection}]; return KILN_C99_OK; }}").unwrap();
+            writeln!(output, "    if ({matches}) {{ int status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{provider_index}].result; return status; }} *result = kiln_exports_{provider_index}[{projection}]; return KILN_C99_OK; }}").unwrap();
         }
     }
     output.push_str(
         "    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n\n",
     );
+    output.push_str("static int kiln_graph_runtime_resolve(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {\n    kiln_graph_require_context *context = (kiln_graph_require_context *)opaque;\n    kiln_graph_context *graph;\n    if (context == NULL || (graph = context->graph) == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n    (void)host;\n    switch (context->base_index) {\n");
+    for (base_index, importer) in runtime_importers.keys().enumerate() {
+        output.push_str(&format!("        case {base_index}:\n"));
+        for node in modules.iter().map(|(node, _)| node) {
+            for dependency in &node.runtime_dependencies {
+                if dependency.importer != *importer {
+                    continue;
+                }
+                let resolved = if matches!(dependency.source, ModuleSource::NodeBuiltin(_)) {
+                    dependency.specifier.clone()
+                } else {
+                    dependency.target.to_string_lossy().into_owned()
+                };
+                writeln!(
+                    output,
+                    "            if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ *result = kiln_c99_copy_text({}, (size_t){}); return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY; }}",
+                    native_c_string(&dependency.specifier),
+                    dependency.specifier.len(),
+                    native_c_string(&resolved),
+                    resolved.len(),
+                )
+                .unwrap();
+            }
+            for ((failure_importer, failure_specifier), message) in
+                graph.runtime_failures(&node.path)
+            {
+                if failure_importer != importer {
+                    continue;
+                }
+                writeln!(
+                    output,
+                    "            if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ (void)kiln_c99_new_type_error(thrown, {}); return KILN_C99_THROWN; }}",
+                    native_c_string(failure_specifier),
+                    failure_specifier.len(),
+                    native_c_string(message),
+                )
+                .unwrap();
+            }
+        }
+        output.push_str("            break;\n");
+    }
+    output.push_str("        default: break;\n    }\n    if (thrown == NULL) return KILN_C99_HOST_ERROR;\n    (void)kiln_c99_new_type_error(thrown, \"Cannot find module\");\n    return KILN_C99_THROWN;\n}\n\n");
     output.push_str(
         "static int kiln_graph_require_builtin(void *opaque, kiln_host *host, kiln_value specifier, kiln_value *result, kiln_value *thrown) {\n    kiln_graph_context *graph = (kiln_graph_context *)opaque;\n    (void)host;\n    if (graph == NULL || result == NULL || specifier.tag != KILN_VALUE_STRING || (specifier.len != 0 && specifier.ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n",
     );
@@ -3497,13 +4519,22 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
         let Some(projection) = native_commonjs_projection_index(node) else {
             continue;
         };
-        let specifier = builtin.specifier();
-        writeln!(
-            output,
-            "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ int status = kiln_graph_ensure_module(graph, (size_t){}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->module_states[{}].result; return status; }} *result = kiln_exports_{}[{}]; return KILN_C99_OK; }}",
-            native_c_string(specifier), specifier.len(), index, index, index, projection
-        )
-        .unwrap();
+        let canonical = builtin.specifier();
+        // Bootstrap/global require has no importing module's fixed table. Publish the same
+        // builtin aliases as importer-scoped require, using the resolver as the authority.
+        let aliases = std::iter::once(canonical).chain(
+            canonical
+                .strip_prefix("node:")
+                .filter(|alias| NodeBuiltin::parse(alias) == Some(builtin)),
+        );
+        for specifier in aliases {
+            writeln!(
+                output,
+                "    if (kiln_c99_string_equals_ascii(specifier, {}, (size_t){})) {{ int status = kiln_graph_ensure_module(graph, (size_t){}); if (status != KILN_C99_OK) {{ if (thrown != NULL) *thrown = graph->instance->module_states[{}].result; return status; }} *result = kiln_exports_{}[{}]; return KILN_C99_OK; }}",
+                native_c_string(specifier), specifier.len(), index, index, index, projection
+            )
+            .unwrap();
+        }
     }
     output.push_str("    return kiln_c99_default_require(NULL, host, specifier, result, thrown);\n}\n\nstatic int kiln_graph_create_require(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    if (graph == NULL || result == NULL || argc != 1 || arguments == NULL || arguments[0].tag != KILN_VALUE_STRING || (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_INVALID_ARGUMENT;\n");
     for (base_index, importer) in runtime_importers.keys().enumerate() {
@@ -3513,15 +4544,351 @@ static int kiln_graph_prepare_completion(kiln_graph_context *graph, size_t index
             .map(|url| url.to_string());
         writeln!(
             output,
-            "    if (kiln_c99_filename_matches(arguments[0], {}, (size_t){}){} ) {{ graph->require_contexts[{base_index}].graph = graph; graph->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_runtime_require, &graph->require_contexts[{base_index}], kiln_graph_gc_visit_roots, graph); }}",
+            "    if (kiln_c99_filename_matches(arguments[0], {}, (size_t){}){} ) {{ graph->instance->require_contexts[{base_index}].graph = graph; graph->instance->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value_with_resolver(result, kiln_graph_runtime_require, kiln_graph_runtime_resolve, &graph->instance->require_contexts[{base_index}], kiln_graph_gc_visit_registered_roots, graph); }}",
             native_c_string(importer.as_ref()),
             importer.len(),
             file_url.as_ref().map(|url| format!(" || kiln_c99_filename_matches(arguments[0], {}, (size_t){})", native_c_string(url), url.len())).unwrap_or_default(),
         ).unwrap();
     }
+    // The entry's import.meta uses its relocated executable path. Only that module's
+    // resolver table can be selected by the executable alias; dependency identities above
+    // remain separate even when they request the same relative specifier.
+    if let Some((base_index, _)) = runtime_importers
+        .keys()
+        .enumerate()
+        .find(|(_, importer)| importer.as_path() == graph.entry())
+    {
+        writeln!(output, "    {{ const uint8_t *bytes = NULL; uint64_t length = 0; if (kiln_realm_argv_at(0, &bytes, &length) == KILN_C99_OK && kiln_c99_filename_matches(arguments[0], (const char *)bytes, (size_t)length)) {{ graph->instance->require_contexts[{base_index}].graph = graph; graph->instance->require_contexts[{base_index}].base_index = (size_t){base_index}; return kiln_c99_commonjs_require_value_with_resolver(result, kiln_graph_runtime_require, kiln_graph_runtime_resolve, &graph->instance->require_contexts[{base_index}], kiln_graph_gc_visit_registered_roots, graph); }} }}").unwrap();
+    }
+    output.push_str(r#"    return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_require_builtin, graph, kiln_graph_gc_visit_registered_roots, graph);
+}
+
+/* Resolve filesystem imports from generated modules only to already linked code.
+ * realpath supplies the same canonical identity used when the graph was captured;
+ * it never makes a new source file executable. */
+static int kiln_graph_runtime_import_path(kiln_value specifier, kiln_value importer,
+                                          uint8_t **canonical, uint64_t *canonical_len) {
+    uint8_t *text = NULL;
+    size_t length = 0, path_len = 0;
+    char *path = NULL;
+    int32_t fs_error = 0;
+    int status = kiln_c99_dynamic_module_text(specifier, &text, &length);
+    if (status != KILN_C99_OK) return status;
+    path = (char *)malloc(length + 1);
+    if (path == NULL) return KILN_C99_OUT_OF_MEMORY;
+    size_t start = 0;
+    if (length >= 7 && memcmp(text, "file://", 7) == 0) {
+        if (length < 8 || text[7] != '/') { free(path); return KILN_C99_INVALID_ARGUMENT; }
+        start = 7;
+    }
+        for (size_t index = start; index < length; ++index) {
+            unsigned char current = text[index];
+            /* A suffix needs a distinct module instance, not the linked namespace. */
+            if (current == '?' || current == '#') { free(path); return KILN_C99_INVALID_ARGUMENT; }
+            if (current == '%') {
+                if (index + 2 >= length) { free(path); return KILN_C99_INVALID_ARGUMENT; }
+                unsigned char hi = text[++index], lo = text[++index];
+                int high = hi >= '0' && hi <= '9' ? hi - '0' :
+                           hi >= 'A' && hi <= 'F' ? hi - 'A' + 10 :
+                           hi >= 'a' && hi <= 'f' ? hi - 'a' + 10 : -1;
+                int low = lo >= '0' && lo <= '9' ? lo - '0' :
+                          lo >= 'A' && lo <= 'F' ? lo - 'A' + 10 :
+                          lo >= 'a' && lo <= 'f' ? lo - 'a' + 10 : -1;
+                if (high < 0 || low < 0) { free(path); return KILN_C99_INVALID_ARGUMENT; }
+                current = (unsigned char)((high << 4) | low);
+                if (current == '/' || current == '\\') { free(path); return KILN_C99_INVALID_ARGUMENT; }
+            }
+            if (current == 0) { free(path); return KILN_C99_INVALID_ARGUMENT; }
+            path[path_len++] = (char)current;
+        }
+    path[path_len] = '\0';
+    if (path_len != 0 && path[0] != '/') {
+        uint8_t *base = NULL;
+        size_t base_len = 0;
+        status = kiln_c99_dynamic_module_text(importer, &base, &base_len);
+        if (status != KILN_C99_OK) { free(path); return status; }
+        while (base_len != 0 && base[base_len - 1] != '/') --base_len;
+        if (base_len > SIZE_MAX - path_len - 1) { free(path); return KILN_C99_OUT_OF_MEMORY; }
+        char *joined = (char *)malloc(base_len + path_len + 1);
+        if (joined == NULL) { free(path); return KILN_C99_OUT_OF_MEMORY; }
+        memcpy(joined, base, base_len);
+        memcpy(joined + base_len, path, path_len + 1);
+        free(path);
+        path = joined;
+        path_len += base_len;
+    }
+    status = kiln_node_fs_realpath_sync((const uint8_t *)path, path_len,
+                                      canonical, canonical_len, &fs_error);
+    free(path);
+    return status == 0 && fs_error == 0 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+}
+
+static int kiln_graph_runtime_module_import(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {
+    if (graph == NULL || graph->instance == NULL || argc != 2 || arguments == NULL || result == NULL || arguments[0].tag != KILN_VALUE_STRING || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;
+"#);
+    let mut linked_module_indices = std::collections::HashMap::new();
+    for (index, (node, _)) in modules.iter().enumerate() {
+        linked_module_indices.insert(node.path.clone(), index);
+        if let Ok(canonical) = std::fs::canonicalize(&node.path) {
+            linked_module_indices.insert(canonical, index);
+        }
+    }
+    for alias in graph.runtime_package_aliases() {
+        let Some(index) = linked_module_indices.get(&alias.target).copied() else {
+            continue;
+        };
+        let package_root = alias.package_root.to_string_lossy();
+        let root = native_c_string(&package_root);
+        let specifier = native_c_string(&alias.specifier);
+        let ambiguous = graph
+            .runtime_package_aliases()
+            .iter()
+            .filter(|candidate| candidate.specifier == alias.specifier)
+            .count()
+            > 1;
+        let root_guard = format!(
+            "(arguments[1].len >= (uint64_t){} && memcmp(arguments[1].ptr, {root}, (size_t){}) == 0 && (arguments[1].len == (uint64_t){} || arguments[1].ptr[{}] == '/' || arguments[1].ptr[{}] == '\\\\'))",
+            package_root.len(),
+            package_root.len(),
+            package_root.len(),
+            package_root.len(),
+            package_root.len()
+        );
+        let root_guard = if ambiguous {
+            root_guard
+        } else {
+            "1".to_owned()
+        };
+        writeln!(output, "    if ({root_guard} && kiln_c99_string_equals_ascii(arguments[0], {specifier}, (size_t){})) {{ int status = kiln_graph_ensure_module(graph, (size_t){index}); if (status != KILN_C99_OK) {{ *result = *kiln_graph_module_result(graph, (size_t){index}); return status; }} *result = graph->instance->namespaces[{index}]; return KILN_C99_OK; }}",
+            alias.specifier.len()).unwrap();
+    }
     output.push_str(
-        "    return kiln_c99_commonjs_require_value_with_roots(result, kiln_graph_require_builtin, graph, kiln_graph_gc_visit_roots, graph);\n}\n\nstatic int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) return kiln_graph_create_require(graph, argc, arguments, result);\n    return kiln_cli_host_call(graph != NULL ? &graph->cli : NULL, operation, argc, arguments, result);\n}\n",
+        r#"    if (arguments[0].len != 0 &&
+        (kiln_string_starts_ascii((const kiln_string *)arguments[0].ptr, "./", 2) ||
+         kiln_string_starts_ascii((const kiln_string *)arguments[0].ptr, "../", 3) ||
+         kiln_string_starts_ascii((const kiln_string *)arguments[0].ptr, "/", 1) ||
+         kiln_string_starts_ascii((const kiln_string *)arguments[0].ptr, "file://", 7))) {
+        uint8_t *canonical = NULL;
+        uint64_t canonical_len = 0;
+        int path_status = kiln_graph_runtime_import_path(arguments[0], arguments[1],
+                                                       &canonical, &canonical_len);
+        if (path_status == KILN_C99_OUT_OF_MEMORY) return path_status;
+        if (path_status == KILN_C99_OK) {
+"#,
     );
+    let mut canonical_targets = BTreeSet::new();
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if namespace_plans[index].is_none() {
+            continue;
+        }
+        let canonical = std::fs::canonicalize(&node.path).unwrap_or_else(|_| node.path.clone());
+        if !canonical_targets.insert(canonical.clone()) {
+            continue;
+        }
+        let path = canonical.to_string_lossy();
+        writeln!(output, "            if (canonical_len == (uint64_t){} && memcmp(canonical, {}, (size_t){}) == 0) {{ kiln_node_fs_free_bytes(canonical, canonical_len); int status = kiln_graph_ensure_module(graph, (size_t){index}); if (status != KILN_C99_OK) {{ *result = *kiln_graph_module_result(graph, (size_t){index}); return status; }} *result = graph->instance->namespaces[{index}]; return KILN_C99_OK; }}", path.len(), native_c_string(&path), path.len()).unwrap();
+    }
+    output.push_str("        }\n        if (canonical != NULL) kiln_node_fs_free_bytes(canonical, canonical_len);\n    }\n");
+    output.push_str(r#"    (void)kiln_c99_new_type_error(result, "runtime module import is outside the linked package graph");
+    return KILN_C99_THROWN;
+}
+
+static int kiln_graph_runtime_module_generation(kiln_graph_context **graph_ref) {
+    kiln_graph_context *graph, *generation;
+    kiln_graph_realm_state *realm;
+    if (graph_ref == NULL || (graph = *graph_ref) == NULL || graph->realm == NULL)
+        return KILN_C99_CONTROL_ERROR;
+    realm = graph->realm;
+    generation = graph->runtime_module_generation != NULL
+                     ? graph->runtime_module_generation
+                     : graph;
+    if (!graph->runtime_module_reset_requested) {
+        *graph_ref = generation;
+        return KILN_C99_OK;
+    }
+    if (graph->runtime_module_reset_requested) {
+        kiln_graph_context *fresh = (kiln_graph_context *)calloc(1, sizeof *fresh);
+        int status;
+        if (fresh == NULL) return KILN_C99_OUT_OF_MEMORY;
+        fresh->instance = (kiln_graph_module_instance *)calloc(1, sizeof *fresh->instance);
+        if (fresh->instance == NULL) { free(fresh); return KILN_C99_OUT_OF_MEMORY; }
+        fresh->realm = realm;
+        fresh->runtime_module_generation = fresh;
+        fresh->host = graph->host;
+        fresh->host.context = fresh;
+        fresh->host.module_context = fresh;
+        fresh->host.module_owner = NULL;
+        fresh->host.module_unit_values = kiln_graph_unit_values;
+        fresh->instance->instance_id = realm->next_module_instance_id++;
+        fresh->host.module_instance_id = fresh->instance->instance_id;
+        fresh->instance->result.tag = KILN_VALUE_UNDEFINED;
+        fresh->instance->entry_result.tag = KILN_VALUE_UNDEFINED;
+        fresh->instance->defer_startup = 1;
+        fresh->next_instance = realm->instances;
+        realm->instances = fresh;
+        realm->current_graph = fresh;
+        status = kiln_graph_enter(fresh);
+        if (status != KILN_C99_OK) {
+            realm->current_graph = graph;
+            return status;
+        }
+        fresh->instance->defer_startup = 0;
+        realm->reset_requested = 0;
+        graph->runtime_module_generation = fresh;
+        graph->runtime_module_reset_requested = 0;
+        *graph_ref = fresh;
+        return KILN_C99_OK;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_graph_runtime_load_file(kiln_graph_context *graph, kiln_value specifier,
+                                        kiln_value *namespace_value, kiln_value *thrown,
+                                        int depth) {
+    uint8_t *url = NULL;
+    size_t url_len = 0;
+    char *path = NULL;
+    size_t path_len = 0;
+    size_t suffix_start = 0, suffix_len = 0;
+    kiln_value path_value = kiln_c99_undefined();
+    kiln_value canonical = kiln_c99_undefined();
+    kiln_value source = kiln_c99_undefined();
+    uint8_t *canonical_bytes = NULL;
+    uint8_t *source_bytes = NULL;
+    uint64_t canonical_len = 0, source_len = 0;
+    int32_t fs_error = 0;
+    int status;
+    if (graph == NULL || graph->instance == NULL || namespace_value == NULL ||
+        specifier.tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_graph_runtime_module_generation(&graph);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_dynamic_module_text(specifier, &url, &url_len);
+    if (status != KILN_C99_OK) return status;
+    if (url_len < 8 || memcmp(url, "file://", 7) != 0 || url[7] != '/') {
+        if (thrown != NULL) (void)kiln_c99_new_type_error(thrown,
+            "runtime native modules require an absolute file URL");
+        return KILN_C99_THROWN;
+    }
+    path = (char *)malloc(url_len + 1);
+    if (path == NULL) return KILN_C99_OUT_OF_MEMORY;
+    suffix_start = url_len;
+    for (size_t index = 7; index < url_len; ++index) {
+        if (url[index] == '%') {
+            if (index + 2 >= url_len) { status = KILN_C99_INVALID_ARGUMENT; goto done; }
+            unsigned char hi = url[index + 1], lo = url[index + 2];
+            int high = hi >= '0' && hi <= '9' ? hi - '0' :
+                       hi >= 'A' && hi <= 'F' ? hi - 'A' + 10 :
+                       hi >= 'a' && hi <= 'f' ? hi - 'a' + 10 : -1;
+            int low = lo >= '0' && lo <= '9' ? lo - '0' :
+                      lo >= 'A' && lo <= 'F' ? lo - 'A' + 10 :
+                      lo >= 'a' && lo <= 'f' ? lo - 'a' + 10 : -1;
+            if (high < 0 || low < 0 || (high == 0 && low == 0) ||
+                ((high << 4) | low) == '/') {
+                status = KILN_C99_INVALID_ARGUMENT; goto done;
+            }
+            path[path_len++] = (char)((high << 4) | low);
+            index += 2;
+        } else {
+            if (url[index] == '?' || url[index] == '#') {
+                suffix_start = index;
+                break;
+            }
+            path[path_len++] = (char)url[index];
+        }
+    }
+    path[path_len] = '\0';
+    suffix_len = url_len - suffix_start;
+    if (kiln_node_fs_realpath_sync((const uint8_t *)path, path_len, &canonical_bytes,
+                                   &canonical_len, &fs_error) != 0 || fs_error != 0) {
+        if (thrown != NULL) (void)kiln_c99_new_type_error(thrown, "cannot resolve runtime module path");
+        status = KILN_C99_THROWN;
+        goto done;
+    }
+    for (kiln_graph_runtime_module *module = graph->realm->runtime_modules;
+         module != NULL; module = module->next) {
+        if (module->generation == graph->instance->instance_id &&
+            strlen(module->path) == canonical_len &&
+            memcmp(module->path, canonical_bytes, canonical_len) == 0 &&
+            module->suffix_len == suffix_len &&
+            memcmp(module->path + canonical_len + 1, url + suffix_start, suffix_len) == 0) {
+            kiln_node_fs_free_bytes(canonical_bytes, canonical_len);
+            canonical_bytes = NULL;
+            if (module->state == 3) {
+                if (thrown != NULL) *thrown = module->failure;
+                status = KILN_C99_THROWN;
+            } else {
+                *namespace_value = module->namespace_value;
+                status = module->state == 2 ? KILN_C99_OK : KILN_C99_THROWN;
+            if (status == KILN_C99_THROWN && thrown != NULL)
+                (void)kiln_c99_new_type_error(thrown, "cyclic runtime module evaluation");
+            }
+            goto done;
+        }
+    }
+    kiln_graph_runtime_module *module = (kiln_graph_runtime_module *)calloc(1, sizeof *module);
+    if (module == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+    if (suffix_len > SIZE_MAX - 2 || canonical_len > SIZE_MAX - suffix_len - 2) {
+        free(module); status = KILN_C99_OUT_OF_MEMORY; goto done;
+    }
+    // One allocation owns the canonical filesystem path and its URL identity suffix.
+    // Queries/fragments select distinct module instances without changing file reads.
+    module->path = (char *)malloc((size_t)canonical_len + suffix_len + 2);
+    if (module->path == NULL) { free(module); status = KILN_C99_OUT_OF_MEMORY; goto done; }
+    memcpy(module->path, canonical_bytes, canonical_len);
+    module->path[canonical_len] = '\0';
+    memcpy(module->path + canonical_len + 1, url + suffix_start, suffix_len);
+    module->path[canonical_len + 1 + suffix_len] = '\0';
+    module->suffix_len = suffix_len;
+    path_value = kiln_c99_copy_text(module->path, (size_t)canonical_len);
+    canonical = path_value;
+    if (canonical.tag != KILN_VALUE_STRING) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+    module->namespace_value = kiln_c99_undefined();
+    module->failure = kiln_c99_undefined();
+    module->state = 1;
+    module->generation = graph->instance->instance_id;
+    module->next = graph->realm->runtime_modules;
+    graph->realm->runtime_modules = module;
+    fs_error = 0;
+    if (kiln_node_fs_read_file_sync((const uint8_t *)module->path,
+            (uint64_t)canonical_len, &source_bytes, &source_len, &fs_error) != 0 ||
+        fs_error != 0) {
+        if (thrown != NULL) (void)kiln_c99_new_type_error(thrown, "cannot read runtime module source");
+        status = KILN_C99_THROWN;
+    } else {
+        source = kiln_c99_copy_text((const char *)source_bytes, (size_t)source_len);
+        status = source.tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    }
+    if (status == KILN_C99_OK)
+        status = kiln_c99_dynamic_eval_module(&graph->host, source, canonical,
+                                               &module->namespace_value, depth, thrown);
+    if (status == KILN_C99_OK) {
+        module->state = 2;
+        *namespace_value = module->namespace_value;
+    } else {
+        module->state = 3;
+        if (thrown != NULL) module->failure = *thrown;
+    }
+done:
+    if (canonical_bytes != NULL) kiln_node_fs_free_bytes(canonical_bytes, canonical_len);
+    if (source_bytes != NULL) kiln_node_fs_free_bytes(source_bytes, source_len);
+    free(path);
+    return status;
+}
+
+static int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result);
+static int kiln_graph_host_call(void *context, uint16_t operation, uint16_t argc, const kiln_value *arguments, kiln_value *result) {
+    kiln_graph_context *graph = (kiln_graph_context *)context;
+    int status;
+    if (graph == NULL || graph->instance == NULL) return KILN_C99_HOST_ERROR;
+    graph->instance->active_calls++;
+    if (operation == KILN_C99_HOST_MODULE_CREATE_REQUIRE) status = kiln_graph_create_require(graph, argc, arguments, result);
+    else if (operation == KILN_C99_HOST_MODULE_LOADER) status = kiln_graph_module_loader(graph, argc, arguments, result);
+    else if (operation == KILN_C99_HOST_RUNTIME_MODULE_IMPORT) status = kiln_graph_runtime_module_import(graph, argc, arguments, result);
+    else status = kiln_cli_host_call(&graph->realm->cli, operation, argc, arguments, result);
+    graph->instance->active_calls--;
+    return status;
+}
+"#);
     // The module a worker names by its path (`new Worker(path)`, realms issue 06), or -1: every
     // module of the program a realm can run as its entry. Matched by its project-relative path at
     // the end of the one asked for -- the longest that matches -- so the launcher names no
@@ -3591,7 +4958,9 @@ static int kiln_install_native_modules(kiln_host *host) {
     kiln_value modules_obj = kiln_c99_undefined();
     int status = kiln_c99_process_object(&proc_obj);
     if (status != KILN_C99_OK) return status;
-    status = kiln_c99_new_object(&modules_obj);
+    /* Extend the realm's existing capability table. Replacing it would discard host loader
+     * and crypto hooks installed by process initialization before the TypeScript bootstrap. */
+    status = kiln_c99_get(host, proc_obj, "__kilnNativeModules", 19, &modules_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
 
     kiln_value net_obj = kiln_c99_undefined();
@@ -3599,13 +4968,42 @@ static int kiln_install_native_modules(kiln_host *host) {
     if (status != KILN_C99_OK) return status;
     kiln_value net_connect = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 338 /* KILN_C99_METHOD_NODE_NET_CONNECT */ };
     kiln_value net_create_server = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 268 /* KILN_C99_METHOD_NODE_NET_CREATE_SERVER */ };
+    kiln_value net_server_is_listening = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 579 /* KILN_C99_METHOD_NODE_SERVER_IS_LISTENING */ };
+    kiln_value net_cork_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 565 /* KILN_C99_METHOD_NODE_SOCKET_CORK_KERNEL */ };
+    kiln_value net_uncork_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 566 /* KILN_C99_METHOD_NODE_SOCKET_UNCORK_KERNEL */ };
+    kiln_value net_pause_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 567 /* KILN_C99_METHOD_NODE_SOCKET_PAUSE_KERNEL */ };
+    kiln_value net_resume_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 568 /* KILN_C99_METHOD_NODE_SOCKET_RESUME_KERNEL */ };
+    kiln_value net_read_socket = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 569 /* KILN_C99_METHOD_NODE_SOCKET_READ_KERNEL */ };
     status = kiln_c99_put(host, net_obj, "connect", 7, net_connect, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, net_obj, "createConnection", 16, net_connect, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, net_obj, "createServer", 12, net_create_server, 0, NULL);
     if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "__serverIsListening", 19, net_server_is_listening, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "__corkSocket", 12, net_cork_socket, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "__uncorkSocket", 14, net_uncork_socket, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "__pauseSocket", 13, net_pause_socket, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "__resumeSocket", 14, net_resume_socket, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, net_obj, "__readSocket", 12, net_read_socket, 0, NULL);
+    if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, modules_obj, "net", 3, net_obj, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value child_process_obj = kiln_c99_undefined();
+    status = kiln_c99_new_object(&child_process_obj);
+    if (status != KILN_C99_OK) return status;
+    kiln_value child_process_exec_file_sync = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 584 /* KILN_C99_METHOD_NODE_CHILD_PROCESS_EXEC_FILE_SYNC */ };
+    status = kiln_c99_put(host, child_process_obj, "__execFileSync", 14,
+                          child_process_exec_file_sync, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, modules_obj, "child_process", 13,
+                          child_process_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
 
     kiln_value http_obj = kiln_c99_undefined();
@@ -3629,9 +5027,23 @@ static int kiln_install_native_modules(kiln_host *host) {
     /* The private host half of `serve()` (kiln-builtins web.ts). */
     kiln_value http_create_fetch_server = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 530 /* KILN_C99_METHOD_NODE_HTTP_CREATE_FETCH_SERVER */ };
     kiln_value http_fetch_respond = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 531 /* KILN_C99_METHOD_NODE_HTTP_FETCH_RESPOND */ };
+    kiln_value http_incoming_ended = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 571 /* KILN_C99_METHOD_NODE_HTTP_INCOMING_ENDED */ };
     status = kiln_c99_put(host, http_obj, "createFetchServer", 17, http_create_fetch_server, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, http_obj, "fetchRespond", 12, http_fetch_respond, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "__incomingMessageEnded", 22,
+                          http_incoming_ended, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    kiln_value http_cancel_request = (kiln_value){ .tag = 11, .flags = 0, .len = 0, .bits = 585 /* KILN_C99_METHOD_NODE_HTTP_CANCEL_REQUEST */ };
+    status = kiln_c99_put(host, http_obj, "__cancelRequest", 15, http_cancel_request, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    kiln_value incoming_message_prototype = kiln_c99_undefined();
+    status = kiln_c99_node_incoming_message_prototype(&incoming_message_prototype);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(host, http_obj, "__incomingMessagePrototype",
+                          sizeof("__incomingMessagePrototype") - 1,
+                          incoming_message_prototype, 0, NULL);
     if (status != KILN_C99_OK) return status;
     status = kiln_c99_put(host, modules_obj, "http", 4, http_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
@@ -3719,8 +5131,7 @@ static int kiln_install_native_modules(kiln_host *host) {
     status = kiln_c99_put(host, modules_obj, "ffi", 3, ffi_obj, 0, NULL);
     if (status != KILN_C99_OK) return status;
 
-    status = kiln_c99_put(host, proc_obj, "__kilnNativeModules", 19, modules_obj, 0, NULL);
-    return status;
+    return KILN_C99_OK;
 }
 
 /* A thread-mode worker realm's own `process.env` view: the process environment every realm
@@ -3741,7 +5152,25 @@ static int kiln_cli_put_worker_env(kiln_host *host) {
     return kiln_c99_put(host, env, "KILN_WORKER_COUNT", 17, kiln_c99_copy_text(text, (size_t)length), 0, NULL);
 }
 
-static int kiln_graph_enter(void *opaque) {
+/* Configure the existing process arrays so node:process exports retain their identity. */
+static int kiln_graph_configure_launch(kiln_graph_context *graph) {
+    const kiln_graph_launch *launch = graph->instance->launch;
+    kiln_value process = kiln_c99_undefined(), args = kiln_c99_undefined();
+    int status = kiln_c99_process_object(&process);
+    if (status == 0) status = kiln_c99_get(&graph->host, process, "argv", 4, &args, 0, &graph->instance->result);
+    if (status == 0) status = kiln_c99_put(&graph->host, args, "1", 1,
+        kiln_c99_copy_text(launch->entry, strlen(launch->entry)), 0, &graph->instance->result);
+    if (status == 0) status = kiln_c99_get(&graph->host, process, "execArgv", 8, &args, 0, &graph->instance->result);
+    for (int i = 0; status == 0 && i < launch->flag_count; i++) {
+        char key[32]; int len = snprintf(key, sizeof key, "%d", i);
+        status = kiln_c99_put(&graph->host, args, key, (size_t)len,
+            kiln_c99_copy_text(launch->flags[i], strlen(launch->flags[i])), 0, &graph->instance->result);
+    }
+    if (status == 0) graph->instance->launch_configured = 1;
+    return status;
+}
+
+static int kiln_graph_enter_inner(void *opaque) {
     kiln_graph_context *graph = (kiln_graph_context *)opaque;
     kiln_graph_entry_context context;
     kiln_host *host;
@@ -3749,30 +5178,35 @@ static int kiln_graph_enter(void *opaque) {
     int status = 0;
     if (graph == NULL) return -1;
     host = &graph->host;
-    result = &graph->result;
+    result = &graph->instance->result;
+    if (!graph->instance->linkage_ready) {
     (void)context;
 "#,
     );
     for base_index in 0..runtime_importers.len() {
         writeln!(
             output,
-            "    graph->require_contexts[{base_index}].graph = graph; graph->require_contexts[{base_index}].base_index = (size_t){base_index};"
+            "    graph->instance->require_contexts[{base_index}].graph = graph; graph->instance->require_contexts[{base_index}].base_index = (size_t){base_index};"
         )
         .unwrap();
     }
     output.push_str(
         r#"
-    if (!graph->roots_registered) {
+    if (!graph->instance->roots_registered) {
         status = kiln_realm_gc_register_roots_with_visitor(kiln_graph_gc_roots,
-                         kiln_graph_gc_visit_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
+                         kiln_graph_gc_visit_registered_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
         if (status != 0) return status;
-        graph->roots_registered = 1;
+        graph->instance->roots_registered = 1;
+        graph->host.module_owner = kiln_c99_external_owner_create(
+            graph, kiln_graph_gc_visit_roots, kiln_graph_release_module_instance);
+        if (graph->host.module_owner == NULL) return KILN_C99_OUT_OF_MEMORY;
+        if (!graph->realm->host_initialized) {
         /* A realm hosted beside others writes its standard streams where its host said. */
-        if (graph->cli.output != NULL)
-            kiln_c99_realm_capture_output(graph->cli.output, graph->cli.error_output);
+        if (graph->realm->cli.output != NULL)
+            kiln_c99_realm_capture_output(graph->realm->cli.output, graph->realm->cli.error_output);
         status = kiln_install_native_modules(host);
         if (status != 0) return status;
-        if (kiln_cli_thread_worker >= 0 && graph->worker_entry == 0) {
+        if (kiln_cli_thread_worker >= 0 && graph->instance->worker_entry == 0) {
             status = kiln_cli_put_worker_env(host);
             if (status != 0) return status;
         }
@@ -3781,10 +5215,17 @@ static int kiln_graph_enter(void *opaque) {
     if let Some(bootstrap) = bootstrap {
         writeln!(
             output,
-            "        status = {}(host, result, NULL, 0, NULL, 0);\n        if (status != 0) {{ if (result->tag == 9 /* KILN_VALUE_OBJECT */) *result = kiln_cli_describe_error(*result); if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n        kiln_c99_builtin_bootstrap_done();",
+            "        status = {}(host, result, NULL, 0, NULL, 0);\n        if (status != 0) {{ if (result->tag == 9 /* KILN_VALUE_OBJECT */) *result = kiln_graph_describe_error(host, *result); if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"builtin-bootstrap\", \"@kiln/runtime-bootstrap\"); return status; }}\n        kiln_c99_builtin_bootstrap_done();",
             bootstrap.symbol
         )
         .unwrap();
+    }
+    output.push_str("        graph->realm->host_initialized = 1;\n        }\n");
+    if modules
+        .iter()
+        .any(|(node, _)| matches!(node.source, ModuleSource::NodeBuiltin(_)))
+    {
+        output.push_str("    if (!graph->is_builtin_graph) { status = kiln_graph_initialize_builtins(graph); if (status != KILN_C99_OK) return status; kiln_graph_alias_builtins(graph); }\n");
     }
     for (index, (node, module)) in modules.iter().enumerate() {
         if node.source == ModuleSource::CommonJs {
@@ -3799,18 +5240,200 @@ static int kiln_graph_enter(void *opaque) {
             );
         }
     }
+    // All CommonJS require functions share the selected realm entry, including a linked child
+    // launched from an ESM parent. An ESM entry exposes undefined as require.main.
+    if modules
+        .iter()
+        .any(|(node, _)| node.source == ModuleSource::CommonJs)
+    {
+        output.push_str("        kiln_value commonjs_main = kiln_c99_undefined();\n        switch (graph->instance->worker_entry) {\n");
+        if modules[entry_index].0.source == ModuleSource::CommonJs {
+            writeln!(
+                output,
+                "        case 0: commonjs_main = kiln_imports_{entry_index}[2]; break;"
+            )
+            .unwrap();
+        }
+        for (index, (node, _)) in modules.iter().enumerate() {
+            if node.source == ModuleSource::CommonJs {
+                writeln!(
+                    output,
+                    "        case {}: commonjs_main = kiln_imports_{index}[2]; break;",
+                    index + 1
+                )
+                .unwrap();
+            }
+        }
+        output.push_str("        default: break;\n        }\n");
+        for (index, (node, _)) in modules.iter().enumerate() {
+            if node.source == ModuleSource::CommonJs {
+                writeln!(output, "        status = kiln_c99_put(NULL, kiln_imports_{index}[1], \"main\", (size_t)4, commonjs_main, 0, NULL);\n        if (status != KILN_C99_OK) {{ *result = kiln_graph_diagnostic(\"commonjs-main\", \"require.main property setup failed\"); return status; }}").unwrap();
+            }
+        }
+    }
+    // ModuleDeclarationInstantiation is a graph phase: allocate every binding cell first, then
+    // wire imports to those cells, and only then create any function closures. No module body is
+    // evaluated in this block.
+    for (index, (node, module)) in modules.iter().enumerate() {
+        let Some(instantiation) = &module.instantiation else {
+            continue;
+        };
+        let is_builtin = matches!(node.source, ModuleSource::NodeBuiltin(_));
+        writeln!(
+            output,
+            "        if (graph->is_builtin_graph == {}) {{",
+            usize::from(is_builtin)
+        )
+        .unwrap();
+        let export_count = native_graph_export_count(node);
+        let cells = if export_count == 0 {
+            "NULL"
+        } else {
+            &format!("kiln_cells_{index}")
+        };
+        writeln!(output, "        status = {}(host, {cells}, (size_t){export_count}); if (status != KILN_C99_OK) return status;", instantiation.prepare_symbol).unwrap();
+        output.push_str("        }\n");
+    }
+    for (index, (_node, module)) in modules.iter().enumerate() {
+        if module.instantiation.is_some() {
+            let is_builtin = matches!(modules[index].0.source, ModuleSource::NodeBuiltin(_));
+            writeln!(
+                output,
+                "        if (graph->is_builtin_graph == {}) {{",
+                usize::from(is_builtin)
+            )
+            .unwrap();
+            if namespace_plans[index].is_some() {
+                write_graph_namespace_build(&mut output, index, &module.symbol, &[], false);
+                writeln!(output, "        if (status != KILN_C99_OK) return status;").unwrap();
+            }
+            output.push_str("        }\n");
+        }
+    }
+    for (index, (_node, module)) in modules.iter().enumerate() {
+        if module.instantiation.is_some() {
+            let is_builtin = matches!(modules[index].0.source, ModuleSource::NodeBuiltin(_));
+            writeln!(
+                output,
+                "        if (graph->is_builtin_graph == {}) {{",
+                usize::from(is_builtin)
+            )
+            .unwrap();
+            if let Some(plan) = &namespace_plans[index] {
+                write_graph_namespace_build(&mut output, index, &module.symbol, plan, false);
+                writeln!(output, "        if (status != KILN_C99_OK) return status;").unwrap();
+            }
+            output.push_str("        }\n");
+        }
+    }
+    for (index, (node, _)) in modules.iter().enumerate() {
+        let is_builtin = matches!(node.source, ModuleSource::NodeBuiltin(_));
+        writeln!(
+            output,
+            "        if (graph->is_builtin_graph == {}) {{",
+            usize::from(is_builtin)
+        )
+        .unwrap();
+        if !modules[index].1.instantiation.is_some() {
+            output.push_str("        }\n");
+            continue;
+        }
+        for (import_index, import) in node.program.imports.iter().enumerate() {
+            if live_imports
+                .is_some_and(|imports| !imports.contains(&(node.path.clone(), import_index)))
+            {
+                continue;
+            }
+            let resolved = graph_import_value(graph, modules, &indices, node, import)?;
+            let provider_index = match &resolved {
+                NativeGraphImport::Binding { provider_index, .. }
+                | NativeGraphImport::Namespace { provider_index }
+                | NativeGraphImport::CommonJsNamed { provider_index, .. }
+                    if matches!(
+                        modules[*provider_index].0.source,
+                        ModuleSource::NodeBuiltin(_)
+                    ) =>
+                {
+                    Some(*provider_index)
+                }
+                _ => None,
+            };
+            if provider_index.is_some() {
+                // BuiltinGraph has prepared every builtin module's live export cells already.
+                // Link to those cells here, but do not evaluate a builtin body while this graph
+                // is still performing ModuleDeclarationInstantiation: builtin callbacks can
+                // dynamically import one of this graph's source modules. Normal evaluation
+                // ensures builtin dependencies after every source module has been instantiated.
+                output.push_str(
+                    "        if (!graph->is_builtin_graph) kiln_graph_alias_builtins(graph);\n",
+                );
+            }
+            if let NativeGraphImport::Binding {
+                provider_index,
+                export_index,
+                live_cell: true,
+            } = resolved.clone()
+            {
+                writeln!(output, "        kiln_imports_{index}[{import_index}] = kiln_cells_{provider_index}[{export_index}];").unwrap();
+            }
+            if let NativeGraphImport::Namespace { provider_index } = resolved.clone() {
+                if modules[provider_index].1.instantiation.is_some() {
+                    writeln!(output, "        kiln_imports_{index}[{import_index}] = kiln_namespaces[{provider_index}];").unwrap();
+                } else {
+                    writeln!(output, "        status = kiln_c99_make_cell(&kiln_imports_{index}[{import_index}]); if (status != KILN_C99_OK) return status;").unwrap();
+                }
+            }
+            match resolved {
+                NativeGraphImport::Binding {
+                    live_cell: false, ..
+                }
+                | NativeGraphImport::CommonJsNamed { .. } => {
+                    writeln!(output, "        status = kiln_c99_make_cell(&kiln_imports_{index}[{import_index}]); if (status != KILN_C99_OK) return status;").unwrap();
+                }
+                _ => {}
+            }
+        }
+        output.push_str("        }\n");
+    }
+    for (index, (node, module)) in modules.iter().enumerate() {
+        let Some(instantiation) = &module.instantiation else {
+            continue;
+        };
+        let is_builtin = matches!(node.source, ModuleSource::NodeBuiltin(_));
+        writeln!(
+            output,
+            "        if (graph->is_builtin_graph == {}) {{",
+            usize::from(is_builtin)
+        )
+        .unwrap();
+        let import_count = node.program.imports.len();
+        let imports = if import_count == 0 {
+            "NULL"
+        } else {
+            &format!("kiln_imports_{index}")
+        };
+        let export_count = native_graph_export_count(node);
+        let exports = if export_count == 0 {
+            "NULL"
+        } else {
+            &format!("kiln_exports_{index}")
+        };
+        writeln!(output, "        status = {}(host, result, {imports}, (size_t){import_count}, {exports}, (size_t){export_count}); if (status != KILN_C99_OK) return status;", instantiation.symbol).unwrap();
+        output.push_str("        }\n");
+    }
     output.push_str("    }\n");
+    evaluation.push_str("    if (graph->instance->launch != NULL) {\n        if (!graph->instance->launch_configured) { status = kiln_graph_configure_launch(graph); if (status != 0) return status; }\n        while (graph->instance->preload_next < graph->instance->launch->preload_count) {\n            size_t index = graph->instance->launch->preloads[graph->instance->preload_next];\n            status = kiln_graph_ensure_module(graph, index);\n            graph->instance->result = graph->instance->module_states[index].result;\n            if (status != 0 || graph->instance->module_states[index].module_settling) return status;\n            graph->instance->preload_next++;\n        }\n    }\n");
     // A worker's realm (`node:worker_threads`, realms issue 06) runs one module of the program as
     // its entry -- with what that module imports, first -- rather than the program's startup list.
     writeln!(
         evaluation,
-        "    if (graph->worker_entry != 0) {{\n        size_t index = graph->worker_entry - 1;\n        graph->current_module = (size_t){};\n        status = kiln_graph_ensure_module(graph, index);\n        graph->result = graph->module_states[index].result;\n        return status;\n    }}",
+        "    if (graph->instance->worker_entry != 0) {{\n        size_t index = graph->instance->worker_entry - 1;\n        graph->instance->current_module = (size_t){};\n        status = kiln_graph_ensure_module(graph, index);\n        graph->instance->result = graph->instance->module_states[index].result;\n        return status;\n    }}",
         startup_indices.len()
     )
     .unwrap();
     writeln!(
         evaluation,
-        "    while (graph->current_module < (size_t){}) {{\n        switch (graph->current_module) {{",
+        "    while (graph->instance->current_module < (size_t){}) {{\n        switch (graph->instance->current_module) {{",
         startup_indices.len()
     )
     .unwrap();
@@ -3829,7 +5452,7 @@ static int kiln_graph_enter(void *opaque) {
             .any(|i| matches!(i, kiln_ir::Instruction::Await | kiln_ir::Instruction::Yield));
         writeln!(
             evaluation,
-            "static int kiln_graph_eval_module_{index}(kiln_graph_context *graph) {{\n    kiln_graph_entry_context context;\n    kiln_graph_module_state *state = &graph->module_states[{index}];\n    kiln_host *host = &graph->host;\n    kiln_value *result = &state->result;\n    kiln_value continuation_promise = kiln_c99_undefined();\n    int status = 0;"
+            "static int kiln_graph_eval_module_{index}(kiln_graph_context *graph) {{\n    kiln_graph_entry_context context;\n    kiln_graph_module_state *state = &graph->instance->module_states[{index}];\n    kiln_host *host = &graph->host;\n    kiln_value *result = &state->result;\n    kiln_value continuation_promise = kiln_c99_undefined();\n    int status = 0;"
         )
         .unwrap();
         if !is_async {
@@ -3844,26 +5467,34 @@ static int kiln_graph_enter(void *opaque) {
         if node.source == ModuleSource::CommonJs {
             writeln!(
                 evaluation,
-                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && graph->cli.last_error.tag == KILN_VALUE_STRING && graph->cli.last_error.len != 0) *result = graph->cli.last_error; else *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); }} return status; }}",
+                "            status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && graph->realm->cli.last_error.tag == KILN_VALUE_STRING && graph->realm->cli.last_error.len != 0) *result = graph->realm->cli.last_error; else *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); }} return status; }}",
                 native_c_string(&logical_paths[index])
             )
             .unwrap();
             if node.path == graph.entry() {
-                evaluation.push_str("            graph->entry_result = *result;\n");
+                evaluation.push_str("            graph->instance->entry_result = *result;\n");
             }
             writeln!(
                 evaluation,
                 "            kiln_namespaces[{index}] = kiln_exports_{index}[0];"
             )
             .unwrap();
-            if let Some(plan) = &namespace_plans[index] {
-                write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
-                writeln!(
+            if module.instantiation.is_none() {
+                if let Some(plan) = &namespace_plans[index] {
+                    write_graph_namespace_build(
+                        &mut evaluation,
+                        index,
+                        &module.symbol,
+                        plan,
+                        false,
+                    );
+                    writeln!(
                     evaluation,
                     "            if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
                     native_c_string(&logical_paths[index])
                 )
                 .unwrap();
+                }
             }
             if !is_async {
                 evaluation.push_str("    state->phase = KILN_MODULE_EVALUATED;\n");
@@ -3888,27 +5519,35 @@ static int kiln_graph_enter(void *opaque) {
                         {mark_unsettled}return KILN_C99_CONTROL_ERROR;
                     }}
                 }}
-                {}_publish_exports({exports});
+                {}_publish_exports(host, {exports});
                 state->phase = KILN_MODULE_EVALUATED;"#,
                 module.symbol,
                 mark_unsettled = if node.path == graph.entry() {
-                    "graph->unsettled_entry = 1;\n                        "
+                    "graph->instance->unsettled_entry = 1;\n                        "
                 } else {
                     ""
                 }
             )
             .unwrap();
             if node.path == graph.entry() {
-                evaluation.push_str("                graph->entry_result = (promise != NULL) ? promise->value : *result;\n");
+                evaluation.push_str("                graph->instance->entry_result = (promise != NULL) ? promise->value : *result;\n");
             }
-            if let Some(plan) = &namespace_plans[index] {
-                write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
-                writeln!(
+            if module.instantiation.is_none() {
+                if let Some(plan) = &namespace_plans[index] {
+                    write_graph_namespace_build(
+                        &mut evaluation,
+                        index,
+                        &module.symbol,
+                        plan,
+                        false,
+                    );
+                    writeln!(
                     evaluation,
                     "                if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
                     native_c_string(&logical_paths[index])
                 )
                 .unwrap();
+                }
             }
             evaluation.push_str(
                 r#"                state->module_settling = 0;
@@ -3939,7 +5578,7 @@ static int kiln_graph_enter(void *opaque) {
         for (dependency_cursor, provider_index) in static_dependencies.iter().enumerate() {
             writeln!(
                 evaluation,
-                "            if (state->dependency_cursor == (size_t){dependency_cursor}) {{ status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ *result = graph->module_states[{provider_index}].result; return status; }} state->dependency_cursor++; if (kiln_graph_module_promise(graph, (size_t){provider_index})->tag == 16 /* KILN_VALUE_PROMISE */) {{ status = kiln_graph_prepare_completion(graph, (size_t){index}); if (status != KILN_C99_OK) return status; status = kiln_c99_module_completion(host, *kiln_graph_module_promise(graph, (size_t){provider_index}), (uint32_t){index}, &continuation_promise, 1, NULL); if (status != KILN_C99_OK) return status; state->module_settling = 1; return 0; }} }}"
+                "            if (state->dependency_cursor == (size_t){dependency_cursor}) {{ status = kiln_graph_ensure_module(graph, (size_t){provider_index}); if (status != KILN_C99_OK) {{ *result = graph->instance->module_states[{provider_index}].result; return status; }} state->dependency_cursor++; if (kiln_graph_module_promise(graph, (size_t){provider_index})->tag == 16 /* KILN_VALUE_PROMISE */) {{ status = kiln_graph_prepare_completion(graph, (size_t){index}); if (status != KILN_C99_OK) return status; status = kiln_c99_module_completion(host, *kiln_graph_module_promise(graph, (size_t){provider_index}), (uint32_t){index}, &continuation_promise, 1, NULL); if (status != KILN_C99_OK) return status; state->module_settling = 1; return 0; }} }}"
             )
             .unwrap();
         }
@@ -3955,6 +5594,7 @@ static int kiln_graph_enter(void *opaque) {
                 NativeGraphImport::Binding {
                     provider_index,
                     export_index,
+                    live_cell,
                 } => {
                     if modules[provider_index].0.source == ModuleSource::CommonJs {
                         writeln!(
@@ -3965,7 +5605,12 @@ static int kiln_graph_enter(void *opaque) {
                     }
                     writeln!(
                         evaluation,
-                        "            kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
+                        "            kiln_imports_{index}[{import_index}] = {}[{export_index}];",
+                        if live_cell {
+                            format!("kiln_cells_{provider_index}")
+                        } else {
+                            format!("kiln_exports_{provider_index}")
+                        }
                     )
                     .unwrap();
                 }
@@ -4029,23 +5674,17 @@ static int kiln_graph_enter(void *opaque) {
             export_count
         )
         .unwrap();
-        if node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Actors) {
-            evaluation.push_str("            if (!kiln_realm_kiln_extensions_on()) return kiln_c99_throw_error(result, UINT64_C(10), \"kiln:actors requires enabled Kiln extensions\");\n");
-        }
-        if matches!(
-            node.source,
-            ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
-        ) {
-            evaluation.push_str("            status = kiln_realm_kiln_shared_hooks(1);\n            if (status != 0) return status;\n");
+        // Every engine builtin module's top-level code runs inside the engine-private window:
+        // `globalThis.__kilnPrivate` reads the realm's private object there and nowhere else.
+        let engine_module = matches!(node.source, ModuleSource::NodeBuiltin(_));
+        if engine_module {
+            evaluation.push_str("            status = kiln_realm_private_window(1);\n            if (status != 0) return status;\n");
         }
         evaluation.push_str(
             "            state->body_started = 1;\n            status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
         );
-        if matches!(
-            node.source,
-            ModuleSource::NodeBuiltin(NodeBuiltin::Shared | NodeBuiltin::Actors)
-        ) {
-            evaluation.push_str("            { int hook_status = kiln_realm_kiln_shared_hooks(0); if (status == 0) status = hook_status; }\n");
+        if engine_module {
+            evaluation.push_str("            { int hook_status = kiln_realm_private_window(0); if (status == 0) status = hook_status; }\n");
         }
         if node.path == graph.entry() && !is_async {
             // The whole graph evaluates inside one job (a dependency's body runs synchronously
@@ -4057,7 +5696,7 @@ static int kiln_graph_enter(void *opaque) {
         }
         writeln!(
             evaluation,
-            "            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && graph->cli.last_error.tag == KILN_VALUE_STRING && graph->cli.last_error.len != 0) *result = graph->cli.last_error; else *result = kiln_graph_diagnostic(\"module-enter\", {}); }} return status; }}",
+            "            if (status != 0) {{ if (status != KILN_C99_THROWN && result->tag == KILN_VALUE_UNDEFINED) {{ if (status == KILN_C99_HOST_ERROR && graph->realm->cli.last_error.tag == KILN_VALUE_STRING && graph->realm->cli.last_error.len != 0) *result = graph->realm->cli.last_error; else *result = kiln_graph_diagnostic(\"module-enter\", {}); }} return status; }}",
             native_c_string(&logical_paths[index])
         )
         .unwrap();
@@ -4079,7 +5718,7 @@ static int kiln_graph_enter(void *opaque) {
                     *result = promise->value;
                     return KILN_C99_THROWN;
                 }}
-                {}_publish_exports({exports});
+                {}_publish_exports(host, {exports});
                 state->phase = KILN_MODULE_EVALUATED;
             }}"#,
                 module.symbol,
@@ -4099,14 +5738,14 @@ static int kiln_graph_enter(void *opaque) {
                 evaluation.push_str(
                     r#"            if (result->tag == 16) {
                 kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)result->bits;
-                graph->entry_result = (promise != NULL && promise->state == 1) ? promise->value : *result;
+                graph->instance->entry_result = (promise != NULL && promise->state == 1) ? promise->value : *result;
             } else {
-                graph->entry_result = *result;
+                graph->instance->entry_result = *result;
             }
 "#,
                 );
             } else {
-                evaluation.push_str("            graph->entry_result = *result;\n");
+                evaluation.push_str("            graph->instance->entry_result = *result;\n");
             }
         }
         if let Some(plan) = &namespace_plans[index] {
@@ -4130,15 +5769,18 @@ static int kiln_graph_enter(void *opaque) {
     for (index, (node, module)) in modules.iter().enumerate() {
         emit_module_case(index, node, module)?;
     }
-    helper_defs.push_str("int kiln_graph_module_completion(kiln_host *host, uint32_t index, int rejected, const kiln_value *value, kiln_value *result, int depth, kiln_value *thrown) {\n    kiln_graph_context *graph = (kiln_graph_context *)host->context;\n    int status = KILN_C99_OK;\n    (void)depth; (void)thrown;\n    if (graph == NULL || result == NULL || value == NULL) return KILN_C99_CONTROL_ERROR;\n    switch (index) {\n");
+    helper_defs.push_str("static void kiln_graph_update_job_pin(kiln_graph_context *graph);\nint kiln_graph_module_completion(kiln_host *host, uint32_t index, int rejected, const kiln_value *value, kiln_value *result, int depth, kiln_value *thrown) {\n    kiln_graph_context *graph = (kiln_graph_context *)host->context;\n    int status = KILN_C99_OK;\n    (void)depth; (void)thrown;\n    if (graph == NULL || result == NULL || value == NULL) return KILN_C99_CONTROL_ERROR;\n    switch (index) {\n");
     for (index, (node, module)) in modules.iter().enumerate() {
         let fatal = if startup_indices.contains(&index) {
             FATAL_UNHANDLED_REJECTION
         } else {
             ""
         };
+        // A dependency continuation may start an importer body. If that body completes
+        // synchronously, fall through and resolve the importer's completion promise here; if it
+        // suspends again, leave that promise pending for the body's own continuation.
         helper_defs.push_str(&format!(
-            "        case {index}: {{\n            kiln_graph_module_state *state = &graph->module_states[{index}];\n            kiln_value settled = kiln_c99_undefined();\n            if (rejected) {{ state->result = *value; state->phase = KILN_MODULE_FAILED; state->failure_status = KILN_C99_THROWN; state->module_settling = 0; *result = *value; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), value, 1, depth, thrown); if (status != KILN_C99_OK) return status; }} {fatal} return KILN_C99_OK; }}\n            if (!state->body_started) {{ state->module_settling = 0; status = kiln_graph_eval_module_{index}(graph); if (status != KILN_C99_OK) {{ state->phase = KILN_MODULE_FAILED; state->failure_status = status; *result = state->result; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), &state->result, 1, depth, thrown); if (status != KILN_C99_OK) return status; }} return KILN_C99_OK; }} *result = kiln_c99_undefined(); return KILN_C99_OK; }}\n            if (state->phase == KILN_MODULE_EVALUATED) {{ *result = kiln_namespaces[{index}]; return KILN_C99_OK; }}\n",
+            "        case {index}: {{\n            kiln_graph_module_state *state = &graph->instance->module_states[{index}];\n            kiln_value settled = kiln_c99_undefined();\n            if (rejected) {{ state->result = *value; state->phase = KILN_MODULE_FAILED; state->failure_status = KILN_C99_THROWN; state->module_settling = 0; *result = *value; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), value, 1, depth, thrown); if (status != KILN_C99_OK) return status; }} kiln_graph_update_job_pin(graph); {fatal} return KILN_C99_OK; }}\n            if (state->phase == KILN_MODULE_EVALUATED) {{ *result = kiln_namespaces[{index}]; kiln_graph_update_job_pin(graph); return KILN_C99_OK; }}\n            if (!state->body_started) {{ state->module_settling = 0; status = kiln_graph_eval_module_{index}(graph); if (status != KILN_C99_OK) {{ state->phase = KILN_MODULE_FAILED; state->failure_status = status; *result = state->result; if (state->completion_reject.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_reject, kiln_c99_undefined(), &state->result, 1, depth, thrown); if (status != KILN_C99_OK) return status; }} kiln_graph_update_job_pin(graph); return KILN_C99_OK; }} if (state->module_settling) {{ *result = kiln_c99_undefined(); return KILN_C99_OK; }} }}\n",
             index = index,
             fatal = fatal
         ));
@@ -4150,23 +5792,29 @@ static int kiln_graph_enter(void *opaque) {
             .any(|i| matches!(i, kiln_ir::Instruction::Await | kiln_ir::Instruction::Yield));
         if is_async && native_graph_export_count(node) != 0 {
             helper_defs.push_str(&format!(
-                "            {symbol}_publish_exports(kiln_exports_{index});\n",
+                "            {symbol}_publish_exports(host, kiln_exports_{index});\n",
                 symbol = module.symbol,
                 index = index
             ));
         }
-        if let Some(plan) = &namespace_plans[index] {
-            write_graph_namespace_build(&mut helper_defs, index, &module.symbol, plan, false);
+        if module.instantiation.is_none() {
+            if let Some(plan) = &namespace_plans[index] {
+                write_graph_namespace_build(&mut helper_defs, index, &module.symbol, plan, false);
+            }
         }
-        helper_defs.push_str(&format!("            state->result = kiln_namespaces[{index}];\n            state->phase = KILN_MODULE_EVALUATED;\n            state->module_settling = 0;\n            *result = state->result;\n            if (state->completion_resolve.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_resolve, kiln_c99_undefined(), &state->result, 1, depth, thrown); if (status != KILN_C99_OK) return status; }}\n", index = index));
+        helper_defs.push_str(&format!("            state->result = kiln_namespaces[{index}];\n            state->phase = KILN_MODULE_EVALUATED;\n            state->module_settling = 0;\n            *result = state->result;\n            if (state->completion_resolve.tag != KILN_VALUE_UNDEFINED) {{ status = kiln_c99_call(host, &settled, state->completion_resolve, kiln_c99_undefined(), &state->result, 1, depth, thrown); if (status != KILN_C99_OK) return status; }}\n            kiln_graph_update_job_pin(graph);\n", index = index));
         if node.path == graph.entry() {
-            helper_defs.push_str("            graph->entry_result = *value;\n");
+            helper_defs.push_str("            graph->instance->entry_result = *value;\n");
         }
         helper_defs.push_str("            return KILN_C99_OK;\n        }\n");
         let _ = node;
     }
     helper_defs.push_str("        default: return KILN_C99_CONTROL_ERROR;\n    }\n}\n");
+    helper_defs.push_str("static void kiln_graph_update_job_pin(kiln_graph_context *graph) {\n    size_t index;\n    if (graph == NULL || graph->instance == NULL || !graph->instance->weak_job_active) return;\n    for (index = 0; index < (size_t)");
+    write!(helper_defs, "{}", modules.len()).unwrap();
+    helper_defs.push_str("; ++index) if (graph->instance->module_states[index].module_settling) return;\n    kiln_c99_gc_leave_job();\n    graph->instance->weak_job_active = 0;\n}\n");
     for (startup_order, &index) in startup_indices.iter().enumerate() {
+        let is_builtin = matches!(modules[index].0.source, ModuleSource::NodeBuiltin(_));
         let is_async = modules[index]
             .0
             .program
@@ -4175,9 +5823,9 @@ static int kiln_graph_enter(void *opaque) {
             .iter()
             .any(|i| matches!(i, kiln_ir::Instruction::Await | kiln_ir::Instruction::Yield));
         if is_async {
-            writeln!(evaluation, "        case {startup_order}: {{ status = kiln_graph_eval_module_{index}(graph); graph->result = graph->module_states[{index}].result; if (status != 0) return status; if (!graph->module_states[{index}].module_settling) graph->current_module++; return 0; }}").unwrap();
+            writeln!(evaluation, "        case {startup_order}: {{ if (graph->is_builtin_graph == {}) {{ status = kiln_graph_eval_module_{index}(graph); graph->instance->result = graph->instance->module_states[{index}].result; if (status != 0) return status; if (!graph->instance->module_states[{index}].module_settling) graph->instance->current_module++; }} else graph->instance->current_module++; return 0; }}", usize::from(is_builtin)).unwrap();
         } else {
-            writeln!(evaluation, "        case {startup_order}: {{ status = kiln_graph_ensure_module(graph, (size_t){index}); graph->result = graph->module_states[{index}].result; if (status != 0) return status; graph->current_module++; return 0; }}").unwrap();
+            writeln!(evaluation, "        case {startup_order}: {{ if (graph->is_builtin_graph == {}) {{ status = kiln_graph_ensure_module(graph, (size_t){index}); graph->instance->result = graph->instance->module_states[{index}].result; if (status != 0) return status; }} graph->instance->current_module++; return 0; }}", usize::from(is_builtin)).unwrap();
         }
     }
     evaluation.push_str(
@@ -4187,18 +5835,49 @@ static int kiln_graph_enter(void *opaque) {
     }
 "#,
     );
+    output.push_str("    graph->instance->linkage_ready = 1;\n    }\n    if (graph->instance->defer_startup) return KILN_C99_OK;\n");
+    output.push_str("    if (!graph->is_builtin_graph && graph->realm->builtin_graph != NULL && graph->realm->builtin_graph->instance->defer_startup) { graph->realm->builtin_graph->instance->defer_startup = 0; status = kiln_graph_enter(graph->realm->builtin_graph); if (status != KILN_C99_OK) { *result = graph->realm->builtin_graph->instance->result; return status; } kiln_graph_alias_builtins(graph); }\n");
     output.push_str(&evaluation);
     output.push_str("    return 0;\n}\n");
+    writeln!(
+        output,
+        "static int kiln_graph_enter(void *opaque) {{\n    kiln_graph_context *graph = (kiln_graph_context *)opaque;\n    int status;\n    if (graph == NULL) return -1;\n    if (!graph->instance->weak_job_active) {{ kiln_c99_gc_enter_job(); graph->instance->weak_job_active = 1; }}\n    status = kiln_graph_enter_inner(opaque);\n    if (status != 0 || graph->instance->current_module >= (size_t){}) {{\n        kiln_c99_gc_leave_job();\n        graph->instance->weak_job_active = 0;\n    }}\n    return status;\n}}",
+        startup_indices.len()
+    )
+    .unwrap();
     output.push_str(&helper_defs);
+    output.push_str("static void kiln_graph_alias_builtins(kiln_graph_context *graph) { kiln_graph_context *builtins; if (graph == NULL || graph->is_builtin_graph || graph->realm == NULL) return; builtins = graph->realm->builtin_graph; if (builtins == NULL) return;\n");
+    for (index, (node, module)) in modules.iter().enumerate() {
+        if !matches!(node.source, ModuleSource::NodeBuiltin(_)) {
+            continue;
+        }
+        let count = native_graph_export_count(node);
+        if count > 0 {
+            writeln!(output, "    memcpy(graph->instance->exports_{index}, builtins->instance->exports_{index}, sizeof graph->instance->exports_{index});").unwrap();
+            if module.instantiation.is_some() {
+                writeln!(output, "    memcpy(graph->instance->cells_{index}, builtins->instance->cells_{index}, sizeof graph->instance->cells_{index});").unwrap();
+            }
+        }
+        writeln!(output, "    graph->instance->namespaces[{index}] = builtins->instance->namespaces[{index}]; graph->instance->module_states[{index}] = builtins->instance->module_states[{index}];").unwrap();
+    }
+    output.push_str("}\nstatic int kiln_graph_initialize_builtins(kiln_graph_context *graph) { kiln_graph_context *builtins; int status; if (graph == NULL || graph->realm == NULL || graph->is_builtin_graph) return KILN_C99_OK; if (graph->realm->builtin_graph != NULL) return KILN_C99_OK; builtins = (kiln_graph_context *)calloc(1, sizeof *builtins); if (builtins == NULL) return KILN_C99_OUT_OF_MEMORY; builtins->instance = (kiln_graph_module_instance *)calloc(1, sizeof *builtins->instance); if (builtins->instance == NULL) { free(builtins); return KILN_C99_OUT_OF_MEMORY; } builtins->realm = graph->realm; builtins->is_builtin_graph = 1; builtins->host = graph->host; builtins->host.context = builtins; builtins->host.module_context = builtins; builtins->host.module_owner = NULL; builtins->host.module_unit_values = kiln_graph_unit_values; builtins->instance->instance_id = graph->realm->next_module_instance_id++; builtins->host.module_instance_id = builtins->instance->instance_id; builtins->instance->result.tag = KILN_VALUE_UNDEFINED; builtins->instance->entry_result.tag = KILN_VALUE_UNDEFINED; builtins->next_instance = graph->realm->instances; graph->realm->instances = builtins; graph->realm->builtin_graph = builtins; builtins->instance->defer_startup = 1; status = kiln_graph_enter(builtins); if (status != KILN_C99_OK) return status;\n");
+    output.push_str("    return KILN_C99_OK; }\n");
     output.push_str(
         "static int kiln_graph_ensure_module(kiln_graph_context *graph, size_t index) {\n",
     );
     output.push_str("    int status;\n");
     output.push_str("    if (graph == NULL || index >= (size_t)");
     output.push_str(&modules.len().to_string());
-    output.push_str(
-        ") return KILN_C99_CONTROL_ERROR;\n    if (graph->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->module_states[index].phase == KILN_MODULE_FAILED) return graph->module_states[index].failure_status;\n    if (graph->module_states[index].phase == KILN_MODULE_EVALUATING) return 0;\n    graph->module_states[index].phase = KILN_MODULE_EVALUATING;\n    switch (index) {\n",
-    );
+    output.push_str(") return KILN_C99_CONTROL_ERROR;\n");
+    for index in 0..modules.len() {
+        if matches!(modules[index].0.source, ModuleSource::NodeBuiltin(_)) {
+            writeln!(output, "    if (!graph->is_builtin_graph && index == (size_t){index}) {{ if (graph->realm->builtin_graph == NULL) return KILN_C99_CONTROL_ERROR; status = kiln_graph_ensure_module(graph->realm->builtin_graph, index); kiln_graph_alias_builtins(graph); return status; }}").unwrap();
+        }
+    }
+    // The continuation handler, unlike a normal ensure, calls eval_module directly when a
+    // dependency has settled. This guard keeps repeated imports and graph edges from re-entering
+    // a suspended module and creating a second execution.
+    output.push_str("    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATED) return 0;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_FAILED) return graph->instance->module_states[index].failure_status;\n    if (graph->instance->module_states[index].phase == KILN_MODULE_EVALUATING) return 0;\n    graph->instance->module_states[index].phase = KILN_MODULE_EVALUATING;\n    switch (index) {\n");
     for index in 0..modules.len() {
         writeln!(output, "        case {index}: {{").unwrap();
         let dependencies = if modules[index].0.source == ModuleSource::CommonJs {
@@ -4210,7 +5889,7 @@ static int kiln_graph_enter(void *opaque) {
             if let Some(&provider) = indices.get(&dependency.target) {
                 writeln!(
                     output,
-                    "            {}status = kiln_graph_ensure_module(graph, (size_t){provider}); if (status != KILN_C99_OK) {{ graph->module_states[index].result = graph->module_states[{provider}].result; graph->module_states[index].phase = KILN_MODULE_FAILED; graph->module_states[index].failure_status = status; return status; }}",
+                    "            {}status = kiln_graph_ensure_module(graph, (size_t){provider}); if (status != KILN_C99_OK) {{ graph->instance->module_states[index].result = graph->instance->module_states[{provider}].result; graph->instance->module_states[index].phase = KILN_MODULE_FAILED; graph->instance->module_states[index].failure_status = status; return status; }}",
                     if dependency_index == 0 { "int " } else { "" }
                 )
                 .unwrap();
@@ -4218,11 +5897,158 @@ static int kiln_graph_enter(void *opaque) {
         }
         writeln!(
             output,
-            "            status = kiln_graph_eval_module_{index}(graph);\n            if (status != KILN_C99_OK) {{ graph->module_states[index].phase = KILN_MODULE_FAILED; graph->module_states[index].failure_status = status; return status; }}\n            return 0;\n        }}"
+            "            status = kiln_graph_eval_module_{index}(graph);\n            if (status != KILN_C99_OK) {{ graph->instance->module_states[index].phase = KILN_MODULE_FAILED; graph->instance->module_states[index].failure_status = status; return status; }}\n            return 0;\n        }}"
         )
         .unwrap();
     }
     output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n    }\n}\n");
+    output.push_str(
+        r#"
+static int kiln_graph_load_generation(kiln_graph_context *graph, size_t target, kiln_value *result) {
+    kiln_graph_context *selected;
+    int status;
+    if (graph == NULL || graph->realm == NULL || result == NULL)
+        return KILN_C99_CONTROL_ERROR;
+    selected = graph->realm->current_graph;
+    if (selected == NULL) return KILN_C99_CONTROL_ERROR;
+    if (graph->realm->reset_requested) {
+        kiln_graph_context *fresh = (kiln_graph_context *)calloc(1, sizeof *fresh);
+        if (fresh == NULL) return KILN_C99_OUT_OF_MEMORY;
+        fresh->instance = (kiln_graph_module_instance *)calloc(1, sizeof *fresh->instance);
+        if (fresh->instance == NULL) { free(fresh); return KILN_C99_OUT_OF_MEMORY; }
+        fresh->realm = graph->realm;
+        fresh->host = graph->host;
+        fresh->host.context = fresh;
+        fresh->host.module_context = fresh;
+        fresh->host.module_owner = NULL;
+        fresh->host.module_unit_values = kiln_graph_unit_values;
+        fresh->instance->instance_id = fresh->realm->next_module_instance_id++;
+        fresh->host.module_instance_id = fresh->instance->instance_id;
+        fresh->instance->result.tag = KILN_VALUE_UNDEFINED;
+        fresh->instance->entry_result.tag = KILN_VALUE_UNDEFINED;
+        fresh->instance->worker_entry = target + 1;
+        fresh->next_instance = fresh->realm->instances;
+        fresh->realm->instances = fresh;
+        fresh->realm->current_graph = fresh;
+        status = kiln_graph_enter(fresh);
+        if (status != KILN_C99_OK) {
+            fresh->realm->current_graph = selected;
+            return status;
+        }
+        status = kiln_graph_ensure_module(fresh, target);
+        if (status != KILN_C99_OK) return status;
+        graph->realm->reset_requested = 0;
+        selected = fresh;
+    } else {
+        status = kiln_graph_ensure_module(selected, target);
+        if (status != KILN_C99_OK) return status;
+    }
+    if (selected->instance->module_states[target].module_settling &&
+        selected->instance->module_states[target].completion_promise.tag == 16 /* KILN_VALUE_PROMISE */) {
+        *result = selected->instance->module_states[target].completion_promise;
+    } else {
+        *result = selected->instance->namespaces[target];
+    }
+    return KILN_C99_OK;
+}
+"#
+    );
+    output.push_str("\n/* Detach callbacks while the heap is live, but keep every registered root context alive\n * through kiln_realm_destroy: roots marked KILN_GC_ROOT_SURVIVES_TEARDOWN are invoked there. */\nstatic void kiln_graph_detach_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    for (graph = realm->instances; graph != NULL; graph = graph->next_instance)\n        if (graph->host.module_owner != NULL) kiln_c99_external_owner_detach(graph->host.module_owner);\n}\nstatic void kiln_graph_free_instances(kiln_graph_realm_state *realm) {\n    kiln_graph_context *graph;\n    if (realm == NULL) return;\n    graph = realm->instances; realm->instances = NULL; realm->current_graph = NULL;\n    while (graph != NULL) {\n        kiln_graph_context *next = graph->next_instance;\n        kiln_graph_free_unit_stores(graph->instance); free(graph->instance); free(graph); graph = next;\n    }\n}\n");
+    output.push_str("\nextern int kiln_c99_module_spy_store_cell(kiln_value cell, kiln_value value);\nstatic int kiln_graph_module_loader(kiln_graph_context *graph, uint16_t argc, const kiln_value *arguments, kiln_value *result) {\n    kiln_graph_context *selected;\n    long target = -1;\n    int referrer_valid = 0;\n    int status;\n    int spy_authorized = 0;\n    if (graph == NULL || graph->realm == NULL || result == NULL || arguments == NULL || argc == 0 || arguments[0].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n    if (kiln_c99_string_equals_ascii(arguments[0], \"reset\", 5)) { if (argc != 1) return KILN_C99_INVALID_ARGUMENT; selected = graph->runtime_module_generation != NULL ? graph->runtime_module_generation : graph; if (selected->instance != NULL) kiln_graph_runtime_modules_release_generation(graph->realm, selected->instance->instance_id); graph->realm->reset_requested = 1; graph->runtime_module_reset_requested = 1; *result = kiln_c99_undefined(); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"registerRunner\", 14)) { if (argc != 2 || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
+    if needs_runner_policy {
+        for (index, (node, _)) in modules.iter().enumerate() {
+            if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+                continue;
+            }
+            let path = node.path.to_string_lossy();
+            if let Some(url) = Url::from_file_path(&node.path)
+                .ok()
+                .map(|value| value.to_string())
+            {
+                writeln!(output, "        if (kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){}) || kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){})) {{ graph->realm->runner_referrer_index = (size_t){index}; *result = kiln_c99_undefined(); return KILN_C99_OK; }}",
+                    native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
+            }
+        }
+    }
+    output.push_str("        return KILN_C99_CONTROL_ERROR; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"registerSpyAdapter\", 18)) { if (argc != 2 || arguments[1].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT; if (graph->realm->runner_referrer_index == SIZE_MAX) { *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n");
+    if needs_runner_policy {
+        for (index, (node, _)) in modules.iter().enumerate() {
+            if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+                continue;
+            }
+            let path = node.path.to_string_lossy();
+            if let Some(url) = Url::from_file_path(&node.path)
+                .ok()
+                .map(|value| value.to_string())
+            {
+                writeln!(output, "        if (kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){}) || kiln_c99_string_equals_ascii(arguments[1], {}, (size_t){})) {{ graph->realm->spy_adapter_referrer_index = (size_t){index}; *result = ((kiln_value){{ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 1 }}); return KILN_C99_OK; }}",
+                    native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
+            }
+        }
+    }
+    output.push_str("        *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n    if (kiln_c99_string_equals_ascii(arguments[0], \"spyExport\", 9)) { if (argc != 5 || arguments[1].tag != 9 || arguments[2].tag != KILN_VALUE_STRING || arguments[4].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n        spy_authorized = 0; switch (graph->realm->spy_adapter_referrer_index) {\n");
+    if needs_runner_policy {
+        for (adapter_index, (adapter_node, _)) in modules.iter().enumerate() {
+            if !matches!(
+                adapter_node.source,
+                ModuleSource::Source | ModuleSource::CommonJs
+            ) {
+                continue;
+            }
+            let Some(adapter_url) = Url::from_file_path(&adapter_node.path)
+                .ok()
+                .map(|value| value.to_string())
+            else {
+                continue;
+            };
+            writeln!(output, "        case (size_t){adapter_index}: spy_authorized = kiln_c99_string_equals_ascii(arguments[4], {}, (size_t){}); break;",
+                native_c_string(&adapter_url), adapter_url.len()).unwrap();
+        }
+    }
+    output.push_str("        default: break; } if (!spy_authorized) { *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n        for (selected = graph->realm->instances; selected != NULL; selected = selected->next_instance) {\n");
+    for (index, (node, _)) in modules.iter().enumerate() {
+        if node.source != ModuleSource::Source {
+            continue;
+        }
+        let Some(entries) = &namespace_plans[index] else {
+            continue;
+        };
+        writeln!(output, "            if (selected->instance->namespaces[{index}].tag == 9 && selected->instance->namespaces[{index}].bits == arguments[1].bits) {{").unwrap();
+        for entry in entries {
+            let NativeNamespaceValue::Binding {
+                provider_index,
+                export_index,
+                live_cell: true,
+            } = entry.value
+            else {
+                continue;
+            };
+            writeln!(output, "                if (kiln_c99_string_equals_ascii(arguments[2], {}, (size_t){})) {{ kiln_value cell = selected->instance->cells_{provider_index}[{export_index}]; if (cell.tag != 6 || kiln_c99_module_spy_store_cell(cell, arguments[3]) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; *result = ((kiln_value){{ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 1 }}); return KILN_C99_OK; }}",
+                native_c_string(&entry.name), entry.name.len()).unwrap();
+        }
+        output.push_str(
+            "                *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK;\n            }\n",
+        );
+    }
+    output.push_str("        }\n        *result = ((kiln_value){ .tag = KILN_VALUE_BOOLEAN, .flags = 0, .len = 0, .bits = 0 }); return KILN_C99_OK; }\n    if ((!kiln_c99_string_equals_ascii(arguments[0], \"importActual\", 12) && !kiln_c99_string_equals_ascii(arguments[0], \"import\", 6)) || argc != 4) return KILN_C99_INVALID_ARGUMENT;\n    if (arguments[1].tag != KILN_VALUE_STRING || arguments[2].tag != KILN_VALUE_STRING || arguments[3].tag != KILN_VALUE_STRING) return KILN_C99_INVALID_ARGUMENT;\n");
+    if needs_runner_policy {
+        for (index, (node, _)) in modules.iter().enumerate() {
+            if !matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
+                continue;
+            }
+            let path = node.path.to_string_lossy();
+            let url = Url::from_file_path(&node.path)
+                .ok()
+                .map(|value| value.to_string());
+            if let Some(url) = url {
+                writeln!(output, "    if (kiln_c99_string_equals_ascii(arguments[3], {}, (size_t){})) target = {index};",
+                    native_c_string(&url), url.len()).unwrap();
+                writeln!(output, "    if (kiln_c99_string_equals_ascii(arguments[2], {}, (size_t){}) || kiln_c99_string_equals_ascii(arguments[2], {}, (size_t){})) referrer_valid = 1;",
+                    native_c_string(&url), url.len(), native_c_string(path.as_ref()), path.len()).unwrap();
+            }
+        }
+    }
+    output.push_str("    if (target < 0 || !referrer_valid) return KILN_C99_CONTROL_ERROR; /* The adapter resolves specifiers; this capability only instantiates compiled targets. */\n    return kiln_graph_load_generation(graph, (size_t)target, result);\n}\n");
     output.push_str(
         r#"/* argc/argv reach the realm before it is entered, so the first `process` a module builds
  * already has the command line. The strings are copied on the other side of this call. `output`
@@ -4236,15 +6062,16 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result, FILE *ou
 
 /* A worker's realm is over: its code is the one its end decided, whatever teardown says. */
 static int kiln_cli_end_worker_realm(uint64_t worker_realm, kiln_graph_context *graph, int code) {
+    kiln_graph_detach_instances(graph->realm);
     (void)kiln_realm_destroy(worker_realm);
-    free(graph);
+    kiln_graph_free_instances(graph->realm);
     return code;
 }
 
 /* In a worker's realm, report the exception that ended it to the parent's `error` event. */
 static int kiln_cli_report_worker_error(void *opaque) {
     kiln_graph_context *graph = (kiln_graph_context *)opaque;
-    return kiln_c99_worker_report_error(graph->result);
+    return kiln_c99_worker_report_error(graph->instance->result);
 }
 
 /* A scheduled turn saves its worker and process-exit state in the realm scope before the
@@ -4269,10 +6096,46 @@ static int kiln_cli_take_realm_exit_code(uint64_t realm, int32_t *out) {
     return request.found;
 }
 
+typedef struct kiln_cli_process_exit_code {
+    int present;
+    int32_t code;
+} kiln_cli_process_exit_code;
+
+extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
+#define KILN_C99_REALM_SLOT_PROCESS_EXIT_CODE UINT32_C(16)
+
+static int kiln_cli_read_process_exit_code(void *opaque) {
+    kiln_cli_process_exit_code *request = (kiln_cli_process_exit_code *)opaque;
+    void *slot_pointer = NULL;
+    int status = kiln_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS_EXIT_CODE, &slot_pointer);
+    if (status != KILN_C99_OK) return status;
+    kiln_value *slot = (kiln_value *)slot_pointer;
+    if (slot->tag == KILN_VALUE_UNDEFINED) {
+        request->present = 0;
+        return KILN_C99_OK;
+    }
+    if (slot->tag != KILN_VALUE_NUMBER) return KILN_C99_CONTROL_ERROR;
+    double code;
+    memcpy(&code, &slot->bits, sizeof(code));
+    request->code = (int32_t)code;
+    request->present = 1;
+    return KILN_C99_OK;
+}
+
+static int kiln_cli_natural_process_exit_code(uint64_t realm, int32_t *out) {
+    kiln_cli_process_exit_code request = {0};
+    int status = kiln_realm_enter(realm, kiln_cli_read_process_exit_code, &request);
+    if (status != KILN_C99_OK) return -1;
+    if (request.present) *out = request.code;
+    return request.present;
+}
+
 /* The graph and result slots outlive every generated C frame. A scheduler can run one step,
  * release its lane, and later resume this record without retaining a frame pointer. */
 typedef struct kiln_cli_realm_run {
     kiln_graph_context *graph;
+    /* Realm services and module-instance values have separate owners. */
+    kiln_graph_realm_state realm_state;
     uint64_t realm;
     const char *phase;
     int status;
@@ -4299,13 +6162,31 @@ static void kiln_cli_realm_begin(kiln_cli_realm_run *run, int argc, char **argv,
         kiln_cli_warn("kiln: out of memory for the module graph", NULL);
         return;
     }
-    graph->cli.output = output;
-    graph->cli.error_output = error_output;
-    graph->worker_entry = worker_entry;
-    graph->result.tag = KILN_VALUE_UNDEFINED;
-    graph->entry_result.tag = KILN_VALUE_UNDEFINED;
+    graph->realm = &run->realm_state;
+    graph->instance = (kiln_graph_module_instance *)calloc(1, sizeof *graph->instance);
+    if (graph->instance == NULL) {
+        free(graph);
+        run->graph = NULL;
+        kiln_cli_warn("kiln: out of memory for the module instance", NULL);
+        return;
+    }
+    graph->realm->instances = graph;
+    graph->realm->current_graph = graph;
+    graph->realm->runner_referrer_index = SIZE_MAX;
+    graph->realm->spy_adapter_referrer_index = SIZE_MAX;
+    graph->realm->next_module_instance_id = 1;
+    graph->instance->instance_id = graph->realm->next_module_instance_id++;
+    graph->realm->cli.output = output;
+    graph->realm->cli.error_output = error_output;
+    graph->instance->worker_entry = worker_entry;
+    graph->instance->result.tag = KILN_VALUE_UNDEFINED;
+    graph->instance->entry_result.tag = KILN_VALUE_UNDEFINED;
     graph->host.call = kiln_graph_host_call;
     graph->host.context = graph;
+    graph->host.module_context = graph;
+    graph->host.module_owner = NULL;
+    graph->host.module_unit_values = kiln_graph_unit_values;
+    graph->host.module_instance_id = graph->instance->instance_id;
     status = kiln_realm_create(&realm);
     if (status == 0 && argc > 0)
         status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);
@@ -4329,19 +6210,54 @@ static void kiln_cli_realm_begin(kiln_cli_realm_run *run, int argc, char **argv,
 /* One provider drive answers 4 when quiescent, 1 for another ready turn, 2 for an I/O wake,
  * 3 for a pure timer deadline, and 0 for failure. The continuous launcher uses the same state
  * machine but lets its provider call wait until quiescence. */
-static int kiln_cli_realm_drive_step(kiln_cli_realm_run *run) {{
+__attribute__((noinline)) static int kiln_cli_realm_drive_step(kiln_cli_realm_run *run) {{
     kiln_graph_context *graph = run->graph;
+    jmp_buf caller_registers;
+    uint64_t boundary_token = 0;
+    int progress;
+    memset(&caller_registers, 0, sizeof caller_registers);
+#if (defined(__GNUC__) || defined(__clang__)) && \
+    (defined(__x86_64__) || defined(__aarch64__))
+    __builtin_unwind_init();
+    if (setjmp(caller_registers) == 0) {{
+        uintptr_t *frame = (uintptr_t *)__builtin_frame_address(0);
+        if (frame != NULL && graph != NULL && graph->instance != NULL &&
+            graph->instance->roots_registered) {{
+            /* x86-64 stores saved FP/return address at frame[0..1]; AArch64 stores
+             * previous FP/LR there. In both supported frame-chain ABIs, frame + 2 is
+             * the first word in the caller's frame. Keep this wrapper noinline so that
+             * the boundary remains the drive-call boundary. */
+            (void)kiln_c99_graph_drive_boundary_push((uintptr_t)(frame + 2),
+                                                       &caller_registers,
+                                                       sizeof caller_registers,
+                                                       &boundary_token);
+        }} else {{
+            /* Without installed graph roots, retain the legacy complete machine scan. */
+            (void)kiln_c99_graph_drive_boundary_push(0, NULL, 0, &boundary_token);
+        }}
+    }} else {{
+        /* No code may longjmp through this scope; keep any outer boundary suppressed if it does. */
+        (void)kiln_c99_graph_drive_boundary_push(0, NULL, 0, &boundary_token);
+    }}
+#else
+    /* Unknown frame-chain ABI: the provider still works, but alias proof stays conservative. */
+    (void)kiln_c99_graph_drive_boundary_push(0, NULL, 0, &boundary_token);
+#endif
     if (!run->scheduled) {{
-        run->status = kiln_realm_drive(run->realm, &graph->host, &graph->result);
-        return run->status == 0 ? 4 : 0;
+        run->status = kiln_realm_drive(run->realm, &graph->host, &graph->instance->result);
+        progress = run->status == 0 ? 4 : 0;
+        goto boundary_done;
     }}
     uint32_t kind = 3;
     uint64_t delay_ns = 0;
-    run->status = kiln_realm_drive_step(run->realm, &graph->host, &graph->result,
+    run->status = kiln_realm_drive_step(run->realm, &graph->host, &graph->instance->result,
                                         &kind, &delay_ns);
-    if (run->status != 0) return 0;
+    if (run->status != 0) {{ progress = 0; goto boundary_done; }}
     run->park_delay_ns = delay_ns;
-    return kind == 0 ? 1 : kind == 1 ? 2 : kind == 2 ? 3 : kind == 3 ? 4 : 0;
+    progress = kind == 0 ? 1 : kind == 1 ? 2 : kind == 2 ? 3 : kind == 3 ? 4 : 0;
+boundary_done:
+    kiln_c99_graph_drive_boundary_pop(boundary_token);
+    return progress;
 }}
 
 /* Advance at most one generated module body or one provider language turn. */
@@ -4349,9 +6265,26 @@ static int kiln_cli_realm_step(kiln_cli_realm_run *run) {{
     kiln_graph_context *graph = run->graph;
     uint64_t realm = run->realm;
     if (run->status != 0 || graph == NULL) return 0;
-    if (graph->current_module < (size_t){} || !graph->roots_registered) {{
-        if (!run->settling_driven && graph->current_module < (size_t){} &&
-            graph->module_states[kiln_graph_startup_indices[graph->current_module]].module_settling) {{
+    if (graph->instance->launch != NULL && graph->instance->roots_registered) {{
+        size_t index = graph->instance->preload_next < graph->instance->launch->preload_count
+            ? graph->instance->launch->preloads[graph->instance->preload_next]
+            : graph->instance->worker_entry - 1;
+        if (graph->instance->module_states[index].module_settling && !run->settling_driven) {{
+            run->phase = "the turn loop";
+            int progress = kiln_cli_realm_drive_step(run);
+            if (progress == 4) {{ run->settling_driven = 1; return 1; }}
+            return progress;
+        }}
+        if (graph->instance->module_states[index].phase != KILN_MODULE_EVALUATED) {{
+            run->settling_driven = 0;
+            run->phase = "module body";
+            run->status = kiln_realm_enter(realm, kiln_graph_enter, graph);
+            return run->status == 0;
+        }}
+    }}
+    if (graph->instance->current_module < (size_t){} || !graph->instance->roots_registered) {{
+        if (!run->settling_driven && graph->instance->current_module < (size_t){} &&
+            graph->instance->module_states[kiln_graph_startup_indices[graph->instance->current_module]].module_settling) {{
             run->phase = "the turn loop";
             int progress = kiln_cli_realm_drive_step(run);
             if (progress == 4) {{ run->settling_driven = 1; return 1; }}
@@ -4384,6 +6317,8 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
      * was asked for. */
     int32_t exit_requested = 0;
     int exit_asked = 0;
+    int32_t natural_exit_requested = 0;
+    int natural_exit_present = 0;
     if (graph == NULL) {{ free(run); return 1; }}"#,
         startup_indices.len(),
         startup_indices.len()
@@ -4395,24 +6330,24 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
         status = KILN_C99_THROWN;
         phase = "module body";
     }
-    if (status == 0 && graph->entry_result.tag == 16 /* KILN_VALUE_PROMISE */) {
+    if (status == 0 && graph->instance->entry_result.tag == 16 /* KILN_VALUE_PROMISE */) {
         typedef struct kiln_launcher_promise_view {
             int state;
             kiln_value value;
         } kiln_launcher_promise_view;
-        kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)graph->entry_result.bits;
+        kiln_launcher_promise_view *promise = (kiln_launcher_promise_view *)(uintptr_t)graph->instance->entry_result.bits;
         if (promise != NULL) {
             if (promise->state == 2 /* KILN_C99_REJECTED */) {
                 status = KILN_C99_THROWN;
                 phase = "module body";
-                graph->result = kiln_cli_describe_error(promise->value);
+                graph->instance->result = kiln_graph_describe_error_in_realm(realm, graph, promise->value);
             } else if (promise->state == 0 /* KILN_C99_PENDING */) {
                 status = KILN_C99_CONTROL_ERROR;
                 phase = "the turn loop";
                 unsettled_entry = 1;
-                graph->result = kiln_graph_diagnostic("top-level await", "unsettled");
+                graph->instance->result = kiln_graph_diagnostic("top-level await", "unsettled");
             } else if (promise->state == 1 /* KILN_C99_FULFILLED */) {
-                graph->entry_result = promise->value;
+                graph->instance->entry_result = promise->value;
             }
         }
     }
@@ -4420,7 +6355,7 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
      * its parent's `terminate`) is its code with nothing reported, and an exception nothing
      * caught goes to the parent's `error` event -- a copy made inside the realm, before the value
      * is turned into the text a main realm prints -- with 1 for its code. */
-    if (worker_entry != 0) {
+    if (worker_entry != 0 && graph->instance->launch == NULL) {
         int32_t requested = 0;
         int code = 0;
         int exit_request = kiln_cli_take_realm_exit_code(realm, &requested);
@@ -4432,9 +6367,13 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
             (void)kiln_realm_enter(realm, kiln_cli_report_worker_error, graph);
             code = 1;
         } else if (status != 0) {
-            if (graph->result.tag != KILN_VALUE_STRING) graph->result = kiln_c99_text(graph->result);
+            if (graph->instance->result.tag != KILN_VALUE_STRING) graph->instance->result = kiln_c99_text(graph->instance->result);
             (void)kiln_realm_enter(realm, kiln_cli_report_worker_error, graph);
             code = 1;
+        } else {
+            int natural = kiln_cli_natural_process_exit_code(realm, &requested);
+            if (natural < 0) code = 1;
+            else if (natural == 1) code = requested;
         }
         int completed = kiln_cli_end_worker_realm(realm, graph, code);
         free(run);
@@ -4457,7 +6396,7 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
      * handled throw resets the realm diagnostic bridge, so this cannot leak an earlier refusal
      * into a later ordinary error. */
     if (status == KILN_C99_THROWN) {
-        kiln_value message = kiln_cli_describe_error(graph->result);
+        kiln_value message = kiln_graph_describe_error_in_realm(realm, graph, graph->instance->result);
         if (message.tag != KILN_VALUE_STRING) {
             message = kiln_c99_text(message);
         }
@@ -4465,42 +6404,57 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
         if (kiln_c99_diagnostic_available() && message.tag == KILN_VALUE_STRING &&
             site.tag == KILN_VALUE_STRING && site.len != 0) {
             kiln_value separator = kiln_c99_copy_text(" at ", 4);
-            graph->result = kiln_c99_concat(kiln_c99_concat(message, separator), site);
+            graph->instance->result = kiln_c99_concat(kiln_c99_concat(message, separator), site);
         } else {
-            graph->result = message;
+            graph->instance->result = message;
         }
     }
     /* An entry whose top-level await never settled, with the loop out of work: node's answer is a
      * warning and status 13 rather than a refusal, and both engines give that one. */
-    unsettled_entry = status == KILN_C99_CONTROL_ERROR && (unsettled_entry || graph->unsettled_entry);
-    if (unsettled_entry) kiln_cli_warn("Warning: Detected unsettled top-level await", &graph->cli);
-    else if (status != 0) kiln_cli_report_failure_with(status, graph->result, phase, &graph->cli);
-    if (writes_result && status == 0 && kiln_cli_write_result(graph->entry_result) != 0) {
+    unsettled_entry = status == KILN_C99_CONTROL_ERROR && (unsettled_entry || graph->instance->unsettled_entry);
+    if (unsettled_entry) kiln_cli_warn("Warning: Detected unsettled top-level await", &graph->realm->cli);
+    else if (status != 0) kiln_cli_report_failure_with(status, graph->instance->result, phase, &graph->realm->cli);
+    if (writes_result && status == 0 && kiln_cli_write_result(graph->instance->entry_result) != 0) {
         static const kiln_string refusal_str = { 17, 0, "filesystem access" };
-        kiln_cli_report_failure_with(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = (const char *)&refusal_str }, "result write", &graph->cli);
+        kiln_cli_report_failure_with(KILN_C99_HOST_ERROR, (kiln_value){ .tag = KILN_VALUE_STRING, .flags = 0, .len = 17, .ptr = (const char *)&refusal_str }, "result write", &graph->realm->cli);
         status = 1;
     }
+    if (status == 0 && !exit_asked && !unsettled_entry) {
+        int natural = kiln_cli_natural_process_exit_code(realm, &natural_exit_requested);
+        if (natural < 0) status = KILN_C99_CONTROL_ERROR;
+        else natural_exit_present = natural;
+    }
+    kiln_graph_detach_instances(&run->realm_state);
     destroy_status = kiln_realm_destroy(realm);
-    free(graph);
+    kiln_graph_free_instances(&run->realm_state);
     free(run);
     if (exit_asked) return (int)exit_requested;
     /* Every failure folds to 1, the way a refusal does; 13 is the one status a program's caller
      * is told apart by, as `process.exit(code)` is. */
     if (unsettled_entry) return 13;
     if (status == 0) status = destroy_status;
+    if (status == 0 && natural_exit_present) return (int)natural_exit_requested;
     return status == 0 ? 0 : 1;
 }
 
-static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
-                                 FILE *error_output, size_t worker_entry) {
+static int kiln_cli_run_entry(int argc, char **argv, int writes_result, FILE *output,
+                              FILE *error_output, size_t worker_entry, const kiln_graph_launch *launch) {
     kiln_cli_realm_run *run = (kiln_cli_realm_run *)calloc(1, sizeof *run);
     if (run == NULL) {
         kiln_cli_warn("kiln: out of memory for the realm session", NULL);
         return 1;
     }
     kiln_cli_realm_begin(run, argc, argv, output, error_output, worker_entry);
+    if (run->graph != NULL) run->graph->instance->launch = launch;
+    if (run->status == 0 && launch != NULL && launch->disallow_strings)
+        run->status = kiln_realm_set_string_code_generation(run->realm, 0);
     while (kiln_cli_realm_step(run)) {}
     return kiln_cli_realm_finish(run, writes_result, worker_entry);
+}
+
+static int kiln_cli_run_realm_as(int argc, char **argv, int writes_result, FILE *output,
+                                 FILE *error_output, size_t worker_entry) {
+    return kiln_cli_run_entry(argc, argv, writes_result, output, error_output, worker_entry, NULL);
 }
 
 /* A worker's standard streams (`node:worker_threads`): each write goes to the parent as a message,
@@ -4545,12 +6499,22 @@ typedef struct kiln_cli_worker_session {
 
 /* A worker made from source text needs a compiler at run time, which a native program does not
  * carry. Report an invalid entry on the parent's error channel while the worker context is live. */
-static void kiln_cli_worker_bad_entry(int32_t eval) {
+static void kiln_cli_worker_bad_entry(int32_t eval, const uint8_t *entry, uint64_t entry_len) {
     static const char no_eval[] = "kiln: a worker made from source text ({ eval: true }) needs a compiler at run time, which a natively built program does not have: put the worker's code in a module of the program";
-    static const char missing[] = "Cannot find module: the worker's script is not a module of this program";
+    /* Name the module and why: a target the compiler could not see named (ADR 0072's rule for
+     * actor modules, which workers share). The worker then exits 1 after this 'error'. */
+    static const char missing_suffix[] = "' was not linked into this build: a native build links only the worker modules a new Worker call names at compile time (a string literal, new URL(literal, import.meta.url), path.join(__dirname, literal) or __filename); this name was computed at run time";
     static const char error_name[] = "Error";
-    const char *text = eval ? no_eval : missing;
-    size_t length = eval ? sizeof no_eval - 1 : sizeof missing - 1;
+    char missing[1024 + sizeof missing_suffix];
+    const char *text = no_eval;
+    size_t length = sizeof no_eval - 1;
+    if (!eval) {
+        int shown = entry_len > 1024 ? 1024 : (int)entry_len;
+        int written = snprintf(missing, sizeof missing, "Cannot find module '%.*s%s", shown,
+                               entry != NULL ? (const char *)entry : "", missing_suffix);
+        text = missing;
+        length = written < 0 ? 0 : (size_t)written < sizeof missing ? (size_t)written : sizeof missing - 1;
+    }
     kiln_worker_token tokens[6];
     memset(tokens, 0, sizeof tokens);
     tokens[0].kind = 3; tokens[0].number = 0;
@@ -4570,7 +6534,7 @@ static void *kiln_cli_worker_begin(const uint8_t *entry, uint64_t entry_len, int
     long index = eval ? -1 : kiln_graph_module_index(entry, entry_len);
     if (session == NULL) return NULL;
     if (index < 0) {
-        kiln_cli_worker_bad_entry(eval);
+        kiln_cli_worker_bad_entry(eval, entry, entry_len);
         session->failed_begin = 1;
         return session;
     }
@@ -5576,6 +7540,55 @@ static void kiln_cli_grow_main_stack(void) {
 #endif
 }
 
+/* Node execution flags select only source modules declared in this finite native graph.
+ * Ordinary application arguments keep their existing meaning. */
+static int kiln_cli_try_source_launch(int argc, char **argv, int *handled) {
+    kiln_graph_launch launch = {0};
+    size_t *preloads = NULL;
+    char **args = NULL;
+    int cursor = 1, status = 1;
+    *handled = argc > 1 && (strcmp(argv[1], "--import") == 0 ||
+        strncmp(argv[1], "--import=", 9) == 0 ||
+        strcmp(argv[1], "--disallow-code-generation-from-strings") == 0);
+    if (!*handled) return 0;
+    preloads = (size_t *)calloc((size_t)argc, sizeof *preloads);
+    if (preloads == NULL) { kiln_cli_warn("kiln: out of memory for source preloads", NULL); return 1; }
+    launch.preloads = preloads;
+    while (cursor < argc && argv[cursor][0] == '-') {
+        const char *preload = NULL;
+        if (strcmp(argv[cursor], "--disallow-code-generation-from-strings") == 0) {
+            launch.disallow_strings = 1; cursor++;
+        } else if (strcmp(argv[cursor], "--import") == 0) {
+            if (++cursor == argc) { kiln_cli_warn("kiln: --import requires a linked module path", NULL); goto done; }
+            preload = argv[cursor++];
+        } else if (strncmp(argv[cursor], "--import=", 9) == 0) {
+            preload = argv[cursor++] + 9;
+        } else {
+            fprintf(stderr, "kiln: unsupported source execution flag '%s'\n", argv[cursor]); goto done;
+        }
+        if (preload != NULL) {
+            long index = kiln_graph_module_index((const uint8_t *)preload, (uint64_t)strlen(preload));
+            if (index < 0) { fprintf(stderr, "kiln: source preload '%s' was not linked; declare it with build --include\n", preload); goto done; }
+            preloads[launch.preload_count++] = (size_t)index;
+        }
+    }
+    if (cursor == argc) { kiln_cli_warn("kiln: source execution flags require a linked entry path", NULL); goto done; }
+    long entry = kiln_graph_module_index((const uint8_t *)argv[cursor], (uint64_t)strlen(argv[cursor]));
+    if (entry < 0) { fprintf(stderr, "kiln: source entry '%s' was not linked; declare it with build --include\n", argv[cursor]); goto done; }
+    launch.entry = argv[cursor];
+    launch.flags = argv + 1;
+    launch.flag_count = cursor - 1;
+    int child_argc = argc - cursor;
+    args = (char **)calloc((size_t)child_argc + 1, sizeof *args);
+    if (args == NULL) { kiln_cli_warn("kiln: out of memory for source arguments", NULL); goto done; }
+    args[0] = argv[0];
+    for (int i = 1; i < child_argc; i++) args[i] = argv[cursor + i];
+    status = kiln_cli_run_entry(child_argc, args, 0, NULL, NULL, (size_t)entry + 1, &launch);
+done:
+    free(args); free(preloads);
+    return status;
+}
+
 int main(int argc, char **argv) {
     long workers, realms;
     kiln_cli_grow_main_stack();
@@ -5588,6 +7601,9 @@ int main(int argc, char **argv) {
         _putenv("KILN_HTTP3=1");
 #endif
     }
+    int source_launch = 0;
+    int source_status = kiln_cli_try_source_launch(argc, argv, &source_launch);
+    if (source_launch) return source_status;
     (void)kiln_worker_set_runner(kiln_cli_run_worker);
     (void)kiln_worker_set_turn_runner(kiln_cli_worker_begin_scheduled,
                                       kiln_cli_worker_identify, kiln_cli_worker_advance,

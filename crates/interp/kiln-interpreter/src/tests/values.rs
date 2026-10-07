@@ -160,7 +160,11 @@ fn realm_timezone_and_locale_are_resolved_once_at_entry() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -202,7 +206,11 @@ fn date_methods_stay_on_the_machine_dispatch_path() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -270,7 +278,11 @@ fn capturing_a_slot_that_was_never_boxed_is_rejected() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::MakeFunction(0), Instruction::Return],
         local_count: 1,
@@ -467,6 +479,21 @@ fn json_indent_argument_is_capped() {
 fn json_raw_json_and_indent_keep_units() {
     let raw_text = StringUnits::from_units(&[b'"' as u16, 0xd800, b'"' as u16]);
     let raw = build_raw_json(&raw_text).expect("valid raw JSON string");
+    let Value::Object(raw_object) = &raw else {
+        panic!("raw JSON is an object");
+    };
+    let raw_object = raw_object.borrow();
+    assert_eq!(raw_object.raw_json_text.as_ref(), Some(&raw_text));
+    assert!(raw_object.frozen && !raw_object.extensible);
+    assert_eq!(raw_object.prototype, Some(Value::Null));
+    assert_eq!(
+        raw_object.get_own_attributes(RAW_JSON_TEXT),
+        Some(Attributes {
+            writable: false,
+            enumerable: true,
+            configurable: false,
+        })
+    );
     let raw_output = serialize_units(&raw, &StringUnits::default())
         .expect("serialize")
         .expect("raw result");
@@ -494,6 +521,16 @@ fn json_raw_json_and_indent_keep_units() {
             b'}' as u16
         ]
     );
+}
+
+#[test]
+fn json_raw_json_brand_cannot_be_forged_with_public_properties() {
+    let lookalike = object(&[(RAW_JSON_TEXT, Value::String("1".into()))]);
+    let Value::Object(lookalike_object) = &lookalike else {
+        panic!("lookalike object");
+    };
+    assert!(lookalike_object.borrow().raw_json_text.is_none());
+    assert_eq!(json(&lookalike).as_deref(), Some(r#"{"rawJSON":"1"}"#));
 }
 
 #[test]
@@ -736,5 +773,158 @@ fn numeric_unary_dispatch_preserves_ieee_edges_and_step_accounting() {
             result.value
         );
         assert_eq!(result.steps, 3);
+    }
+}
+
+/// Position-taking string methods read a code unit in place: each call is O(1) rather than a copy of
+/// the whole string, so a loop over a long string is linear (it was quadratic; NOTES.md, 2026-09-18).
+mod unit_reads {
+    use super::*;
+
+    fn read(native: Native, text: &StringUnits, index: f64) -> Value {
+        call_native(
+            &Intrinsics::default(),
+            native,
+            &Value::String(text.clone()),
+            &[Value::Number(index)],
+        )
+        .expect("a position-taking string method answers")
+    }
+
+    fn unit(value: Value) -> Option<Vec<u16>> {
+        match value {
+            Value::String(text) => Some(text.to_units().to_vec()),
+            Value::Undefined => None,
+            other => panic!("expected a string or undefined, got {other:?}"),
+        }
+    }
+
+    fn number(value: Value) -> f64 {
+        match value {
+            Value::Number(number) => number,
+            other => panic!("expected a number, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ascii_string_reads_each_unit() {
+        let text = StringUnits::from("a<b>&");
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 0.0)), 97.0);
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 4.0)), 38.0);
+        assert!(number(read(Native::StringCharCodeAt, &text, 5.0)).is_nan());
+        assert!(number(read(Native::StringCharCodeAt, &text, -1.0)).is_nan());
+        assert_eq!(
+            unit(read(Native::StringCharAt, &text, 1.0)),
+            Some(vec![0x3c])
+        );
+        assert_eq!(unit(read(Native::StringCharAt, &text, 5.0)), Some(vec![]));
+        assert_eq!(unit(read(Native::StringAt, &text, -1.0)), Some(vec![0x26]));
+        assert_eq!(unit(read(Native::StringAt, &text, 5.0)), None);
+        assert_eq!(number(read(Native::StringCodePointAt, &text, 2.0)), 98.0);
+        assert_eq!(
+            read(Native::StringCodePointAt, &text, 5.0),
+            Value::Undefined
+        );
+    }
+
+    #[test]
+    fn mixed_bmp_string_reads_each_unit() {
+        // "a", U+00E9 (Latin1 range), U+20AC, U+4E2D: forces UTF-16 storage.
+        let text = StringUnits::from("a\u{e9}\u{20ac}\u{4e2d}");
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 1.0)), 233.0);
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 2.0)), 8364.0);
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 3.0)), 20013.0);
+        assert!(number(read(Native::StringCharCodeAt, &text, 4.0)).is_nan());
+        assert_eq!(
+            unit(read(Native::StringCharAt, &text, 3.0)),
+            Some(vec![0x4e2d])
+        );
+        assert_eq!(
+            unit(read(Native::StringAt, &text, -2.0)),
+            Some(vec![0x20ac])
+        );
+        assert_eq!(number(read(Native::StringCodePointAt, &text, 2.0)), 8364.0);
+    }
+
+    #[test]
+    fn surrogate_pairs_count_as_two_units() {
+        // "x", U+1F600 (D83D DE00), "y", then a lone high surrogate.
+        let text = StringUnits::from_units(&[0x78, 0xd83d, 0xde00, 0x79, 0xd800]);
+        assert_eq!(
+            number(read(Native::StringCharCodeAt, &text, 1.0)),
+            f64::from(0xd83d)
+        );
+        assert_eq!(
+            number(read(Native::StringCharCodeAt, &text, 2.0)),
+            f64::from(0xde00)
+        );
+        assert_eq!(number(read(Native::StringCharCodeAt, &text, 3.0)), 121.0);
+        assert_eq!(
+            unit(read(Native::StringCharAt, &text, 2.0)),
+            Some(vec![0xde00])
+        );
+        assert_eq!(
+            unit(read(Native::StringAt, &text, -1.0)),
+            Some(vec![0xd800])
+        );
+        // The whole code point from the lead, the trail on its own, a lone lead as itself.
+        assert_eq!(
+            number(read(Native::StringCodePointAt, &text, 1.0)),
+            f64::from(0x1f600)
+        );
+        assert_eq!(
+            number(read(Native::StringCodePointAt, &text, 2.0)),
+            f64::from(0xde00)
+        );
+        assert_eq!(
+            number(read(Native::StringCodePointAt, &text, 4.0)),
+            f64::from(0xd800)
+        );
+    }
+
+    #[test]
+    fn long_string_loop_is_not_quadratic() {
+        // 400k calls over a 400k-unit string: ~1.6e11 unit copies if each call copied the string,
+        // so this finishes only if each read is O(1).
+        let text = StringUnits::from("ab<c>&\"".repeat(400_000 / 7 + 1).as_str());
+        let mut sum = 0.0;
+        for index in 0..text.unit_len() {
+            sum += number(read(Native::StringCharCodeAt, &text, index as f64));
+        }
+        assert!(sum > 0.0);
+    }
+}
+
+#[test]
+fn source_builtin_load_observes_global_replacement_but_intrinsic_load_keeps_identity() {
+    for intrinsic in [false, true] {
+        let code = if intrinsic {
+            Instruction::LoadIntrinsicBuiltin(kiln_ir::Builtin::Array)
+        } else {
+            Instruction::LoadBuiltin(kiln_ir::Builtin::Array)
+        };
+        let program = program(vec![], vec![code, Instruction::Return]);
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: Default::default(),
+            timezone: None,
+            locale: None,
+        };
+        let mut vm = test_vm(&program, &mut host);
+        let original = vm.builtin_value(kiln_ir::Builtin::Array, RealmId::PRIMARY);
+        let Value::Object(global) = vm.global_object() else {
+            panic!("global must be an object")
+        };
+        global.borrow_mut().set("Array", Value::Number(42.0));
+        let result = vm.run().unwrap().value;
+        assert!(strict_equal(
+            &result,
+            &if intrinsic {
+                original
+            } else {
+                Value::Number(42.0)
+            }
+        ));
     }
 }

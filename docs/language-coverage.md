@@ -1,5 +1,11 @@
 # Language coverage: where the interpreter is, and the order to grow it
 
+> **Historical, kept as written.** This was the bootstrap backlog of 2026-08-29, and §8 records
+> that its ladder was finished. It no longer describes what kiln does. Current coverage is
+> measured, not listed: Test262 chunk by chunk in `conformance/test262-baseline.json`, the native
+> refusal inventory (ADR 0063), and the corpora that `mise run gate` runs. Open work is in
+> `docs/issues/`.
+
 This document turns "grow the interpreter" into a backlog. It is written against measurements,
 not against intent: every claim about what kiln does today came from running the CLI, and the
 commands are given so the numbers can be re-taken when they stop being true.

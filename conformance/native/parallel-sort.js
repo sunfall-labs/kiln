@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// `parallelSort` is `sort` (ADR 0068 rule 3; .scratch/parallel-builtins issue 10). A stable sort
+// `parallelSort` is `sort` (ADR 0068 rule 3; docs/issues/parallel-builtins issue 10). A stable sort
 // under a consistent order has one answer, so the pool may run it: a typed array's default
 // numeric order (`-0` before `+0`, `NaN` last), or a comparator proven to be `(a, b) => a - b`
 // or `(a, b) => b - a` over numbers with no `NaN` -- `-0` and `+0` then compare equal and keep
@@ -31,7 +31,10 @@ check("other comparator", xs.slice(0, 3000).parallelSort((a, b) => (a < b ? -1 :
 check("array default order", xs.slice(0, 2000).parallelSort(), xs.slice(0, 2000).sort());
 check("empty", [].parallelSort((a, b) => a - b), [].sort((a, b) => a - b));
 
-const kinds = [Float64Array, Float32Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array, Uint8ClampedArray];
+// Float16's C enum slot precedes Float32, although the parallel provider does not currently
+// specialize it; it must safely fall back while the neighboring Float32/Float64 kinds stay
+// aligned with the shared native-kind mapping.
+const kinds = [Float64Array, Float32Array, Float16Array, Int32Array, Uint32Array, Int16Array, Uint16Array, Int8Array, Uint8Array, Uint8ClampedArray];
 for (let j = 0; j < kinds.length; j++) {
   const Kind = kinds[j];
   const view = new Kind(j % 3 === 0 ? 40000 : 700);

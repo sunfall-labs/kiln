@@ -1,6 +1,741 @@
 use super::*;
 
 #[test]
+fn native_graph_declares_runtime_module_host_abi_without_static_fs_or_dynamic_import() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping runtime-module ABI integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-runtime-module-abi-declarations");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "console.log('runtime loader declarations precede use');\n",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph without node:fs or dynamic import");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("runtime module host declarations precede every generated call site");
+    let output = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run graph without dynamic imports");
+    assert!(
+        output.status.success(),
+        "native graph failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"runtime loader declarations precede use\n");
+}
+
+#[test]
+fn native_module_reset_keeps_old_namespace_and_closure_on_old_instance() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native module-instance integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-module-instance-reset");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    fs::write(
+        root.path.join("main.mjs"),
+        r#"
+const loader = process.__kilnNativeModules.__kilnHostModuleLoader;
+loader("registerRunner", import.meta.url);
+const originalV8 = await import("node:v8");
+let releaseOld;
+globalThis.__moduleInstanceGate = new Promise(resolve => { releaseOld = resolve; });
+let oldPromise = import("./target.mjs");
+await Promise.resolve();
+loader("reset");
+const current = await import("./target.mjs");
+const currentV8 = await import("node:v8");
+releaseOld();
+let old = await oldPromise;
+console.log(old.value, current.value, old === current, old.retained(),
+            old.urlConstructor === current.urlConstructor,
+            old.processObject === current.processObject,
+            old.v8Object === current.v8Object,
+            originalV8.default === currentV8.default,
+            originalV8 === currentV8);
+"#,
+    )
+    .expect("write entry");
+    fs::write(
+        root.path.join("target.mjs"),
+        r#"
+import { URL } from "node:url";
+import process from "node:process";
+import v8 from "node:v8";
+const generation = (globalThis.__moduleInstanceGeneration ?? 0) + 1;
+globalThis.__moduleInstanceGeneration = generation;
+if (generation === 1) await globalThis.__moduleInstanceGate;
+export const value = generation;
+export const urlConstructor = URL;
+export const processObject = process;
+export const v8Object = v8;
+export function retained() { return generation; }
+"#,
+    )
+    .expect("write target");
+    let entry = root.path.join("main.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("module-instance graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("module-instance graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run module reset with GC stress");
+    assert!(
+        output.status.success(),
+        "stressed module reset failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"1 2 false 1 true true true true true\n");
+}
+
+#[test]
+fn native_module_reset_collects_superseded_generation_while_current_stays_alive() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native module-generation GC integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-module-instance-collection");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    fs::write(
+        root.path.join("main.mjs"),
+        r#"
+const loader = process.__kilnNativeModules.__kilnHostModuleLoader;
+loader("registerRunner", import.meta.url);
+async function probe() {
+  loader("reset");
+  let old = await import("./target.mjs");
+  loader("reset");
+  const current = await import("./target.mjs");
+  const weak = new WeakRef(old);
+  old = null;
+  current.check(weak);
+}
+await probe();
+"#,
+    )
+    .expect("write entry");
+    fs::write(
+        root.path.join("target.mjs"),
+        r#"
+const generation = (globalThis.__collectibleGeneration ?? 0) + 1;
+globalThis.__collectibleGeneration = generation;
+export const value = generation;
+export function check(weak) {
+  setTimeout(() => {
+    globalThis.__gcJunk = Array.from({length: 2000}, (_, i) => ({i}));
+    globalThis.__gcJunk = null;
+    setTimeout(() => console.log(weak.deref() === undefined, generation), 0);
+  }, 0);
+}
+"#,
+    )
+    .expect("write target");
+    let entry = root.path.join("main.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("module-generation graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("module-generation graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run reset with GC stress");
+    assert!(
+        output.status.success(),
+        "stressed module reset failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"true 2\n",
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn native_import_meta_reparse_remaps_export_demand_after_slot_compaction() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-import-meta-demand-remap");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create project");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { plugin } from './provider.mjs'; console.log(plugin());",
+    )
+    .expect("write entry");
+    let provider = project.join("provider.mjs");
+    fs::write(
+        &provider,
+        "import { unused } from './unused.mjs'; import { live } from './live.mjs'; if (false) console.log(unused); export function plugin() { return live + import.meta.url; }",
+    )
+    .expect("write provider");
+    fs::write(project.join("unused.mjs"), "export const unused = 1;").expect("write unused");
+    fs::write(project.join("live.mjs"), "export const live = 2;").expect("write live");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph");
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
+            .expect("compute demand");
+    let old_slot = *demand
+        .slots
+        .get(&provider)
+        .and_then(|slots| slots.iter().next())
+        .expect("provider export is demanded");
+    let old_live_imports = demand
+        .live_imports
+        .iter()
+        .filter_map(|(path, index)| (path == &provider).then_some(*index))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(old_live_imports, BTreeSet::from([0, 1]));
+
+    let (reparsed, remapped) = native_import_meta_reparse(&graph, &demand);
+    let new_slot = reparsed
+        .module(&provider)
+        .and_then(|node| {
+            node.program
+                .exports
+                .iter()
+                .find(|export| export.exported == "plugin")
+        })
+        .map(|export| export.local_slot)
+        .expect("reparsed provider retains its export");
+    assert_ne!(
+        old_slot, new_slot,
+        "the fixture must exercise slot renumbering"
+    );
+    assert_eq!(
+        remapped.slots.get(&provider),
+        Some(&BTreeSet::from([new_slot]))
+    );
+    let reparsed_provider = reparsed.module(&provider).expect("reparsed provider");
+    assert_eq!(reparsed_provider.program.imports.len(), 1);
+    assert_eq!(reparsed_provider.program.imports[0].local, "live");
+    assert_eq!(
+        remapped
+            .live_imports
+            .iter()
+            .filter_map(|(path, index)| (path == &provider).then_some(*index))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([0])
+    );
+}
+
+#[test]
+fn native_import_meta_reparse_reuses_static_typescript_source_map() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-import-meta-static-ts-map");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create project");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { plugin } from './provider.ts'; console.log(plugin(5));",
+    )
+    .expect("write entry");
+    let provider = project.join("provider.ts");
+    let authored = "import { unused } from './unused.mjs';\nimport { live } from './live.mjs';\nif (false) console.log(unused);\nexport function plugin(value: number): string { console.log(value); return live + import.meta.url; }\n";
+    fs::write(&provider, authored).expect("write TypeScript provider");
+    fs::write(project.join("unused.mjs"), "export const unused = 1;").expect("write unused");
+    fs::write(project.join("live.mjs"), "export const live = 2;").expect("write live");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph containing static TypeScript");
+    let original = graph
+        .module(&provider)
+        .expect("TypeScript provider")
+        .program
+        .program
+        .static_source_provenance
+        .as_ref()
+        .expect("static TypeScript transform provenance");
+    let original_node = graph.module(&provider).unwrap();
+    assert!(
+        !original_node.program.program.source.contains(": number"),
+        "the generated JavaScript is the graph parser input"
+    );
+    assert_eq!(original_node.program.imports.len(), 2);
+    let original_identity = Arc::clone(&original.identity);
+
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
+            .expect("compute graph demand");
+    let (reparsed, _) = native_import_meta_reparse(&graph, &demand);
+    let reparsed_provider = reparsed.module(&provider).expect("reparsed TS provider");
+    assert_eq!(
+        reparsed_provider.program.imports.len(),
+        1,
+        "the native DCE/reparse path must remove the unused import"
+    );
+    assert_eq!(reparsed_provider.program.imports[0].local, "live");
+    assert!(
+        !reparsed_provider
+            .program
+            .program
+            .source
+            .contains(": number"),
+        "native import.meta reparsing consumes prepared JavaScript rather than transforming twice"
+    );
+    assert_eq!(
+        reparsed_provider
+            .program
+            .program
+            .static_source_identity
+            .as_deref(),
+        Some(original_identity.as_ref())
+    );
+    let reparsed_provenance = reparsed_provider
+        .program
+        .program
+        .static_source_provenance
+        .as_ref()
+        .expect("prepared reparse retains source map");
+    assert!(Arc::ptr_eq(reparsed_provenance, original));
+    assert!(
+        reparsed_provider
+            .program
+            .program
+            .debug_call_sites
+            .iter()
+            .any(|site| site.line == 4),
+        "call-site coordinates still refer to the authored TypeScript line"
+    );
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping static TypeScript import.meta execution: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native TS import.meta graph builds after prepared-source DCE");
+    let output = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run TS import.meta graph");
+    assert!(
+        output.status.success(),
+        "native TS graph failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 native output");
+    assert!(
+        stdout.starts_with("5\n2file://") && stdout.contains("provider.ts"),
+        "import.meta.url should use the original TypeScript module URL; got {stdout:?}"
+    );
+}
+
+#[test]
+fn native_dce_keeps_package_metadata_commonjs_goal_for_typescript() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-dce-package-commonjs-ts-goal");
+    fs::write(root.path.join("package.json"), r#"{"type":"commonjs"}"#)
+        .expect("write CommonJS package metadata");
+    let entry = root.path.join("main.ts");
+    fs::write(
+        &entry,
+        "function sloppy(){ return this === globalThis; } const dep: number = require('./dep.cjs'); console.log(sloppy(), dep); module.exports = dep;",
+    )
+    .expect("write CommonJS TypeScript entry");
+    fs::write(root.path.join("dep.cjs"), "module.exports = 42;")
+        .expect("write required CommonJS dependency");
+
+    let resolver = NodeRuntimeResolver::new(&root.path).expect("Node resolver");
+    let node_format = kiln_module_resolver::ResolutionPolicy::node_format(
+        &resolver,
+        &kiln_module_resolver::ResolvedModule::new(
+            entry.clone(),
+            kiln_module_resolver::ResolutionKind::Relative,
+        ),
+    )
+    .expect("classify package metadata");
+    assert_eq!(
+        node_format,
+        Some(kiln_module_resolver::NodeModuleFormat::CommonJs)
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("package metadata selects CommonJS parsing for .ts");
+    let original = graph.module(&entry).expect("CommonJS TS entry");
+    let provenance = original
+        .program
+        .program
+        .static_source_provenance
+        .as_ref()
+        .expect("static TS source provenance")
+        .clone();
+    assert_eq!(provenance.original_type.goal, kiln_hir::SourceGoal::Script);
+    assert!(provenance.original_type.commonjs);
+    assert!(
+        !original.program.strictness.body,
+        "package-metadata CommonJS TypeScript retains its sloppy wrapper semantics"
+    );
+
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
+            .expect("compute graph demand");
+    let (reparsed, _) = native_import_meta_reparse(&graph, &demand);
+    let reparsed_entry = reparsed.module(&entry).expect("reparsed CommonJS TS entry");
+    assert_eq!(
+        reparsed_entry
+            .program
+            .program
+            .static_source_provenance
+            .as_ref()
+            .unwrap()
+            .original_type,
+        provenance.original_type
+    );
+    assert!(
+        !reparsed_entry.program.strictness.body,
+        "prepared native DCE must preserve CommonJS strictness"
+    );
+    assert!(
+        !reparsed_entry.program.program.source.contains(": number"),
+        "prepared native DCE consumes generated JavaScript, not authored TypeScript"
+    );
+    assert!(
+        reparsed_entry
+            .program
+            .program
+            .source
+            .contains("module.exports = dep"),
+        "prepared native DCE must retain CommonJS exports: {}",
+        reparsed_entry.program.program.source
+    );
+}
+
+#[test]
+fn native_import_meta_reparse_preserves_indirect_export_origin() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-import-meta-reexport-origin");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create project");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { publicName, aliasName, namespaceName } from './barrel.mjs'; console.log(publicName(), aliasName(), namespaceName.implementation());",
+    )
+    .expect("write entry");
+    let barrel = project.join("barrel.mjs");
+    fs::write(
+        &barrel,
+        "import { implementation as localName } from './provider.mjs'; export { localName as publicName, localName as aliasName }; export * as namespaceName from './provider.mjs'; export const metadata = import.meta.url;",
+    )
+    .expect("write barrel");
+    let provider = project.join("provider.mjs");
+    fs::write(&provider, "export function implementation() { return 42; }")
+        .expect("write provider");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph");
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
+            .expect("compute demand");
+    let old_exports = ["publicName", "aliasName", "namespaceName"].map(|name| {
+        graph
+            .resolved_export(&barrel, name)
+            .expect("original reexport origin")
+            .clone()
+    });
+    assert!(matches!(
+        &old_exports[0],
+        ResolvedExport::Local { module, .. } if module == &provider
+    ));
+    assert_eq!(
+        old_exports[0], old_exports[1],
+        "aliases share provider identity"
+    );
+    assert_eq!(
+        old_exports[2],
+        ResolvedExport::Namespace {
+            module: provider.clone()
+        }
+    );
+
+    let (reparsed, remapped) = native_import_meta_reparse(&graph, &demand);
+    for (name, old_export) in ["publicName", "aliasName", "namespaceName"]
+        .into_iter()
+        .zip(old_exports.iter())
+    {
+        assert_eq!(
+            reparsed.resolved_export(&barrel, name),
+            Some(old_export),
+            "reparsed origin for {name}"
+        );
+    }
+    let reparsed_barrel = reparsed.module(&barrel).expect("reparsed barrel");
+    for name in ["publicName", "aliasName", "namespaceName"] {
+        let export_slot = reparsed_barrel
+            .program
+            .exports
+            .iter()
+            .find(|export| export.exported == name)
+            .expect("reparsed export row")
+            .local_slot;
+        let import_index = reparsed_barrel
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == export_slot)
+            .expect("reparsed synthetic import row");
+        let import = &reparsed_barrel.program.imports[import_index];
+        assert_eq!(import.source, "./provider.mjs", "source for {name}");
+        assert_eq!(
+            import.imported,
+            if name == "namespaceName" {
+                kiln_ir::NAMESPACE_IMPORT
+            } else {
+                "implementation"
+            },
+            "imported binding for {name}"
+        );
+        assert!(
+            remapped
+                .live_imports
+                .contains(&(barrel.clone(), import_index)),
+            "demand retained for {name}"
+        );
+    }
+
+    let reparsed_entry = reparsed.module(&entry).expect("reparsed entry");
+    let entry_import_index = reparsed_entry
+        .program
+        .imports
+        .iter()
+        .position(|import| import.local == "publicName")
+        .expect("entry import row");
+    let entry_import = &reparsed_entry.program.imports[entry_import_index];
+    let barrel_target = reparsed_entry
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.specifier == entry_import.source)
+        .expect("entry barrel dependency")
+        .target
+        .clone();
+    assert_eq!(
+        reparsed
+            .resolved_export(&barrel_target, &entry_import.imported)
+            .expect("reparsed entry resolution"),
+        &old_exports[0]
+    );
+}
+
+#[test]
+fn release_dce_preserves_indirect_export_origin_after_reexport_slot_compaction() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-release-reexport-origin");
+    let project = root.path.join("project");
+    fs::create_dir_all(&project).expect("create project");
+    fs::write(
+        project.join("package.json"),
+        r#"{"type":"module","sideEffects":["./compile.mjs"]}"#,
+    )
+    .expect("write side-effect metadata");
+    let entry = project.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { publicName } from './facade.mjs'; console.log(publicName());",
+    )
+    .expect("write entry");
+    let facade = project.join("facade.mjs");
+    fs::write(
+        &facade,
+        "export * from './index.mjs'; export const metadata = import.meta.url;",
+    )
+    .expect("write outer star barrel");
+    let barrel = project.join("index.mjs");
+    fs::write(&barrel, "export * from './schemas.mjs';").expect("write star barrel");
+    let schemas = project.join("schemas.mjs");
+    fs::write(
+        &schemas,
+        "export { implementation as deadA } from './provider.mjs'; export { implementation as deadB } from './provider.mjs'; export { implementation as deadC } from './provider.mjs'; export { implementation as publicName } from './provider.mjs'; export const metadata = import.meta.url;",
+    )
+    .expect("write named re-export barrel");
+    let provider = project.join("provider.mjs");
+    fs::write(
+        &provider,
+        "export function implementation() { return 42; } export function unused() { return 0; }",
+    )
+    .expect("write provider");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build graph");
+    let demand =
+        kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::production())
+            .expect("compute release demand");
+    let schemas_node = graph.module(&schemas).expect("schemas module node");
+    let schemas_export = schemas_node
+        .program
+        .exports
+        .iter()
+        .find(|export| export.exported == "publicName")
+        .expect("schemas named re-export");
+    assert!(
+        demand
+            .slots
+            .get(&schemas)
+            .is_some_and(|slots| slots.contains(&schemas_export.local_slot)),
+        "demand through export-star barrels must reach the named re-export slot"
+    );
+    let schemas_import = schemas_node
+        .program
+        .imports
+        .iter()
+        .position(|import| import.local_slot == schemas_export.local_slot)
+        .expect("named re-export backing import");
+    assert!(
+        demand
+            .live_imports
+            .contains(&(schemas.clone(), schemas_import))
+    );
+    assert!(demand.live.contains(&barrel));
+    let (reduced, demand) = reduced_graph(&graph, &demand).expect("reduce graph");
+    let previous = reduced
+        .resolved_export(&barrel, "publicName")
+        .expect("initial indirect export")
+        .clone();
+    assert!(matches!(
+        &previous,
+        ResolvedExport::Local { module, .. } if module == &provider
+    ));
+    assert_eq!(
+        reduced.resolved_export(&barrel, "publicName"),
+        Some(&previous),
+        "star barrels must retain the public name's ultimate origin"
+    );
+
+    let (specialized, _) = dce_release_graph(&reduced, &demand);
+    assert_eq!(
+        specialized.resolved_export(&barrel, "publicName"),
+        Some(&previous),
+        "release DCE must keep the public export wired to its original provider"
+    );
+    assert!(matches!(
+        specialized.resolved_export(&facade, "publicName"),
+        Some(ResolvedExport::Local { module, .. }) if module == &provider
+    ));
+    let specialized_schemas = specialized
+        .module(&schemas)
+        .expect("specialized named re-export barrel");
+    let export = specialized_schemas
+        .program
+        .exports
+        .iter()
+        .find(|export| export.exported == "publicName")
+        .expect("retained public export");
+    let backing_import = specialized_schemas
+        .program
+        .imports
+        .iter()
+        .find(|import| import.local_slot == export.local_slot)
+        .expect("re-export import row remains linked");
+    assert_eq!(backing_import.source, "./provider.mjs");
+    assert_eq!(backing_import.imported, "implementation");
+}
+
+#[test]
 fn shared_loader_paths_canonicalize_and_reserve_the_loader_namespace() {
     let root = TestDirectory::new("kiln-native-loader-path");
     let real = root.path.join("real");
@@ -52,7 +787,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
     let cache_path = project.path.join("emission-cache");
     let cache = ArtifactCache::new(&cache_path);
     let (_, effective_policy) = source_module_input_id(node, "main.js", &policy, profile);
-    let expected = graph_source_emitter::emit(node, "main.js", &effective_policy).unwrap();
+    let expected = graph_source_emitter::emit(node, "main.js", &effective_policy, false).unwrap();
     let (first, first_hit) = cached_graph_module(
         &cache,
         "test-target",
@@ -60,6 +795,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
         "main.js",
         &policy,
         profile,
+        false,
         || panic!("eligible Source emission must use the fingerprinted emitter"),
     )
     .unwrap();
@@ -74,6 +810,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
         "main.js",
         &policy,
         profile,
+        false,
         || panic!("unchanged module was emitted again"),
     )
     .unwrap();
@@ -86,6 +823,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
         "main.js",
         &policy,
         profile,
+        false,
         || panic!("target-distinct cold cache entry must emit"),
     )
     .unwrap();
@@ -158,6 +896,7 @@ fn graph_emission_cache_hits_persist_and_all_input_classes_invalidate() {
             "main.js",
             &embedded,
             profile,
+            false,
             || {
                 calls.set(calls.get() + 1);
                 Ok(expected.clone())
@@ -251,7 +990,15 @@ fn bootstrap_emission_cache_reopens_and_separates_surface_and_policy() {
     )
     .unwrap();
     assert!(!hit);
-    assert!(first.generic_only && first.chunks.is_empty());
+    // The generic default is split by bytes too (about a megabyte per unit), so a cold build's
+    // compile is not one eight-megabyte clang invocation; what distinguishes the specialized
+    // entry is its specialization, not its unit count.
+    assert!(first.generic_only);
+    assert!(
+        first.chunks.len() > 1,
+        "generic bootstrap split into units: {}",
+        first.chunks.len()
+    );
     assert!(!specialized.generic_only);
     assert!(
         specialized.chunks.len() > 1,
@@ -266,19 +1013,69 @@ fn native_bootstrap_family_selection_closes_over_dependencies_and_open_world() {
     let mut members = kiln_graph::DemandedMembers::default();
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        0
+        family::WEB_BOOTSTRAP_DEPENDENCIES
     );
+    members.names.insert("toLocaleLowerCase".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES | family::STRING_LOCALE
+    );
+    members.names.clear();
     members.builtins.insert("Date".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::DATE
+        family::WEB_BOOTSTRAP_DEPENDENCIES | family::DATE
     );
     members.builtins.clear();
     members.builtins.insert("Uint8Array".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::TYPED_ARRAY | family::ARRAY_BUFFER
+        family::WEB_BOOTSTRAP_DEPENDENCIES | family::TYPED_ARRAY | family::ARRAY_BUFFER
     );
+    members.builtins.clear();
+    members.names.clear();
+    members.builtins.insert("Math".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES
+    );
+    members.names.insert("floor".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES
+    );
+    members.names.clear();
+    members.names.insert("getOwnPropertyNames".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES
+            | family::NUMERIC_MATH
+            | family::TYPED_ARRAY
+            | family::ARRAY_BUFFER
+    );
+    members.names.clear();
+    members.builtins.clear();
+    members.names.insert("f16round".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES
+            | family::NUMERIC_MATH
+            | family::TYPED_ARRAY
+            | family::ARRAY_BUFFER
+    );
+    members.names.clear();
+    members.builtins.insert("BigInt".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES | family::NUMERIC_BIGINT
+    );
+    members.builtins.clear();
+    members.names.insert("asUintN".to_owned());
+    assert_eq!(
+        native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+        family::WEB_BOOTSTRAP_DEPENDENCIES | family::NUMERIC_BIGINT
+    );
+    members.names.clear();
     members.has_computed_access = true;
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
@@ -399,7 +1196,7 @@ fn the_core_bootstraps_closures_are_region_closures() {
     let region = bootstrap.source.matches("KU_REGION_CLOSURE(").count();
     let captured = bootstrap.source.matches("KU_CLOSURE(").count();
     assert!(
-        region >= 300 && captured <= 40,
+        region >= 600 && captured <= 250,
         "region closure sites {region}, capturing sites {captured}"
     );
 }
@@ -418,6 +1215,8 @@ class Point {
 function total(points) { let s = 0; for (const p of points) s += p.norm(); return s; }
 function build(n) { const out = []; for (let i = 0; i < n; i++) out.push(new Point(i, i + 1).scaled(2)); return out; }
 export const answer = total(build(10));
+// This closure lands in a later C chunk; its loader call must be declared there too.
+export function loadLater() { return import('./later.js'); }
 "#;
     let hir = kiln_frontend_oxc::parse("split.js", source);
     let program = kiln_ir::compile_module(&hir).expect("compiles");
@@ -574,7 +1373,7 @@ static int write_host_call(void *context, uint16_t operation, uint16_t argc,
 }}
 
 int main(void) {{
-    kiln_host host = {{ write_host_call, NULL }};
+    kiln_host host = {{ write_host_call, NULL, NULL }};
     kiln_value result;
     return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
 }}
@@ -603,7 +1402,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run embedded scheduling graph");
+    let output = command
+        .output_when_launchable()
+        .expect("run embedded scheduling graph");
     assert!(
         output.status.success(),
         "embedded scheduling graph failed: {}",
@@ -683,7 +1484,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     return KILN_C99_OK;
 }}
 int main(void) {{
-    kiln_host host = {{ host_call, NULL }};
+    kiln_host host = {{ host_call, NULL, NULL }};
     kiln_value result;
     return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
 }}
@@ -712,7 +1513,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run delayed dynamic host");
+    let output = command
+        .output_when_launchable()
+        .expect("run delayed dynamic host");
     assert!(
         output.status.success(),
         "delayed dynamic host failed with {:?}: {}",
@@ -742,12 +1545,11 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
     assert!(!launcher.contains("kiln_imports_1[0] ="));
     assert_eq!(launcher.matches("kiln_realm_create(&realm)").count(), 1);
     assert_eq!(launcher.matches("kiln_realm_destroy(realm)").count(), 1);
-    assert_eq!(
-        launcher
-            .matches("kiln_realm_enter(realm, kiln_graph_enter, graph)")
-            .count(),
-        1
-    );
+    // Native async launching can enter the same graph callback from either the initial body
+    // step or a child-selected startup branch. The callback wiring is the contract here; its
+    // number of generated call sites is an implementation detail. The executable star-export
+    // check below verifies that the selected export still reaches its origin at runtime.
+    assert!(launcher.contains("run->status = kiln_realm_enter(realm, kiln_graph_enter, graph);"));
     assert!(!launcher.contains("kiln_graph_enter_module"));
     let (bootstrap, _, _, _) = native_builtin_bootstrap_module(
         &root.cache(),
@@ -832,6 +1634,493 @@ fn native_graph_wiring_uses_resolved_star_export_origins() {
 }
 
 #[test]
+fn native_commonjs_cycle_observes_current_module_exports_assignment() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-commonjs-cycle-module-exports");
+    fs::write(root.path.join("package.json"), r#"{"type":"commonjs"}"#)
+        .expect("write package type");
+    fs::write(
+        root.path.join("range.js"),
+        "class Range {} module.exports = Range; const Comparator = require('./comparator.js'); Range.Comparator = Comparator;",
+    )
+    .expect("write Range module");
+    fs::write(
+        root.path.join("comparator.js"),
+        "const Range = require('./range.js'); class Comparator {} Comparator.Range = Range; module.exports = Comparator;",
+    )
+    .expect("write Comparator module");
+    let entry = root.path.join("main.js");
+    fs::write(
+        &entry,
+        "const Range = require('./range.js'); console.log(Range.Comparator.Range === Range);",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build cyclic CommonJS graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native CommonJS-cycle execution: no C compiler found");
+        return;
+    };
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let report = builder
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native cyclic CommonJS graph builds and runs");
+    assert_eq!(report.stdout, b"true\n");
+}
+
+#[test]
+fn native_commonjs_require_resolve_returns_path_without_evaluating_target() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-commonjs-require-resolve");
+    fs::write(root.path.join("package.json"), r#"{"type":"commonjs"}"#)
+        .expect("write package type");
+    fs::write(
+        root.path.join("target.cjs"),
+        "globalThis.__requireResolveTargetEvaluated = true; module.exports = 42;",
+    )
+    .expect("write resolve target");
+    let entry = root.path.join("main.cjs");
+    fs::write(
+        &entry,
+        "const resolve = require.resolve; const builtin = resolve('node:path'); const local = resolve('./target.cjs'); console.log(builtin === 'node:path', local.endsWith('/target.cjs'), globalThis.__requireResolveTargetEvaluated === undefined);",
+    )
+    .expect("write require.resolve entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build CommonJS require.resolve graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native require.resolve execution: no C compiler found");
+        return;
+    };
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let report = builder
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native require.resolve graph builds and runs");
+    assert_eq!(report.stdout, b"true true true\n");
+}
+
+#[test]
+fn native_commonjs_require_main_points_to_the_entry_module() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-commonjs-require-main");
+    fs::write(root.path.join("package.json"), r#"{"type":"commonjs"}"#)
+        .expect("write package type");
+    fs::write(
+        root.path.join("dep.js"),
+        "module.exports = require.main === module;",
+    )
+    .expect("write dependency");
+    let entry = root.path.join("main.js");
+    fs::write(
+        &entry,
+        "const dep = require('./dep.js'); console.log(require.main === module, dep);",
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build CommonJS require.main graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native CommonJS require.main execution: no C compiler found");
+        return;
+    };
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let report = builder
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native CommonJS require.main graph builds and runs");
+    assert_eq!(report.stdout, b"true false\n");
+}
+
+#[test]
+fn native_graph_cycles_instantiate_live_export_cells_before_evaluation() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-esm-cycle-live-cell");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write package type");
+    fs::write(
+        root.path.join("a.mjs"),
+        "import { readB } from './b.mjs'; export let value = 'a'; export function readA() { return value; } export function change() { value = 'changed'; } console.log(readB()); change(); console.log(readB());",
+    )
+    .expect("write cycle entry");
+    fs::write(
+        root.path.join("b.mjs"),
+        "import { readA, value } from './a.mjs'; export function readB() { return readA() + ':' + value; }",
+    )
+    .expect("write cycle dependency");
+    let entry = root.path.join("a.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build cyclic ESM graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native ESM-cycle execution: no C compiler found");
+        return;
+    };
+    let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
+    let report = builder
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native cyclic ESM graph builds and runs");
+    if report.exit_code != Some(0) || report.stdout != b"a:a\nchanged:changed\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("result: {:?}", report.result);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(
+        report.exit_code,
+        Some(0),
+        "native ESM cycle must exit successfully"
+    );
+    assert_eq!(report.stdout, b"a:a\nchanged:changed\n");
+}
+
+#[test]
+fn native_graph_commonjs_require_of_esm_returns_the_module_namespace() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-cjs-requires-esm-namespace");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write package type");
+    fs::write(
+        root.path.join("main.cjs"),
+        "const dependency = require('./dependency');\n\
+         console.log(typeof dependency, dependency.answer);\n",
+    )
+    .expect("write CommonJS entry");
+    fs::write(
+        root.path.join("dependency.js"),
+        "export const answer = 42;\n",
+    )
+    .expect("write ESM dependency");
+    let entry = root.path.join("main.cjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build CommonJS to ESM graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native CommonJS-to-ESM execution: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("CommonJS can synchronously require an ESM dependency");
+    if report.exit_code != Some(0) || report.stdout != b"object 42\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(report.exit_code, Some(0));
+    assert_eq!(report.stdout, b"object 42\n");
+}
+
+#[test]
+fn native_graph_sync_require_rejects_transitive_top_level_await_with_node_code() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-cjs-requires-transitive-tla");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write package type");
+    fs::write(
+        root.path.join("main.cjs"),
+        "try { require('./middle.js'); } catch (error) { console.log(error.code); }\n",
+    )
+    .expect("write CommonJS entry");
+    fs::write(
+        root.path.join("middle.js"),
+        "import './async-leaf.js'; export const ready = true;\n",
+    )
+    .expect("write intermediate ESM module");
+    fs::write(
+        root.path.join("async-leaf.js"),
+        "await Promise.resolve(); export const ready = true;\n",
+    )
+    .expect("write transitive top-level-await module");
+    let entry = root.path.join("main.cjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build CommonJS to transitive async ESM graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native transitive TLA require check: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("transitive TLA graph builds and runs");
+    if report.exit_code != Some(0) || report.stdout != b"ERR_REQUIRE_ASYNC_MODULE\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(report.exit_code, Some(0));
+    assert_eq!(report.stdout, b"ERR_REQUIRE_ASYNC_MODULE\n");
+}
+
+#[test]
+fn native_graph_commonjs_loop_reassigns_a_local_function_binding() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-commonjs-loop-current-binding");
+    fs::write(
+        root.path.join("main.cjs"),
+        r#"
+function series(onDone, count) {
+  let current = onDone;
+  for (let j = count - 1; j >= 0; j--) {
+    const done = current;
+    current = () => done();
+  }
+  return current();
+}
+console.log(series(() => 'done', 2));
+"#,
+    )
+    .expect("write CommonJS local-binding regression");
+    let entry = root.path.join("main.cjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build CommonJS local-binding graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native CommonJS local-binding check: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("CommonJS local-binding graph builds and runs");
+    if report.exit_code != Some(0) || report.stdout != b"done\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(report.exit_code, Some(0));
+    assert_eq!(report.stdout, b"done\n");
+}
+
+#[test]
+fn native_graph_cycle_keeps_builtin_closure_and_namespace_bindings_live() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-esm-cycle-namespace-builtin");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write package type");
+    fs::write(
+        root.path.join("a.mjs"),
+        "import { before, read, describe } from './b.mjs';\n\
+         console.log(before());\n\
+         export let value = 'first';\n\
+         console.log(read());\n\
+         value = 'second';\n\
+         console.log(read());\n\
+         console.log(describe());\n",
+    )
+    .expect("write cycle entry");
+    fs::write(
+        root.path.join("b.mjs"),
+        "import { basename } from 'node:path';\n\
+         import * as a from './a.mjs';\n\
+         export function before() {\n\
+           let direct = false; let descriptor = false;\n\
+           try { a.value; } catch (error) { direct = error instanceof ReferenceError; }\n\
+           try { Object.getOwnPropertyDescriptor(a, 'value'); } catch (error) { descriptor = error instanceof ReferenceError; }\n\
+           return `tdz:${direct}:${descriptor}`;\n\
+         }\n\
+         export function read() { return `${basename('/tmp/item.txt')}:${a.value}`; }\n\
+         export function describe() { const d = Object.getOwnPropertyDescriptor(a, 'value'); return `descriptor:${d.value}:${typeof d.value}:${d.writable}`; }\n",
+    )
+    .expect("write cycle dependency");
+    let entry = root.path.join("a.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build cyclic ESM graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native ESM namespace-cycle execution: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native cyclic namespace graph builds and runs");
+    if report.exit_code != Some(0)
+        || report.stdout
+            != b"tdz:true:true\nitem.txt:first\nitem.txt:second\ndescriptor:second:string:true\n"
+    {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("result: {:?}", report.result);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(
+        report.exit_code,
+        Some(0),
+        "native namespace cycle must exit successfully"
+    );
+    assert_eq!(
+        report.stdout,
+        b"tdz:true:true\nitem.txt:first\nitem.txt:second\ndescriptor:second:string:true\n"
+    );
+}
+
+#[test]
+fn native_graph_cycle_supports_mutually_reexported_namespaces() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let root = TestDirectory::new("kiln-native-esm-cycle-namespace-reexports");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#).expect("write package type");
+    fs::write(
+        root.path.join("a.mjs"),
+        "import { peer as a } from './b.mjs';\n\
+         export let label = 'A';\n\
+         export * as peer from './b.mjs';\n\
+         console.log(`${a.label}:${a.peer.label}`);\n\
+         label = 'A2';\n\
+         console.log(`${a.label}:${a.peer.label}`);\n",
+    )
+    .expect("write namespace cycle entry");
+    fs::write(
+        root.path.join("b.mjs"),
+        "export const label = 'B';\n\
+         export * as peer from './a.mjs';\n",
+    )
+    .expect("write namespace cycle dependency");
+    let entry = root.path.join("a.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build mutually re-exported namespace graph");
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native namespace-re-export cycle execution: no C compiler found");
+        return;
+    };
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("native mutually re-exported namespace graph builds and runs");
+    if report.exit_code != Some(0) || report.stdout != b"A:B\nA2:B\n" {
+        eprintln!("exit_code: {:?}", report.exit_code);
+        eprintln!("result: {:?}", report.result);
+        eprintln!("stderr: {}", String::from_utf8_lossy(&report.stderr));
+        eprintln!("stdout: {}", String::from_utf8_lossy(&report.stdout));
+    }
+    assert_eq!(
+        report.exit_code,
+        Some(0),
+        "namespace re-export cycle exits successfully"
+    );
+    assert_eq!(report.stdout, b"A:B\nA2:B\n");
+}
+
+#[test]
 fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -892,10 +2181,10 @@ fn native_graph_reserves_commonjs_wrapper_bindings_for_the_launcher() {
         logical_module_path(graph.project_root(), &modules[commonjs_index].0.path)
             .expect("logical CommonJS path");
     assert!(launcher.contains("    kiln_value imports_0[5];"));
-    assert!(launcher.contains("#define kiln_imports_0 (graph->imports_0)"));
+    assert!(launcher.contains("#define kiln_imports_0 (graph->instance->imports_0)"));
     assert!(launcher.contains("_commonjs_wrapper(kiln_imports_0, (size_t)5, "));
     assert!(launcher.contains(&format!(
-        "kiln_commonjs_require_{commonjs_index}, graph, kiln_graph_gc_visit_roots, graph)"
+        "kiln_commonjs_require_{commonjs_index}, kiln_commonjs_resolve_{commonjs_index}, graph, kiln_graph_gc_visit_registered_roots, graph)"
     )));
     assert!(launcher.contains(&format!(
             "{}_commonjs_wrapper(kiln_imports_{commonjs_index}, (size_t)5, {}, (size_t){}, {}, (size_t){}",
@@ -1176,9 +2465,145 @@ fn native_module_addressed_actor_calls_and_transfers() {
     assert!(!disabled.status.success());
     assert!(
         String::from_utf8_lossy(&disabled.stderr)
-            .contains("kiln:actors requires enabled Kiln extensions"),
+            .contains("TypeError: kiln:actors requires enabled Kiln extensions"),
         "{}",
         String::from_utf8_lossy(&disabled.stderr)
+    );
+}
+
+#[test]
+fn native_actor_links_absolute_names_and_refuses_computed_ones_by_name() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-actor-names");
+    let root = project.path.canonicalize().expect("canonical project");
+    let counter = "import { Actor } from 'kiln:actors'; export class Counter extends Actor { increment() { return 1; } }";
+    for name in ["absolute", "url", "computed"] {
+        fs::write(root.join(format!("{name}.mjs")), counter).expect("write actor module");
+    }
+    let absolute = root.join("absolute.mjs");
+    let url = Url::from_file_path(root.join("url.mjs")).expect("file URL");
+    let computed = root.join("computed.mjs");
+    let entry = root.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ spawnActor }} from 'kiln:actors';\n\
+             for (const owner of [await spawnActor({{ module: {absolute:?}, export: 'Counter' }}), await spawnActor({{ module: {url:?}, export: 'Counter' }})]) {{ console.log(await owner.ref.call('increment', [])); await owner.stop(); }}\n\
+             const computed = [{computed:?}][process.argv.length > 100 ? 1 : 0];\n\
+             try {{ await spawnActor({{ module: computed, export: 'Counter' }}); }} catch (error) {{ console.log(error.name, error.message); }}\n",
+            url = url.as_str(),
+        ),
+    )
+    .expect("write actor entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build actor graph");
+    assert!(
+        graph.module(&absolute).is_some(),
+        "absolute path literal was not linked"
+    );
+    assert!(
+        graph.module(root.join("url.mjs")).is_some(),
+        "file URL literal was not linked"
+    );
+    assert!(
+        graph.module(&computed).is_none(),
+        "computed name was linked"
+    );
+    let built = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(root.join("program"), NativeProfile::Dev).with_node(true),
+        )
+        .expect("build native actor graph");
+    let output = Command::new(&built.output)
+        .output_when_launchable()
+        .expect("run native actor graph");
+    assert!(
+        output.status.success(),
+        "actor process failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout,
+        format!(
+            "1\n1\nTypeError actor module `{}` was not linked into this build: a native build links only the actor modules a spawnActor call names at compile time (a string literal, new URL(literal, import.meta.url), or a const holding one); this name was computed at run time\n",
+            computed.display()
+        )
+    );
+}
+
+#[test]
+fn native_worker_refuses_an_unlinked_target_by_name_then_exits() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Ok(toolchain) = Toolchain::discover() else {
+        return;
+    };
+    let project = TestDirectory::new("kiln-native-worker-unlinked");
+    let root = project.path.canonicalize().expect("canonical project");
+    fs::write(
+        root.join("linked.mjs"),
+        "import { parentPort } from 'node:worker_threads'; parentPort.postMessage('linked ran');",
+    )
+    .expect("write linked worker");
+    fs::write(
+        root.join("computed.mjs"),
+        "import { parentPort } from 'node:worker_threads'; parentPort.postMessage('computed ran');",
+    )
+    .expect("write computed worker");
+    let entry = root.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { Worker as Thread } from 'node:worker_threads';\n\
+         const run = (worker) => new Promise((resolve) => { worker.on('message', (m) => console.log(m)); worker.on('error', (e) => console.log(e.name, e.message)); worker.on('exit', (code) => { console.log('exit', code); resolve(); }); });\n\
+         await run(new Thread(new URL('./linked.mjs', import.meta.url)));\n\
+         const name = ['comp', 'uted.mjs'].join('');\n\
+         await run(new Thread(new URL('./' + name, import.meta.url)));\n",
+    )
+    .expect("write worker entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build worker graph");
+    assert!(
+        graph.module(root.join("linked.mjs")).is_some(),
+        "renamed Worker target was not linked"
+    );
+    let built = project
+        .builder(toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions::new(root.join("program"), NativeProfile::Dev).with_node(true),
+        )
+        .expect("build native worker graph");
+    let output = Command::new(&built.output)
+        .output_when_launchable()
+        .expect("run native worker graph");
+    assert!(
+        output.status.success(),
+        "worker process failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "linked ran\nexit 0\nError Cannot find module '{}' was not linked into this build: a native build links only the worker modules a new Worker call names at compile time (a string literal, new URL(literal, import.meta.url), path.join(__dirname, literal) or __filename); this name was computed at run time\nexit 1\n",
+            root.join("computed.mjs").display()
+        )
     );
 }
 
@@ -1845,6 +3270,533 @@ fn native_namespace_import_of_commonjs_resolves_property_values() {
 }
 
 #[test]
+fn native_linked_child_entry_preserves_preloads_arguments_and_codegen_policy() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-linked-child");
+    let parent = root.path.join("parent.mjs");
+    let preload = root.path.join("preload.mjs");
+    let child = root.path.join("child.mjs");
+    let commonjs = root.path.join("child.cjs");
+    fs::write(&parent, "console.log('parent');").expect("write parent");
+    fs::write(
+        &preload,
+        "await Promise.resolve(); globalThis.preloaded = 'ready';",
+    )
+    .expect("write preload");
+    fs::write(
+        &child,
+        r#"
+import process, { argv, execArgv } from 'node:process';
+await Promise.resolve();
+console.log(preloaded, argv === process.argv, execArgv === process.execArgv, argv[2], execArgv[0]);
+console.log(argv[1].endsWith('child.mjs'), execArgv[1], execArgv[2].endsWith('preload.mjs'));
+console.log(eval(42));
+try { eval('1 + 1'); } catch (error) { console.log(error.name); }
+let converted = 0;
+try { Function({ toString() { converted++; return 'return 1'; } }); }
+catch (error) { console.log(error.name, converted); }
+"#,
+    )
+    .expect("write child");
+    fs::write(
+        &commonjs,
+        "console.log(require.main === module, __filename.endsWith('child.cjs')); ",
+    )
+    .expect("write CommonJS child");
+    let graph = ModuleGraph::build_node_with_includes(
+        &parent,
+        NodeRuntimeResolver::new(&root.path).expect("resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+        vec![
+            (preload.clone(), ModuleSource::Source),
+            (child.clone(), ModuleSource::Source),
+            (commonjs.clone(), ModuleSource::CommonJs),
+        ],
+    )
+    .expect("build child graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("link child graph");
+    let output = Command::new(&report.output)
+        .arg("--disallow-code-generation-from-strings")
+        .arg("--import")
+        .arg(&preload)
+        .arg(&child)
+        .arg("payload")
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("launch linked child");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ready true true payload --disallow-code-generation-from-strings\ntrue --import true\n42\nEvalError\nEvalError 1\n");
+    let refused = Command::new(&report.output)
+        .arg("--import")
+        .arg(root.path.join("unlinked.mjs"))
+        .arg(&child)
+        .output_when_launchable()
+        .expect("reject unlinked preload");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("source preload"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("unlinked.mjs"));
+    let commonjs_output = Command::new(&report.output)
+        .arg("--disallow-code-generation-from-strings")
+        .arg(&commonjs)
+        .output_when_launchable()
+        .expect("launch linked CommonJS child");
+    assert!(
+        commonjs_output.status.success(),
+        "status {:?}, stdout: {}, stderr: {}",
+        commonjs_output.status.code(),
+        String::from_utf8_lossy(&commonjs_output.stdout),
+        String::from_utf8_lossy(&commonjs_output.stderr)
+    );
+    assert_eq!(commonjs_output.stdout, b"true true\n");
+    let parent_output = Command::new(&report.output)
+        .output_when_launchable()
+        .expect("run original parent");
+    assert!(parent_output.status.success());
+    assert_eq!(parent_output.stdout, b"parent\n");
+}
+
+#[test]
+fn native_exec_file_sync_runs_linked_child_and_captures_both_streams() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-exec-file-sync-linked-child");
+    let parent = root.path.join("parent.mjs");
+    let child = root.path.join("child.mjs");
+    fs::write(
+        &child,
+        "process.stdout.write('child stdout\\n'); process.stderr.write('child stderr\\n'); if (process.argv.includes('nonzero')) process.exitCode = 7;",
+    )
+    .expect("write child entry");
+    fs::write(
+        &parent,
+        "import { execFileSync, spawnSync } from 'node:child_process';\n\
+         import process from 'node:process';\n\
+         const child = new URL('./child.mjs', import.meta.url).pathname;\n\
+         const sync = spawnSync(process.execPath, ['--disallow-code-generation-from-strings', child]);\n\
+         console.log('spawn:', typeof sync.pid, sync.pid > 0, sync.status, sync.signal, sync.stdout.toString('utf8').trim());\n\
+         const fileOutput = execFileSync(process.execPath, ['--disallow-code-generation-from-strings', child]);\n\
+         console.log('exec-args:', fileOutput.toString('utf8').trim());\n\
+         const output = execFileSync(process.execPath, ['--disallow-code-generation-from-strings', child], { encoding: 'utf8' });\n\
+         console.log('captured:', output.trim());\n\
+         try { execFileSync(process.execPath, ['--disallow-code-generation-from-strings', child, 'nonzero'], { encoding: 'utf8' }); }\n\
+         catch (error) { console.log('status:', error.status, 'signal:', error.signal, 'stdout:', typeof error.stdout, error.stdout.trim(), 'stderr:', typeof error.stderr, error.stderr.trim()); }\n\
+         if (process.platform !== 'win32') {\n\
+           const execOptions = execFileSync('/usr/bin/true', { encoding: 'utf8' });\n\
+           const spawnOptions = spawnSync('/usr/bin/true', { encoding: 'utf8' });\n\
+           console.log('options-overload:', typeof execOptions, execOptions.length, typeof spawnOptions.stdout, spawnOptions.status);\n\
+           try { execFileSync('/bin/sh', ['-c', 'kill -TERM $$'], { encoding: 'utf8' }); }\n\
+           catch (error) { console.log('signal:', error.signal, error.status, typeof error.stderr); }\n\
+         }\n",
+    )
+    .expect("write parent entry");
+    let graph = ModuleGraph::build_node_with_includes(
+        &parent,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+        vec![(child, ModuleSource::Source)],
+    )
+    .expect("build graph with lazy linked child");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("build execFileSync graph");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run execFileSync graph under GC stress");
+    assert!(
+        output.status.success(),
+        "native graph failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"spawn: number true 0 null child stdout\nexec-args: child stdout\ncaptured: child stdout\nstatus: 7 signal: null stdout: string child stdout stderr: string child stderr\noptions-overload: string 0 string 0\nsignal: SIGTERM null string\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn native_declared_esm_include_stays_lazy_and_supports_computed_require() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-declared-esm");
+    let included = root.path.join("included.mjs");
+    let entry = root.path.join("main.cjs");
+    fs::write(&included, "globalThis.runs++; export const answer = 42;").expect("write lazy ESM");
+    fs::write(&entry, "globalThis.runs = 0; const path = __dirname + '/included.mjs'; console.log('before', runs); const first = require(path); console.log(first.answer, runs, first === require(path));").expect("write computed require");
+    let graph = ModuleGraph::build_node_with_includes(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+        vec![(included, ModuleSource::Source)],
+    )
+    .expect("build declared ESM graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("link declared ESM graph");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run declared ESM graph");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"before 0\n42 1 true\n");
+}
+
+#[test]
+fn native_dynamic_import_evaluates_runtime_module_with_linked_package_import_and_cache_identity() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping runtime module integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-runtime-module");
+    fs::create_dir_all(root.path.join("node_modules/pkg/src")).expect("create linked package");
+    fs::write(
+        root.path.join("node_modules/pkg/package.json"),
+        r#"{"name":"pkg","type":"module","exports":{"./*":"./src/*.js"}}"#,
+    )
+    .expect("write package exports");
+    fs::write(
+        root.path.join("node_modules/pkg/src/runtime.js"),
+        "export const value = 42;\n",
+    )
+    .expect("write linked runtime module");
+    let generated = root.path.join("generated.mjs");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ writeFileSync }} from 'node:fs';\n\
+             import {{ value }} from 'pkg/runtime';\n\
+             const path = '{}';\n\
+             writeFileSync(path, \"import {{ value }} from 'pkg/runtime'; import * as runtime from './node_modules/pkg/src/runtime.js'; function helper() {{ return runtime.value + value - value; }} export let count = 0; export function answer() {{ return helper(); }} export function bump() {{ count++; return count; }}\");\n\
+             const computedUrl = new URL('./node_modules/pkg/src/runtime.js', import.meta.url).href;\n\
+             console.log((await import(computedUrl)) === await import('pkg/runtime'));\n\
+             const url = 'file://' + path;\n\
+             const first = await import(url);\n\
+             const second = await import(url);\n\
+             const queried = await import(url + '?version=1#part');\n\
+             const queriedAgain = await import(url + '?version=1#part');\n\
+             const otherQuery = await import(url + '?version=2#part');\n\
+             const otherFragment = await import(url + '?version=1#other');\n\
+             console.log(queried === queriedAgain, queried === first, queried === otherQuery, queried === otherFragment, queried.bump(), queriedAgain.count, otherQuery.count, otherFragment.count);\n\
+             const descriptor = Object.getOwnPropertyDescriptor(first, 'count');\n\
+             const directWrite = Reflect.set(first, 'count', 99);\n\
+             const proxyWrite = Reflect.set(new Proxy(first, {{}}), 'count', 99);\n\
+             console.log(value, first.answer(), first === second, descriptor.value, descriptor.writable, descriptor.enumerable, descriptor.configurable, directWrite, proxyWrite, first.bump(), first.count);\n\
+             writeFileSync(path + '.bad', 'export = ;');\n\
+             try {{ await import('file://' + path + '.bad'); }}\n\
+             catch (error) {{ console.log(error.name); }}\n",
+            generated.display()
+        ),
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("runtime module graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("runtime module graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run runtime module with GC stress");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"true\ntrue false false false 1 1 0 0\n42 42 true 0 true true false false false 1 1\nSyntaxError\n",
+        "stderr={}, exit={:?}",
+        String::from_utf8_lossy(&output.stderr),
+        output.status.code()
+    );
+}
+
+#[test]
+fn native_runtime_module_syntax_failure_has_no_import_or_body_side_effects() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping runtime module preflight integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-runtime-module-preflight");
+    fs::write(
+        root.path.join("package.json"),
+        r#"{"name":"pkg","type":"module"}"#,
+    )
+    .expect("write package manifest");
+    fs::write(
+        root.path.join("tsconfig.json"),
+        r#"{"compilerOptions":{"baseUrl":".","paths":{"pkg/*":["src/*.mjs"]}}}"#,
+    )
+    .expect("write path alias");
+    fs::create_dir_all(root.path.join("src")).expect("create package source directory");
+    fs::write(
+        root.path.join("src/runtime.mjs"),
+        "globalThis.dependencyRuns++; export const value = 42;\n",
+    )
+    .expect("write linked dependency");
+    fs::write(
+        root.path.join("preserver.mjs"),
+        "export const load = () => import('pkg/runtime');\n",
+    )
+    .expect("write lazy graph edge");
+    let generated = root.path.join("generated.mjs");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import './preserver.mjs';\n\
+             import {{ writeFileSync }} from 'node:fs';\n\
+             globalThis.dependencyRuns = 0;\n\
+             const path = '{}';\n\
+             writeFileSync(path, \"import {{ value }} from 'pkg/runtime'; globalThis.bodyRuns = 1; export const = value;\");\n\
+             const url = 'file://' + path;\n\
+             let first, second;\n\
+             try {{ await import(url); }} catch (error) {{ first = error; }}\n\
+             try {{ await import(url); }} catch (error) {{ second = error; }}\n\
+             console.log(first && first.name, first === second, globalThis.dependencyRuns, globalThis.bodyRuns);\n",
+            generated.display()
+        ),
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build runtime module graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("runtime module graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run runtime module preflight with GC stress");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"SyntaxError true 0 undefined\n",
+        "stderr={}, exit={:?}",
+        String::from_utf8_lossy(&output.stderr),
+        output.status.code()
+    );
+}
+
+#[test]
+fn native_runtime_module_reset_keeps_old_namespace_closure_and_collects_safely() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping runtime module reset integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-runtime-module-reset");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package manifest");
+    let generated = root.path.join("generated.mjs");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ writeFileSync }} from 'node:fs';\n\
+             const loader = process.__kilnNativeModules.__kilnHostModuleLoader;\n\
+             loader('registerRunner', import.meta.url);\n\
+             const path = '{}';\n\
+             const moduleSource = value => 'export const value = ' + value + '; export function retained() {{ return value; }}';\n\
+             writeFileSync(path, moduleSource(1));\n\
+             const url = 'file://' + path;\n\
+             const old = await import(url);\n\
+             loader('reset');\n\
+             writeFileSync(path, moduleSource(2));\n\
+             const current = await import(url);\n\
+             console.log(old === current, old.value, current.value, old.retained(), current.retained());\n",
+            generated.display()
+        ),
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build runtime module graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("runtime module graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run runtime module reset with GC stress");
+    assert!(
+        output.status.success(),
+        "stressed runtime module reset failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"false 1 2 1 2\n");
+}
+
+#[test]
+fn native_runtime_module_reset_releases_old_cache_generation() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping runtime module cache collection: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-runtime-module-cache-collection");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package manifest");
+    let generated = root.path.join("generated.mjs");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        format!(
+            "import {{ writeFileSync }} from 'node:fs';\n\
+             const loader = process.__kilnNativeModules.__kilnHostModuleLoader;\n\
+             loader('registerRunner', import.meta.url);\n\
+             async function probe() {{\n\
+             const path = '{}';\n\
+             const source = generation => 'export const value = ' + generation + '; export function check(weak) {{ setTimeout(() => {{ globalThis.gcJunk = Array.from({{length: 2000}}, (_, i) => ({{i}})); globalThis.gcJunk = null; setTimeout(() => console.log(weak.deref() === undefined, value), 0); }}, 0); }}';\n\
+             writeFileSync(path, source(1));\n\
+             const url = 'file://' + path;\n\
+             let old = await import(url);\n\
+             loader('reset');\n\
+             writeFileSync(path, source(2));\n\
+             const current = await import(url);\n\
+             const weak = new WeakRef(old);\n\
+             old = null;\n\
+             current.check(weak);\n\
+             }}\n\
+             await probe();\n",
+            generated.display()
+        ),
+    )
+    .expect("write entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build runtime module graph");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .build_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("runtime module graph builds");
+    let output = Command::new(&report.output)
+        .env("KILN_GC_STRESS", "1")
+        .output_when_launchable()
+        .expect("run runtime module cache collection with GC stress");
+    assert!(
+        output.status.success(),
+        "runtime module cache collection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"true 2\n",
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn native_dynamic_import_resolves_opentui_and_in_graph_modules() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -2255,6 +4207,9 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String("embedded\0tail=".into()),
             Constant::Number(0.1_f64.to_bits()),
@@ -2272,6 +4227,7 @@ fn embedded_shared_library_calls_host_without_cli_runtime_and_reuses_cache() {
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let colliding_output = root.path.join("embedded-header.H");
     let collision = builder
@@ -2427,7 +4383,7 @@ struct capture {
 
 int main(void) {
     struct capture capture = {{0}, 0, 0};
-    kiln_host host = {capture_host_call, &capture};
+    kiln_host host = {capture_host_call, &capture, NULL};
     kiln_value result;
     int status = "#,
     );
@@ -2468,7 +4424,9 @@ int main(void) {
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run embedding host");
+    let output = command
+        .output_when_launchable()
+        .expect("run embedding host");
     assert!(
         output.status.success(),
         "embedding host failed: {}",
@@ -2497,11 +4455,15 @@ fn owned_result_graph_api_preserves_uncaught_thrown_scalars() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::String("thrown\0value".into())],
             code: vec![Instruction::Const(0), Instruction::Throw],
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -2578,7 +4540,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run throw graph host");
+    let output = command
+        .output_when_launchable()
+        .expect("run throw graph host");
     assert!(
         output.status.success(),
         "throw graph host failed with {:?}: {}",
@@ -2609,6 +4573,9 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(42.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -2619,6 +4586,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -2633,6 +4601,9 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(99.0_f64.to_bits())],
             code: vec![
                 Instruction::LoadLocal(0),
@@ -2647,6 +4618,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".into()],
         imports: vec![ImportBinding {
@@ -2688,12 +4660,51 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
     let launcher =
         graph_launcher_source(&first_graph, &first_modules, &NativeRealmPolicy::default())
             .expect("launcher emits");
+    let second_modules = second_graph
+        .modules()
+        .map(|node| {
+            (
+                node,
+                kiln_backend_c::emit_module(&node.program).expect("sibling module emits"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let sibling_launcher = graph_launcher_source(
+        &second_graph,
+        &second_modules,
+        &NativeRealmPolicy::default(),
+    )
+    .expect("sibling launcher emits");
+    let first_difference = launcher
+        .lines()
+        .zip(sibling_launcher.lines())
+        .enumerate()
+        .find(|(_, (left, right))| left != right)
+        .map(|(line, (left, right))| (line + 1, left, right));
+    assert!(
+        first_difference.is_none() && launcher.len() == sibling_launcher.len(),
+        "logical sibling launcher sources differ: {first_difference:?}, sizes {} and {}",
+        launcher.len(),
+        sibling_launcher.len()
+    );
     let main = launcher
         .find("int main(int argc, char **argv)")
         .expect("launcher has main");
-    // The linkage arrays are the realm's graph context's fields (realms issue 04 step 5).
+    // Generated code is shared, but mutable linker slots are owned by the explicit instance.
     assert!(launcher[..main].contains("    kiln_value exports_"));
     assert!(launcher[..main].contains("    kiln_value imports_"));
+    assert!(launcher[..main].contains("typedef struct kiln_graph_module_instance {"));
+    assert!(launcher[..main].contains("kiln_graph_module_instance *instance;"));
+    assert!(launcher[..main].contains(
+        "graph->instance = (kiln_graph_module_instance *)calloc(1, sizeof *graph->instance);"
+    ));
+    assert!(launcher[..main].contains("graph->host.module_context = graph;"));
+    assert!(launcher[..main].contains("(graph->instance->exports_"));
+    assert!(launcher[..main].contains("&graph->instance->module_states[index].result"));
+    assert!(launcher[..main].contains("kiln_graph_realm_state realm_state;"));
+    assert!(launcher[..main].contains("kiln_graph_realm_state *realm;"));
+    assert!(launcher[..main].contains("graph->realm = &run->realm_state;"));
+    assert!(launcher[..main].contains("graph->realm->cli"));
     assert!(!launcher.contains("static kiln_value kiln_exports_"));
     assert!(!launcher.contains("static kiln_value kiln_imports_"));
     assert!(!launcher[main..].contains("kiln_value exports_"));
@@ -2750,6 +4761,9 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(43.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -2760,6 +4774,7 @@ fn graph_build_reuses_sibling_objects_across_different_roots() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -2961,6 +4976,9 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Number(7.0_f64.to_bits())],
             code: vec![
                 Instruction::Const(0),
@@ -2971,6 +4989,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -2985,11 +5004,15 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![Instruction::LoadLocal(0), Instruction::Return],
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".into()],
         imports: vec![ImportBinding {
@@ -3142,7 +5165,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         .expect("compile wrapper source");
     objects.push(wrapper_object);
     let target = target_identity(toolchain.identity());
-    let (provider, _, _) = builder
+    let (provider, _, _, provider_link_arguments) = builder
         .cached_number_provider(&target)
         .expect("load Realm provider");
     let provider_archive = root.path.join("realm-provider.a");
@@ -3150,6 +5173,13 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
     let library = root.path.join(shared_library_name());
     let mut manual_link = LinkOptions::default();
     manual_link.runtime_libraries.push(provider_archive);
+    // Manual fixture links must honor the same provider contract as NativeBuilder,
+    // including platform libraries required by an explicitly configured GUI archive.
+    manual_link.extra_args.extend(
+        provider_link_arguments
+            .into_iter()
+            .map(std::ffi::OsString::from),
+    );
     if cfg!(not(target_os = "windows")) {
         manual_link.libraries.push("m".to_owned());
     }
@@ -3186,7 +5216,7 @@ fn shared_graph_wrapper_emits_and_links_without_static_value_arrays() {
         .link_executable(&[host_object], &host_executable, &host_link)
         .expect("link null-host executable");
     let output = Command::new(&host_executable)
-        .output()
+        .output_when_launchable()
         .expect("run null-host executable");
     assert!(
         output.status.success(),
@@ -3216,6 +5246,9 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![
                 Instruction::HostCall {
@@ -3229,6 +5262,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -3243,6 +5277,9 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
         program: Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![
                 Instruction::LoadLocal(0),
@@ -3255,6 +5292,7 @@ fn shared_graph_proxy_preserves_host_strings_across_module_boundaries() {
             local_count: 1,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         dependencies: vec!["./dep.js".into()],
         imports: vec![ImportBinding {
@@ -3354,7 +5392,7 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
 
 int main(void) {{
     host_context context = {{0, {{0}}, {{0, 0, NULL}}}};
-    kiln_host host = {{host_call, &context}};
+    kiln_host host = {{host_call, &context, NULL}};
     kiln_value result;
     int index;
     for (index = 0; index < 64; ++index) {{
@@ -3415,7 +5453,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run shared graph host");
+    let output = command
+        .output_when_launchable()
+        .expect("run shared graph host");
     assert!(
         output.status.success(),
         "shared graph host failed with {:?}: {}",
@@ -3446,11 +5486,15 @@ fn content_named_loaders_allow_same_basename_libraries_in_one_host() {
     let program = |value: f64| Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::Number(value.to_bits())],
         code: vec![Instruction::Const(0), Instruction::Return],
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
     let first = builder
@@ -3536,7 +5580,7 @@ int main(void) {{
         .link_executable(&[host_object], &host_executable, &link_options)
         .expect("link same-basename host");
     let output = Command::new(&host_executable)
-        .output()
+        .output_when_launchable()
         .expect("run same-basename host");
     assert!(
         output.status.success(),
@@ -3603,6 +5647,17 @@ fn executable_graph_omits_unused_modules_only_with_package_permission() {
     assert!(names.contains(std::ffi::OsStr::new("used.js")));
     assert!(!names.contains(std::ffi::OsStr::new("index.js")));
     assert!(!names.contains(std::ffi::OsStr::new("unused.js")));
+
+    let (reduced, _) = graph
+        .reduce_to_live(&selected.demand())
+        .expect("rewrite the live import around the omitted barrel");
+    let entry_node = reduced.module(&entry).expect("retained entry module");
+    assert!(
+        entry_node
+            .dependencies
+            .iter()
+            .any(|dependency| { dependency.target.ends_with("node_modules/example/used.js") })
+    );
 }
 
 #[test]
@@ -3648,6 +5703,40 @@ fn executable_graph_keeps_unused_import_without_package_permission() {
             .iter()
             .any(|node| node.path.ends_with("node_modules/example/index.js"))
     );
+}
+
+#[test]
+fn acyclic_namespace_providers_are_preinstantiated_for_live_exports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-acyclic-live-namespace");
+    fs::write(project.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let provider = project.path.join("provider.mjs");
+    fs::write(
+        &provider,
+        "export let value = 1; export function update(next) { value = next; }",
+    )
+    .expect("write namespace provider");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import * as ns from './provider.mjs'; export { ns };",
+    )
+    .expect("write namespace importer");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build namespace graph");
+
+    let preinstantiated = graph::preinstantiated_module_paths(&graph);
+    let provider = fs::canonicalize(provider).expect("canonical provider path");
+    let entry = fs::canonicalize(entry).expect("canonical entry path");
+    assert!(preinstantiated.contains(&provider));
+    assert!(!preinstantiated.contains(&entry));
 }
 
 #[test]
@@ -3805,6 +5894,241 @@ fn executable_graph_full_namespace_demand_overrides_a_partial_demand() {
 }
 
 #[test]
+fn executable_graph_namespace_reexport_demand_keeps_provider_exports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-full-namespace-reexport-demand");
+    fs::write(project.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let provider = project.path.join("provider.js");
+    fs::write(
+        &provider,
+        "export function used() { return 42; } export function otherwiseUnused() { return 7; }",
+    )
+    .expect("write namespace provider");
+    fs::write(
+        project.path.join("barrel.js"),
+        "export * as helpers from './provider.js';",
+    )
+    .expect("write namespace re-export");
+    let entry = project.path.join("main.cjs");
+    fs::write(
+        &entry,
+        "const { helpers } = require('./barrel.js'); console.log(helpers.used());",
+    )
+    .expect("write CommonJS entry");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable graph");
+    let provider = fs::canonicalize(provider).expect("canonical provider");
+    let provider_node = graph.module(&provider).expect("provider node");
+    let barrel = fs::canonicalize(project.path.join("barrel.js")).expect("canonical barrel");
+    let barrel_node = graph.module(&barrel).expect("barrel node");
+    let namespace_import = barrel_node
+        .program
+        .imports
+        .iter()
+        .position(|import| import.imported == kiln_ir::NAMESPACE_IMPORT)
+        .expect("barrel namespace import");
+    assert!(
+        selected
+            .live_imports
+            .contains(&(barrel.clone(), namespace_import)),
+        "the namespace import that backs the re-export must be linked"
+    );
+    let demanded = selected
+        .live_export_slots
+        .get(&provider)
+        .expect("namespace re-export requires the provider namespace");
+    for export in &provider_node.program.exports {
+        assert!(
+            demanded.contains(&export.local_slot),
+            "namespace member {} was not retained",
+            export.exported
+        );
+    }
+    assert!(!selected.partial_namespace_members.contains_key(&provider));
+}
+
+#[test]
+fn executable_graph_named_reexport_demand_keeps_backing_imports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-named-reexport-import-demand");
+    fs::write(project.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let provider = project.path.join("provider.js");
+    fs::write(
+        &provider,
+        "export function used() { return 42; } export function otherwiseUnused() { return 7; }",
+    )
+    .expect("write named export provider");
+    let first_barrel = project.path.join("first.js");
+    fs::write(
+        &first_barrel,
+        "export { used as first } from './provider.js';",
+    )
+    .expect("write first named re-export");
+    let second_barrel = project.path.join("second.js");
+    fs::write(
+        &second_barrel,
+        "export { first as selected } from './first.js';",
+    )
+    .expect("write second named re-export");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { selected } from './second.js'; console.log(selected());",
+    )
+    .expect("write named re-export consumer");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable graph");
+    for barrel in [first_barrel, second_barrel] {
+        let barrel = fs::canonicalize(barrel).expect("canonical barrel");
+        let barrel_node = graph.module(&barrel).expect("barrel node");
+        let backing_import = barrel_node
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == barrel_node.program.exports[0].local_slot)
+            .expect("re-export has a backing import");
+        assert!(
+            selected
+                .live_imports
+                .contains(&(barrel.clone(), backing_import)),
+            "named re-export backing import must be linked"
+        );
+        assert!(
+            selected.modules.iter().any(|module| module.path == barrel),
+            "named re-export owner must stay in the selected graph"
+        );
+    }
+    let provider = fs::canonicalize(provider).expect("canonical provider");
+    let provider_node = graph.module(&provider).expect("provider node");
+    let demanded = selected
+        .live_export_slots
+        .get(&provider)
+        .expect("named re-export demands provider export");
+    let used = provider_node
+        .program
+        .exports
+        .iter()
+        .find(|export| export.exported == "used")
+        .expect("used export");
+    assert!(demanded.contains(&used.local_slot));
+}
+
+#[test]
+fn executable_graph_commonjs_named_reexport_keeps_chained_backing_imports() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TestDirectory::new("kiln-native-commonjs-named-reexport-demand");
+    fs::write(
+        project.path.join("package.json"),
+        r#"{"type":"module","sideEffects":false}"#,
+    )
+    .expect("write side-effect-free root package metadata");
+    fs::create_dir(project.path.join("provider")).expect("create CommonJS provider directory");
+    fs::write(
+        project.path.join("provider/package.json"),
+        r#"{"type":"commonjs"}"#,
+    )
+    .expect("write CommonJS package metadata");
+    fs::write(
+        project.path.join("provider/index.js"),
+        "module.exports = { answer: 42 };",
+    )
+    .expect("write CommonJS provider");
+    let first_barrel = project.path.join("first.mjs");
+    fs::write(
+        &first_barrel,
+        "export { answer as first } from './provider/index.js';",
+    )
+    .expect("write first ESM barrel");
+    let second_barrel = project.path.join("second.mjs");
+    fs::write(
+        &second_barrel,
+        "export { first as selected } from './first.mjs';",
+    )
+    .expect("write second ESM barrel");
+    let entry = project.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import { selected } from './second.mjs'; console.log(selected);",
+    )
+    .expect("write named CommonJS re-export consumer");
+
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("source graph compiles");
+    let selected = kiln_liveness::select_executable_modules(
+        &graph,
+        &kiln_liveness::SelectionOptions::production(),
+    )
+    .expect("select executable graph");
+
+    for barrel in [first_barrel, second_barrel] {
+        let barrel = fs::canonicalize(barrel).expect("canonical barrel");
+        let barrel_node = graph.module(&barrel).expect("barrel node");
+        let backing_import = barrel_node
+            .program
+            .imports
+            .iter()
+            .position(|import| import.local_slot == barrel_node.program.exports[0].local_slot)
+            .expect("re-export has a backing import");
+        assert!(
+            selected
+                .live_imports
+                .contains(&(barrel.clone(), backing_import)),
+            "CommonJS named re-export backing import must be linked"
+        );
+        assert!(
+            selected.modules.iter().any(|module| module.path == barrel),
+            "CommonJS named re-export owner must stay in the selected graph"
+        );
+    }
+    let provider = fs::canonicalize(project.path.join("provider/index.js"))
+        .expect("canonical CommonJS provider");
+    assert!(
+        selected
+            .modules
+            .iter()
+            .any(|module| module.path == provider)
+    );
+    assert!(
+        selected
+            .live_export_slots
+            .get(&provider)
+            .is_some_and(|slots| slots.contains(&0))
+    );
+}
+
+#[test]
 fn release_graph_selects_the_production_arm_of_an_exact_commonjs_dispatcher() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -3940,7 +6264,7 @@ static int host_call(void *context, uint16_t operation, uint16_t argc,
     return KILN_C99_OK;
 }}
 int main(void) {{
-    kiln_host host = {{ host_call, NULL }};
+    kiln_host host = {{ host_call, NULL, NULL }};
     kiln_value result;
     return {symbol}(&host, &result) == KILN_C99_OK ? 0 : 1;
 }}
@@ -3969,7 +6293,9 @@ int main(void) {{
     command.env("LD_LIBRARY_PATH", loader_directory);
     #[cfg(target_os = "macos")]
     command.env("DYLD_LIBRARY_PATH", loader_directory);
-    let output = command.output().expect("run delayed dynamic host");
+    let output = command
+        .output_when_launchable()
+        .expect("run delayed dynamic host");
     assert!(
         output.status.success(),
         "delayed dynamic host failed with {:?}: {}",
@@ -4029,4 +6355,165 @@ fn parallel_sites_without_compiling_are_the_builds_own() {
         .build_graph(&graph, &options)
         .expect("build parallel-sites graph");
     assert_eq!(planned, built.parallel_sites);
+}
+
+#[test]
+fn native_runner_spy_overlay_mutates_live_export_without_mutating_namespace() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native namespace spy integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-namespace-spy-overlay");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    fs::write(
+        root.path.join("main.mjs"),
+        r#"
+import { run, constRun, functionRun } from "./consumer.mjs";
+const nativeModules = process.__kilnNativeModules;
+const namespace = await import("./target.mjs");
+const before = Object.getOwnPropertyDescriptor(namespace, "run");
+const original = namespace.run;
+const originalConst = namespace.constRun;
+const originalFunction = namespace.functionRun;
+const replacement = () => "mock";
+const registrationDenied = nativeModules.__kilnHostModuleLoader("registerSpyAdapter", import.meta.url) === false;
+const unauthorized = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", replacement, import.meta.url) === false;
+nativeModules.__kilnHostModuleLoader("registerRunner", import.meta.url);
+nativeModules.__kilnHostModuleLoader("registerSpyAdapter", import.meta.url);
+const wrongReferrer = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", replacement, "file:///unauthorized.mjs") === false;
+let ordinaryMutation = false;
+try { Object.defineProperty(namespace, "run", { value: replacement }); }
+catch { ordinaryMutation = true; }
+const installed = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", replacement, import.meta.url);
+const mocked = namespace.run === replacement && run() === "mock";
+nativeModules.__kilnHostModuleLoader("spyExport", namespace, "run", original, import.meta.url);
+const constReplacement = () => "const-mock";
+const functionReplacement = () => "function-mock";
+const constIntercepted = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "constRun", constReplacement, import.meta.url)
+  && constRun() === "const-mock";
+const functionIntercepted = nativeModules.__kilnHostModuleLoader("spyExport", namespace, "functionRun", functionReplacement, import.meta.url)
+  && functionRun() === "function-mock";
+nativeModules.__kilnHostModuleLoader("spyExport", namespace, "constRun", originalConst, import.meta.url);
+nativeModules.__kilnHostModuleLoader("spyExport", namespace, "functionRun", originalFunction, import.meta.url);
+const after = Object.getOwnPropertyDescriptor(namespace, "run");
+console.log(registrationDenied, unauthorized, wrongReferrer, installed, ordinaryMutation, mocked,
+  run() === "real", constIntercepted, functionIntercepted, after.configurable === before.configurable,
+  after.enumerable === before.enumerable, after.get === before.get,
+  after.set === before.set, after.value === before.value);
+"#,
+    )
+    .expect("write entry");
+    fs::write(
+        root.path.join("target.mjs"),
+        "export let run = () => 'real'; export const constRun = () => 'const'; export function functionRun() { return 'function'; }\n",
+    )
+    .expect("write target");
+    fs::write(
+        root.path.join("consumer.mjs"),
+        "import { run, constRun, functionRun } from './target.mjs'; export { run, constRun, functionRun };\n",
+    )
+    .expect("write consumer");
+    let entry = root.path.join("main.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("namespace-spy graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("namespace-spy graph builds and runs");
+    assert!(
+        report.succeeded(),
+        "namespace-spy process failed: {report:?}"
+    );
+    assert_eq!(
+        report.stdout,
+        b"true true true true true true true true true true true true true true\n"
+    );
+}
+
+#[test]
+fn native_runner_spy_overlay_targets_retained_namespace_generation() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping native namespace-generation spy integration: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-namespace-spy-generation");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    fs::write(
+        root.path.join("main.mjs"),
+        r#"
+import { run } from "./consumer.mjs";
+const nativeModules = process.__kilnNativeModules;
+const loader = nativeModules.__kilnHostModuleLoader;
+loader("registerRunner", import.meta.url);
+loader("registerSpyAdapter", import.meta.url);
+const old = await import("./target.mjs");
+loader("reset");
+const current = await import("./target.mjs");
+const original = old.run;
+const replacement = () => "mock";
+const installed = loader("spyExport", old, "run", replacement, import.meta.url);
+const oldGenerationIntercepted = run() === "mock" && old.run === replacement;
+const currentGenerationUntouched = current.run() === "real2";
+const restored = loader("spyExport", old, "run", original, import.meta.url);
+console.log(installed, oldGenerationIntercepted, currentGenerationUntouched,
+  restored, run() === "real1", old.run() === "real1", current.run() === "real2");
+"#,
+    )
+    .expect("write entry");
+    fs::write(
+        root.path.join("target.mjs"),
+        "const generation = (globalThis.__spyGeneration ?? 0) + 1; globalThis.__spyGeneration = generation; export let run = () => 'real' + generation;\n",
+    )
+    .expect("write target");
+    fs::write(
+        root.path.join("consumer.mjs"),
+        "import { run } from './target.mjs'; export { run };\n",
+    )
+    .expect("write consumer");
+    let entry = root.path.join("main.mjs");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("namespace-generation graph compiles");
+    let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
+        .run_graph(
+            &graph,
+            &NativeBuildOptions {
+                output: root.path.join("program"),
+                profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
+                march_native: false,
+                node: true,
+                ..NativeBuildOptions::default()
+            },
+        )
+        .expect("namespace-generation graph builds and runs");
+    assert!(
+        report.succeeded(),
+        "spy generation process failed: {report:?}"
+    );
+    assert_eq!(report.stdout, b"true true true true true true true\n");
 }

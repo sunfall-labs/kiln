@@ -43,34 +43,16 @@ node_modules/
 # checkout lives in ~/.cache/kiln, never in the tree.
 /bench/realworld/.toolchains/
 
-# Ad-hoc differential probes written while chasing a bug. The filings under `.scratch/<feature>/`
-# are deliberate and tracked; these are the scratch paper beside them.
-.scratch/es/
-# What `bench/io/fs-promises.mjs` writes and rewrites while it is being timed, and what
-# `conformance/native/shape-keys-survive-collection.cjs` writes to make the collector run. Both
-# have to live somewhere the program can reach, `.scratch` is otherwise tracked, and the adapter
-# publishes no `unlink` -- so without these, running the benchmarks or the native corpus leaves
-# stray files in everyone's `git status`.
-.scratch/bench-io-test.tmp
+# Scratch paper. Issues, PRDs and the probes and measurements they cite are tracked under
+# `docs/issues/` (docs/agents/issue-tracker.md); nothing in `.scratch/` is, so `git add -A` cannot
+# sweep a binary or a probe into a commit, and clearing the directory loses nothing anyone
+# recorded. Until 2026-10-02 the tracker lived here, and clearing it took all 634 filings with it.
+# `bench/io/fs-promises.mjs` and the surface inventory write their temporary files here.
+/.scratch/
+# What `conformance/native/shape-keys-survive-collection.cjs` writes to make the collector run.
 .kiln-shape-keys-probe.tmp
-# Ad-hoc compiled probes beside the tracked filings under `.scratch/<feature>/`. These are
-# extensionless binaries (and their checkouts and tmpdirs), never sources: the tracked
-# `probe_*.mjs` filings keep their extensions, so these patterns cannot match them. Untracked
-# by default so `git add -A` cannot sweep a binary into a commit (same logic as *.snap.new).
-.scratch/*_bin
-.scratch/*_release
-.scratch/*_stripped
-.scratch/*_prof
-.scratch/*_dev
-.scratch/*_rel
-.scratch/*_opt
-.scratch/probe_indexof
-.scratch/test_gtk
-.scratch/compio-http*/
-.scratch/hono/
-.scratch/surface-*/
 # Slice runs of the native surface inventory; only the whole inventory is recorded.
-.scratch/native-real-libraries/*.partial.*
+/docs/issues/native-real-libraries/*.partial.*
 gmon.out
 __pycache__/
 
@@ -79,3 +61,6 @@ conformance/npm-compat/node_modules/
 conformance/npm-compat/results/raw/
 conformance/npm-compat/tmp/
 conformance/npm-compat/expected/
+
+# Release archives written by scripts/package-release.sh.
+/dist/

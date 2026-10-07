@@ -29,6 +29,7 @@
 #   KILN_NATIVE_GC_STRESS=1 ...               every run with the collector stressed on every
 #                                             allocation (name a representative subset: minutes)
 #   KILN_REALMS_COUNTS="1 2 8"                the realm counts to run (default: 1 2 and the cores)
+#   KILN_NATIVE_REALMS_LOG_DIR=<directory>    retain per-probe streams and phase markers
 #
 # WHY REPEAT. A race between realms shows up in some runs and not others: realms issue 24's
 # segfault -- every realm thread tearing down at once used one process-wide fallback heap -- took
@@ -104,10 +105,19 @@ fi
 JOBS="${KILN_JOBS:-$(((CORES + 3) / 4))}"
 ((JOBS < 1)) && JOBS=1
 
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiln-native-realms.XXXXXXXX")"
+if [[ -n ${KILN_NATIVE_REALMS_LOG_DIR:-} ]]; then
+	mkdir -p "$KILN_NATIVE_REALMS_LOG_DIR"
+	WORK_DIR="$(mktemp -d "$KILN_NATIVE_REALMS_LOG_DIR/run.XXXXXXXX")"
+else
+	WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiln-native-realms.XXXXXXXX")"
+fi
 cleanup() {
 	if [[ ${BASHPID:-$$} -eq $$ ]]; then
-		rm -rf "$WORK_DIR"
+		if [[ -n ${KILN_NATIVE_REALMS_LOG_DIR:-} ]]; then
+			kiln_say "native realms evidence: $WORK_DIR"
+		else
+			rm -rf "$WORK_DIR"
+		fi
 	fi
 }
 trap cleanup EXIT
@@ -144,6 +154,7 @@ run_probe() {
 	# clock (ADR 0044), which is what makes a probe's output the same on every run -- a shipped
 	# binary keeps wall time. `KILN_NATIVE_KEEP_WORK` leaves the build directory to copy it from.
 	local kept built program=""
+	printf '%s\n' build > "$dir/phase"
 	KILN_NATIVE_KEEP_WORK=1 env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot \
 		${adapter:+"$adapter"} run --native ${profile:+--profile "$profile"} "$probe" > "$dir/build.log" 2>&1 || true
 	while read -r kept; do
@@ -158,7 +169,10 @@ run_probe() {
 	fi
 
 	local alone alone_status=0
-	alone="$(env ${probe_env[@]+"${probe_env[@]}"} "$dir/program" 2>&1)" || alone_status=$?
+	printf '%s\n' alone > "$dir/phase"
+	env ${probe_env[@]+"${probe_env[@]}"} "$dir/program" > "$dir/alone.log" 2>&1 || alone_status=$?
+	printf '%s\n' "$alone_status" > "$dir/alone.status"
+	alone="$(<"$dir/alone.log")"
 
 	local count index realm_status run process_status where
 	for count in $COUNTS; do
@@ -168,6 +182,7 @@ run_probe() {
 			mkdir -p "$out"
 			where="N=$count"
 			((REPEAT > 1)) && where="N=$count run $run of $REPEAT"
+			printf '%s\n' "$where" > "$dir/phase"
 			# The process's own streams stay empty unless the host itself fails; they are kept.
 			process_status=0
 			env ${probe_env[@]+"${probe_env[@]}"} KILN_REALMS="$count" KILN_REALMS_OUT="$out" \
@@ -197,6 +212,7 @@ run_probe() {
 			done
 		done
 	done
+	printf '%s\n' matched > "$dir/phase"
 	touch "$dir/matched"
 }
 

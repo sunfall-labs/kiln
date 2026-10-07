@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::intrinsic_members::NamedMembers;
 use crate::{
     ExecutionError, Native, NodeObject, ObjectData, PrototypeTable, RealmId, Value, is_callable,
-    own_data_property,
+    own_data_property, tracked_object,
 };
 
 #[derive(Debug)]
@@ -18,6 +18,7 @@ pub(crate) struct ReadableState {
     pub(crate) high_water_mark: usize,
     pub(crate) ended: bool,
     pub(crate) end_emitted: bool,
+    pub(crate) end_scheduled: bool,
     pub(crate) reading: bool,
     pub(crate) flowing: bool,
     pub(crate) destroyed: bool,
@@ -38,13 +39,14 @@ pub(crate) fn new_readable_state(
     high_water_mark: usize,
     encoding: Option<String>,
 ) -> Rc<RefCell<ReadableState>> {
-    let public = Rc::new(RefCell::new(ObjectData::default()));
+    let public = tracked_object(ObjectData::default());
     Rc::new(RefCell::new(ReadableState {
         buffer: Vec::new(),
         buffered_bytes: 0,
         high_water_mark,
         ended: false,
         end_emitted: false,
+        end_scheduled: false,
         reading: false,
         flowing: false,
         destroyed: false,
@@ -67,7 +69,7 @@ pub(crate) fn node_readable(arguments: &[Value], receiver: Option<&Value>) -> Va
     let initializes_existing = matches!(receiver, Some(Value::Object(_)));
     let object = match receiver {
         Some(Value::Object(object)) => Rc::clone(object),
-        _ => Rc::new(RefCell::new(ObjectData::default())),
+        _ => tracked_object(ObjectData::default()),
     };
     {
         let mut data = object.borrow_mut();
@@ -127,7 +129,7 @@ pub(crate) fn node_writable(arguments: &[Value], receiver: Option<&Value>) -> Va
     let initializes_existing = matches!(receiver, Some(Value::Object(_)));
     let object = match receiver {
         Some(Value::Object(object)) => Rc::clone(object),
-        _ => Rc::new(RefCell::new(ObjectData::default())),
+        _ => tracked_object(ObjectData::default()),
     };
     let state = Rc::new(RefCell::new(WritableState {
         ended: false,
@@ -238,9 +240,12 @@ readable_prototype_members! {
     ("once", NodeEventOnce),
     ("emit", NodeEventEmit),
     ("listeners", NodeEventListeners),
-    ("eventNames", NodeEventNames),
+    ("listenerCount", NodeEventListenerCount),
+    ("removeListener", NodeEventRemoveListener),
+    ("off", NodeEventRemoveListener),
     ("removeAllListeners", NodeEventRemoveAllListeners),
     ("setMaxListeners", NodeEventSetMaxListeners),
+    ("eventNames", NodeEventNames),
 }
 
 pub(crate) fn writable_constructor_property(prop: &str) -> Option<Value> {

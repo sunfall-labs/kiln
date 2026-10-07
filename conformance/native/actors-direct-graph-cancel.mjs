@@ -1,6 +1,7 @@
+// native-env: KILN_ENGINE_PRIVATE_FOR_TESTS=1
 // kiln-native: stress=skip
+// Drives the actor protocol through the engine-private channel (see actors-graph-reservation.mjs).
 // Abort when publication status is returned, before the actor module consumes the ticket.
-import { MessagePort } from 'node:worker_threads';
 import { isolate, spawnActor, transfer } from 'kiln:actors';
 
 const owner = await spawnActor({
@@ -20,7 +21,7 @@ if (retried.answer !== 17 || retried.text.length !== 300000 || retried.text[2999
 const ticket = transfer(isolate(() => ({ answer: 42, values: [1, 2, 3], text: 'z'.repeat(300000) })));
 const closedTicket = transfer(isolate(() => ({ answer: 23, text: 's'.repeat(300000) })));
 const controller = new AbortController();
-const internals = MessagePort[Symbol.for('kiln.messagePort')];
+const internals = globalThis.__kilnPrivate.messagePort;
 const original = internals.workerOp;
 let published = false;
 let aborted = false;

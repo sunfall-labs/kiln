@@ -483,7 +483,13 @@ fn execute_module_case(
         }
     };
     let is_async = has_flag(case, "async");
-    let linked = if program.dependencies.is_empty() && program.imports.is_empty() {
+    // A module that imports nothing statically runs alone -- unless it calls `import()`, which
+    // must find this very module in the realm's module map (a module importing itself is the
+    // same record, not a second evaluation), and only the graph executor puts it there.
+    let linked = if program.dependencies.is_empty()
+        && program.imports.is_empty()
+        && !program.program.has_dynamic_import()
+    {
         let mut host = CaptureHost::new();
         let outcome = execute_module(
             &program,

@@ -1,8 +1,54 @@
 
+/* JavaScript's constructor return override is any object, including a function. Keep this
+ * predicate separate from prototype eligibility: `null` is a legal prototype but a primitive
+ * constructor return, while Temporal and host callables are objects even though they are not all
+ * represented by ordinary object storage. */
+static int kiln_c99_is_object_value(kiln_value value) {
+    switch (value.tag) {
+    case KILN_VALUE_OBJECT:
+    case KILN_VALUE_FUNCTION:
+    case KILN_VALUE_BUILTIN:
+    case KILN_VALUE_ARRAY:
+    case KILN_VALUE_METHOD:
+    case KILN_VALUE_GENERATOR:
+    case KILN_VALUE_DATE:
+    case KILN_VALUE_COLLECTION:
+    case KILN_VALUE_PROMISE:
+    case KILN_VALUE_TIMER:
+    case KILN_VALUE_SETTLER:
+    case KILN_VALUE_BOUND:
+    case KILN_VALUE_REGEXP:
+    case KILN_VALUE_ARRAY_BUFFER:
+    case KILN_VALUE_TYPED_ARRAY:
+    case KILN_VALUE_PROXY:
+    case KILN_VALUE_TEMPORAL:
+    case KILN_VALUE_COMMONJS_REQUIRE:
+    case KILN_VALUE_DATA_VIEW:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int kiln_c99_get_prototype_from_constructor(kiln_host *host, kiln_value constructor,
+                                                    kiln_value default_prototype,
+                                                    kiln_value *out, int depth,
+                                                    kiln_value *thrown) {
+    kiln_value prototype;
+    int status = kiln_c99_get(host, constructor, "prototype", 9, &prototype, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    *out = kiln_c99_is_object_value(prototype)
+               ? prototype
+               : default_prototype;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *result,
                                                kiln_value callee, const kiln_value *args,
                                                size_t argc, kiln_value new_target, int depth,
                                                kiln_value *thrown);
+static int kiln_c99_is_constructor(kiln_value value);
+
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
                               const kiln_value *args, size_t argc, int depth,
                               kiln_value *thrown) {
@@ -21,25 +67,45 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
     kiln_value saved_adopted;
     kiln_value adopted;
     int status;
-    /* Built-in constructors already create their exotic payloads through their ordinary
-     * [[Construct]] implementation. Reflect.construct changes the resulting object's prototype
-     * to GetPrototypeFromConstructor(newTarget); ordinary generated functions need the target in
-     * their body too, so their full path below carries it directly. */
-    if (new_target.tag != callee.tag || new_target.bits != callee.bits) {
-        if (callee.tag != KILN_VALUE_FUNCTION && callee.tag != KILN_VALUE_PROXY &&
-            callee.tag != KILN_VALUE_BOUND) {
-            kiln_value target_prototype;
-            status = kiln_c99_construct(host, result, callee, args, argc, depth, thrown);
+    /* Symbol and BigInt expose [[Construct]] for IsConstructor/newTarget checks, but their
+     * own constructor algorithms reject execution. Reflect.construct with either as newTarget
+     * is valid when another target performs the construction. */
+    if (callee.tag == KILN_VALUE_BUILTIN &&
+        (callee.bits == KILN_C99_BUILTIN_SYMBOL || callee.bits == KILN_C99_BUILTIN_BIGINT)) {
+        return kiln_c99_throw_not_a(thrown, callee, "constructor");
+    }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_TYPED_ARRAY) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Abstract class TypedArray not directly constructable");
+    }
+    if ((new_target.tag != callee.tag || new_target.bits != callee.bits) &&
+        callee.tag != KILN_VALUE_FUNCTION && callee.tag != KILN_VALUE_PROXY &&
+        callee.tag != KILN_VALUE_BOUND) {
+        kiln_value target_prototype;
+        if (callee.tag == KILN_VALUE_BUILTIN &&
+            callee.bits == KILN_C99_BUILTIN_OBJECT) {
+            status = kiln_c99_get_prototype_from_constructor(
+                host, new_target, kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
+                &target_prototype, depth, thrown);
             if (status != KILN_C99_OK) return status;
-            status = kiln_c99_prototype_object(new_target, &target_prototype);
+            status = kiln_c99_new_object(result);
             if (status != KILN_C99_OK) return status;
-            if (result->tag == KILN_VALUE_OBJECT || result->tag == KILN_VALUE_ARRAY ||
-                result->tag == KILN_VALUE_COLLECTION || result->tag == KILN_VALUE_DATE ||
-                result->tag == KILN_VALUE_REGEXP || result->tag == KILN_VALUE_PROMISE) {
-                return kiln_c99_set_prototype(*result, target_prototype);
-            }
-            return KILN_C99_OK;
+            return kiln_c99_set_prototype(*result, target_prototype);
         }
+        status = kiln_c99_construct(host, result, callee, args, argc, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        kiln_value default_prototype;
+        status = kiln_c99_get_prototype_from_constructor(
+            host, callee, kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
+            &default_prototype, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_get_prototype_from_constructor(host, new_target, default_prototype,
+                                                          &target_prototype, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (kiln_c99_is_object_value(*result)) {
+            return kiln_c99_set_prototype(*result, target_prototype);
+        }
+        return KILN_C99_OK;
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_FUNCTION) {
         return kiln_c99_dynamic_new_function(host, result, args, argc, depth, thrown);
@@ -90,8 +156,7 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
      * dispatch block. */
 #if KILN_RETAIN_GROUP_BUFFER
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_BUFFER) {
-        return kiln_c99_buffer_from(result, argc > 0 ? args[0] : kiln_c99_number(0.0), args,
-                                    argc, thrown);
+        return kiln_c99_buffer_legacy(result, args, argc, thrown);
     }
 #endif
     if (callee.tag == KILN_VALUE_PROXY) {
@@ -196,16 +261,26 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
     if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_STRING ||
                                              callee.bits == KILN_C99_BUILTIN_NUMBER ||
                                              callee.bits == KILN_C99_BUILTIN_BOOLEAN)) {
-        /* `new String("hi")` is a *wrapper object*, not a string: `typeof` says "object", it is
-         * never `===` its own contents, and `new Boolean(false)` is truthy. This backend has no
-         * wrapper objects, and it used to answer with the primitive -- the same thing `String(x)`
-         * gives -- which read as though the constructor had worked.
-         *
-         * That was safe only while the interpreter did the same, and it no longer is: the
-         * interpreter has wrappers now, so the shared answer became a silent disagreement about
-         * `typeof`, `===` and truthiness all at once. A refusal is the honest state until the
-         * object model grows a wrapper, because there is no primitive that behaves like one. */
-        KILN_C99_REFUSE("a primitive wrapper constructor");
+        kiln_value primitive;
+        /* String(symbol) is permitted, but `new String(symbol)` cannot erase the Symbol's type
+         * and still be a String wrapper. Number and Boolean use their call conversion unchanged. */
+        if (callee.bits == KILN_C99_BUILTIN_STRING && argc > 0) {
+            /* The call form String(symbol) is exceptional and returns a descriptive string;
+             * construction uses ordinary ToString after ToPrimitive, so both a primitive Symbol
+             * and a boxed Symbol must throw. Reusing the call result lost that distinction. */
+            int status = kiln_c99_to_primitive(host, args[0], 1, &primitive, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (primitive.tag == KILN_VALUE_SYMBOL) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert a Symbol value to a string");
+            }
+            primitive = kiln_c99_text(primitive);
+            return kiln_c99_new_primitive_wrapper(result, primitive);
+        }
+        status = kiln_c99_call(host, &primitive, callee, kiln_c99_undefined(), args, argc,
+                               depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_new_primitive_wrapper(result, primitive);
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_REGEXP) {
         /* `new RegExp(source, flags)` builds exactly what `RegExp(source, flags)` builds -- the
@@ -258,11 +333,36 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
     }
     if (callee.tag == KILN_VALUE_BUILTIN && kiln_c99_error_name(callee.bits) != NULL) {
         int present = 0;
-        status = kiln_c99_new_error(result, callee.bits,
-                                    argc > 0 ? args[0] : kiln_c99_undefined());
+        kiln_value stack_limit_value;
+        size_t frame_limit = 0;
+        int capture_enabled = 0;
+        status = kiln_c99_get(host, kiln_c99_builtin(KILN_C99_BUILTIN_ERROR),
+                              "stackTraceLimit", 15, &stack_limit_value, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (stack_limit_value.tag == KILN_VALUE_NUMBER) {
+            double configured = kiln_c99_as_number(stack_limit_value);
+            capture_enabled = 1;
+            if (configured > 0.0) {
+                frame_limit = isinf(configured) || configured >= (double)SIZE_MAX
+                                  ? SIZE_MAX
+                                  : (size_t)floor(configured);
+            }
+        }
+        status = kiln_c99_new_error_limited(result, callee.bits,
+                                            argc > 0 ? args[0] : kiln_c99_undefined(),
+                                            frame_limit, capture_enabled);
         if (status != KILN_C99_OK) {
             return status;
         }
+        status = kiln_c99_get_prototype_from_constructor(
+            host, callee,
+            kiln_c99_builtin(callee.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR
+                                 ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
+                                 : KILN_C99_BUILTIN_ERROR_PROTOTYPE),
+            &prototype, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_set_prototype(*result, prototype);
+        if (status != KILN_C99_OK) return status;
         /* `new Error(message, { cause })` carries the cause *by identity*, which is the whole
          * reason it exists: a wrapper has to be able to hand back the error it wrapped. Dropping
          * the options argument left the wrapping looking entirely right -- message, name and
@@ -435,6 +535,12 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
                                      ? kiln_val_to_boundary(pair->elements[1])
                                      : kiln_c99_undefined();
                     }
+                    if (is_weak && !kiln_c99_can_be_held_weakly(key)) {
+                        return kiln_c99_throw_error(
+                            thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                            is_map ? "Invalid value used as weak map key"
+                                   : "Invalid value used in weak set");
+                    }
                     status = kiln_c99_collection_put(built, key, member);
                     if (status != KILN_C99_OK) {
                         return status;
@@ -456,9 +562,7 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
             if (args[0].tag == KILN_VALUE_DATE) {
                 time = kiln_c99_date_time(args[0]);
             } else if (args[0].tag == KILN_VALUE_STRING) {
-                size_t date_len = 0;
-                const char *date_bytes = kiln_c99_string_ascii_bytes(args[0], &date_len);
-                time = date_bytes == NULL ? NAN : kiln_c99_parse_date(date_bytes, date_len);
+                time = kiln_c99_parse_date(args[0]);
             } else {
                 kiln_value primitive;
                 status = kiln_c99_to_primitive(host, args[0], 2 /* default */,
@@ -467,9 +571,7 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
                     return status;
                 }
                 if (primitive.tag == KILN_VALUE_STRING) {
-                    size_t date_len = 0;
-                    const char *date_bytes = kiln_c99_string_ascii_bytes(primitive, &date_len);
-                    time = date_bytes == NULL ? NAN : kiln_c99_parse_date(date_bytes, date_len);
+                    time = kiln_c99_parse_date(primitive);
                 } else if (primitive.tag == KILN_VALUE_SYMBOL) {
                     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                                 "Cannot convert a Symbol value to a number");
@@ -525,7 +627,7 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
         return kiln_c99_new_text_encoder(result);
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_TEXT_DECODER) {
-        return kiln_c99_new_text_decoder(result, args, argc, thrown);
+        return kiln_c99_new_text_decoder(host, result, args, argc, depth, thrown);
     }
     if (callee.tag == KILN_VALUE_BOUND) {
         /* `[[Construct]]` on a bound function prepends the bound arguments and forwards to the
@@ -567,21 +669,15 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
             return kiln_c99_throw_not_a(thrown, callee, "constructor");
         }
     }
-    status = kiln_c99_prototype_object(new_target, &prototype);
+    status = kiln_c99_get_prototype_from_constructor(
+        host, new_target, kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE), &prototype,
+        depth, thrown);
     if (status != KILN_C99_OK) {
         return status;
     }
     status = kiln_c99_new_object(&instance);
     if (status != KILN_C99_OK) {
         return status;
-    }
-    /* GetPrototypeFromConstructor substitutes `Object.prototype` for a `prototype` that is not an
-     * object -- an assigned undefined or null among them -- and an unrecorded link is that. A null
-     * link would mean `Object.create(null)`, which is not what `new` builds. */
-    if (prototype.tag == KILN_VALUE_NULL || prototype.tag == KILN_VALUE_BOOLEAN ||
-        prototype.tag == KILN_VALUE_NUMBER || prototype.tag == KILN_VALUE_STRING ||
-        prototype.tag == KILN_VALUE_SYMBOL || prototype.tag == KILN_VALUE_BIGINT) {
-        prototype = kiln_c99_undefined();
     }
     kiln_c99_heap_store_value(kiln_c99_object_of(instance), &kiln_c99_object_of(instance)->prototype, prototype);
     /* Inside the body being constructed, `new.target` is the constructor the `new` named -- and
@@ -604,7 +700,7 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
      * constructor whose `super()` built something exotic yields *that* -- the instance allocated
      * above was abandoned the moment `this` was rebound, and returning it would hand back an
      * ordinary object wearing the subclass's prototype. */
-    *result = produced.tag == KILN_VALUE_OBJECT || produced.tag == KILN_VALUE_ARRAY ? produced
+    *result = kiln_c99_is_object_value(produced) ? produced
               : adopted.tag != KILN_VALUE_UNDEFINED                                 ? adopted
                                                                                     : instance;
     return KILN_C99_OK;
@@ -638,6 +734,12 @@ static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value
     }
     if (parent.tag == KILN_VALUE_BUILTIN) {
         return kiln_c99_construct(host, produced, parent, args, argc, depth, thrown);
+    }
+    if (parent.tag == KILN_VALUE_PROXY) {
+        /* A Proxy used as a class heritage value follows [[Construct]], not [[Call]]. Preserve
+         * the new.target of the derived constructor so the trap receives the actual subclass. */
+        return kiln_c99_construct_with_new_target(host, produced, parent, args, argc,
+                                                   kiln_c99_new_target, depth, thrown);
     }
     {
         kiln_value saved = kiln_c99_adopted_this;
@@ -675,16 +777,22 @@ static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value
  * ordinary call and has no way to report an adoption back to *its* caller, so
  * `class B extends A extends Array` loses the array at the second link. Both engines lose it in
  * the same place, which is the property this backend is measured on. */
-static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
+static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced, int preserve_prototype) {
     kiln_value prototype;
     kiln_value *slot;
     /* A parent that produced nothing -- every JavaScript constructor -- leaves `this` alone. */
-    if (produced.tag != KILN_VALUE_OBJECT && produced.tag != KILN_VALUE_ARRAY &&
-        produced.tag != KILN_VALUE_COLLECTION) {
+    if (!kiln_c99_is_object_value(produced)) {
         return KILN_C99_OK;
     }
     if (receiver->tag != KILN_VALUE_OBJECT ||
         (produced.tag == receiver->tag && produced.bits == receiver->bits)) {
+        return KILN_C99_OK;
+    }
+    if (preserve_prototype) {
+        /* A Proxy construct trap (or an ordinary constructor explicitly returning an object)
+         * has already chosen the object's prototype. Only native base constructors need the
+         * derived receiver's prototype transplanted onto their separately allocated result. */
+        *receiver = produced;
         return KILN_C99_OK;
     }
     prototype = kiln_c99_object_of(*receiver)->prototype;
@@ -695,6 +803,12 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
         return KILN_C99_OK;
     }
     slot = kiln_c99_exotic_store(produced);
+    if (slot == NULL) {
+        /* An explicitly returned callable/host object retains its own prototype. */
+        *receiver = produced;
+        kiln_c99_adopted_this = produced;
+        return KILN_C99_OK;
+    }
     if (slot->tag != KILN_VALUE_OBJECT) {
         int status = kiln_c99_new_object_for_owner(slot, (const void *)(uintptr_t)produced.bits);
         if (status != KILN_C99_OK) {
@@ -707,6 +821,15 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
     return KILN_C99_OK;
 }
 
+int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure) {
+    if (receiver == NULL || closure == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (!closure->arrow && !closure->strict &&
+        (*receiver == KILN_VAL_UNDEFINED || *receiver == KILN_VAL_NULL)) {
+        return kiln_c99_global_object_val(receiver);
+    }
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
                              kiln_val receiver, const kiln_val *args, size_t argc,
                              int depth, kiln_value *thrown) {
@@ -714,9 +837,8 @@ static int kiln_c99_call_val(kiln_host *host, kiln_val *result, kiln_val callee,
         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(callee);
         if (KILN_LIKELY(!plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {
             kiln_val vreceiver = plain->arrow ? plain->captured_this : receiver;
-            if (!plain->arrow && !plain->strict && (vreceiver == KILN_VAL_UNDEFINED || vreceiver == KILN_VAL_NULL)) {
-                (void)kiln_c99_global_object_val(&vreceiver);
-            }
+            int receiver_status = kiln_c99_normalize_closure_receiver(&vreceiver, plain);
+            if (receiver_status != KILN_C99_OK) return receiver_status;
             *result = KILN_VAL_UNDEFINED;
             return kiln_c99_invoke_closure(host, result, plain, vreceiver, args, argc, depth, thrown, NULL, 0);
         }
@@ -792,10 +914,19 @@ static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val
     return status;
 }
 
-static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced) {
+static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced, kiln_val parent) {
     kiln_value breceiver = kiln_val_to_boundary(*receiver);
     kiln_value bproduced = kiln_val_to_boundary(produced);
-    int status = kiln_c99_adopt_super(&breceiver, bproduced);
+    kiln_value bparent = kiln_val_to_boundary(parent);
+    /* `super_call` unwraps bound constructors before dispatch. A bound native builtin still
+     * needs the derived prototype transplanted onto its separately allocated result, while a
+     * Proxy must keep its `[[Construct]]` result untouched. Classify the same effective target
+     * without unwrapping Proxies. */
+    while (bparent.tag == KILN_VALUE_BOUND) {
+        bparent = ((kiln_bound *)(uintptr_t)bparent.bits)->target;
+    }
+    int status = kiln_c99_adopt_super(
+        &breceiver, bproduced, bparent.tag != KILN_VALUE_BUILTIN);
     if (status == KILN_C99_OK) {
         *receiver = kiln_val_from_boundary(breceiver);
     }
@@ -814,10 +945,9 @@ static int kiln_c99_can_be_prototype(kiln_value value) {
            value.tag == KILN_VALUE_COLLECTION || value.tag == KILN_VALUE_PROMISE ||
            value.tag == KILN_VALUE_REGEXP || value.tag == KILN_VALUE_ARRAY_BUFFER ||
            value.tag == KILN_VALUE_TYPED_ARRAY || value.tag == KILN_VALUE_DATA_VIEW ||
-           value.tag == KILN_VALUE_PROXY || value.tag == KILN_VALUE_GENERATOR;
+           value.tag == KILN_VALUE_PROXY || value.tag == KILN_VALUE_GENERATOR ||
+           value.tag == KILN_VALUE_TIMER;
 }
-
-static int kiln_c99_is_constructor(kiln_value value);
 
 /* `class D extends C` links two pairs of things: the prototype objects, so an instance of `D`
  * finds a method of `C`, and the *constructors*, so `D` finds a static of `C`. The second is
@@ -852,10 +982,10 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
         kiln_c99_heap_store_value(kiln_c99_object_of(store), &kiln_c99_object_of(store)->prototype, prototype);
         return KILN_C99_OK;
     }
-    if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_is_namespace(target.bits)) {
-        /* Prototype tables are real objects in the language even though this backend represents
-         * their immutable method surface by an interned builtin id. A relink is observable and
-         * therefore needs an ordinary mutable store, just like a function's static chain. */
+    if (target.tag == KILN_VALUE_BUILTIN) {
+        /* Built-in callables and prototype tables both have mutable [[Prototype]] links even
+         * though their intrinsic surfaces are represented by interned ids. Keep the link in the
+         * same own-property store used by reads and reflection. */
         kiln_value store;
         int status = kiln_c99_callable_store(target, &store, 1);
         if (status != KILN_C99_OK) return status;
@@ -871,10 +1001,10 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
  * `prototype` either, which the class's own check on `prototype` refuses. */
 static int kiln_c99_heritage_constructs(kiln_value value) {
     if (value.tag == KILN_VALUE_PROXY) {
-        return kiln_c99_is_constructor(kiln_c99_proxy_of(value)->target);
+        return kiln_c99_heritage_constructs(kiln_c99_proxy_of(value)->target);
     }
     if (value.tag == KILN_VALUE_BOUND) {
-        return kiln_c99_is_constructor(((kiln_bound *)(uintptr_t)value.bits)->target);
+        return kiln_c99_heritage_constructs(((kiln_bound *)(uintptr_t)value.bits)->target);
     }
     if (value.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(value);
@@ -882,7 +1012,8 @@ static int kiln_c99_heritage_constructs(kiln_value value) {
                  closure->is_method);
     }
     if (value.tag == KILN_VALUE_BUILTIN)
-        return !kiln_c99_is_namespace(value.bits) && value.bits != KILN_C99_BUILTIN_SYMBOL && value.bits != KILN_C99_BUILTIN_BIGINT;
+        return !kiln_c99_is_namespace(value.bits) &&
+               value.bits != KILN_C99_BUILTIN_TYPED_ARRAY;
     if (value.tag == KILN_VALUE_METHOD) {
         for (size_t i = 0; i < sizeof kiln_c99_native_constructors / sizeof *kiln_c99_native_constructors; ++i)
             if (kiln_c99_native_constructors[i].method == value.bits) return 1;
@@ -952,6 +1083,11 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         return kiln_c99_instance_of(host, value, ((kiln_bound *)(uintptr_t)constructor.bits)->target, answer, depth, thrown);
     if (value.tag == KILN_VALUE_PROXY) value = kiln_c99_proxy_inner(value);
     if (constructor.tag == KILN_VALUE_PROXY) constructor = kiln_c99_proxy_inner(constructor);
+    /* OrdinaryHasInstance returns false for every primitive before reading the constructor's
+     * `prototype` property. In particular, `"x" instanceof Function.prototype` is false even
+     * though Function.prototype has no object-valued `prototype`. */
+    if (!kiln_c99_is_reference(value) && value.tag != KILN_VALUE_DATE)
+        return KILN_C99_OK;
     /* A builtin constructor has no prototype object here; the question it answers is about the
      * tag instead, which is the same question and a shorter walk. */
     if (constructor.tag == KILN_VALUE_BUILTIN) {
@@ -973,6 +1109,14 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         case KILN_C99_BUILTIN_DATA_VIEW:
             *answer = value.tag == KILN_VALUE_DATA_VIEW;
             return KILN_C99_OK;
+        case KILN_C99_BUILTIN_TYPED_ARRAY:
+            /* The abstract `%TypedArray%` constructor is the shared parent of the concrete
+             * numeric constructors. Its ordinary instance check accepts every typed view. */
+            *answer = value.tag == KILN_VALUE_TYPED_ARRAY;
+            return KILN_C99_OK;
+        case KILN_C99_BUILTIN_FUNCTION_PROTOTYPE:
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Function has non-object prototype 'undefined' in instanceof check");
         case KILN_C99_BUILTIN_INT8_ARRAY:
         case KILN_C99_BUILTIN_UINT8_ARRAY:
         case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY:
@@ -982,6 +1126,7 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         case KILN_C99_BUILTIN_UINT32_ARRAY:
         case KILN_C99_BUILTIN_FLOAT32_ARRAY:
         case KILN_C99_BUILTIN_FLOAT64_ARRAY:
+        case KILN_C99_BUILTIN_FLOAT16_ARRAY:
         case KILN_C99_BUILTIN_BIG_INT64_ARRAY:
         case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: {
             kiln_typed_kind kind;
@@ -1083,9 +1228,20 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         case KILN_C99_BUILTIN_NUMBER:
         case KILN_C99_BUILTIN_BOOLEAN:
         case KILN_C99_BUILTIN_SYMBOL:
-        case KILN_C99_BUILTIN_BIGINT:
-            *answer = 0;
+        case KILN_C99_BUILTIN_BIGINT: {
+            uint8_t expected = constructor.bits == KILN_C99_BUILTIN_STRING
+                                   ? KILN_C99_WRAPPER_STRING
+                               : constructor.bits == KILN_C99_BUILTIN_NUMBER
+                                   ? KILN_C99_WRAPPER_NUMBER
+                               : constructor.bits == KILN_C99_BUILTIN_BOOLEAN
+                                   ? KILN_C99_WRAPPER_BOOLEAN
+                               : constructor.bits == KILN_C99_BUILTIN_SYMBOL
+                                   ? KILN_C99_WRAPPER_SYMBOL
+                                   : KILN_C99_WRAPPER_BIGINT;
+            *answer = value.tag == KILN_VALUE_OBJECT &&
+                      kiln_c99_object_of(value)->primitive_wrapper_kind == expected;
             return KILN_C99_OK;
+        }
         default:
             KILN_C99_REFUSE("instanceof against a built-in whose instances this backend does not "
                             "model");
@@ -1129,6 +1285,24 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
         }
     }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        if (current.tag == KILN_VALUE_FUNCTION || current.tag == KILN_VALUE_METHOD ||
+            current.tag == KILN_VALUE_BOUND) {
+            kiln_value store;
+            kiln_value next = kiln_c99_undefined();
+            status = kiln_c99_callable_store(current, &store, 0);
+            if (status != KILN_C99_OK) return status;
+            if (store.tag == KILN_VALUE_OBJECT) next = kiln_c99_object_prototype_read(store);
+            if (next.tag == KILN_VALUE_UNDEFINED)
+                next = current.tag == KILN_VALUE_FUNCTION
+                           ? kiln_c99_function_kind_prototype(kiln_c99_closure_of(current))
+                           : kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
+            current = next;
+            if (current.tag == prototype.tag && current.bits == prototype.bits) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+            continue;
+        }
         if (current.tag != KILN_VALUE_OBJECT) {
             return KILN_C99_OK;
         }
@@ -1183,6 +1357,14 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
         if (value.bits == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) {
             return kiln_c99_static_text(function_text, sizeof(function_text) - 1);
         }
+        if (value.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE ||
+            (value.bits >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
+             value.bits <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE) ||
+            value.bits == KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE ||
+            value.bits == KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE ||
+            value.bits == KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE) {
+            return kiln_c99_static_text(object_text, sizeof(object_text) - 1);
+        }
         if (kiln_c99_is_namespace(value.bits)) {
             return kiln_c99_static_text(object_text, sizeof(object_text) - 1);
         }
@@ -1203,6 +1385,7 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_REGEXP:
     case KILN_VALUE_PROMISE:
+    case KILN_VALUE_TIMER:
     case KILN_VALUE_ARRAY_BUFFER:
     case KILN_VALUE_TYPED_ARRAY:
     /* A DataView, listed rather than left to fall through: the `default:` below answers

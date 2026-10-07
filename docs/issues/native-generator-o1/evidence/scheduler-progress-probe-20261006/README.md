@@ -1,0 +1,13 @@
+# Interval-zero scheduler progress probe
+
+This probe isolates one part of the Sharding timeout hypothesis: an infinite background loop that calls `Effect.sleep(0)` while a foreground fiber waits on 100 ms TestClock sleeps. The source is in `entry.ts`; all three engines produced exactly 600 foreground wakeups by virtual time 60,000 ms and 308,435 background iterations. Bun and the interpreter counters were equal; the native release result matched them. The result rules out a generic zero-delay cooperative-yield failure for this minimal shape, but it does not establish progress under Sharding's runner-storage, assignment, hash-map, or retry workload.
+
+`receipt.json` records commands, CLI/provider/binary hashes, outcomes, and the native build. `native-build.log`, `native-runtime.log`, and `native-build.status.json` retain the complete native build/run evidence. The frozen CLI was `6713bd67c4bc01a925fb566f3d66f8bd1256dd31ad52f882c41e837b998468ab`; the pinned provider manifest digest was `4b68a2200f148e19ff7fcd146cacd5c8ffb546692d67e52478fb3b266c19621b`.
+
+The initial combined `run --native` attempt was stopped at the compile boundary because its 90-second watchdog also covered a cold graph build. It produced no probe outcome and is explicitly excluded. The accepted run built a native-release executable in a separate durable job, then applied the 90-second watchdog only to the executable. The 4 GiB memory cap and one-worker limit applied to the build.
+
+## Scheduler path checked
+
+The pinned TestClock implementation returns immediately from `sleep` when `end <= currentTimestamp`, so `sleep(0)` creates no entry in the fake-clock sleep queue. For each positive-duration sleeper already due during `TestClock.adjust`, `run` pops the entry, advances fake time, opens its latch, and yields once before continuing. The Effect run loop also yields when the default scheduler operation budget is exhausted; the zero-delay background loop depends on that ordinary yield. The probe demonstrates that this interval-zero loop shape coexists with all due foreground wakeups in all three engines. It does not include the repeated runner-storage, assignment, or hashing work present in Sharding, and therefore cannot determine whether those callbacks consume the 5-second case budget.
+
+Source hashes for the pinned TestClock, Effect run loop, scheduler, and native runtime turn driver are in `receipt.json`. Bun's command wrapper reported 0.965 seconds. The native binary was not separately timed; it completed before the command poll returned, so this evidence makes no exact Bun/native time comparison.

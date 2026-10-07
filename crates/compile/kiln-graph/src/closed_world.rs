@@ -1,11 +1,10 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::graph;
 use kiln_ir::{
     Constant, FunctionProto, Instruction, ModuleProgram, Program, RemovableDeclaration, Upvalue,
 };
 
-use crate::graph::{FunctionGraph, GraphOp, Terminator, build_function_graph};
+use crate::graph::{FunctionGraph, GraphOp, Terminator, ValueId, build_function_graph};
 
 fn graph_for(proto: &FunctionProto, program: &Program) -> Option<FunctionGraph> {
     let graph = build_function_graph(proto, program).ok()?;
@@ -166,16 +165,9 @@ fn stored_declaration(code: &[Instruction], pc: usize) -> Option<(u32, bool)> {
 pub fn closed_world_function_liveness(
     program: &Program,
     demanded: &BTreeSet<u32>,
-    direct_eval: bool,
+    _direct_eval: bool,
     declarations: &[RemovableDeclaration],
 ) -> (HashSet<usize>, Vec<HashSet<u32>>, BTreeSet<u32>) {
-    if direct_eval {
-        return (
-            (0..program.functions.len()).collect(),
-            vec![HashSet::new(); program.functions.len() + 1],
-            (0..program.local_count).collect(),
-        );
-    }
     let parents = function_parent_candidates(program);
     let mut module_live = demanded.clone();
     let mut function_live = vec![BTreeSet::<u32>::new(); program.functions.len()];
@@ -226,6 +218,44 @@ pub fn closed_world_function_liveness(
                         None => changed |= module_live.insert(*slot),
                         Some(index) => changed |= function_live[index].insert(*slot),
                     },
+                    Instruction::DirectEval(site) => {
+                        // The eval compiler can read or write every binding in its site's
+                        // lexical environment. Preserve those cells, but do not let an eval in
+                        // an unreachable function keep unrelated functions and module slots live.
+                        for binding in &site.bindings {
+                            let (binding_owner, slot) = match binding.access {
+                                kiln_ir::EvalAccess::Cell(slot) => (owner, slot),
+                                kiln_ir::EvalAccess::Upvalue(upvalue) => {
+                                    let Some(index) = owner else {
+                                        // A top-level eval cannot name an upvalue. Malformed or
+                                        // hand-authored IR falls back to keeping the whole scope.
+                                        return (
+                                            (0..program.functions.len()).collect(),
+                                            vec![HashSet::new(); program.functions.len() + 1],
+                                            (0..program.local_count).collect(),
+                                        );
+                                    };
+                                    let Some((binding_owner, slot)) = captured_slot_owner(
+                                        program,
+                                        &parents,
+                                        index,
+                                        upvalue as usize,
+                                    ) else {
+                                        return (
+                                            (0..program.functions.len()).collect(),
+                                            vec![HashSet::new(); program.functions.len() + 1],
+                                            (0..program.local_count).collect(),
+                                        );
+                                    };
+                                    (binding_owner, slot)
+                                }
+                            };
+                            match binding_owner {
+                                None => changed |= module_live.insert(slot),
+                                Some(index) => changed |= function_live[index].insert(slot),
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -259,7 +289,8 @@ pub fn closed_world_function_liveness(
                 continue;
             };
             for upvalue in 0..function.upvalues.len() {
-                let Some((owner, slot)) = captured_slot_owner(program, &parents, index, upvalue)
+                let Some((owner, slot)) =
+                    captured_slot_owner(program, &parents, index, upvalue as usize)
                 else {
                     return (
                         (0..program.functions.len()).collect(),
@@ -354,6 +385,17 @@ pub fn retained_module_size(
             program.functions.len(),
         );
     };
+    if module.link_facts.direct_eval {
+        return (
+            program.code.len()
+                + program
+                    .functions
+                    .iter()
+                    .map(|f| f.code.len())
+                    .sum::<usize>(),
+            program.functions.len(),
+        );
+    }
     let (reachable, dead_pcs, _) = closed_world_function_liveness(
         program,
         demanded,
@@ -421,11 +463,68 @@ pub fn retained_module_instructions<'a>(
 /// evaluated between loading a namespace and calling its method. Aliases used only to carry the
 /// same value across TDZ checks, locals, or control-flow joins remain inspectable. Any other use
 /// is deliberately the conservative answer.
+fn namespace_alias_reaches(
+    value: ValueId,
+    defs: &HashMap<ValueId, &GraphOp>,
+    roots: &HashSet<ValueId>,
+    local_aliases: &HashSet<u32>,
+) -> bool {
+    let mut pending = vec![value];
+    let mut seen = HashSet::new();
+    while let Some(value) = pending.pop() {
+        if roots.contains(&value) {
+            return true;
+        }
+        if !seen.insert(value) {
+            continue;
+        }
+        match defs.get(&value) {
+            Some(GraphOp::StoreLocal { value, .. } | GraphOp::CheckTdz { value, .. }) => {
+                pending.push(*value);
+            }
+            Some(GraphOp::Phi { inputs }) => {
+                pending.extend(inputs.iter().map(|(_, input)| *input));
+            }
+            Some(GraphOp::LoadLocal(slot)) if local_aliases.contains(slot) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Resolve namespace reads for several import slots using one verified graph construction.
+/// Graphs live only for this batch; callers retain the compact answers, not program graphs.
+pub fn closed_world_namespace_members_for_slots(
+    program: &Program,
+    slots: impl IntoIterator<Item = u32>,
+    direct_eval: bool,
+) -> BTreeMap<u32, Option<BTreeSet<String>>> {
+    let slots = slots.into_iter().collect::<BTreeSet<_>>();
+    if slots.is_empty() {
+        return BTreeMap::new();
+    }
+    let graphs = namespace_graphs(program, direct_eval);
+    slots
+        .into_iter()
+        .map(|slot| {
+            let members = graphs
+                .as_ref()
+                .and_then(|graphs| namespace_members(program, slot, graphs));
+            (slot, members)
+        })
+        .collect()
+}
+
 pub fn closed_world_namespace_members(
     program: &Program,
     slot: u32,
     direct_eval: bool,
 ) -> Option<BTreeSet<String>> {
+    let graphs = namespace_graphs(program, direct_eval)?;
+    namespace_members(program, slot, &graphs)
+}
+
+fn namespace_graphs(program: &Program, direct_eval: bool) -> Option<NamespaceGraphs> {
     if direct_eval {
         return None;
     }
@@ -448,12 +547,34 @@ pub fn closed_world_namespace_members(
     let functions = program
         .functions
         .iter()
-        .enumerate()
-        .map(|(_, function)| graph_for(function, program).ok_or(()))
+        .map(|function| graph_for(function, program).ok_or(()))
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
+    Some(NamespaceGraphs {
+        entry,
+        functions,
+        module_upvalues,
+    })
+}
+
+struct NamespaceGraphs {
+    entry: FunctionGraph,
+    functions: Vec<FunctionGraph>,
+    module_upvalues: Vec<Vec<Option<u32>>>,
+}
+
+fn namespace_members(
+    program: &Program,
+    slot: u32,
+    graphs: &NamespaceGraphs,
+) -> Option<BTreeSet<String>> {
+    let NamespaceGraphs {
+        entry,
+        functions,
+        module_upvalues,
+    } = graphs;
     let mut members = BTreeSet::new();
-    for (graph, function_index) in std::iter::once((&entry, None)).chain(
+    for (graph, function_index) in std::iter::once((entry, None)).chain(
         functions
             .iter()
             .enumerate()
@@ -490,7 +611,25 @@ pub fn closed_world_namespace_members(
         if roots.is_empty() {
             continue;
         }
-        let is_namespace = |value| roots.contains(&graph::resolve_root_alias(value, &defs));
+        // A namespace value can cross a suspension through a local or a resume phi. Unlike
+        // `resolve_root_alias`, this deliberately follows every phi input: a mixed value is still
+        // a possible namespace, and including its statically named member only widens the result.
+        let mut namespace_locals = HashSet::new();
+        loop {
+            let mut changed = false;
+            for (_, op) in graph.blocks.iter().flat_map(|block| &block.operations) {
+                let GraphOp::StoreLocal { slot, value } = op else {
+                    continue;
+                };
+                if namespace_alias_reaches(*value, &defs, &roots, &namespace_locals) {
+                    changed |= namespace_locals.insert(*slot);
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let is_namespace = |value| namespace_alias_reaches(value, &defs, &roots, &namespace_locals);
         for block in &graph.blocks {
             for (_, op) in &block.operations {
                 let namespace_operands = op
@@ -535,4 +674,54 @@ pub fn closed_world_namespace_members(
         }
     }
     Some(members)
+}
+
+#[cfg(test)]
+mod namespace_batch_tests {
+    use super::*;
+
+    #[test]
+    fn independent_namespace_slots_keep_named_reads_and_escapes_separate() {
+        let program = Program {
+            source: "".into(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
+            constants: vec![
+                Constant::String("alpha".into()),
+                Constant::String("beta".into()),
+            ],
+            code: vec![
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(0),
+                Instruction::Pop,
+                Instruction::LoadLocal(1),
+                Instruction::GetProperty(1),
+                Instruction::Pop,
+                Instruction::LoadLocal(2),
+                Instruction::Return,
+            ],
+            local_count: 3,
+            functions: Vec::new(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+        };
+        let expected = [
+            (0, Some(["alpha".to_owned()].into_iter().collect())),
+            (1, Some(["beta".to_owned()].into_iter().collect())),
+            (2, None),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            closed_world_namespace_members_for_slots(&program, [2, 0, 1, 0], false),
+            expected
+        );
+        assert_eq!(
+            closed_world_namespace_members_for_slots(&program, [0, 1, 2], true),
+            [(0, None), (1, None), (2, None)].into_iter().collect()
+        );
+        assert!(closed_world_namespace_members_for_slots(&program, [], false).is_empty());
+    }
 }

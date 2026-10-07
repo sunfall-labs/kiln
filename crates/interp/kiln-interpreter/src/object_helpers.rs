@@ -35,7 +35,7 @@ pub(super) fn clone_plain_data(
                     || !data.extensible
                     || data.frozen
                     || data.module_namespace
-                    || !data.namespace_cells.is_empty()
+                    || data.namespace_bindings.is_some()
                     || data.primitive.is_some()
                     || data.node_events.is_some()
                     || data.node_object.is_some()
@@ -59,7 +59,7 @@ pub(super) fn clone_plain_data(
                 }
                 entries
             };
-            let copy = Rc::new(RefCell::new(ObjectData::default()));
+            let copy = tracked_object(ObjectData::default());
             seen.insert(identity, Value::Object(Rc::clone(&copy)));
             for (key, item) in entries {
                 let item = clone_plain_data(&item, seen, depth + 1)?;
@@ -163,7 +163,7 @@ pub(super) fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionE
                 "isSymbolicLink",
                 Value::Native(Native::NodeStatIsSymbolicLink, RealmId::PRIMARY),
             );
-            Value::Object(Rc::new(RefCell::new(object)))
+            Value::Object(tracked_object(object))
         }
         AsyncHostValue::Resource(resource) => {
             return Err(ExecutionError::Host {
@@ -186,6 +186,12 @@ pub(super) fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionE
         AsyncHostValue::ProcessOutput(output) => {
             let mut object = ObjectData::default();
             object.set(
+                "pid",
+                output
+                    .pid
+                    .map_or(Value::Undefined, |pid| Value::Number(pid as f64)),
+            );
+            object.set(
                 "stdout",
                 node_host_value(AsyncHostValue::Bytes(output.stdout))?,
             );
@@ -205,7 +211,7 @@ pub(super) fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionE
                     .signal
                     .map_or(Value::Null, |signal| Value::Number(signal as f64)),
             );
-            Value::Object(Rc::new(RefCell::new(object)))
+            Value::Object(tracked_object(object))
         }
         AsyncHostValue::ResourceState(state) => {
             return Err(ExecutionError::Host {
@@ -224,7 +230,7 @@ pub(super) fn iteration_result(value: Value, done: bool) -> Value {
     let mut result = ObjectData::default();
     result.set("value", value);
     result.set("done", Value::Boolean(done));
-    Value::Object(Rc::new(RefCell::new(result)))
+    Value::Object(tracked_object(result))
 }
 
 /// The trace recorded on an error object when it was constructed, if it is one.
@@ -442,6 +448,108 @@ pub(super) fn value_realm(value: &Value) -> RealmId {
     }
 }
 
+/// `GetFunctionRealm` for the callable kinds represented by this VM. The other-realm Array
+/// species check uses this only after IsConstructor succeeded; following bound functions and
+/// proxies is required even though the final identity test rejects those wrappers. A revoked
+/// proxy throws here as the specification requires.
+pub(super) fn get_function_realm(value: &Value) -> Result<RealmId, ExecutionError> {
+    match value {
+        Value::Native(_, realm) | Value::Callback(_, realm) => Ok(*realm),
+        Value::Function(closure) => Ok(closure.realm),
+        Value::Bound(bound) => get_function_realm(&bound.target),
+        Value::Proxy(proxy) if proxy.revoked.get() => Err(ExecutionError::RevokedProxy),
+        Value::Proxy(proxy) => get_function_realm(&proxy.target),
+        Value::Wrapped(wrapped) => Ok(wrapped.realm),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "GetFunctionRealm requires a callable object".to_owned(),
+        }),
+    }
+}
+
+/// Whether `value` is the exact intrinsic Array constructor for a realm other than the currently
+/// executing Array built-in. The query is intentionally about identity, not a function's name,
+/// prototype or target: proxies and bound functions still have their realm chain checked above,
+/// then remain ordinary custom species by identity.
+pub(super) fn is_other_realm_array_constructor(
+    value: &Value,
+    current_realm: RealmId,
+) -> Result<bool, ExecutionError> {
+    if !is_constructor(value) {
+        return Ok(false);
+    }
+    let function_realm = get_function_realm(value)?;
+    Ok(matches!(
+        value,
+        Value::Native(Native::ArrayConstructor, realm)
+            if *realm == function_realm && *realm != current_realm
+    ))
+}
+
+#[cfg(test)]
+mod function_realm_tests {
+    use super::*;
+
+    fn bound(target: Value) -> Value {
+        Value::Bound(Rc::new(BoundFunction {
+            target,
+            this_value: Value::Undefined,
+            arguments: Vec::new(),
+            properties: RefCell::new(ObjectData::default()),
+        }))
+    }
+
+    #[test]
+    fn array_species_realm_predicate_checks_identity_and_revocation() {
+        let primary_array = Value::Native(Native::ArrayConstructor, RealmId::PRIMARY);
+        let foreign_array = Value::Native(Native::ArrayConstructor, RealmId(1));
+        let foreign_date = Value::Native(Native::DateConstructor, RealmId(1));
+        assert!(
+            !is_other_realm_array_constructor(&primary_array, RealmId::PRIMARY)
+                .expect("same-realm Array is not foreign")
+        );
+        assert!(
+            is_other_realm_array_constructor(&foreign_array, RealmId::PRIMARY)
+                .expect("foreign intrinsic Array is foreign")
+        );
+        assert!(
+            !is_other_realm_array_constructor(&foreign_date, RealmId::PRIMARY)
+                .expect("a foreign constructor is not foreign Array")
+        );
+
+        let bound_array = bound(foreign_array.clone());
+        assert!(
+            !is_other_realm_array_constructor(&bound_array, RealmId::PRIMARY)
+                .expect("bound Array is not the intrinsic by identity")
+        );
+
+        let live_proxy = Value::Proxy(Rc::new(ProxyData {
+            target: foreign_array.clone(),
+            handler: Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            private_elements: RefCell::new(ObjectData::default()),
+            revoked: std::cell::Cell::new(false),
+        }));
+        assert!(
+            !is_other_realm_array_constructor(&live_proxy, RealmId::PRIMARY)
+                .expect("proxy Array is not the intrinsic by identity")
+        );
+
+        let revoked_proxy = Value::Proxy(Rc::new(ProxyData {
+            target: foreign_array,
+            handler: Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
+            private_elements: RefCell::new(ObjectData::default()),
+            revoked: std::cell::Cell::new(true),
+        }));
+        assert!(matches!(
+            is_other_realm_array_constructor(&revoked_proxy, RealmId::PRIMARY),
+            Err(ExecutionError::RevokedProxy)
+        ));
+        assert!(matches!(
+            is_other_realm_array_constructor(&bound(revoked_proxy), RealmId::PRIMARY),
+            Err(ExecutionError::RevokedProxy)
+        ));
+    }
+}
+
 /// Rewrite an intrinsic minted by a table so that it names `realm`'s copy of that built-in.
 ///
 /// The property tables are pure and realm-blind by design -- `Native::property` cannot be handed
@@ -512,11 +620,15 @@ pub(super) fn prototype_of(value: &Value) -> Value {
         // walks to. Falling to `Object.prototype` with the arm below broke exactly that:
         // `Iterator.from(x)` must hand back `x` when it is already an iterator, and stopped.
         Value::Native(
-            Native::AsyncGeneratorFunctionConstructor | Native::GeneratorFunctionConstructor,
+            Native::AsyncFunctionConstructor
+                | Native::AsyncGeneratorFunctionConstructor
+                | Native::GeneratorFunctionConstructor,
             _,
         ) => Value::Native(Native::FunctionConstructor, realm),
         Value::Native(
-            Native::AsyncGeneratorFunctionPrototype | Native::GeneratorFunctionPrototype,
+            Native::AsyncFunctionPrototype
+                | Native::AsyncGeneratorFunctionPrototype
+                | Native::GeneratorFunctionPrototype,
             _,
         ) => Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm),
         Value::Native(Native::PrototypeOf(PrototypeTable::AsyncGenerator), _) => {
@@ -589,19 +701,10 @@ pub(super) fn prototype_of(value: &Value) -> Value {
         // machinery makes are callables too -- a program is handed `resolve` and `reject` and can
         // ask what they inherit from, and answering null said they were not functions at all.
         Value::Function(closure) => {
-            if let Some(table) = generator_prototype_table(closure) {
-                match table {
-                    PrototypeTable::AsyncGenerator => {
-                        Value::Native(Native::AsyncGeneratorFunctionPrototype, realm)
-                    }
-                    PrototypeTable::Generator => {
-                        Value::Native(Native::GeneratorFunctionPrototype, realm)
-                    }
-                    _ => Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm),
-                }
-            } else {
-                Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm)
-            }
+            function_kind_prototype(closure).map_or_else(
+                || Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm),
+                |prototype| Value::Native(prototype, realm),
+            )
         }
         Value::Native(_, _)
         | Value::Bound(_)
@@ -694,6 +797,13 @@ pub(super) fn has_property_key(
     target: &Value,
     key: PropertyKeyRef<'_>,
 ) -> bool {
+    // A shared value (ADR 0073) answers `in` as the frozen object it is: its own fields, then the
+    // chain its facade reports. It has no store of its own, so every arm below missed it and
+    // `"a" in share({ a: 1 })` was false while the read answered 1.
+    if let Value::Shared(facade) = target {
+        return facade.own_property(key).is_some()
+            || has_property_key(intrinsics, &facade.prototype(), key);
+    }
     if let Value::Array(items) = target
         && let Some(index) = array_index_key(key)
     {
@@ -785,7 +895,7 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
                     .borrow()
                     .prototype_table()
                     .is_some_and(|(table, realm)| {
-                        own_attributes(
+                        has_property_ascii(
                             intrinsics,
                             &Value::Native(
                                 Native::PrototypeOf(table),
@@ -793,7 +903,6 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
                             ),
                             &name,
                         )
-                        .is_some()
                     })
                 // An iterator this realm made inherits `%IteratorPrototype%`, as the read does.
                 || ((object.borrow().get_own("@@iterated").is_some()
@@ -878,11 +987,7 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
         other if exotic_properties(other).is_some() => {
             exotic_properties(target).is_some_and(|store| store.borrow().lookup(&name).is_some())
                 || exotic_reserved_name(target, &name)
-                || own_attributes(intrinsics, &prototype_of(target), &name).is_some()
-                || !matches!(
-                    inherited_object_property(intrinsics, &name, value_realm(target)),
-                    Value::Undefined
-                )
+                || has_property_ascii(intrinsics, &prototype_of_in(intrinsics, target), &name)
         }
         // Mirrors the read: the realm's store first, then the table, then the `name` and
         // `length` every callable owns. A property a program deleted is absent here too, or
@@ -921,32 +1026,87 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
             // is every constructor and method table but that one. Answering from the built-in's
             // own names alone denied them `hasOwnProperty`, and denied `Math` a property the
             // program had put on `Object.prototype` and could read straight off it.
-            let inherited = if matches!(
-                native,
-                Native::PrototypeOf(PrototypeTable::IteratorFor(_) | PrototypeTable::Generator)
-            ) {
-                // One link further: these reach `%IteratorPrototype%` before `Object.prototype`.
-                native_inherited_property(intrinsics, target, &name)
-            } else {
-                inherited_object_property(intrinsics, &name, value_realm(target))
-            };
-            own || (!matches!(native, Native::PrototypeOf(PrototypeTable::Object))
-                && !matches!(inherited, Value::Undefined))
+            own || has_property_ascii(intrinsics, &prototype_of_in(intrinsics, target), name)
         }
-        // Mirrors the read: a function answers from its own store, then from `name`, `length`
-        // and `prototype`, then from the methods every callable inherits. `in` has to agree with
-        // what a read would produce, or a feature-detect and the call after it disagree.
+        // Callable methods belong to the actual prototype chain. In particular, setting a
+        // function's prototype to null removes inherited methods without removing its own
+        // identity properties. Membership must not invoke an inherited accessor.
         Value::Function(closure) => {
             closure.properties.borrow().lookup(&name).is_some()
                 || matches!(name, "name" | "length")
                 || (name == "prototype" && has_prototype_property(closure))
-                || !matches!(
-                    function_property(intrinsics, &name, value_realm(target)),
-                    Value::Undefined
-                )
+                || has_property_ascii(intrinsics, &prototype_of_in(intrinsics, target), name)
         }
         _ => false,
     }
+}
+
+/// Returns `None` when ordinary HasProperty must run (a Proxy, non-array or prototype condition
+/// that this representation cannot search without user code), otherwise `Some(None)` when no
+/// present index remains, or `Some(Some(index))` for the next own present slot. Indexed properties
+/// on Array/Object.prototype disable the shortcut monotonically, so inherited numeric keys always
+/// continue through HasProperty.
+pub(super) fn next_array_present_index(
+    intrinsics: &Intrinsics,
+    target: &Value,
+    cursor: usize,
+    limit: usize,
+    reverse: bool,
+) -> Option<Option<usize>> {
+    let Value::Array(array) = target else {
+        return None;
+    };
+    let items = array.items.borrow();
+    if reverse {
+        if cursor < items.len() {
+            let index = cursor;
+            if array_exotic_element(array, index).is_some()
+                || !matches!(items[index], Value::Native(Native::Hole, _))
+            {
+                return Some(Some(index));
+            }
+        }
+    } else if cursor < items.len()
+        && (array_exotic_element(array, cursor).is_some()
+            || !matches!(items[cursor], Value::Native(Native::Hole, _)))
+    {
+        return Some(Some(cursor));
+    }
+    // Arrays without an explicit [[Prototype]] link belong to the primary realm in this
+    // representation. Non-primary arrays carry their realm's intrinsic prototype as an
+    // explicit link and took the fallback above.
+    if intrinsics.indexed_array_prototype.get()
+        || intrinsics.indexed_prototype_chain_is_custom(RealmId::PRIMARY)
+        || array.properties.borrow().prototype().is_some()
+    {
+        return None;
+    }
+    if reverse {
+        if items.is_empty() {
+            return Some(None);
+        }
+        let mut index = cursor.min(items.len() - 1);
+        loop {
+            if array_exotic_element(array, index).is_some()
+                || !matches!(items[index], Value::Native(Native::Hole, _))
+            {
+                return Some(Some(index));
+            }
+            if index == 0 {
+                return Some(None);
+            }
+            index -= 1;
+        }
+    }
+    let end = limit.min(items.len());
+    for index in cursor.min(end)..end {
+        if array_exotic_element(array, index).is_some()
+            || !matches!(items[index], Value::Native(Native::Hole, _))
+        {
+            return Some(Some(index));
+        }
+    }
+    Some(None)
 }
 
 #[derive(Clone, Debug)]

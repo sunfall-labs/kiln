@@ -1,12 +1,15 @@
+// native-env: KILN_ENGINE_PRIVATE_FOR_TESTS=1
+// Drives the actor protocol through the engine-private channel, which a program never sees:
+// the switch above (a developer switch, off by default in both engines) leaves it readable.
 import { spawnActor } from 'kiln:actors';
-import { MessageChannel, MessagePort } from 'node:worker_threads';
+import { MessageChannel } from 'node:worker_threads';
 
 const owner = await spawnActor({
   module: new URL('./support/actor-counter.mjs', import.meta.url),
   export: 'Counter',
   args: [1],
 });
-const internals = MessagePort[Symbol.for('kiln.messagePort')];
+const internals = globalThis.__kilnPrivate.messagePort;
 const endpoint = internals.workerOp(23, owner.ref.address);
 const sender = internals.internalPort(endpoint, null, null, false);
 const id = internals.workerOp(25);

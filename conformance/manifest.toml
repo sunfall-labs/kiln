@@ -51,8 +51,8 @@ source_commit = "bfdd2b0"
 source_commit_subject = "porffor/Effect: findings, and the three regression gates"
 ported = "2026-08-29"
 guard_tests = 20
-effect_tests = 15
-total_tests = 35
+effect_tests = 12
+total_tests = 32
 
 # How the expected output in this file was obtained. Both halves were *observed*, not
 # transcribed: every value below is what `node v25.9.0` actually printed on this machine.
@@ -684,55 +684,6 @@ expected_stdout = """
 RESULT hi world | 2,4,6
 """
 
-[[test]]
-id = "effect/13-actor-service"
-group = "effect"
-source = "effect/src/13-actor-service.ts"
-bundle = "effect/bundle/13-actor-service.js"
-bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
-status = "needs-bundle"
-features = ["modules", "classes", "actors", "scopes", "event-loop", "promises"]
-effect_api = ["Context.Service", "spawnActorLayer", "Effect.gen", "Effect.scoped", "Effect.provide", "Effect.runPromise"]
-notes = """
-Actor service lifecycle, mailbox serialization, and Scope finalizer cleanup.
-"""
-expected_stdout = """
-ACTOR 10 | 25 | closed
-"""
-
-[[test]]
-id = "effect/14-zero-copy-queue"
-group = "effect"
-source = "effect/src/14-zero-copy-queue.ts"
-bundle = "effect/bundle/14-zero-copy-queue.js"
-bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
-status = "needs-bundle"
-features = ["modules", "regions", "transfer-ticket", "event-loop", "promises"]
-effect_api = ["isolate", "transfer", "Effect.gen", "Effect.runPromise"]
-notes = """
-An isolated graph ticket cannot be cloned as an ordinary value while runtime ownership
-proof and handoff remain pending. The historical filename is retained for corpus IDs.
-"""
-expected_stdout = """
-QUEUE DataCloneError ok
-"""
-
-[[test]]
-id = "effect/15-native-parallel"
-group = "effect"
-source = "effect/src/15-native-parallel.ts"
-bundle = "effect/bundle/15-native-parallel.js"
-bundle_inputs = ["effect/package.json", "effect/package-lock.json", "effect/build.sh"]
-status = "needs-bundle"
-features = ["modules", "concurrency", "parallelism", "fiber-interruption", "event-loop", "promises"]
-effect_api = ["forEachParallel", "Effect.gen", "Effect.sleep", "Effect.onInterrupt", "Effect.flip", "Effect.runPromise"]
-notes = """
-Native parallel collection evaluation with fiber interruption and error short-circuiting.
-"""
-expected_stdout = """
-PARALLEL 20,40,60 | interrupted ok
-"""
-
 
 # ---------------------------------------------------------------------------------------------
 # Not a test. A committed input fixture, listed here so it is inventoried rather than being an
@@ -1322,6 +1273,21 @@ undefined
 """
 
 [[test]]
+id = "regress/r11-method-name-survives-nested-calls"
+group = "regress"
+source = "regress/r11-method-name-survives-nested-calls.js"
+status = "runnable"
+features = ["error-stack", "callsite-method-name", "frame-unwind"]
+catches = """
+A nested call can overwrite the caller's method name unless frame restoration restores it
+alongside the other activation state. This checks both normal return and caught exception
+paths with anonymous functions so the stack must use the computed callsite alias.\
+"""
+expected_stdout = """
+nested callsite aliases restored
+"""
+
+[[test]]
 id = "regress/r12-method-prototype"
 group = "regress"
 source = "regress/r12-method-prototype.js"
@@ -1462,7 +1428,7 @@ source = "regress/r17-message-port-delivery-and-transfer.mjs"
 status = "runnable"
 features = ["message-channel", "message-port", "structured-clone", "transfer-list", "array-buffer-detach", "worker-threads", "promise-jobs", "next-tick"]
 catches = """
-Issue 14 of `.scratch/realms-and-concurrency`. Delivery: node dispatches a port's messages from \
+Issue 14 of `docs/issues/realms-and-concurrency`. Delivery: node dispatches a port's messages from \
 one callback with a full checkpoint (ticks, then promise jobs, then an async handler's later \
 awaits) between two messages, and each port's queue as one batch, so `B1` comes after all of `A`. \
 Delivering the queue from one `setImmediate` without the checkpoint, or one `setImmediate` per \
@@ -1558,7 +1524,7 @@ source = "regress/r19-message-port-poll-phase-and-event-slots.mjs"
 status = "runnable"
 features = ["message-channel", "message-port", "event-target", "set-immediate", "timers", "next-tick", "promise-jobs"]
 catches = """
-Issue 14 of `.scratch/realms-and-concurrency`, after r17. Node delivers a port's messages in \
+Issue 14 of `docs/issues/realms-and-concurrency`, after r17. Node delivers a port's messages in \
 libuv's poll phase, between the timers due when a turn begins and the turn's immediates; until \
 2026-09-27 a delivery was a `setImmediate` and an immediate a zero-delay timeout, so an \
 immediate scheduled before the first `postMessage`, or beside a post from a timer callback, ran \
@@ -1604,7 +1570,7 @@ source = "regress/r20-unhandled-rejection-exits.js"
 status = "runnable"
 features = ["promise-jobs", "next-tick", "unhandled-rejections"]
 catches = """
-Issue 18 of `.scratch/realms-and-concurrency`. A rejection nothing handled ends the program as \
+Issue 18 of `docs/issues/realms-and-concurrency`. A rejection nothing handled ends the program as \
 node's default `--unhandled-rejections=throw` does: reported once the checkpoint that left it is \
 over -- after the ticks and promise jobs, so a handler attached from either is in time -- as an \
 uncaught exception, exit status 1, before any timer runs. The native backend exited 0 without a \
@@ -1974,6 +1940,29 @@ across multiple chunks without routing through string materialization.\
 """
 expected_stdout = """
 200 00ff010a
+"""
+
+[[test]]
+id = "server/s09-listen-callback"
+requires_host = "node"
+group = "server"
+source = "server/s09-listen-callback.mjs"
+status = "runnable"
+features = ["modules", "builtin-modules", "node-http", "promises", "async-await", "event-emitter", "for-of"]
+catches = """
+Every callback form of `server.listen` -- (port, host, cb), (port, cb), (port, host) with a
+'listening' listener, and ({port, host}, cb) -- fires the 'listening' event and then the callback,
+and both before the first request is served. The callback is the line a real server prints and a
+supervisor waits for. The interpreter and native engines both fired it; what lost it was the
+`kiln run` output path, which held a program's output until the program exited -- never, for a
+server. That path is pinned by the daemon test `streamed_output_reaches_the_client_while_a_server_runs`,
+because a corpus run captures output in-process and cannot see the difference.\
+"""
+expected_stdout = """
+port,host,cb event,callback,request
+port,cb event,callback,request
+port,host event,request
+{port,host},cb event,callback,request
 """
 
 [[test]]
@@ -2376,4 +2365,26 @@ false 1 2 2
 true false true
 true true 4 7
 true
+"""
+
+[[test]]
+id = "regress/r56-sloppy-function-duplicate-parameters"
+group = "regress"
+source = "regress/r56-sloppy-function-duplicate-parameters.js"
+status = "runnable"
+features = ["functions", "constructors", "parity"]
+catches = "Function constructor bodies inherit strictness from their own directive, not the caller; duplicate names remain legal for simple sloppy parameter lists and bind the final position."
+expected_stdout = """
+2 2 4
+"""
+
+[[test]]
+id = "regress/r58-internal-suppressed-error-prototype"
+group = "regress"
+source = "regress/r58-internal-suppressed-error-prototype.js"
+status = "runnable"
+features = ["explicit-resource-management", "errors", "parity"]
+catches = "Errors produced internally while unwinding sync or async disposal use the public realm SuppressedError prototype and preserve the displaced errors."
+expected_stdout = """
+sync and async SuppressedError prototypes passed
 """

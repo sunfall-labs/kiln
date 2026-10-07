@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// The parallel/sequential differential harness (.scratch/parallel-builtins issue 02), tier 0:
+// The parallel/sequential differential harness (docs/issues/parallel-builtins issue 02), tier 0:
 // the awkward numbers -- both zeros, NaN, the infinities, denormals, the int32 and uint32
 // edges, 2^53 + 1, halves -- repeated across every chunk boundary.
 //

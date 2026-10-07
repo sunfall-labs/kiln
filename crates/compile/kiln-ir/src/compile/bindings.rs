@@ -21,7 +21,14 @@ impl super::Compiler {
 
     /// The brand key of the class currently being compiled, for the store that installs it.
     pub(super) fn own_private_brand_key(&self) -> String {
-        private_key(self.private_scopes.last().copied().unwrap_or(0), "%brand")
+        let depth = self.private_scopes.len().saturating_sub(1);
+        private_key(
+            self.private_scope_modules
+                .get(depth)
+                .map_or(&self.private_module_id, String::as_str),
+            self.private_scopes.get(depth).copied().unwrap_or(0),
+            "%brand",
+        )
     }
 
     /// Read `name` from the bindings around it, ignoring any `with` object.
@@ -49,11 +56,8 @@ impl super::Compiler {
             // not one to load from.
             Resolution::Local(local) if !local.initialized => {
                 let _ = local;
-                let scratch = self.local_count;
-                self.local_count += 1;
-                self.code.push(Instruction::NewCell(scratch));
-                self.code.push(Instruction::MarkUninitialized(scratch));
-                self.code.push(Instruction::LoadCell(scratch));
+                let check = self.uninitialized_read_check();
+                self.code.extend(check);
             }
             Resolution::Local(local) if local.celled => {
                 self.code.push(Instruction::LoadCell(local.slot))
@@ -87,6 +91,34 @@ impl super::Compiler {
         }
     }
 
+    /// Emit a run-time TDZ read using a temporary cell, for an uninitialized ordinary local.
+    ///
+    /// Native graph lowering represents uncaptured locals as SSA values, so a raw `LoadLocal`
+    /// cannot observe the uninitialized marker the way the interpreter can. A fresh cell routes
+    /// the check through the same `LoadCell` operation used for captured bindings in both
+    /// engines.
+    pub(super) fn uninitialized_read_check(&mut self) -> Vec<Instruction> {
+        let scratch = self.local_count;
+        self.local_count += 1;
+        vec![
+            Instruction::NewCell(scratch),
+            Instruction::MarkUninitialized(scratch),
+            Instruction::LoadCell(scratch),
+        ]
+    }
+
+    /// Evaluate a function declaration whose lexical value was initialized on scope entry.
+    pub(super) fn emit_annexb_function_write(&mut self, function: &Function) {
+        if !function.generator
+            && !function.asynchronous
+            && self.annexb_var_functions.contains(&function.span)
+            && let Some(name) = &function.name
+            && let Resolution::Local(local) = self.resolve(name)
+        {
+            self.emit_annexb_var_write(name, local);
+        }
+    }
+
     /// The var-scoped write Annex B adds to a block-level function declaration's evaluation.
     ///
     /// Emitted after the block-scoped binding has been given its value, and reading that binding
@@ -94,9 +126,6 @@ impl super::Compiler {
     /// two bindings start as the same function object and diverge from there --
     /// `{ function f() {} f = 123; }` leaves the outer `f` a function.
     pub(super) fn emit_annexb_var_write(&mut self, name: &str, block: Local) {
-        if !self.annexb_var_functions.contains(name) {
-            return;
-        }
         let Some(target) = self.scopes[0].get(name).copied() else {
             // The var-scoped binding is a property of the global object, so the copy is a write
             // to it rather than to a slot.
@@ -164,15 +193,18 @@ impl super::Compiler {
                 let local = scope[name];
                 // An import is the exporter's binding, and writing one is refused wherever it is
                 // written. `const` is the nearest thing this vocabulary has to that.
-                let declaration = match local.kind {
-                    _ if local.imported => EvalDeclaration::Const,
-                    VariableKind::Var => EvalDeclaration::Var,
-                    VariableKind::Let => EvalDeclaration::Let,
-                    // A `using` binding cannot be reassigned either, and what an eval'd source
-                    // may do with it is exactly what it may do with a `const`.
-                    VariableKind::Const | VariableKind::Using | VariableKind::AwaitUsing => {
-                        EvalDeclaration::Const
-                    }
+                let declaration = match local.eval_declaration {
+                    Some(declaration) => declaration,
+                    None => match local.kind {
+                        _ if local.imported => EvalDeclaration::Const,
+                        VariableKind::Var => EvalDeclaration::Var,
+                        VariableKind::Let => EvalDeclaration::Let,
+                        // A `using` binding cannot be reassigned either, and what an eval'd source
+                        // may do with it is exactly what it may do with a `const`.
+                        VariableKind::Const | VariableKind::Using | VariableKind::AwaitUsing => {
+                            EvalDeclaration::Const
+                        }
+                    },
                 };
                 order.push((name.clone(), declaration));
             }
@@ -202,6 +234,35 @@ impl super::Compiler {
             });
         }
         bindings
+    }
+
+    /// The object records around a direct eval are dynamic environments, not lexical bindings.
+    /// Capture their hidden object cells in outer-to-inner order so eval recompilation can seed
+    /// the same `with` lookup chain instead of resolving those names globally.
+    pub(super) fn eval_site_with_objects(&mut self, span: Span) -> Vec<EvalBinding> {
+        let names: Vec<String> = self
+            .with_scopes
+            .iter()
+            .map(|with| with.name.clone())
+            .collect();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let access = match self.resolve_or_capture(&name) {
+                    Resolution::Local(local) if local.celled => EvalAccess::Cell(local.slot),
+                    Resolution::Upvalue(index) => EvalAccess::Upvalue(index),
+                    _ => {
+                        self.error(Some(span), "a direct `eval` cannot reach an active `with`");
+                        return None;
+                    }
+                };
+                Some(EvalBinding {
+                    name,
+                    access,
+                    declaration: EvalDeclaration::Const,
+                })
+            })
+            .collect()
     }
 
     /// Names visible to the function being compiled, and how each is reached.

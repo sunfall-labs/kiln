@@ -61,6 +61,7 @@ pub enum Command {
         path: PathBuf,
         args: Vec<String>,
         node: bool,
+        wall_clock: bool,
         native: bool,
         profile: NativeProfile,
         /// How long the program may run. Unmetered unless `--max-steps` says otherwise: a
@@ -75,6 +76,7 @@ pub enum Command {
     },
     Build {
         path: PathBuf,
+        includes: Vec<String>,
         output: Option<PathBuf>,
         profile: NativeProfile,
         shared: bool,
@@ -114,6 +116,14 @@ pub enum Command {
         binary: String,
         args: Vec<String>,
     },
+    /// Node-compatible source launch used when this executable is `process.execPath`.
+    NodeLaunch {
+        path: PathBuf,
+        args: Vec<String>,
+        preloads: Vec<String>,
+        exec_argv: Vec<String>,
+        disallow_string_code_generation: bool,
+    },
 }
 
 /// What `kiln cache` was asked to do. One action today, spelled as an action rather than as a
@@ -138,6 +148,14 @@ pub fn parse<I>(args: I) -> Result<Parsed>
 where
     I: IntoIterator<Item = String>,
 {
+    let args = args.into_iter().collect::<Vec<_>>();
+    if args.first().is_some_and(|arg| {
+        arg == "--import"
+            || arg.starts_with("--import=")
+            || arg == "--disallow-code-generation-from-strings"
+    }) {
+        return parse_node_launch(args);
+    }
     let mut positional: Vec<String> = Vec::new();
     let mut one_shot = false;
     let mut socket: Option<PathBuf> = None;
@@ -145,8 +163,11 @@ where
     let mut changed = false;
     let mut parse_only = false;
     let mut node = false;
+    let mut wall_clock = false;
+    let mut clock_specified = false;
     let mut native = false;
     let mut output: Option<PathBuf> = None;
+    let mut includes = Vec::new();
     let mut test_output: Option<PathBuf> = None;
     let mut profile: Option<NativeProfile> = None;
     let mut max_steps: Option<u64> = None;
@@ -220,6 +241,18 @@ where
                 reject_inline_value(&flag, &inline)?;
                 node = true;
             }
+            "--clock" => {
+                clock_specified = true;
+                wall_clock = match value_for(&flag, inline, &mut args)?.as_str() {
+                    "wall" => true,
+                    "virtual" => false,
+                    value => {
+                        return Err(Error::usage(format!(
+                            "unknown clock policy `{value}`; use `virtual` or `wall`"
+                        )));
+                    }
+                };
+            }
             "--native" => {
                 reject_inline_value(&flag, &inline)?;
                 native = true;
@@ -234,6 +267,13 @@ where
             }
             "--output" => {
                 output = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
+            }
+            "--include" => {
+                let specifier = value_for(&flag, inline, &mut args)?;
+                if specifier.is_empty() {
+                    return Err(Error::usage("--include needs a nonempty module specifier"));
+                }
+                includes.push(specifier);
             }
             "--out" => {
                 test_output = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
@@ -298,6 +338,14 @@ where
 
     if native && name != "run" {
         return Err(Error::usage("--native only applies to `kiln run`"));
+    }
+    if clock_specified && name != "run" {
+        return Err(Error::usage("--clock only applies to `kiln run`"));
+    }
+    if wall_clock && !node {
+        return Err(Error::usage(
+            "--clock wall requires --node for host-clock scheduling",
+        ));
     }
     if shared && name != "build" {
         return Err(Error::usage("--shared only applies to `kiln build`"));
@@ -390,6 +438,11 @@ where
     if explain && name != "build" {
         return Err(Error::usage("--explain only applies to `kiln build`"));
     }
+    if !includes.is_empty() && (name != "build" || shared) {
+        return Err(Error::usage(
+            "--include only applies to Node executable `kiln build`",
+        ));
+    }
     // The interpreter and `kiln run --native` take the same choice from `KILN_EXTENSIONS=0` at run
     // time; the flag exists for the one thing an environment cannot do, which is fix the answer
     // into a binary that will be run somewhere else (ADR 0068).
@@ -432,6 +485,7 @@ where
                 path: PathBuf::from(path),
                 args,
                 node,
+                wall_clock,
                 native,
                 profile: profile.unwrap_or_default(),
                 steps: max_steps.map_or(StepBudget::Unmetered, StepBudget::Limited),
@@ -444,6 +498,7 @@ where
         }
         "build" => Command::Build {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
+            includes,
             output,
             profile: profile.unwrap_or_default(),
             shared,
@@ -549,6 +604,59 @@ where
         command,
         one_shot,
         socket,
+    }))
+}
+
+fn parse_node_launch(args: Vec<String>) -> Result<Parsed> {
+    let mut cursor = 0;
+    let mut preloads = Vec::new();
+    let mut exec_argv = Vec::new();
+    let mut disallow_string_code_generation = false;
+    while cursor < args.len() && args[cursor].starts_with('-') {
+        let flag = &args[cursor];
+        if flag == "--disallow-code-generation-from-strings" {
+            disallow_string_code_generation = true;
+            exec_argv.push(flag.clone());
+            cursor += 1;
+        } else if flag == "--import" {
+            let Some(preload) = args.get(cursor + 1) else {
+                return Err(Error::usage("--import requires a module path"));
+            };
+            if preload.starts_with('-') {
+                return Err(Error::usage("--import requires a module path"));
+            }
+            preloads.push(preload.clone());
+            exec_argv.extend([flag.clone(), preload.clone()]);
+            cursor += 2;
+        } else if let Some(preload) = flag.strip_prefix("--import=") {
+            if preload.is_empty() {
+                return Err(Error::usage("--import requires a module path"));
+            }
+            preloads.push(preload.to_owned());
+            exec_argv.push(flag.clone());
+            cursor += 1;
+        } else {
+            return Err(Error::usage(format!(
+                "unsupported Node source execution flag `{flag}`"
+            )));
+        }
+    }
+    let Some(path) = args.get(cursor) else {
+        return Err(Error::usage(
+            "Node source execution flags require an entry module path",
+        ));
+    };
+    cursor += 1;
+    Ok(Parsed::Run(Invocation {
+        command: Command::NodeLaunch {
+            path: PathBuf::from(path),
+            args: args[cursor..].to_vec(),
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+        },
+        one_shot: true,
+        socket: None,
     }))
 }
 
@@ -668,8 +776,10 @@ options:
     --changed          with `test`, run failures, smoke, and affected tests only
     --parse-only       with `test`, classify parser outcomes without interpreting
     --node             with `run`, `build`, or `test`, install the Tokio-owned Node compatibility Adapter
+    --clock <policy>   choose `virtual` (default) or `wall` timer scheduling for `run`
     --native           with `run`, execute through the native backend
     --shared            with `build`, write a shared library for embedding
+    --include <module>  with `build`, retain an additional lazy module (repeatable)
     --dry-run          with `cache gc`, report the sweep without deleting anything
     --output <path>    with `build`, write the native executable or shared library here
     --explain-parallel with `build` or `check`, report every parallelMap call site and whether
@@ -755,6 +865,56 @@ mod tests {
     }
 
     #[test]
+    fn node_source_launch_preserves_ordered_preloads_flags_and_script_args() {
+        let parsed = parse([
+            "--import".to_owned(),
+            "./first.ts".to_owned(),
+            "--disallow-code-generation-from-strings".to_owned(),
+            "--import=./second.ts".to_owned(),
+            "./entry.ts".to_owned(),
+            "--program-flag".to_owned(),
+            "value".to_owned(),
+        ])
+        .expect("Node source launch parses");
+        let Parsed::Run(invocation) = parsed else {
+            panic!("source launch becomes a run");
+        };
+        assert!(invocation.one_shot);
+        let Command::NodeLaunch {
+            path,
+            args,
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+        } = invocation.command
+        else {
+            panic!("Node source launch keeps its options");
+        };
+        assert_eq!(path, PathBuf::from("./entry.ts"));
+        assert_eq!(args, ["--program-flag", "value"]);
+        assert_eq!(preloads, ["./first.ts", "./second.ts"]);
+        assert_eq!(
+            exec_argv,
+            [
+                "--import",
+                "./first.ts",
+                "--disallow-code-generation-from-strings",
+                "--import=./second.ts"
+            ]
+        );
+        assert!(disallow_string_code_generation);
+    }
+
+    #[test]
+    fn node_source_launch_refuses_unknown_flags_and_missing_entry() {
+        assert!(
+            usage_error(&["--import", "preload.ts", "--experimental-flag", "entry.ts"])
+                .contains("unsupported Node source execution flag")
+        );
+        assert!(usage_error(&["--import", "preload.ts"]).contains("require an entry module path"));
+    }
+
+    #[test]
     fn flags_may_precede_or_follow_the_command() {
         let before = run(&["--one-shot", "check", "a.js"]);
         let after = run(&["check", "a.js", "--one-shot"]);
@@ -771,6 +931,28 @@ mod tests {
     }
 
     #[test]
+    fn build_includes_are_repeatable_and_command_scoped() {
+        let invocation = run(&[
+            "build",
+            "main.ts",
+            "--include=./worker.ts",
+            "--include",
+            "pkg/runtime",
+        ]);
+        let Command::Build { includes, .. } = invocation.command else {
+            panic!("build command");
+        };
+        assert_eq!(includes, ["./worker.ts", "pkg/runtime"]);
+        for args in [
+            vec!["run", "main.ts", "--include=x"],
+            vec!["build", "main.ts", "--shared", "--include=x"],
+            vec!["build", "main.ts", "--include="],
+        ] {
+            assert!(parse(args.into_iter().map(str::to_owned)).is_err());
+        }
+    }
+
+    #[test]
     fn native_build_and_run_profiles_parse() {
         assert_eq!(
             run(&[
@@ -783,6 +965,7 @@ mod tests {
             .command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: Some(PathBuf::from("bin/app")),
                 profile: NativeProfile::Release,
                 shared: false,
@@ -818,6 +1001,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 args: Vec::new(),
                 node: false,
+                wall_clock: false,
                 native: true,
                 profile: NativeProfile::Check,
                 steps: StepBudget::Unmetered,
@@ -842,6 +1026,34 @@ mod tests {
         let inline = run(&["--socket=/tmp/k.sock", "stats"]);
         assert_eq!(split, inline);
         assert_eq!(split.socket, Some(PathBuf::from("/tmp/k.sock")));
+    }
+
+    #[test]
+    fn wall_clock_requires_its_host_adapter() {
+        assert!(
+            parse(
+                ["run", "main.ts", "--clock", "wall"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                ["run", "main.ts", "--clock", "wall", "--node"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_ok()
+        );
+        assert!(
+            parse(
+                ["run", "main.ts", "--clock", "virtual"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -929,6 +1141,7 @@ mod tests {
             run(&["run", "a.mjs", "--node"]).command,
             Command::Run {
                 node: true,
+                wall_clock: false,
                 native: false,
                 ..
             }
@@ -1056,6 +1269,7 @@ mod tests {
             run(&["run", "server.mjs", "--node"]).command,
             Command::Run {
                 node: true,
+                wall_clock: false,
                 native: false,
                 ..
             }
@@ -1065,10 +1279,59 @@ mod tests {
             run(&["run", "server.mjs", "--node", "--native"]).command,
             Command::Run {
                 node: true,
+                wall_clock: false,
                 native: true,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn clock_policy_applies_to_both_run_engines() {
+        assert!(matches!(
+            run(&["run", "server.ts", "--node", "--clock", "wall"]).command,
+            Command::Run {
+                node: true,
+                wall_clock: true,
+                native: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["run", "server.ts", "--clock=virtual"]).command,
+            Command::Run {
+                wall_clock: false,
+                native: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["run", "server.ts", "--node", "--native", "--clock", "wall"]).command,
+            Command::Run {
+                node: true,
+                wall_clock: true,
+                native: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&[
+                "run",
+                "server.ts",
+                "--node",
+                "--native",
+                "--clock",
+                "virtual"
+            ])
+            .command,
+            Command::Run {
+                node: true,
+                wall_clock: false,
+                native: true,
+                ..
+            }
+        ));
+        assert!(usage_error(&["test", "suite", "--clock", "virtual"]).contains("only applies"));
     }
 
     #[test]
@@ -1164,6 +1427,7 @@ mod tests {
             run(&["build", "src/main.ts", "--march=native"]).command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: None,
                 profile: NativeProfile::Dev,
                 shared: false,
@@ -1182,6 +1446,7 @@ mod tests {
             run(&["build", "src/main.ts", "--march", "native"]).command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: None,
                 profile: NativeProfile::Dev,
                 shared: false,
@@ -1202,6 +1467,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 args: Vec::new(),
                 node: false,
+                wall_clock: false,
                 native: true,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,
@@ -1289,6 +1555,7 @@ mod tests {
             run(&["build", "src/main.ts", "--explain"]).command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: None,
                 profile: NativeProfile::Dev,
                 shared: false,
@@ -1312,6 +1579,7 @@ mod tests {
             run(&["build", "src/main.ts", "--static"]).command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: None,
                 profile: NativeProfile::Dev,
                 shared: false,
@@ -1340,6 +1608,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 args: Vec::new(),
                 node: false,
+                wall_clock: false,
                 native: true,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,
@@ -1360,6 +1629,7 @@ mod tests {
             .command,
             Command::Build {
                 path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
                 output: None,
                 profile: NativeProfile::Dev,
                 shared: false,
@@ -1398,6 +1668,7 @@ mod tests {
                 path: PathBuf::from("cli.ts"),
                 args: vec!["--version".to_string()],
                 node: true,
+                wall_clock: false,
                 native: false,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,
@@ -1414,6 +1685,7 @@ mod tests {
                 path: PathBuf::from("app.ts"),
                 args: vec!["cmd".to_string(), "--flag".to_string(), "val".to_string()],
                 node: false,
+                wall_clock: false,
                 native: false,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,

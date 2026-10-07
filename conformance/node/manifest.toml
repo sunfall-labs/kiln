@@ -6,6 +6,15 @@ source_commit = "d795edb56765d4ec743bcda5a0c1452bed74de0c"
 adaptation = "Harness-only rewrites are documented in UPSTREAM.md; API assertions remain intact."
 
 [[test]]
+id = "kiln/host-clock/timer-fairness"
+requires_host = "node"
+clock = "wall"
+source = "host-clock-timer-fairness.cjs"
+status = "runnable"
+features = ["node:timers", "host-clock", "setImmediate", "zero-delay-timers"]
+expected_stdout = "pass\n"
+
+[[test]]
 id = "kiln/fs/descriptor-callbacks"
 requires_host = "node"
 source = "fs-descriptor-callbacks.cjs"

@@ -14,6 +14,13 @@ pub(crate) struct Lower<'a, 's> {
 }
 impl<'a, 's> Lower<'a, 's> {
     pub fn new(module: &'a k::Module, atoms: &'a Interner<'s>) -> Self {
+        // Static TS execution HIR has been transformed to JavaScript. The checker must consume
+        // the authored module sidecar so all declaration nodes and spans address its text.
+        let module = module
+            .type_syntax
+            .original_module
+            .as_deref()
+            .unwrap_or(module);
         let mut file = b::FileBuilder::default();
         file.source_len = module.source.len() as u32;
         file.text = Cow::Owned(module.source.as_bytes().to_vec());

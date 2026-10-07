@@ -16,8 +16,17 @@ node so a fast wrong answer reads as a divergence, never as a win.
 
 Tier A runs everywhere a runtime can execute the language subset; tier B needs
 the Node adapter, so porffor and Hermes report it as unsupported (a capability
-gate, not a failure). `inputs/users.json` is committed; regenerate it with
-`node inputs/gen-users.mjs`.
+gate, not a failure). Kiln's native column builds all four programs as
+`native-release` AOT executables; tier B passes `--node` at build time to include
+the filesystem or HTTP adapter. The Bun column runs the `.ts` source directly.
+`inputs/users.json` is committed; regenerate it with `node inputs/gen-users.mjs`.
+
+CLI timings include program startup and exclude AOT builds. Memory is the maximum
+of each runtime's per-process peak RSS across repetitions, excluding compilers
+and earlier runs. A fresh measurement worker isolates the child resource counter;
+the worker's startup and result transport are outside the reported program time.
+The OS RSS counter covers the child's entire lifetime, including the inherited
+pre-exec worker image, which sets a memory floor for very small programs.
 
 ## Runtimes
 
@@ -37,3 +46,8 @@ printed, never failed.
 `mise run realworld` is the front door. The `.toolchains/` directory is
 gitignored; the Hermes checkout lives in `~/.cache/kiln` beside the Test262
 corpus, never under `/tmp`.
+
+When measuring a frozen compiler from another checkout, set `KILN_SOURCE_REV` to
+its build source revision. Reports retain that declaration separately from the
+harness checkout revision and record the actual compiler binary SHA-256. An
+unknown compiler source revision stays unspecified.

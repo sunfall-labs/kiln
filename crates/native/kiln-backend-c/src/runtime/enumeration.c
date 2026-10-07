@@ -1,33 +1,78 @@
 
-/* Append everything `source` yields to `target`, which is what array spread, `for...of` and
- * destructuring all reduce to.
- *
- * An array and a string are walked directly rather than through their iterators. That is a
- * shortcut the specification does not take, and it is visible to a program that replaces
- * `Array.prototype[Symbol.iterator]` -- which this backend has no way to do, so the shortcut
- * cannot be observed here. Anything else must hand back an iterator and is driven by `next`. */
+/* The canonical string iterator walks code points without observing @@iterator again. */
+static int kiln_c99_string_iterator_append(kiln_value target, kiln_value source) {
+    uint16_t *units = NULL;
+    size_t count = 0;
+    size_t index;
+    int status = kiln_c99_to_units(source, &units, &count);
+    if (status != KILN_C99_OK) return status;
+    for (index = 0; index < count; ++index) {
+        size_t width = (units[index] >= 0xD800 && units[index] <= 0xDBFF &&
+                        index + 1 < count && units[index + 1] >= 0xDC00 &&
+                        units[index + 1] <= 0xDFFF)
+                           ? 2
+                           : 1;
+        status = kiln_c99_array_push(target, kiln_c99_from_units(units + index, width));
+        if (status != KILN_C99_OK) {
+            free(units);
+            return status;
+        }
+        index += width - 1;
+    }
+    free(units);
+    return KILN_C99_OK;
+}
+
+/* Append everything source yields to target, which is what array spread, for...of and
+ * destructuring all reduce to. Builtin-backed values have compact loops below, but only after
+ * the observable @@iterator lookup proves that the canonical method is still selected. */
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown) {
     kiln_value iterator;
+    kiln_value method;
     size_t index;
     int status;
-    if (source.tag == KILN_VALUE_ARRAY) {
+    /* Nullish has a distinct not-iterable failure from the property-read error the lookup
+     * would produce. */
+    if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
+        return kiln_c99_throw_not_iterable(thrown, source);
+    }
+    status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &method, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (!kiln_c99_is_callable(method)) {
+        return kiln_c99_throw_not_iterable(thrown, source);
+    }
+
+    /* Exact method identity handles own and subclass overrides; the realm guard protects the
+     * iterator machinery (including its next method) from builtin mutation. The property lookup
+     * above still runs first, so an accessor override keeps its specified side effects. */
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_ARRAY_VALUES && source.tag == KILN_VALUE_ARRAY &&
+        source.bits != target.bits) {
         kiln_array *array = kiln_c99_array_of(source);
         size_t length = array->count;
-        for (index = 0; index < length && index < array->count; ++index) {
-            /* Iteration *reads* each position, so a hole arrives as the undefined it reads as.
-             * That is what makes `[...[1, , 3]]` a dense three-element array where `map` over
-             * the same input leaves the hole alone. */
-            status = kiln_c99_array_push(target, array->elements[index] == KILN_VAL_HOLE
-                                                     ? kiln_c99_undefined()
-                                                     : kiln_val_to_boundary(array->elements[index]));
-            if (status != KILN_C99_OK) {
-                return status;
-            }
+        int dense = array->properties.tag == KILN_VALUE_UNDEFINED;
+        for (index = 0; dense && index < length; ++index) {
+            dense = array->elements[index] != KILN_VAL_HOLE;
         }
-        return KILN_C99_OK;
+        /* A hole observes inherited indexed properties under the iterator protocol. Keep that
+         * case on the generic path; dense arrays have no such lookup to perform. */
+        if (dense) {
+            for (index = 0; index < length && index < array->count; ++index) {
+                status = kiln_c99_array_push(target,
+                                             kiln_val_to_boundary(array->elements[index]));
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            return KILN_C99_OK;
+        }
     }
-    if (source.tag == KILN_VALUE_TYPED_ARRAY) {
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_ARRAY_VALUES &&
+        source.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(source);
         /* Read each element at the moment it is visited: a view is live over its shared buffer. */
         for (index = 0; index < view->length; ++index) {
@@ -40,7 +85,9 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         }
         return KILN_C99_OK;
     }
-    if (source.tag == KILN_VALUE_COLLECTION) {
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_COLLECTION_SELF &&
+        source.tag == KILN_VALUE_COLLECTION) {
         /* A Map yields `[key, value]` pairs and a Set yields values, which is what makes
          * `for (const [k, v] of map)` and `for (const v of set)` both read naturally. */
         kiln_collection *collection = kiln_c99_collection_of(source);
@@ -70,53 +117,20 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         }
         return KILN_C99_OK;
     }
-    if (source.tag == KILN_VALUE_STRING) {
-        /* A string iterates as its *characters*, not its code units: an astral character is one
-         * step, which is the difference between iterating a string and indexing it. */
-        uint16_t *units = NULL;
-        size_t count = 0;
-        status = kiln_c99_to_units(source, &units, &count);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        for (index = 0; index < count; ++index) {
-            size_t width = (units[index] >= 0xD800 && units[index] <= 0xDBFF &&
-                            index + 1 < count && units[index + 1] >= 0xDC00 &&
-                            units[index + 1] <= 0xDFFF)
-                               ? 2
-                               : 1;
-            status = kiln_c99_array_push(target, kiln_c99_from_units(units + index, width));
-            if (status != KILN_C99_OK) {
-                free(units);
-                return status;
-            }
-            index += width - 1;
-        }
-        free(units);
-        return KILN_C99_OK;
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_ARRAY_VALUES && source.tag == KILN_VALUE_STRING) {
+        /* The consumer already performed the observable iterator lookup. The private string
+         * walk must not re-probe @@iterator, or a saved intrinsic delegated by a custom override
+         * recurses through that override. */
+        return kiln_c99_string_iterator_append(target, source);
     }
-    /* Nullish is answered here rather than by the `@@iterator` lookup below, because the two
-     * faults are reported differently: reading a property off null is "Cannot read properties of
-     * null", but *iterating* it is "null is not iterable", and `[...null]` is the second one. */
-    if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
-        return kiln_c99_throw_not_iterable(thrown, source);
-    }
-    /* Everything else goes through the protocol: ask for an iterator, then drive it. */
-    if (source.tag == KILN_VALUE_GENERATOR) {
+    /* A generator's intrinsic @@iterator just returns itself; replaced methods still use the
+     * ordinary call path. */
+    if (kiln_c99_builtins_unmodified() && method.tag == KILN_VALUE_METHOD &&
+        method.bits == KILN_C99_METHOD_GENERATOR_SELF &&
+        source.tag == KILN_VALUE_GENERATOR) {
         iterator = source;
     } else {
-        kiln_value method;
-        status = kiln_c99_probe_symbol(host, source, "@@iterator", 10, &method, depth, thrown);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
-        /* No `@@iterator` at all is the ordinary case -- `for (const x of 5)` and `[...null]` --
-         * and the language ends the program there with a TypeError the program may catch, rather
-         * than a fault. The lookup above already answered undefined for a missing `@@` name, so
-         * reaching here means the value genuinely has nothing to iterate with. */
-        if (!kiln_c99_is_callable(method)) {
-            return kiln_c99_throw_not_iterable(thrown, source);
-        }
         status = kiln_c99_call(host, &iterator, method, source, NULL, 0, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
@@ -277,11 +291,16 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
     const char *intrinsic_key = NULL;
     size_t intrinsic_len = 0;
     kiln_value current = target;
-    size_t steps;
+    size_t steps = 0;
     *answer = 0;
     if (kiln_c99_is_node_hidden_key_key(key)) {
         return KILN_C99_OK;
     }
+kiln_has_next_prototype:
+    if (steps >= KILN_C99_MAX_PROTOTYPE_DEPTH)
+        KILN_C99_REFUSE("a property-membership prototype chain beyond the traversal limit");
+    current = target;
+    if (target.tag == KILN_VALUE_NULL) return KILN_C99_OK;
     if (target.tag == KILN_VALUE_PROXY) {
         kiln_value exposed = kiln_c99_key_value(key, &ikey);
         if (exposed.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
@@ -297,6 +316,11 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         return kiln_c99_has_property_key(host, prototype, key, ikey, answer, depth, thrown);
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
+        if (target.bits == KILN_C99_BUILTIN_REGEXP_PROTOTYPE &&
+            kiln_c99_same_name_key(key, "@@toStringTag")) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
         kiln_value store;
         if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
             kiln_c99_store_has(store, key, ikey)) {
@@ -305,7 +329,50 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         }
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         *answer = kiln_c99_builtin_has_member(target.bits, intrinsic_key, intrinsic_len);
+        if (!*answer && kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
+            store.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_object_of(store)->prototype.tag != KILN_VALUE_UNDEFINED) {
+            return kiln_c99_has_property_key(
+                host, kiln_c99_object_of(store)->prototype, key, ikey, answer, depth, thrown);
+        }
         return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_GENERATOR) {
+        kiln_generator *frame = kiln_c99_generator_of(target);
+        kiln_value store = frame->properties;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            if (kiln_c99_store_has(store, key, ikey)) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+        }
+        kiln_value prototype = frame->prototype;
+        if (store.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_object_of(store)->prototype.tag != KILN_VALUE_UNDEFINED) {
+            prototype = kiln_c99_object_of(store)->prototype;
+        }
+        /* The TypeScript-owned generator prototype is authoritative for membership too.
+         * Walk descriptors without evaluating a getter or inventing intrinsic members. */
+        if (prototype.tag == KILN_VALUE_OBJECT || prototype.tag == KILN_VALUE_PROXY ||
+            prototype.tag == KILN_VALUE_NULL) {
+            target = prototype;
+            ++steps;
+            goto kiln_has_next_prototype;
+        }
+        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
+        *answer = kiln_c99_same_name_key(key, "throw") ||
+            (kiln_c99_same_name_key(key, "@@asyncIterator") && frame->async_generator) ||
+            (!(frame->async_generator && kiln_c99_same_name_key(key, "@@iterator")) &&
+             kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_GENERATOR_NEXT,
+                                   KILN_C99_METHOD_GENERATOR_SELF) != 0);
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_TIMER) {
+        /* Its own store and the `Timeout.prototype` chain behind it, like any ordinary object. */
+        int status = kiln_c99_timer_materialize(target);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_has_property_key(host, kiln_c99_timer_of(target)->properties, key, ikey,
+                                         answer, depth, thrown);
     }
     if (target.tag == KILN_VALUE_PROMISE) {
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
@@ -334,56 +401,40 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_FUNCTION) {
-        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
-        /* A closure answers from its own store, then from the members every callable has. Same
-         * reason as the promise above: `"call" in fn` was false about a member `fn.call`
-         * produces. */
         kiln_closure *closure = kiln_c99_closure_of(target);
-        if (kiln_c99_closure_store(closure).tag == KILN_VALUE_OBJECT) {
-            int carried = 0;
-            int status = kiln_c99_has_property_key(host, kiln_c99_closure_store(closure), key, ikey, &carried,
-                                               depth, thrown);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            if (carried) {
-                *answer = 1;
-                return KILN_C99_OK;
-            }
-        }
-        *answer = kiln_c99_callable_method(intrinsic_key, intrinsic_len) != 0 ||
-                  kiln_c99_same_name_key(key, "name") ||
-                  kiln_c99_same_name_key(key, "length") ||
-                  /* Method syntax carries no `prototype` unless it is a generator, and cannot be
-                   * constructed -- the same condition the read applies, so a `hasOwnProperty` and
-                   * an `in` about `obj.m.prototype` cannot disagree. */
-                  (kiln_c99_same_name_key(key, "prototype") &&
-                   (!closure->is_method || closure->generator)) ||
-                  kiln_c99_same_name_key(key, "constructor") ||
-                  kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
-                                         KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
-        return KILN_C99_OK;
-    }
-    if (target.tag == KILN_VALUE_DATE) {
-        (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
-        /* The membership predicate the date read consults, so `"getTime" in d` and `d.getTime`
-         * cannot disagree -- and a member the language has but this backend has not built is
-         * still present, which is the question `in` asks.
-         *
-         * Except for the symbol keys. `kiln_c99_is_date_member` answers *every* `@@` name, which
-         * is right for the read it was written for -- an unimplemented well-known symbol must
-         * refuse rather than read as undefined -- and wrong here, where the question is whether
-         * the property exists. A date owns one symbol-keyed member. Answering the rest true said
-         * `Symbol.for("constructDateFrom") in date` was true to a bundled `date-fns`, which then
-         * called the undefined it found. */
-        if (kiln_c99_key_is_reserved(key)) {
-            *answer = kiln_c99_same_name_key(key, "@@toPrimitive");
+        kiln_value store = kiln_c99_closure_store(closure);
+        /* Membership asks only about own slots and then the actual [[Prototype]]. Reading an
+         * inherited static symbol already follows this chain; `in` must follow it too without
+         * invoking a getter. Callable methods belong to Function.prototype, so an explicit null
+         * prototype must also end their membership rather than synthesizing them here. */
+        if (kiln_c99_store_has(store, key, ikey) ||
+            kiln_c99_same_name_key(key, "name") || kiln_c99_same_name_key(key, "length") ||
+            (kiln_c99_same_name_key(key, "prototype") &&
+             kiln_c99_function_owns_prototype(closure))) {
+            *answer = 1;
             return KILN_C99_OK;
         }
-        *answer = kiln_c99_is_date_member(intrinsic_key, intrinsic_len) ||
-                  kiln_c99_lookup_method(intrinsic_key, intrinsic_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
-                                         KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
-        return KILN_C99_OK;
+        target = store.tag == KILN_VALUE_OBJECT
+                     ? kiln_c99_object_prototype_read(store) : kiln_c99_undefined();
+        if (target.tag == KILN_VALUE_UNDEFINED)
+            target = kiln_c99_function_kind_prototype(closure);
+        ++steps;
+        goto kiln_has_next_prototype;
+    }
+    if (target.tag == KILN_VALUE_DATE) {
+        kiln_value store = ((kiln_date *)(uintptr_t)target.bits)->properties;
+        if (kiln_c99_store_has(store, key, ikey)) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
+        /* Date carries program-defined string and symbol keys in its ordinary store.
+         * Membership must also consult the actual prototype without invoking getters. */
+        target = store.tag == KILN_VALUE_OBJECT
+                     ? kiln_c99_object_prototype_read(store) : kiln_c99_undefined();
+        if (target.tag == KILN_VALUE_UNDEFINED)
+            target = kiln_c99_builtin(KILN_C99_BUILTIN_DATE_PROTOTYPE);
+        ++steps;
+        goto kiln_has_next_prototype;
     }
     if (target.tag == KILN_VALUE_ARRAY_BUFFER) {
         kiln_value store;
@@ -459,6 +510,11 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
                                           "hasIndices", "global",      "ignoreCase", "multiline",
                                           "dotAll",     "unicode",     "unicodeSets", "sticky"};
         size_t index;
+        kiln_value store = kiln_c99_regexp_of(target)->properties;
+        if (kiln_c99_store_has(store, key, ikey)) {
+            *answer = 1;
+            return KILN_C99_OK;
+        }
         for (index = 0; index < sizeof own / sizeof own[0]; ++index) {
             if (kiln_c99_same_name_key(key, own[index])) {
                 *answer = 1;
@@ -472,7 +528,8 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         {
             static const char *const inherited[] = {"exec",      "test",       "toString",
                                                     "compile",   "@@match",    "@@matchAll",
-                                                    "@@replace", "@@search",   "@@split"};
+                                                    "@@replace", "@@search",   "@@split",
+                                                    "@@toStringTag"};
             for (index = 0; index < sizeof inherited / sizeof inherited[0]; ++index) {
                 if (kiln_c99_same_name_key(key, inherited[index])) {
                     *answer = 1;
@@ -492,7 +549,36 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         }
         if (index >= 0.0) {
             kiln_array *array = kiln_c99_array_of(target);
-            *answer = (size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE;
+            if (array->properties.tag == KILN_VALUE_OBJECT &&
+                kiln_c99_store_has(array->properties, key, ikey)) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+            if ((size_t)index < array->count &&
+                array->elements[(size_t)index] != KILN_VAL_HOLE) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+            if (array->properties.tag == KILN_VALUE_OBJECT) {
+                int inherited = 0;
+                int status = kiln_c99_has_property_key(host, array->properties, key, ikey,
+                                                       &inherited, depth, thrown);
+                if (status != KILN_C99_OK || inherited) {
+                    *answer = inherited;
+                    return status;
+                }
+            }
+            /* A sparse or out-of-range index can still be inherited from Array.prototype.
+             * Array iteration methods use this same [[HasProperty]] path before [[Get]], so
+             * checking only the dense vector and named-property store made `1 in array` false
+             * while a direct read found an inherited value. */
+            if (array->properties.tag != KILN_VALUE_OBJECT ||
+                kiln_c99_object_of(array->properties)->prototype.tag == KILN_VALUE_UNDEFINED) {
+                return kiln_c99_has_property_key(
+                    host, kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE), key, ikey,
+                    answer, depth, thrown);
+            }
+            *answer = 0;
             return KILN_C99_OK;
         }
         /* A name an array carries beside its elements -- `a.total`, the `index` on a match
@@ -524,7 +610,10 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         *answer = kiln_c99_same_name_key(key, "@@iterator") ||
                   kiln_c99_same_name_key(key, "@@unscopables") ||
-                  kiln_c99_array_method(intrinsic_key, intrinsic_len) != 0;
+                  kiln_c99_array_method(intrinsic_key, intrinsic_len) != 0 ||
+                  kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
+                                         KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                         KILN_C99_METHOD_OBJECT_VALUE_OF) != 0;
         if (!*answer) {
             /* A member defined on `Array.prototype` itself (the bootstrap's parallel family, a
              * program's polyfill): the store the array read consults after the table. */
@@ -566,7 +655,7 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
     {
         kiln_gc_heap *heap = kiln_c99_gc_heap();
         const kiln_string *canonical = ikey != NULL ? ikey : kiln_c99_interned_key_in(heap, key);
-        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        for (; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
             kiln_property property;
             if (current.tag != KILN_VALUE_OBJECT) {
                 break;
@@ -577,6 +666,12 @@ static int kiln_c99_has_property_key(kiln_host *host, kiln_value target, const k
             }
             current = kiln_c99_object_prototype_read(current);
         }
+    }
+    if (current.tag == KILN_VALUE_FUNCTION || current.tag == KILN_VALUE_BUILTIN ||
+        current.tag == KILN_VALUE_PROXY) {
+        target = current;
+        ++steps;
+        goto kiln_has_next_prototype;
     }
     /* `in` has to agree with the read about what the end of the chain carries. */
     if (target.tag == KILN_VALUE_OBJECT &&
@@ -644,22 +739,99 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
          * slot reads as undefined, `length` is unchanged, and `in` says the element is gone. */
         double slot = kiln_c99_key_index_key(key);
         kiln_array *array = kiln_c99_array_of(target);
-        if (array->frozen) {
+        /* `length` is an own, non-configurable property even though it is stored on the array
+         * header rather than in the named-property store. */
+        if (kiln_c99_same_name_key(key, "length")) {
             *answer = 0;
             return KILN_C99_OK;
         }
-        if (slot >= 0.0 && (size_t)slot < array->count) {
+        if (slot >= 0.0 && array->properties.tag == KILN_VALUE_OBJECT) {
+            kiln_property property;
+            if (kiln_c99_property_read_own_value(array->properties, key, ikey, &property)) {
+                int status = kiln_c99_delete_key(host, array->properties, key, ikey, answer,
+                                                 depth, thrown);
+                if (status == KILN_C99_OK && *answer && (size_t)slot < array->count) {
+                    kiln_c99_heap_store_val(array, &array->elements[(size_t)slot],
+                                            KILN_VAL_HOLE);
+                    array->is_numeric = 0;
+                }
+                return status;
+            }
+        }
+        if (slot >= 0.0 && (size_t)slot < array->count &&
+            array->elements[(size_t)slot] != KILN_VAL_HOLE) {
+            if (array->frozen) {
+                *answer = 0;
+                return KILN_C99_OK;
+            }
             kiln_c99_heap_store_val(array, &array->elements[(size_t)slot], KILN_VAL_HOLE);
             array->is_numeric = 0;
+            return KILN_C99_OK;
         }
+        /* Named and symbol properties live beside the indexed elements. Deleting one must
+         * reach that ordinary store; otherwise getters that delete a later key leave it visible
+         * to the fresh descriptor check performed by object spread. */
+        if (slot < 0.0 && array->properties.tag == KILN_VALUE_OBJECT &&
+            kiln_c99_store_has(array->properties, key, ikey)) {
+            if (array->frozen) {
+                *answer = 0;
+                return KILN_C99_OK;
+            }
+            return kiln_c99_delete_key(host, array->properties, key, ikey, answer, depth, thrown);
+        }
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_FUNCTION || target.tag == KILN_VALUE_METHOD) {
+        /* Callable-owned properties live in the ordinary property store. Keep
+         * deletion on that same authority used by reads and writes; treating the function as a
+         * non-object here would report success while leaving an own property visible. */
+        kiln_value store;
+        int status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT && kiln_c99_store_has(store, key, ikey))
+            return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_TYPED_ARRAY) {
         int found;
         int enumerable;
         kiln_c99_typed_own_key(target, key, &found, &enumerable);
-        *answer = !found;
+        if (found) {
+            *answer = 0;
+            return KILN_C99_OK;
+        }
+        {
+            kiln_value store = kiln_c99_typed_array_of(target)->properties;
+            if (store.tag == KILN_VALUE_OBJECT && kiln_c99_store_has(store, key, ikey))
+                return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
+        }
+        *answer = 1;
         return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_REGEXP) {
+        kiln_value store = kiln_c99_regexp_of(target)->properties;
+        if (kiln_c99_same_name_key(key, "lastIndex")) {
+            *answer = 0;
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_store_has(store, key, ikey))
+            return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_DATE) {
+        /* A Date's timestamp is its internal slot; properties created by the program live in its
+         * separate ordinary store and can be deleted there like any other configurable own key. */
+        kiln_value store = ((kiln_date *)(uintptr_t)target.bits)->properties;
+        return store.tag == KILN_VALUE_OBJECT
+                   ? kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown)
+                   : KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_TIMER) {
+        /* What a program hung on a timer handle lives in its own store. */
+        kiln_value store = kiln_c99_timer_of(target)->properties;
+        return store.tag == KILN_VALUE_OBJECT
+                   ? kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown)
+                   : KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_BUILTIN) {
         /* A member the program wrote onto a built-in lives in the built-in's store, and deleting
@@ -679,6 +851,31 @@ static int kiln_c99_delete_key(kiln_host *host, kiln_value target, const kiln_st
                 return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
             }
         }
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_GENERATOR) {
+        kiln_value store = kiln_c99_generator_of(target)->properties;
+        return store.tag == KILN_VALUE_OBJECT
+            ? kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown) : KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        kiln_value store;
+        int status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT)
+            return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_BOUND) {
+        /* User-defined properties on a bound function live in its ordinary callable store.
+         * Treat deletion just like deletion from the wrapped function's store; otherwise a
+         * configurable own property remains visible after delete, including with a null
+         * [[Prototype]]. */
+        kiln_value store;
+        int status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT)
+            return kiln_c99_delete_key(host, store, key, ikey, answer, depth, thrown);
         return KILN_C99_OK;
     }
     if (target.tag != KILN_VALUE_OBJECT) {
@@ -766,7 +963,7 @@ static int kiln_c99_delete_computed_or_throw(kiln_host *host, kiln_value target,
  * indices precede named shape keys; a mixed shape/list store keeps the dictionary conversion
  * until its integer-key merge has a read-only cursor. */
 static int kiln_c99_append_enumerable_object_keys(kiln_object *object, kiln_value built,
-                                                   int include_dense) {
+                                                   int include_dense, int skip_indices) {
     size_t index;
     size_t count;
     int status;
@@ -790,6 +987,9 @@ static int kiln_c99_append_enumerable_object_keys(kiln_object *object, kiln_valu
         kiln_property projected;
         const kiln_property *property = kiln_c99_property_view(object, index, &projected);
         if (!property->enumerable) continue;
+        /* Array indexed descriptors describe the same keys as its element walk, not extra
+         * named properties. The array walk also owns their enumerability and ordering. */
+        if (skip_indices && kiln_c99_key_index_key(property->key) >= 0.0) continue;
         status = kiln_c99_array_push(built, kiln_c99_stable_key_value(property->key));
         if (status != KILN_C99_OK) return status;
     }
@@ -829,24 +1029,76 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
     }
     if (target.tag == KILN_VALUE_OBJECT) {
         kiln_object *object = kiln_c99_object_of(target);
-        status = kiln_c99_append_enumerable_object_keys(object, built, 1);
+        status = kiln_c99_append_enumerable_object_keys(object, built, 1, 0);
         if (status != KILN_C99_OK) return status;
+    } else if (target.tag == KILN_VALUE_BUILTIN) {
+        /* A built-in constructor can have enumerable own statics even though its callable
+         * properties are not held in an ordinary object store. Walk its authoritative own-key
+         * list and use the same descriptor path as Object.getOwnPropertyDescriptor; this keeps
+         * `Object.keys(Buffer)` and `for (const key in Buffer)` aligned with the members the
+         * builtin actually exposes (notably Buffer's legacy enumerable statics). */
+        kiln_value all;
+        status = kiln_c99_builtin_own_keys(target.bits, &all);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < kiln_c99_array_of(all)->count; ++index) {
+            kiln_value key = kiln_val_to_boundary(kiln_c99_array_of(all)->elements[index]);
+            kiln_value descriptor;
+            kiln_value enumerable;
+            int found = 0;
+            if (key.tag != KILN_VALUE_STRING) continue; /* for-in ignores symbols */
+            if (kiln_c99_same_name_key((const kiln_string *)key.ptr, "length") ||
+                kiln_c99_same_name_key((const kiln_string *)key.ptr, "name") ||
+                kiln_c99_same_name_key((const kiln_string *)key.ptr, "prototype")) {
+                /* The callable slots are own but never enumerable, and some builtin descriptor
+                 * paths intentionally leave their derived descriptors to the callable model. */
+                continue;
+            }
+            status = kiln_c99_describe_property_key(
+                host, target, (const kiln_string *)key.ptr, NULL, &descriptor, &found, depth,
+                thrown);
+            if (status != KILN_C99_OK) return status;
+            if (!found) continue;
+            status = kiln_c99_get(host, descriptor, "enumerable", 10, &enumerable, depth,
+                                  thrown);
+            if (status != KILN_C99_OK) return status;
+            if (kiln_c99_truthy(enumerable)) {
+                status = kiln_c99_array_push(built, key);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+    } else if (target.tag == KILN_VALUE_REGEXP) {
+        kiln_value store = kiln_c99_regexp_of(target)->properties;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_append_enumerable_object_keys(kiln_c99_object_of(store), built, 1, 0);
+            if (status != KILN_C99_OK) return status;
+        }
     } else if (target.tag == KILN_VALUE_ARRAY) {
         /* An array's own enumerable keys are its indices, as strings: `for (const i in [7,8])`
          * gives "0" and "1", not 0 and 1. */
         kiln_array *array = kiln_c99_array_of(target);
         for (index = 0; index < array->count; ++index) {
-            if (array->elements[index] == KILN_VAL_HOLE) {
-                continue;
+            kiln_value key = kiln_c99_undefined();
+            int present = array->elements[index] != KILN_VAL_HOLE;
+            if (array->has_index_descriptors && array->properties.tag == KILN_VALUE_OBJECT) {
+                kiln_property descriptor;
+                key = kiln_c99_text(kiln_c99_number((double)index));
+                if (key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+                if (kiln_c99_property_read_own(kiln_c99_object_of(array->properties),
+                                               (const kiln_string *)key.ptr, NULL, &descriptor)) {
+                    if (!descriptor.enumerable) continue;
+                    present = 1;
+                }
             }
-            status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
+            if (!present) continue;
+            if (key.tag != KILN_VALUE_STRING) key = kiln_c99_text(kiln_c99_number((double)index));
+            status = kiln_c99_array_push(built, key);
             if (status != KILN_C99_OK) {
                 return status;
             }
         }
         if (array->properties.tag == KILN_VALUE_OBJECT) {
             kiln_object *extra = kiln_c99_object_of(array->properties);
-            status = kiln_c99_append_enumerable_object_keys(extra, built, 0);
+            status = kiln_c99_append_enumerable_object_keys(extra, built, 0, 1);
             if (status != KILN_C99_OK) return status;
         }
     } else if (target.tag == KILN_VALUE_TYPED_ARRAY) {
@@ -856,6 +1108,19 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
             if (status != KILN_C99_OK) {
                 return status;
             }
+        }
+        if (view->properties.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_append_enumerable_object_keys(
+                kiln_c99_object_of(view->properties), built, 0, 0);
+            if (status != KILN_C99_OK) return status;
+        }
+    } else if (target.tag == KILN_VALUE_COMMONJS_REQUIRE) {
+        kiln_value store;
+        status = kiln_c99_callable_store(target, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_append_enumerable_object_keys(kiln_c99_object_of(store), built, 0, 0);
+            if (status != KILN_C99_OK) return status;
         }
     }
     *out = built;
@@ -1039,7 +1304,6 @@ static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value 
         kiln_value descriptor;
         kiln_value enumerable;
         kiln_value copied;
-        kiln_value name;
         int found;
         status = kiln_c99_proxy_describe(host, source, key, &descriptor, &found, depth, thrown);
         if (status != KILN_C99_OK) {
@@ -1059,14 +1323,10 @@ static int kiln_c99_spread_proxy(kiln_host *host, kiln_value target, kiln_value 
         if (status != KILN_C99_OK) {
             return status;
         }
-        /* A symbol is stored under the reserved name it carries, the same spelling every other
-         * write of one uses -- and that name lives on the symbol, so it outlives this frame. */
-        name = kiln_c99_property_key(key);
-        if (name.tag != KILN_VALUE_STRING) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        status = kiln_c99_put_mode_key(host, target, (const kiln_string *)name.ptr,
-                                       (const kiln_string *)name.ptr, copied, 0, depth, thrown);
+        /* CopyDataProperties uses CreateDataProperty on its fresh target. Preserve the original
+         * string or symbol key instead of assigning through [[Set]], which could invoke an
+         * inherited setter on Object.prototype. */
+        status = kiln_c99_create_data_property(host, target, key, copied, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
         }

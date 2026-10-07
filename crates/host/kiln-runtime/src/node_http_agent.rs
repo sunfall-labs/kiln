@@ -4,7 +4,7 @@
 //! request. It owns no socket, Tokio task, Hyper sender, or JavaScript value; bindings translate
 //! these decisions into their existing resource and request identities.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use kiln_host_abi::ResourceId;
 
@@ -45,6 +45,13 @@ pub enum AgentFailure {
     Connect { request: u64 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentCancellation {
+    Missing,
+    Waiting,
+    Connecting { next: Option<u64> },
+}
+
 #[derive(Debug)]
 pub struct HttpAgent {
     max_sockets: usize,
@@ -54,9 +61,12 @@ pub struct HttpAgent {
 
 #[derive(Debug, Default)]
 struct OriginPool {
-    connecting: usize,
+    connecting: BTreeSet<u64>,
     idle: VecDeque<ResourceId>,
     busy: BTreeMap<ResourceId, u64>,
+    /// Connections released as non-reusable remain accounted for until the transport's close
+    /// event. A waiter can only start a new connection after that event retires the old resource.
+    retiring: BTreeSet<ResourceId>,
     waiting: VecDeque<u64>,
 }
 
@@ -75,20 +85,25 @@ impl HttpAgent {
             pool.busy.insert(resource, request);
             return AgentDecision::Reuse(resource);
         }
-        if pool.connecting.saturating_add(pool.busy.len()) >= self.max_sockets {
+        if pool
+            .connecting
+            .len()
+            .saturating_add(pool.busy.len())
+            .saturating_add(pool.retiring.len())
+            >= self.max_sockets
+        {
             pool.waiting.push_back(request);
             return AgentDecision::Queued;
         }
-        pool.connecting += 1;
+        pool.connecting.insert(request);
         AgentDecision::Connect
     }
 
     pub fn connected(&mut self, origin: HttpOrigin, resource: ResourceId, request: u64) -> bool {
         let pool = self.origins.entry(origin.clone()).or_default();
-        if pool.connecting == 0 || self.resources.contains_key(&resource) {
+        if self.resources.contains_key(&resource) || !pool.connecting.remove(&request) {
             return false;
         }
-        pool.connecting -= 1;
         pool.busy.insert(resource, request);
         self.resources.insert(resource, origin);
         true
@@ -101,8 +116,14 @@ impl HttpAgent {
         let Some(pool) = self.origins.get_mut(&origin) else {
             return AgentRelease::Retire;
         };
-        if pool.busy.remove(&resource).is_none() || !reusable {
-            self.resources.remove(&resource);
+        if pool.busy.remove(&resource).is_none() {
+            return AgentRelease::Retire;
+        }
+        if !reusable {
+            // Keep the resource-to-origin mapping until `closed()`. In particular, a request
+            // queued while this socket was busy must be promoted when a response listener
+            // destroys the socket before the response-end release reaches the transport.
+            pool.retiring.insert(resource);
             return AgentRelease::Retire;
         }
         if let Some(request) = pool.waiting.pop_front() {
@@ -126,16 +147,36 @@ impl HttpAgent {
             .is_some_and(|pool| pool.busy.contains_key(&resource))
     }
 
-    pub fn connect_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
+    pub fn connect_failed(&mut self, origin: &HttpOrigin, failed_request: u64) -> AgentFailure {
         let Some(pool) = self.origins.get_mut(origin) else {
             return AgentFailure::Empty;
         };
-        pool.connecting = pool.connecting.saturating_sub(1);
+        if !pool.connecting.remove(&failed_request) {
+            return AgentFailure::Empty;
+        }
         let Some(request) = pool.waiting.pop_front() else {
             return AgentFailure::Empty;
         };
-        pool.connecting += 1;
+        pool.connecting.insert(request);
         AgentFailure::Connect { request }
+    }
+
+    pub fn cancel_connect(&mut self, origin: &HttpOrigin, request: u64) -> AgentCancellation {
+        let Some(pool) = self.origins.get_mut(origin) else {
+            return AgentCancellation::Missing;
+        };
+        if let Some(position) = pool.waiting.iter().position(|queued| *queued == request) {
+            pool.waiting.remove(position);
+            return AgentCancellation::Waiting;
+        }
+        if !pool.connecting.remove(&request) {
+            return AgentCancellation::Missing;
+        }
+        let next = pool.waiting.pop_front();
+        if let Some(next) = next {
+            pool.connecting.insert(next);
+        }
+        AgentCancellation::Connecting { next }
     }
 
     pub fn closed(&mut self, resource: ResourceId) -> Option<u64> {
@@ -143,9 +184,10 @@ impl HttpAgent {
         let pool = self.origins.get_mut(&origin)?;
         pool.idle.retain(|candidate| *candidate != resource);
         pool.busy.remove(&resource);
+        pool.retiring.remove(&resource);
         let request = pool.waiting.pop_front();
-        if request.is_some() {
-            pool.connecting += 1;
+        if let Some(request) = request {
+            pool.connecting.insert(request);
         }
         request
     }
@@ -202,7 +244,31 @@ mod tests {
         assert!(agent.connected(origin.clone(), resource, 1));
         assert_eq!(agent.acquire(origin, 2), AgentDecision::Queued);
         assert_eq!(agent.release(resource, false), AgentRelease::Retire);
-        assert_eq!(agent.closed(resource), None);
+        assert_eq!(agent.closed(resource), Some(2));
+    }
+
+    #[test]
+    fn non_reusable_connection_promotes_waiter_only_after_close() {
+        let mut agent = HttpAgent::new(1);
+        let origin = HttpOrigin::http("example.com", 80);
+        let resource = ResourceId::new(12);
+        assert_eq!(agent.acquire(origin.clone(), 1), AgentDecision::Connect);
+        assert!(agent.connected(origin.clone(), resource, 1));
+        assert_eq!(agent.acquire(origin, 2), AgentDecision::Queued);
+        assert_eq!(agent.release(resource, false), AgentRelease::Retire);
+        assert_eq!(
+            agent.acquire(HttpOrigin::http("example.com", 80), 3),
+            AgentDecision::Queued
+        );
+        assert_eq!(agent.closed(resource), Some(2));
+        assert_eq!(
+            agent.connect_failed(&HttpOrigin::http("example.com", 80), 2),
+            AgentFailure::Connect { request: 3 }
+        );
+        assert_eq!(
+            agent.acquire(HttpOrigin::http("example.com", 80), 4),
+            AgentDecision::Queued
+        );
     }
 
     #[test]
@@ -213,10 +279,26 @@ mod tests {
         assert_eq!(agent.acquire(origin.clone(), 2), AgentDecision::Queued);
         assert_eq!(agent.acquire(origin.clone(), 3), AgentDecision::Queued);
         assert_eq!(
-            agent.connect_failed(&origin),
+            agent.connect_failed(&origin, 1),
             AgentFailure::Connect { request: 2 }
         );
         assert_eq!(agent.acquire(origin, 4), AgentDecision::Queued);
+    }
+
+    #[test]
+    fn canceling_a_connect_retires_its_slot_and_promotes_the_oldest_waiter() {
+        let mut agent = HttpAgent::new(1);
+        let origin = HttpOrigin::http("example.com", 80);
+        assert_eq!(agent.acquire(origin.clone(), 1), AgentDecision::Connect);
+        assert_eq!(agent.acquire(origin.clone(), 2), AgentDecision::Queued);
+        assert_eq!(agent.acquire(origin.clone(), 3), AgentDecision::Queued);
+        assert_eq!(
+            agent.cancel_connect(&origin, 1),
+            AgentCancellation::Connecting { next: Some(2) }
+        );
+        assert_eq!(agent.cancel_connect(&origin, 3), AgentCancellation::Waiting);
+        assert_eq!(agent.connect_failed(&origin, 2), AgentFailure::Empty);
+        assert_eq!(agent.acquire(origin, 4), AgentDecision::Connect);
     }
 
     #[test]

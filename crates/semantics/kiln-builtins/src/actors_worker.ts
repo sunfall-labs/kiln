@@ -1,7 +1,14 @@
 // This module is a worker entry, linked into programs that import kiln:actors. It is harmless
 // when evaluated in the spawning realm. The target class is loaded only inside this new realm.
 import { isMainThread, parentPort, workerData, MessagePort } from "node:worker_threads";
-import { prepareActorMessage, consumeActorTickets } from "kiln:actors/core";
+import { Actor, prepareActorMessage, consumeActorTickets } from "kiln:actors/core";
+
+// Internal to kiln:actors, like kiln:actors/core: refused to programs by the resolver, and
+// refused here without kiln's extensions, naming the owner.
+const enginePrivate: any = ((): any => { const G = globalThis as any; return G.__kilnPrivate; })();
+if (enginePrivate?.extensions !== true) {
+  throw new TypeError("kiln:actors requires enabled Kiln extensions");
+}
 
 export const actorWorkerEntry = "kiln:actors/worker";
 const BIND_RECEIVER = 33;
@@ -31,7 +38,9 @@ let running = new Set<Reservation>();
 let closing = false;
 let force = false;
 let completed = false;
+let actorClass: any;
 let instance: any;
+let constructed = false;
 
 function remoteError(error: any): any {
   let cause: any = undefined;
@@ -91,7 +100,7 @@ function serve(): void {
   inbox = control;
   // Name this inbox's actual provider realm for a future opaque graph request. A failed bind
   // leaves graph requests unavailable; ordinary cloned actor messages keep working.
-  const internals: any = (MessagePort as any)[Symbol.for("kiln.messagePort")];
+  const internals: any = enginePrivate.messagePort;
   try { if (internals) internals.workerOp(BIND_RECEIVER, internals.portEndpoint(inbox)); }
   catch { /* An unavailable host leaves cloned actor messages working. */ }
   capacity = init.capacity;
@@ -212,6 +221,18 @@ function serve(): void {
       let method: any;
       try {
         if (force) throw new Error("actor was stopped");
+        if (payload.construct === true) {
+          // The owner's first call, before it hands out the address; never a second time.
+          if (constructed) throw new TypeError("actor is already constructed");
+          constructed = true;
+          instance = new actorClass(...payload.args);
+          answer(request, "resolve", undefined);
+          running.delete(request);
+          active--;
+          stopped();
+          continue;
+        }
+        if (!constructed) throw new TypeError("actor is not constructed");
         if (typeof payload.method !== "string" || payload.method === "constructor") {
           throw new TypeError("actor method is not public");
         }
@@ -334,11 +355,14 @@ function serve(): void {
   void import(init.module).then((loaded: any) => {
     try {
       const ctor: any = loaded[init.exportName];
-      if (typeof ctor !== "function" || !ctor.prototype || !(Symbol.for("kiln.actor.base") in ctor.prototype)) {
+      // A realm evaluates `kiln:actors/core` once, so the target's `Actor` is this one: the
+      // check is the real prototype chain, which no property a program writes can forge.
+      if (typeof ctor !== "function" || !ctor.prototype ||
+          !Object.prototype.isPrototypeOf.call(Actor.prototype, ctor.prototype)) {
         throw new TypeError("actor export must be a class extending Actor");
       }
-      instance = new ctor(...init.args);
-      control.postMessage({ kind: "ready" });
+      actorClass = ctor;
+      control.postMessage({ kind: "loaded" });
     } catch (error) {
       control.postMessage({ kind: "spawnError", value: remoteError(error) });
       inbox.close();
@@ -349,9 +373,10 @@ function serve(): void {
   });
 }
 
-const startedMark = Symbol.for("kiln.actor.worker.started");
-if (!isMainThread && workerData?.__kilnActorVersion === 1 && !(globalThis as any)[startedMark]) {
-  (globalThis as any)[startedMark] = true;
+// Whether this realm's worker entry has already started its mailbox is a fact about the realm,
+// kept on the realm's engine-private object rather than as a mark on its global object.
+if (!isMainThread && workerData?.__kilnActorVersion === 1 && !enginePrivate.actorWorkerStarted) {
+  enginePrivate.actorWorkerStarted = true;
   // An actor yields its lane between mailbox turns. A synchronous wait would keep that lane
   // occupied while the actor that must notify it could be queued behind it.
   if (typeof Atomics === "object" && Atomics !== null) {

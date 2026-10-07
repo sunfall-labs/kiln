@@ -6,10 +6,24 @@ import { spawn } from "node:child_process";
 import test from "node:test";
 
 const drive = join(import.meta.dirname, "drive.mjs");
+const pipelineDrive = join(import.meta.dirname, "drive-pipeline.mjs");
 
 function runDrive(port, scenario = "hello") {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [drive, "100", "1", String(port), scenario], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
+  });
+}
+
+function runPipeline(port, durationMs = 100) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [pipelineDrive, String(durationMs), "1", String(port)], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -104,6 +118,63 @@ test("drive settles a truncated response as an error", async () => {
     const report = JSON.parse(result.stdout);
     assert.notEqual(result.code, 0);
     assert.ok(report.errors > 0);
+  } finally {
+    await stopServer(child);
+    await rm(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("pipeline driver validates fixed-length and chunked responses", async () => {
+  for (const framing of ["length", "chunked"]) {
+    const fixture = await serverScript(`
+      import http from "node:http";
+      const server = http.createServer((_req, res) => {
+        if (${JSON.stringify(framing)} === "chunked") {
+          res.writeHead(200, {"transfer-encoding":"chunked"});
+          res.write("hello "); res.end("from kiln");
+        } else {
+          res.writeHead(200, {"content-length":"15"}); res.end("hello from kiln");
+        }
+      });
+      server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+    `);
+    const { child, port } = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [fixture.path], { stdio: ["ignore", "pipe", "inherit"] });
+      child.stdout.once("data", (data) => resolve({ child, port: Number(data) }));
+    });
+    try {
+      const result = await runPipeline(port);
+      const report = JSON.parse(result.stdout);
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(report.pipeline_depth, 8);
+      assert.ok(report.requests >= 8);
+      assert.equal(report.errors, 0);
+      assert.equal(report.wrong, 0);
+    } finally {
+      await stopServer(child);
+      await rm(fixture.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("pipeline driver rejects same-status wrong bodies", async () => {
+  const fixture = await serverScript(`
+    import http from "node:http";
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, {"content-length":"5"}); res.end("wrong");
+    });
+    server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+  `);
+  const { child, port } = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [fixture.path], { stdio: ["ignore", "pipe", "inherit"] });
+    child.stdout.once("data", (data) => resolve({ child, port: Number(data) }));
+  });
+  try {
+    const result = await runPipeline(port);
+    const report = JSON.parse(result.stdout);
+    assert.notEqual(result.code, 0);
+    assert.equal(report.errors, 0);
+    assert.ok(report.wrong > 0);
   } finally {
     await stopServer(child);
     await rm(fixture.dir, { recursive: true, force: true });

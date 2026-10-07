@@ -10,7 +10,7 @@ use kiln_host_abi::HostOps;
 
 use crate::{
     ExecutionError, Native, NodeObject, ObjectData, PrototypeTable, ReadableState, RealmId, Value,
-    Vm, WritableState, new_readable_state, node_bytes_value, ordinary_object,
+    Vm, WritableState, new_readable_state, node_bytes_value, ordinary_object, tracked_object,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,7 +122,7 @@ pub(crate) fn node_zlib_create_transform(kind: ZlibTransformKind) -> Value {
         writable: Rc::clone(&writable_state),
         accumulated: RefCell::new(Vec::new()),
     });
-    let object = Rc::new(RefCell::new(ObjectData::default()));
+    let object = tracked_object(ObjectData::default());
     {
         let mut data = object.borrow_mut();
         data.node_events.get_or_insert_with(Vec::new);

@@ -1,3 +1,7 @@
+// IsConstructor inspects engine callable metadata without invoking a constructor or reading
+// observable properties. The static algorithm below has the same owner in both engines.
+const __kilnIsConstructor: (value: any) => boolean = (globalThis as any).__kilnIsConstructor;
+
 // kiln-builtins: `%TypedArray%.prototype` (ADR 0005, ADR 0063 rule 4, Phase 5.1).
 //
 // Shared by both interpreter and native execution.
@@ -29,16 +33,359 @@ delete (globalThis as any).__kilnTypedArrayOutOfBounds;
 // default `sort` 2.5 s as element loops here, against node's 2.6 ms and 84 ms.
 const __kilnTypedArrayCopy: (target: any, targetIndex: number, source: any, sourceIndex: number, count: number) => boolean =
   (globalThis as any).__kilnTypedArrayCopy;
+// Buffer's bootstrap follows this one, after this module has deleted the host primitive from the
+// global object. Hand the validated byte-copy operation across that fixed bootstrap boundary;
+// Buffer captures and deletes the temporary slot before user code can run.
+const __kilnBufferHandoffGlobal = globalThis as any;
+if (typeof __kilnTypedArrayCopy === "function" &&
+    typeof __kilnBufferHandoffGlobal.Buffer === "function" &&
+    typeof __kilnBufferHandoffGlobal.__kilnBufferToString === "function") {
+  __kilnBufferHandoffGlobal.__kilnBufferTypedArrayCopy = __kilnTypedArrayCopy;
+}
 delete (globalThis as any).__kilnTypedArrayCopy;
 const __kilnTypedArraySort: (view: any) => boolean = (globalThis as any).__kilnTypedArraySort;
 delete (globalThis as any).__kilnTypedArraySort;
+// Internal state: 0 is a non-view, 1 a mutable view, 2 a view of an immutable buffer. This reads
+// slots only; detachment/bounds are checked by the numeric accessor after argument coercion.
+const __kilnDataViewState: (view: any) => number =
+  (globalThis as any).__kilnDataViewState;
+delete (globalThis as any).__kilnDataViewState;
+
+// DataView's half-precision accessors share the existing Float16Array element conversion. They
+// live in this bootstrap family because the backend already retains it whenever DataView or a
+// typed-array constructor is observable.
+(function installDataViewFloat16() {
+  const Float16 = (globalThis as any).Float16Array;
+  const Uint16 = (globalThis as any).Uint16Array;
+  if (typeof DataView === "undefined" || typeof Float16 !== "function" ||
+      typeof Uint16 !== "function") return;
+
+  const getUint16 = DataView.prototype.getUint16;
+  const setUint16 = DataView.prototype.setUint16;
+  const floatScratch = new Float16(1);
+  const bitsScratch = new Uint16(floatScratch.buffer);
+  const maxSafeInteger = 9007199254740991;
+
+  function requireDataViewReceiver(receiver: any): number {
+    const state = __kilnDataViewState(receiver);
+    if (state === 0) {
+      throw new TypeError("Method called on an incompatible receiver");
+    }
+    return state;
+  }
+
+  function toIndex(value: any): number {
+    let integer = +value;
+    if (integer !== integer || integer === 0) return 0;
+    if (integer === Infinity || integer === -Infinity) throw new RangeError("Index out of range");
+    integer = integer < 0 ? Math.ceil(integer) : Math.floor(integer);
+    if (integer < 0 || integer > maxSafeInteger) throw new RangeError("Index out of range");
+    return integer;
+  }
+
+  const methods = {
+    getFloat16(this: any, byteOffset: any): number {
+      requireDataViewReceiver(this);
+      const offset = toIndex(byteOffset);
+      const littleEndian = !!arguments[1];
+      bitsScratch[0] = getUint16.call(this, offset, littleEndian);
+      return floatScratch[0];
+    },
+    setFloat16(this: any, byteOffset: any, value: any): void {
+      // SetViewValue checks mutability before either argument is coerced, directly from slots
+      // even when user code replaces a view's public buffer/immutable properties.
+      if (requireDataViewReceiver(this) === 2) {
+        throw new TypeError("ArrayBuffer is immutable");
+      }
+      const offset = toIndex(byteOffset);
+      floatScratch[0] = +value;
+      const bits = bitsScratch[0];
+      const littleEndian = !!arguments[2];
+      setUint16.call(this, offset, bits, littleEndian);
+    },
+  };
+
+  Object.defineProperty(DataView.prototype, "getFloat16", {
+    value: methods.getFloat16,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(DataView.prototype, "setFloat16", {
+    value: methods.setFloat16,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+})();
 
 (function installTypedArrayPrototype() {
   if (typeof Uint8Array === "undefined" || !Uint8Array.prototype) {
     return;
   }
 
+  // `%TypedArray%` owns the generic static constructors. Concrete typed-array constructors
+  // inherit these through their [[Prototype]], so publishing them on Uint8Array alone makes
+  // `Object.getOwnPropertyNames(Object.getPrototypeOf(Uint8Array))` incomplete in the native
+  // bootstrap even though direct reads on each concrete constructor happen to work.
+  const sharedConstructor = Object.getPrototypeOf(Uint8Array);
+  if (sharedConstructor) {
+    // Node exposes these shared static own keys in `of`, then `from` order.
+    Object.defineProperty(sharedConstructor, "of", {
+      value: Uint8Array.of,
+      writable: true,
+      configurable: true,
+    });
+    Object.defineProperty(sharedConstructor, "from", {
+      value: {
+        from(this: any, source: any): any {
+          const C = this;
+          if (!__kilnIsConstructor(C)) throw new TypeError("TypedArray.from requires a constructor");
+          const mapper = arguments[1];
+          const mapping = mapper !== undefined;
+          if (mapping && typeof mapper !== "function") throw new TypeError("TypedArray.from mapper must be callable");
+          const thisArg = arguments[2];
+          if (source === null || source === undefined) throw new TypeError("TypedArray.from source is null or undefined");
+          const iteratorMethod = source[Symbol.iterator];
+          let values: any;
+          let length: number;
+          if (iteratorMethod !== undefined && iteratorMethod !== null) {
+            if (typeof iteratorMethod !== "function") throw new TypeError("TypedArray.from iterator must be callable");
+            // Gather before constructing or mapping; Array.from receives the already-read
+            // iterator method through a wrapper, so a getter on source is observed once.
+            values = Array.from({ [Symbol.iterator]() { return apply(iteratorMethod, source, []); } });
+            length = values.length;
+          } else {
+            values = Object(source);
+            length = toLength(values.length);
+          }
+          const result = validateTypedArray(new C(length), "from");
+          if (lengthOf(result) < length) throw new TypeError("TypedArray.from constructor returned a short array");
+          for (let index = 0; index < length; index++) {
+            const value = values[index];
+            result[index] = mapping ? apply(mapper, thisArg, [value, index]) : value;
+          }
+          return result;
+        },
+      }.from,
+      writable: true,
+      configurable: true,
+    });
+    if (typeof Symbol !== "undefined" && Symbol.species) {
+      const speciesGetter = function(this: any): any { return this; };
+      Object.defineProperty(speciesGetter, "name", {
+        value: "get [Symbol.species]",
+        configurable: true,
+      });
+      Object.defineProperty(sharedConstructor, Symbol.species, {
+        get: speciesGetter,
+        configurable: true,
+      });
+    }
+  }
+
+  const fromBase64Method = {
+    fromBase64(input: any, options: any = undefined): Uint8Array {
+      if (typeof input !== "string") {
+        throw new TypeError("Uint8Array.fromBase64 requires a string argument");
+      }
+      if (options !== undefined && (options === null || typeof options !== "object")) {
+        throw new TypeError("options must be an object");
+      }
+      const alphabetOption = options === undefined ? undefined : options.alphabet;
+      const alphabet = alphabetOption === undefined ? "base64" : alphabetOption;
+      if (typeof alphabet !== "string") {
+        throw new TypeError('alphabet must be "base64" or "base64url"');
+      }
+      if (alphabet !== "base64" && alphabet !== "base64url") {
+        throw new TypeError('alphabet must be "base64" or "base64url"');
+      }
+      const handlingOption = options === undefined ? undefined : options.lastChunkHandling;
+      const handling = handlingOption === undefined ? "loose" : handlingOption;
+      if (typeof handling !== "string") {
+        throw new TypeError('lastChunkHandling must be "loose", "strict", or "stop-before-partial"');
+      }
+      if (handling !== "loose" && handling !== "strict" && handling !== "stop-before-partial") {
+        throw new TypeError('lastChunkHandling must be "loose", "strict", or "stop-before-partial"');
+      }
+      const plus = alphabet === "base64" ? 62 : -1;
+      const slash = alphabet === "base64" ? 63 : -1;
+      const dash = alphabet === "base64url" ? 62 : -1;
+      const under = alphabet === "base64url" ? 63 : -1;
+      const values: number[] = [];
+      let padded = false;
+      let padding = 0;
+      let sourceLength = 0;
+      for (let i = 0; i < input.length; i++) {
+        const code = input.charCodeAt(i);
+        if (code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) continue;
+        sourceLength++;
+        if (code === 61) {
+          padded = true;
+          padding++;
+          if (padding > 2) throw new SyntaxError("invalid Base64 string");
+          continue;
+        }
+        if (padded) throw new SyntaxError("invalid Base64 string");
+        let value = -1;
+        if (code >= 65 && code <= 90) value = code - 65;
+        else if (code >= 97 && code <= 122) value = code - 71;
+        else if (code >= 48 && code <= 57) value = code + 4;
+        else if (code === 43) value = plus;
+        else if (code === 47) value = slash;
+        else if (code === 45) value = dash;
+        else if (code === 95) value = under;
+        if (value < 0) throw new SyntaxError("invalid Base64 string");
+        values.push(value);
+      }
+      let remainder = values.length % 4;
+      if (handling === "stop-before-partial" && padded && padding === 1 && remainder === 2) {
+        values.length -= remainder;
+        remainder = 0;
+        padded = false;
+      }
+      if (padded && (sourceLength % 4 !== 0 ||
+          (padding === 1 && remainder !== 3) || (padding === 2 && remainder !== 2))) {
+        throw new SyntaxError("invalid Base64 string");
+      }
+      if (handling === "stop-before-partial" && !padded) {
+        values.length -= remainder;
+        remainder = 0;
+      } else if (handling === "strict" && !padded && remainder !== 0) {
+        throw new SyntaxError("invalid Base64 string");
+      } else if (remainder === 1) {
+        throw new SyntaxError("invalid Base64 string");
+      }
+      const outputLength = Math.floor(values.length * 6 / 8);
+      const bytes = new Uint8Array(outputLength);
+      let accumulator = 0;
+      let bits = 0;
+      let written = 0;
+      for (const value of values) {
+        accumulator = (accumulator << 6) | value;
+        bits += 6;
+        if (bits >= 8) {
+          bits -= 8;
+          bytes[written++] = (accumulator >> bits) & 255;
+        }
+      }
+      if (handling === "strict" && bits !== 0 && (accumulator & ((1 << bits) - 1)) !== 0) {
+        throw new SyntaxError("invalid Base64 string");
+      }
+      return bytes;
+    },
+  }.fromBase64;
+
+  Object.defineProperty(Uint8Array, "fromBase64", {
+    value: fromBase64Method,
+    writable: true,
+    configurable: true,
+  });
+
+  const fromHexMethod = {
+    fromHex(input: any): Uint8Array {
+      if (typeof input !== "string") {
+        throw new TypeError("Uint8Array.fromHex requires a string argument");
+      }
+      if (input.length % 2 !== 0) {
+        throw new SyntaxError("hex string must have an even number of characters");
+      }
+      function digit(code: number): number {
+        if (code >= 48 && code <= 57) return code - 48;
+        if (code >= 65 && code <= 70) return code - 55;
+        if (code >= 97 && code <= 102) return code - 87;
+        return -1;
+      }
+      const bytes = new Uint8Array(input.length / 2);
+      for (let index = 0; index < bytes.length; index++) {
+        const high = digit(input.charCodeAt(index * 2));
+        const low = digit(input.charCodeAt(index * 2 + 1));
+        if (high < 0 || low < 0) throw new SyntaxError("invalid hex string");
+        bytes[index] = high * 16 + low;
+      }
+      return bytes;
+    },
+  }.fromHex;
+
+  Object.defineProperty(Uint8Array, "fromHex", {
+    value: fromHexMethod,
+    writable: true,
+    configurable: true,
+  });
+
+  const toBase64Method = {
+    toBase64(this: any, options: any = undefined): string {
+      requireTypedArray(this, "toBase64");
+      if (this instanceof DataView || !(this instanceof Uint8Array)) {
+        throw new TypeError("Uint8Array.prototype.toBase64 called on an incompatible receiver");
+      }
+      if (options !== undefined && (options === null || typeof options !== "object")) {
+        throw new TypeError("options must be an object");
+      }
+      const alphabetOption = options === undefined ? undefined : options.alphabet;
+      const alphabet = alphabetOption === undefined ? "base64" : alphabetOption;
+      if (typeof alphabet !== "string") {
+        throw new TypeError('alphabet must be "base64" or "base64url"');
+      }
+      if (alphabet !== "base64" && alphabet !== "base64url") {
+        throw new TypeError('alphabet must be "base64" or "base64url"');
+      }
+      const omitPaddingOption = options === undefined ? undefined : options.omitPadding;
+      const omitPadding = Boolean(omitPaddingOption);
+      if (isOutOfBounds(this)) throw new TypeError("ArrayBuffer is detached or out of bounds");
+      const chars = alphabet === "base64"
+        ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+      let result = "";
+      for (let i = 0; i < this.length; i += 3) {
+        const remaining = this.length - i;
+        const a = this[i];
+        const b = remaining > 1 ? this[i + 1] : 0;
+        const c = remaining > 2 ? this[i + 2] : 0;
+        const packed = (a << 16) | (b << 8) | c;
+        result += chars[(packed >>> 18) & 63] + chars[(packed >>> 12) & 63];
+        if (remaining > 1) result += chars[(packed >>> 6) & 63];
+        else if (!omitPadding) result += "=";
+        if (remaining > 2) result += chars[packed & 63];
+        else if (!omitPadding) result += "=";
+      }
+      return result;
+    },
+  }.toBase64;
+
+  Object.defineProperty(Uint8Array.prototype, "toBase64", {
+    value: toBase64Method,
+    writable: true,
+    configurable: true,
+  });
+
+  const toHexMethod = {
+    toHex(this: any): string {
+      if (!(this instanceof Uint8Array)) {
+        throw new TypeError("Uint8Array.prototype.toHex called on an incompatible receiver");
+      }
+      if (isOutOfBounds(this)) throw new TypeError("ArrayBuffer is detached or out of bounds");
+      let output = "";
+      for (let index = 0; index < this.length; index++) {
+        const byte = this[index];
+        output += (byte < 16 ? "0" : "") + byte.toString(16);
+      }
+      return output;
+    },
+  }.toHex;
+
+  Object.defineProperty(Uint8Array.prototype, "toHex", {
+    value: toHexMethod,
+    writable: true,
+    configurable: true,
+  });
+
   const Proto = Object.getPrototypeOf(Uint8Array.prototype);
+  // `Call(F, V, args)` as the specification spells it: captured once, so a program that replaces
+  // `Function.prototype.call` cannot change what a method here walks or whom a callback sees as
+  // `this`. Every `.call` below used to read that property at each use -- `lengthOf` among them,
+  // which every method reaches, so replacing it emptied `map` and `filter` (and `parallelMap`).
+  const apply = Reflect.apply;
   if (!Proto) {
     return;
   }
@@ -51,7 +398,7 @@ delete (globalThis as any).__kilnTypedArraySort;
   const lengthGetter: ((this: any) => number) | undefined =
     lengthDescriptor && typeof lengthDescriptor.get === "function" ? lengthDescriptor.get : undefined;
   function lengthOf(ta: any): number {
-    return lengthGetter !== undefined ? lengthGetter.call(ta) : ta.length;
+    return lengthGetter !== undefined ? apply(lengthGetter, ta, []) : ta.length;
   }
 
   function requireTypedArray(thisArg: any, methodName: string): any {
@@ -94,7 +441,7 @@ delete (globalThis as any).__kilnTypedArraySort;
   }
 
   function toIntegerOrInfinity(val: any): number {
-    const n = Number(val);
+    const n = +val;
     if (Number.isNaN(n) || n === 0) return 0;
     if (!Number.isFinite(n)) return n;
     return Math.trunc(n);
@@ -271,7 +618,7 @@ delete (globalThis as any).__kilnTypedArraySort;
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       const kValue = this[k];
-      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : apply(predicate, thisArg, [kValue, k, this])) {
         return kValue;
       }
     }
@@ -286,7 +633,7 @@ delete (globalThis as any).__kilnTypedArraySort;
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
       const kValue = this[k];
-      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : apply(predicate, thisArg, [kValue, k, this])) {
         return k;
       }
     }
@@ -301,7 +648,7 @@ delete (globalThis as any).__kilnTypedArraySort;
     const len = lengthOf(this);
     for (let k = len - 1; k >= 0; k--) {
       const kValue = this[k];
-      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : apply(predicate, thisArg, [kValue, k, this])) {
         return kValue;
       }
     }
@@ -316,7 +663,7 @@ delete (globalThis as any).__kilnTypedArraySort;
     const len = lengthOf(this);
     for (let k = len - 1; k >= 0; k--) {
       const kValue = this[k];
-      if (thisArg === undefined ? predicate(kValue, k, this) : predicate.call(thisArg, kValue, k, this)) {
+      if (thisArg === undefined ? predicate(kValue, k, this) : apply(predicate, thisArg, [kValue, k, this])) {
         return k;
       }
     }
@@ -330,7 +677,7 @@ delete (globalThis as any).__kilnTypedArraySort;
     }
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
-      if (thisArg === undefined ? predicate(this[k], k, this) : predicate.call(thisArg, this[k], k, this)) {
+      if (thisArg === undefined ? predicate(this[k], k, this) : apply(predicate, thisArg, [this[k], k, this])) {
         return true;
       }
     }
@@ -344,7 +691,7 @@ delete (globalThis as any).__kilnTypedArraySort;
     }
     const len = lengthOf(this);
     for (let k = 0; k < len; k++) {
-      if (!(thisArg === undefined ? predicate(this[k], k, this) : predicate.call(thisArg, this[k], k, this))) {
+      if (!(thisArg === undefined ? predicate(this[k], k, this) : apply(predicate, thisArg, [this[k], k, this]))) {
         return false;
       }
     }
@@ -367,7 +714,7 @@ delete (globalThis as any).__kilnTypedArraySort;
       if (thisArg === undefined) {
         callback(this[k], k, this);
       } else {
-        callback.call(thisArg, this[k], k, this);
+        apply(callback, thisArg, [this[k], k, this]);
       }
     }
   } }.forEach;
@@ -380,7 +727,7 @@ delete (globalThis as any).__kilnTypedArraySort;
     const len = lengthOf(this);
     const result = typedArraySpeciesCreate(this, len, "map");
     for (let k = 0; k < len; k++) {
-      result[k] = thisArg === undefined ? callback(this[k], k, this) : callback.call(thisArg, this[k], k, this);
+      result[k] = thisArg === undefined ? callback(this[k], k, this) : apply(callback, thisArg, [this[k], k, this]);
     }
     return result;
   } }.map;
@@ -394,8 +741,8 @@ delete (globalThis as any).__kilnTypedArraySort;
     const kept: any[] = [];
     for (let k = 0; k < len; k++) {
       const val = this[k];
-      if (thisArg === undefined ? callback(val, k, this) : callback.call(thisArg, val, k, this)) {
-        kept.push(val);
+      if (thisArg === undefined ? callback(val, k, this) : apply(callback, thisArg, [val, k, this])) {
+        kept[kept.length] = val;
       }
     }
     const result = typedArraySpeciesCreate(this, kept.length, "filter");
@@ -465,7 +812,7 @@ delete (globalThis as any).__kilnTypedArraySort;
       const el = this[k];
       parts.push(el !== undefined && el !== null ? String(el) : "");
     }
-    return arrayJoin.call(parts, sep);
+    return apply(arrayJoin, parts, [sep]);
   } }.join;
 
   function createTypedArrayIterator(ta: any, kind: "entries" | "keys" | "values"): any {
@@ -513,17 +860,17 @@ delete (globalThis as any).__kilnTypedArraySort;
 
   const entries = { entries(this: any): any {
     validateTypedArray(this, "entries");
-    return typeof arrayEntries === "function" ? arrayEntries.call(this) : createTypedArrayIterator(this, "entries");
+    return typeof arrayEntries === "function" ? apply(arrayEntries, this, []) : createTypedArrayIterator(this, "entries");
   } }.entries;
 
   const keys = { keys(this: any): any {
     validateTypedArray(this, "keys");
-    return typeof arrayKeys === "function" ? arrayKeys.call(this) : createTypedArrayIterator(this, "keys");
+    return typeof arrayKeys === "function" ? apply(arrayKeys, this, []) : createTypedArrayIterator(this, "keys");
   } }.keys;
 
   const values = { values(this: any): any {
     validateTypedArray(this, "values");
-    return typeof arrayValues === "function" ? arrayValues.call(this) : createTypedArrayIterator(this, "values");
+    return typeof arrayValues === "function" ? apply(arrayValues, this, []) : createTypedArrayIterator(this, "values");
   } }.values;
 
   // --- Mutators / Copiers ---
@@ -932,11 +1279,6 @@ delete (globalThis as any).__kilnTypedArraySort;
     return res;
   } }.toLocaleString;
 
-  function parallelMap(this: any, callback: any, thisArg?: any): any {
-    requireTypedArray(this, "parallelMap");
-    return this.map(callback, thisArg);
-  }
-
   // --- Method installation ---
 
   // Built-in methods are not constructors, so every one is a method definition (`{ m() {} }.m`)
@@ -993,12 +1335,6 @@ delete (globalThis as any).__kilnTypedArraySort;
     defineMethod(Symbol.iterator, values);
   }
 
-  // kiln's own members (ADR 0068): declared in `kiln_builtin_surface::KILN_EXTENSIONS`, installed
-  // only when the realm installs extensions (`extensions.ts`), and non-enumerable like the rest.
-  function defineExtension(name: string, fn: any): void {
-    if (kilnExtensions) {
-      defineMethod(name, fn);
-    }
-  }
-  defineExtension("parallelMap", parallelMap);
+  // kiln's own members on this prototype -- the parallel family, `parallelMap` included -- are
+  // defined once, with the array ones, in `parallel.ts` (ADR 0068, ADR 0069).
 })();

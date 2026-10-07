@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn generated_closures_retain_their_host_context_without_rebinding_plain_closures() {
+    let mut closure_program = program(
+        Vec::new(),
+        vec![Instruction::MakeFunction(0), Instruction::Return],
+        0,
+    );
+    closure_program
+        .functions
+        .push(function(vec![Instruction::Return]));
+    let generated = emit(&closure_program).expect("closure module emits");
+    assert!(
+        generated
+            .source
+            .contains("kiln_c99_closure_of(built)->module_host = kiln_c99_module_host(host);")
+    );
+
+    let wrapper = r#"
+int main(void) {
+    kiln_host old_host = { NULL, (void *)(uintptr_t)1, NULL };
+    kiln_host current_host = { NULL, (void *)(uintptr_t)2, NULL };
+    kiln_host unused_storage;
+    kiln_closure module_closure = {0};
+    kiln_closure plain_closure = {0};
+    module_closure.module_host = &old_host;
+    if (kiln_c99_closure_host(&current_host, &module_closure, &unused_storage) != &old_host) return 1;
+    if (old_host.call != current_host.call) return 2;
+    plain_closure.module_host = NULL;
+    if (kiln_c99_closure_host(&current_host, &plain_closure, &unused_storage) != &current_host) return 3;
+    if (kiln_c99_module_host(&current_host) != NULL) return 4;
+    old_host.module_context = &old_host;
+    if (kiln_c99_module_host(&old_host) != &old_host) return 5;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "closure-module-host-context");
+    assert!(
+        run.status.success(),
+        "closure host binding failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn generated_entry_refuses_a_failed_root_registration_before_running() {
     let generated = emit(&program(
         vec![Constant::Number(42.0f64.to_bits())],
@@ -47,11 +91,15 @@ fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let legacy = emit(&program).expect("default program emits");
     let explicit_default =
@@ -168,11 +216,15 @@ fn decoupled_modules_include_one_external_runtime_header() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let policy = EmissionPolicy {
         decoupled_prelude: true,
@@ -353,6 +405,9 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("f16round".into())],
         code: vec![
             Instruction::MakeFunction(0),
@@ -384,6 +439,7 @@ fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_cal
             type_annotations: None,
         }],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("nested refusal probe emits");
     let wrapper = format!(
@@ -742,6 +798,158 @@ fn program_hash_covers_function_table_and_proto_contents() {
 }
 
 #[test]
+fn program_hash_covers_lossless_source_origin() {
+    let base = program(Vec::new(), vec![Instruction::Return], 0);
+    let with_origin = |unit| {
+        let mut program = base.clone();
+        program.source_origin = Some(std::sync::Arc::new(kiln_ir::SourceOrigin {
+            units: kiln_ir::StringUnits::from_units(&[unit]),
+            byte_to_unit: vec![0, 1].into(),
+        }));
+        program
+    };
+    assert_ne!(
+        hash_program(&with_origin(0xd800)),
+        hash_program(&with_origin(0xfffd)),
+        "distinct original UTF-16 source units must not share an emitted-artifact identity"
+    );
+}
+
+#[test]
+fn program_hash_covers_static_transform_identity() {
+    let base = program(Vec::new(), vec![Instruction::Return], 0);
+    let with_identity = |identity: &str| {
+        let mut program = base.clone();
+        program.static_source_identity = Some(std::sync::Arc::from(identity));
+        program
+    };
+    assert_ne!(
+        hash_program(&with_identity("transform-a")),
+        hash_program(&with_identity("transform-b")),
+        "transform policy and source-map identity must affect native cache identity"
+    );
+
+    let source = "export const add = (left: number, right: number) => left + right;";
+    let compile_at = |path: &str| {
+        let hir = kiln_frontend_oxc::parse(path, source);
+        kiln_ir::compile_module(&hir)
+            .expect("static TypeScript compiles")
+            .program
+    };
+    let first = compile_at("/checkout-one/src/entry.ts");
+    let second = compile_at("/checkout-two/src/entry.ts");
+    assert_eq!(
+        first.static_source_identity, second.static_source_identity,
+        "absolute diagnostic paths do not participate in content identity"
+    );
+    assert_eq!(
+        hash_program(&first),
+        hash_program(&second),
+        "identical transformed programs and maps should share native artifacts across roots"
+    );
+}
+
+#[test]
+fn program_hash_covers_debug_call_site_coordinates() {
+    let base = program(Vec::new(), vec![Instruction::Return], 0);
+    let with_site = |site: kiln_ir::DebugCallSite| {
+        let mut program = base.clone();
+        program.debug_call_sites = vec![site];
+        program
+    };
+    let base_site = kiln_ir::DebugCallSite {
+        function_span: None,
+        instruction: 0,
+        line: 3,
+        column: 7,
+    };
+    let variants = [
+        kiln_ir::DebugCallSite {
+            line: 4,
+            ..base_site
+        },
+        kiln_ir::DebugCallSite {
+            column: 8,
+            ..base_site
+        },
+        kiln_ir::DebugCallSite {
+            instruction: 1,
+            ..base_site
+        },
+        kiln_ir::DebugCallSite {
+            function_span: Some(kiln_ir::Span { start: 0, end: 0 }),
+            ..base_site
+        },
+        kiln_ir::DebugCallSite {
+            line: 3,
+            ..base_site
+        },
+    ];
+    let baseline = hash_program(&with_site(base_site));
+    for variant in variants.into_iter().take(4) {
+        assert_ne!(
+            baseline,
+            hash_program(&with_site(variant)),
+            "each debug call-site field affects emitted frame metadata"
+        );
+    }
+    let mut reordered = base.clone();
+    reordered.debug_call_sites = vec![base_site, variants[0]];
+    let mut reversed = reordered.clone();
+    reversed.debug_call_sites.reverse();
+    assert_ne!(
+        hash_program(&reordered),
+        hash_program(&reversed),
+        "ordered call-site tables must retain their instruction mapping"
+    );
+}
+
+#[test]
+fn module_hash_covers_link_facts_used_by_emission() {
+    let base = ModuleProgram {
+        program: program(Vec::new(), vec![Instruction::Return], 0),
+        ..ModuleProgram::default()
+    };
+    let baseline = hash_module_with_seed(&base, 0xcbf29ce484222325);
+
+    let mut direct_eval = base.clone();
+    direct_eval.link_facts.direct_eval = true;
+    assert_ne!(
+        baseline,
+        hash_module_with_seed(&direct_eval, 0xcbf29ce484222325),
+        "direct eval changes module evaluation emission"
+    );
+
+    let mut removable = base.clone();
+    removable.link_facts.removable_declarations = vec![kiln_ir::RemovableDeclaration {
+        local_slots: vec![1, 3],
+        pc_start: 2,
+        pc_end: 5,
+    }];
+    assert_ne!(
+        baseline,
+        hash_module_with_seed(&removable, 0xcbf29ce484222325),
+        "closed-world declaration elision changes module emission"
+    );
+    let mut changed = removable.clone();
+    changed.link_facts.removable_declarations[0]
+        .local_slots
+        .reverse();
+    assert_ne!(
+        hash_module_with_seed(&removable, 0xcbf29ce484222325),
+        hash_module_with_seed(&changed, 0xcbf29ce484222325),
+        "declaration slot ordering is retained in module identity"
+    );
+    changed = removable.clone();
+    changed.link_facts.removable_declarations[0].pc_end += 1;
+    assert_ne!(
+        hash_module_with_seed(&removable, 0xcbf29ce484222325),
+        hash_module_with_seed(&changed, 0xcbf29ce484222325),
+        "declaration boundaries are retained in module identity"
+    );
+}
+
+#[test]
 fn emitted_closure_names_use_lossless_effective_function_metadata() {
     let mut high = function(vec![Instruction::Return]);
     high.inferred_name = Some(kiln_ir::StringUnits::from_units(&[0xd800]));
@@ -831,6 +1039,229 @@ fn compact_mode_deduplicates_function_names_across_functions() {
 }
 
 #[test]
+fn generic_mixed_tier_keeps_unsupported_bodies_at_o0_and_boxed() {
+    let selected = function(vec![Instruction::Return]);
+    let mut unsupported = function(vec![Instruction::Return]);
+    unsupported.generator = true;
+    let mut prog = program(
+        Vec::new(),
+        vec![
+            Instruction::MakeFunction(0),
+            Instruction::MakeFunction(1),
+            Instruction::Return,
+        ],
+        0,
+    );
+    prog.functions = vec![selected, unsupported];
+
+    let emitted = emit_with_policy(
+        &prog,
+        EmissionPolicy {
+            generic_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("generic module emits");
+    assert!(emitted.generic_only);
+    assert!(emitted.generic_mixed_optimization);
+    assert_eq!(emitted.chunk_generic_mixed_optimization, Vec::<bool>::new());
+    assert_eq!(
+        emitted
+            .source
+            .matches("defined(KILN_GENERIC_MIXED_TIER)")
+            .count(),
+        1,
+        "only the unselected generic body receives an O0 attribute"
+    );
+    assert!(emitted.source.contains("_fn_0("));
+    assert!(emitted.source.contains("_fn_1("));
+    assert!(
+        !emitted.source.contains("_fn_0_t("),
+        "the optimized generic tier retains the boxed ABI instead of a typed clone"
+    );
+
+    let mut compiled = emitted.clone();
+    compiled.source = format!("#define KILN_GENERIC_MIXED_TIER 1\n{}", compiled.source);
+    let wrapper = format!(
+        "int main(void) {{ kiln_value result; return {0}(NULL, &result) == KILN_C99_OK ? 0 : 1; }}\n",
+        compiled.symbol
+    );
+    let run = run_with_main(&compiled, &wrapper, "generic-mixed-tier-attributes");
+    assert!(
+        run.status.success(),
+        "mixed-tier C compiles and runs: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn generic_mixed_tier_keeps_looping_generator_boxed_while_selecting_its_body() {
+    let mut generator = function(vec![
+        Instruction::NewObject { count: 0 },
+        Instruction::Yield,
+        Instruction::Pop,
+        Instruction::Jump(0),
+    ]);
+    generator.generator = true;
+    let mut prog = program(
+        Vec::new(),
+        vec![Instruction::MakeFunction(0), Instruction::Return],
+        0,
+    );
+    prog.functions.push(generator);
+
+    let emitted = emit_with_policy(
+        &prog,
+        EmissionPolicy {
+            generic_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("generic generator module emits");
+    assert!(emitted.generic_mixed_optimization);
+    assert!(
+        !emitted.source.contains("_fn_0_t("),
+        "the O1 tier keeps the existing boxed generator entry and ABI"
+    );
+    assert_eq!(
+        emitted
+            .source
+            .matches("defined(KILN_GENERIC_MIXED_TIER)")
+            .count(),
+        0,
+        "the selected generator body is emitted without the O0 optnone attribute"
+    );
+
+    let mut compiled = emitted.clone();
+    compiled.source = format!("#define KILN_GENERIC_MIXED_TIER 1\n{}", compiled.source);
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    uint64_t realm;
+    kiln_value function, generator, result, value, done;
+    kiln_value thrown = kiln_c99_undefined();
+    if (setenv("KILN_GC_STRESS", "1", 1) != 0) return 1;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 2;
+    kiln_test_realm_active = 1;
+    if (kiln_c99_make_closure(&function, {symbol}_fn_0, NULL, NULL, 0, "<tier-test>", 0, 0,
+                              1, 0, 0, 0, 0, 1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
+                              0, 4, 0, 0, NULL, 0) != KILN_C99_OK) return 3;
+    {{ int status = kiln_c99_call(NULL, &generator, function, kiln_c99_undefined(), NULL, 0, 0,
+                                  &thrown);
+       if (status != KILN_C99_OK) {{
+           size_t len = 0; const char *message = kiln_c99_string_ascii_bytes(thrown, &len);
+           fprintf(stderr, "generator call status=%d thrown-tag=%d %.*s\\n", status,
+                   thrown.tag, (int)len, message ? message : "");
+           return 40 + status;
+       }} }}
+    if (generator.tag != KILN_VALUE_GENERATOR) return 30 + generator.tag;
+    for (int i = 0; i < 5; ++i) {{
+        if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_GENERATOR_NEXT, generator,
+                                   NULL, 0, 0, &thrown) != KILN_C99_OK) return 5;
+    }}
+    if (result.tag != KILN_VALUE_OBJECT) return 20 + result.tag;
+    if (kiln_c99_get(NULL, result, "value", 5, &value, 0, &thrown) != KILN_C99_OK ||
+        value.tag != KILN_VALUE_OBJECT) return 3;
+    if (kiln_c99_get(NULL, result, "done", 4, &done, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_truthy(done)) return 4;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 5;
+}}
+"#,
+        symbol = compiled.symbol
+    );
+    let run = run_with_main(&compiled, &wrapper, "generic-looping-generator-tier");
+    assert!(
+        run.status.success(),
+        "boxed generator C compiles and runs (status {:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn generic_mixed_tier_budget_is_spent_after_module_liveness() {
+    let mut prog = program(
+        (0..65)
+            .map(|index| Constant::Number((index as f64).to_bits()))
+            .collect(),
+        vec![
+            Instruction::MakeFunction(64),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    prog.functions = (0..65)
+        .map(|index| function(vec![Instruction::Const(index), Instruction::Return]))
+        .collect();
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module(prog, Vec::new(), Vec::new()),
+        "retained-tier.js",
+        EmissionPolicy {
+            compact: true,
+            generic_only: true,
+            live_module_slots: Some(std::sync::Arc::new(Default::default())),
+            unit_chunk_bytes: Some(1),
+            ..Default::default()
+        },
+    )
+    .expect("module emits");
+    assert!(emitted.generic_mixed_optimization);
+    assert!(
+        emitted.chunks.is_empty(),
+        "one retained body needs only one unit"
+    );
+    assert!(emitted.source.contains("_fn_64"));
+    assert!(
+        !emitted.source.contains("defined(KILN_GENERIC_MIXED_TIER)"),
+        "the only retained function receives the optimized tier"
+    );
+}
+
+#[test]
+fn generic_mixed_tier_metadata_tracks_each_emitted_chunk() {
+    let selected = function(vec![Instruction::Return]);
+    let mut unsupported = function(vec![Instruction::Return]);
+    unsupported.generator = true;
+    let mut prog = program(
+        Vec::new(),
+        vec![
+            Instruction::MakeFunction(0),
+            Instruction::MakeFunction(1),
+            Instruction::Return,
+        ],
+        0,
+    );
+    prog.functions = vec![selected, unsupported];
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module(prog, Vec::new(), Vec::new()),
+        "tier-test.js",
+        EmissionPolicy {
+            compact: true,
+            generic_only: true,
+            unit_chunk_bytes: Some(1),
+            ..Default::default()
+        },
+    )
+    .expect("chunked generic module emits");
+
+    assert!(emitted.generic_mixed_optimization);
+    assert!(emitted.chunks.len() >= 2);
+    assert_eq!(
+        emitted.chunk_generic_mixed_optimization.len(),
+        emitted.chunks.len()
+    );
+    assert!(emitted.chunk_generic_mixed_optimization[0]);
+    assert!(
+        emitted
+            .chunk_generic_mixed_optimization
+            .iter()
+            .any(|mixed| !mixed)
+    );
+}
+
+#[test]
 fn compact_mode_emits_closure_metadata_table_and_compact_call_sites() {
     let mut f0 = function(vec![Instruction::Return]);
     f0.name = Some("target".into());
@@ -892,6 +1323,9 @@ fn executable_compact_closure_executes_correctly() {
         &Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![
                 Constant::Number(0f64.to_bits()),
                 Constant::Number(1f64.to_bits()),
@@ -914,6 +1348,7 @@ fn executable_compact_closure_executes_correctly() {
             local_count: 2,
             functions: vec![bump],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         EmissionPolicy {
             compact: true,
@@ -1152,7 +1587,7 @@ fn emitted_async_module_emits_publish_exports() {
     ))
     .expect("async module emits");
     assert!(generated.source.contains(&format!(
-        "void {}_publish_exports(kiln_value *exports)",
+        "void {}_publish_exports(kiln_host *host, kiln_value *exports)",
         generated.symbol
     )));
     assert!(
@@ -1397,6 +1832,9 @@ fn compact_module_pools_inline_cache_sites_and_interned_keys_into_dense_tables()
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![
                 Constant::String("foo".to_owned().into()),
                 Constant::String("bar".to_owned().into()),
@@ -1419,6 +1857,7 @@ fn compact_module_pools_inline_cache_sites_and_interned_keys_into_dense_tables()
                 ],
             )],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -1499,6 +1938,9 @@ fn compact_module_with_many_keys_uses_dense_static_key_array_and_loop() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![
                 Constant::String("k0".to_owned().into()),
                 Constant::String("k1".to_owned().into()),
@@ -1521,6 +1963,7 @@ fn compact_module_with_many_keys_uses_dense_static_key_array_and_loop() {
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         Vec::new(),
@@ -1581,4 +2024,43 @@ int main(void) {
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
+}
+
+#[test]
+fn split_instantiation_call_sites_use_declared_shared_receiver_helper() {
+    let mut module = super::module(
+        super::program(
+            vec![
+                Constant::Number(1.0f64.to_bits()),
+                Constant::String("toString".into()),
+            ],
+            vec![
+                Instruction::Const(0),
+                Instruction::CallMethod { name: 1, argc: 0 },
+                Instruction::Return,
+            ],
+            0,
+        ),
+        Vec::new(),
+        Vec::new(),
+    );
+    module.link_facts.module_instantiation_end = 2;
+
+    let emitted = emit_module_with_logical_path_and_policy_and_instantiation(
+        &module,
+        "fixture/instantiate-method.js",
+        EmissionPolicy::default(),
+        true,
+    )
+    .expect("split module emits");
+    let instantiation = emitted.instantiation.expect("instantiation entry emitted");
+
+    assert!(
+        instantiation
+            .source
+            .contains("kiln_c99_normalize_closure_receiver")
+    );
+    assert!(runtime_prelude_header().contains(
+        "extern int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure);"
+    ));
 }

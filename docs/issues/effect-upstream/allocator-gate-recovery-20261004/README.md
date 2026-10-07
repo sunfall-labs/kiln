@@ -1,0 +1,9 @@
+# Allocator gate recovery, 2026-10-04
+
+The production source remains the frozen allocator candidate, CLI SHA-256 `f1c8f22d171e209a929842563e5dd35f2a2226d9c363486497665bcde9189de0`. The only subsequent test-source change records two reviewed internal initializer declarations in the prelude snapshot (`1727112b`). The focused snapshot test passed: 1 passed, 0 failed.
+
+The full-GUI provider was packaged with the repository packager, which verifies exported symbols and native link arguments. Its source digest is unchanged from the headless provider; the manifest and archive provenance are recorded here. All 14 native probes affected by ENOSPC or missing GUI capability in gate `run.VO6m36gX` now pass: 14 matched, 0 refused, 0 diverged. This is focused recovery evidence, not a replacement full gate or full GC-stress run.
+
+A fresh complete Pool run with the same combined compiler discovered all 47 cases and yielded 44 passed, 3 failed, 0 skipped. Thus its retention failures remain current; the prior diagnostic was not merely testing an obsolete compiler. The result document is retained. Overall upstream scope remains all 322 files. Performance verification, full GC-stress validation, and the remaining upstream failures are unfinished.
+
+A quiet targeted benchmark recheck, using the same headless provider as the original gate and unchanged thresholds (25% plus more than 3 ms absolute), passed all five selected bundles: acorn 19.46 ms, dayjs 9.97 ms, marked 12.73 ms, postcss 14.22 ms, uuid 6.30 ms. Build work finished before serial timing; outputs were checked against Node. This resolves the three flagged rows in a focused recheck, not the full 13-row gate or final Bun comparisons. An initial preparation using the GUI provider was stopped before timing to avoid changing the comparison inputs.

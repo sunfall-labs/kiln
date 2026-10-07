@@ -1,0 +1,11 @@
+[package]
+name = "kiln-key-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
+rsa = { version = "0.9.10", default-features = false, features = ["std", "pem", "u64_digit"] }
+serde_json = { workspace = true }

@@ -1,6 +1,10 @@
 // kiln-builtins: node:stream implementation (Phase 5.2, ADR 0005)
 
+declare const Buffer: any;
+
 class EventEmitter {
+  static defaultMaxListeners = 10;
+
   _events: Record<string | symbol, Function[]>;
   _eventsCount: number;
   _maxListeners: number | undefined;
@@ -96,6 +100,26 @@ class EventEmitter {
     return this;
   }
 
+  listenerCount(event: string | symbol): number {
+    const list = this._events ? this._events[event] : undefined;
+    return Array.isArray(list) ? list.length : 0;
+  }
+
+  setMaxListeners(n: number): this {
+    const max = Number(n);
+    if (Number.isNaN(max) || max < 0) {
+      throw new RangeError('The value of "n" is out of range. It must be >= 0.');
+    }
+    this._maxListeners = max;
+    return this;
+  }
+
+  getMaxListeners(): number {
+    return this._maxListeners === undefined
+      ? EventEmitter.defaultMaxListeners
+      : this._maxListeners;
+  }
+
   listeners(event: string | symbol): Function[] {
     if (!this._events || !this._events[event]) return [];
     return this._events[event].slice();
@@ -112,7 +136,13 @@ class EventEmitter {
   }
 }
 
-export class Stream extends EventEmitter {
+// Node exposes EventEmitter.prototype.on as an alias of addListener. Keep the alias itself
+// instead of delegating through `this.addListener`: legacy stream subclasses commonly replace
+// `addListener` with their `on` wrapper, which calls Stream.prototype.on.call(this, ...). A
+// dynamic delegation here would recurse through that wrapper forever.
+EventEmitter.prototype.on = EventEmitter.prototype.addListener;
+
+class StreamImplementation extends EventEmitter {
   static Readable: typeof Readable;
   static Writable: typeof Writable;
   static Duplex: typeof Duplex;
@@ -163,7 +193,37 @@ export class Stream extends EventEmitter {
   }
 }
 
-export class Readable extends Stream {
+// readable-stream and other legacy subclasses initialize their receiver with Stream.call(this).
+export function Stream(this: any, options?: any): void {
+  if (this._events === undefined) {
+    this._events = Object.create(null);
+    this._eventsCount = 0;
+  }
+  this._maxListeners = this._maxListeners || undefined;
+}
+export type Stream = StreamImplementation;
+Stream.prototype = StreamImplementation.prototype;
+Object.defineProperty(Stream.prototype, "constructor", {
+  value: Stream, writable: true, configurable: true,
+});
+
+// Node's stream constructors predate ES classes and remain callable with `.call(this, options)`.
+// Keep the implementation classes for `extends`, but expose callable constructor functions that
+// initialize an existing receiver as well as a newly allocated one.
+function legacyStreamConstructor(Implementation: any, publicName: string): any {
+  const Constructor: any = function (this: any, ...args: any[]): void {
+    Object.assign(this, new Implementation(...args));
+  };
+  Object.defineProperty(Constructor, "name", { value: publicName, configurable: true });
+  Object.setPrototypeOf(Constructor, Implementation);
+  Constructor.prototype = Implementation.prototype;
+  Object.defineProperty(Constructor.prototype, "constructor", {
+    value: Constructor, writable: true, configurable: true,
+  });
+  return Constructor;
+}
+
+class ReadableImplementation extends Stream {
   _readableState: {
     buffer: any[];
     length: number;
@@ -261,8 +321,8 @@ export class Readable extends Stream {
       state.length = 0;
       if (chunks.length === 1) {
         res = chunks[0];
-      } else if (typeof (globalThis as any).Buffer !== "undefined" && typeof (globalThis as any).Buffer.concat === "function") {
-        res = (globalThis as any).Buffer.concat(chunks);
+      } else if (typeof Buffer !== "undefined" && typeof Buffer.concat === "function") {
+        res = Buffer.concat(chunks);
       } else {
         res = chunks;
       }
@@ -308,8 +368,8 @@ export class Readable extends Stream {
     if (state.objectMode || (typeof chunk === "string" && state.encoding)) {
       // An object-mode stream carries values as they are; a string stays a string under an
       // encoding.
-    } else if (typeof chunk === "string" && typeof (globalThis as any).Buffer !== "undefined") {
-      chunk = (globalThis as any).Buffer.from(chunk, encoding);
+    } else if (typeof chunk === "string" && typeof Buffer !== "undefined") {
+      chunk = Buffer.from(chunk, encoding);
     }
     if (chunk === "" || (chunk && typeof chunk.length === "number" && chunk.length === 0)) {
       if (!state.ended && this.listeners("readable").length > 0) {
@@ -348,7 +408,8 @@ export class Readable extends Stream {
     state.buffer.push(chunk);
     state.length += (chunk && chunk.length) || 0;
     state.reading = state.length < state.highWaterMark;
-    this.emit("data", chunk);
+    // A paused or explicitly non-flowing stream retains chunks until read() or resume().
+    // Emitting data here would both leak paused data and deliver it a second time on resume.
     this.emit("readable");
     return state.length < state.highWaterMark;
   }
@@ -454,7 +515,15 @@ export class Readable extends Stream {
   }
 }
 
-export class Writable extends Stream {
+// EventEmitter's `on` is intentionally an alias of its base `addListener`. Readable adds
+// scheduling behavior when a listener is attached to `readable`, so it needs its own alias;
+// delegating from the base alias would recurse for legacy subclasses that wrap addListener.
+ReadableImplementation.prototype.on = ReadableImplementation.prototype.addListener;
+
+export interface Readable extends ReadableImplementation {}
+export const Readable: any = legacyStreamConstructor(ReadableImplementation, "Readable");
+
+class WritableImplementation extends Stream {
   _writableState: {
     ended: boolean;
     finished: boolean;
@@ -544,7 +613,10 @@ export class Writable extends Stream {
   }
 }
 
-export class Duplex extends Readable {
+export interface Writable extends WritableImplementation {}
+export const Writable: any = legacyStreamConstructor(WritableImplementation, "Writable");
+
+class DuplexImplementation extends Readable {
   _writableState: any;
   writable: boolean;
   writableEnded: boolean;
@@ -580,7 +652,10 @@ export class Duplex extends Readable {
   }
 }
 
-export class Transform extends Duplex {
+export interface Duplex extends DuplexImplementation {}
+export const Duplex: any = legacyStreamConstructor(DuplexImplementation, "Duplex");
+
+class TransformImplementation extends Duplex {
   constructor(options?: any) {
     super(options);
     if (options && typeof options.transform === "function") {
@@ -645,6 +720,9 @@ export class Transform extends Duplex {
     return this;
   }
 }
+
+export interface Transform extends TransformImplementation {}
+export const Transform: any = legacyStreamConstructor(TransformImplementation, "Transform");
 
 export class PassThrough extends Transform {}
 

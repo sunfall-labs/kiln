@@ -337,6 +337,20 @@ class Blob {
     return new Uint8Array(this._data);
   }
 
+  stream(): ReadableStream<Uint8Array> {
+    const data = this._data;
+    let offset = 0;
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= data.length) { controller.close(); return; }
+        const end = Math.min(offset + 65536, data.length);
+        controller.enqueue(data.slice(offset, end));
+        offset = end;
+        if (offset >= data.length) controller.close();
+      },
+    });
+  }
+
   slice(start?: number, end?: number, contentType?: string): Blob {
     const s = start === undefined ? 0 : start < 0 ? Math.max(this.size + start, 0) : Math.min(start, this.size);
     const e = end === undefined ? this.size : end < 0 ? Math.max(this.size + end, 0) : Math.min(end, this.size);
@@ -395,12 +409,23 @@ class DOMException extends Error {
   }
 }
 
+function formDataValue(value: any, filename?: string): string | File {
+  if (!(value instanceof Blob)) {
+    if (filename !== undefined) throw new TypeError("FormData filename requires a Blob");
+    return String(value);
+  }
+  if (value instanceof File && filename === undefined) return value;
+  return new File([value], filename === undefined ? "blob" : String(filename), {
+    type: value.type, lastModified: value instanceof File ? value.lastModified : undefined,
+  });
+}
+
 class FormData {
   private _entries: [string, string | Blob][] = [];
 
   append(name: string, value: any, _filename?: string): void {
     const k = String(name);
-    const val = value instanceof Blob ? value : String(value);
+    const val = formDataValue(value, _filename);
     this._entries.push([k, val]);
   }
 
@@ -436,7 +461,7 @@ class FormData {
 
   set(name: string, value: any, _filename?: string): void {
     const k = String(name);
-    const val = value instanceof Blob ? value : String(value);
+    const val = formDataValue(value, _filename);
     let found = false;
     const newEntries: [string, string | Blob][] = [];
     for (let i = 0; i < this._entries.length; i++) {
@@ -512,13 +537,165 @@ function bodyContentType(body: any): string | null {
   return null;
 }
 
+// HTML multipart encoding retains entry order and raw file bytes; only textual fields
+// normalize line endings. The boundary belongs to this extraction, not to the FormData.
+function formLineEndings(value: string): string {
+  return value.replace(/\r\n|\r|\n/g, "\r\n");
+}
+function formQuoted(value: string): string {
+  return formLineEndings(value).replace(/\r/g, "%0D").replace(/\n/g, "%0A").replace(/"/g, "%22");
+}
+const formBoundaryRandom = Math.random;
+function encodeFormData(form: FormData): { bytes: Uint8Array; type: string } {
+  let boundary = "----kilnFormBoundary";
+  for (let i = 0; i < 4; i++) boundary += formBoundaryRandom().toString(36).slice(2);
+  const parts: Uint8Array[] = [];
+  let length = 0;
+  function add(bytes: Uint8Array): void { parts.push(bytes); length += bytes.byteLength; }
+  for (const [name, value] of form) {
+    let head = `--${boundary}\r\nContent-Disposition: form-data; name="${formQuoted(name)}"`;
+    if (value instanceof Blob) {
+      const filename = value instanceof File ? value.name : "blob";
+      head += `; filename="${formQuoted(filename)}"\r\nContent-Type: ${value.type || "application/octet-stream"}`;
+    }
+    add(getSharedEncoder().encode(head + "\r\n\r\n"));
+    add(value instanceof Blob ? value._data : getSharedEncoder().encode(formLineEndings(value)));
+    add(getSharedEncoder().encode("\r\n"));
+  }
+  add(getSharedEncoder().encode(`--${boundary}--\r\n`));
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (let i = 0; i < parts.length; i++) { bytes.set(parts[i], offset); offset += parts[i].byteLength; }
+  return { bytes, type: `multipart/form-data; boundary=${boundary}` };
+}
+
+// MIME parameters allow quoted strings with escaped characters and semicolons.
+function mimeParameter(value: string, wanted: string): string | null {
+  let i = value.indexOf(";");
+  while (i >= 0 && i < value.length) {
+    i++;
+    while (value[i] === " " || value[i] === "\t") i++;
+    const start = i;
+    while (i < value.length && value[i] !== "=" && value[i] !== ";") i++;
+    const name = value.slice(start, i).trim().toLowerCase();
+    if (value[i] !== "=") continue;
+    i++;
+    while (value[i] === " " || value[i] === "\t") i++;
+    let parameter = "";
+    if (value[i] === '"') {
+      i++;
+      let closed = false;
+      while (i < value.length) {
+        const c = value[i++];
+        if (c === '"') { closed = true; break; }
+        if (c === "\\" && i < value.length) parameter += value[i++];
+        else parameter += c;
+      }
+      if (!closed) return null;
+      while (i < value.length && value[i] !== ";") i++;
+    } else {
+      const begin = i;
+      while (i < value.length && value[i] !== ";") i++;
+      parameter = value.slice(begin, i).trim();
+    }
+    if (name === wanted) return parameter;
+    if (i === value.length) break;
+  }
+  return null;
+}
+function findBodyBytes(bytes: Uint8Array, needle: Uint8Array, start: number): number {
+  for (let i = start; i <= bytes.byteLength - needle.byteLength; i++) {
+    if (bytes[i] !== needle[0]) continue;
+    let j = 1;
+    while (j < needle.byteLength && bytes[i + j] === needle[j]) j++;
+    if (j === needle.byteLength) return i;
+  }
+  return -1;
+}
+async function bodyFormData(self: any, contentType: string | null): Promise<FormData> {
+  const bytes = await bodyBytes(self);
+  const form = new FormData();
+  const type = contentType === null ? "" : contentType.split(";", 1)[0].trim().toLowerCase();
+  if (type === "application/x-www-form-urlencoded") {
+    const params = new URLSearchParams(getSharedDecoder().decode(bytes));
+    for (const [name, value] of params) form.append(name, value);
+    return form;
+  }
+  if (type !== "multipart/form-data") throw new TypeError("Body has no supported form content type");
+  const boundary = mimeParameter(contentType!, "boundary");
+  if (boundary === null || boundary === "" || boundary.indexOf("\r") >= 0 || boundary.indexOf("\n") >= 0) {
+    throw new TypeError("Multipart body has no valid boundary");
+  }
+  const encoder = getSharedEncoder();
+  const marker = encoder.encode(`--${boundary}`);
+  const delimiter = encoder.encode(`\r\n--${boundary}`);
+  const headerEnd = encoder.encode("\r\n\r\n");
+  let cursor = findBodyBytes(bytes, marker, 0);
+  if (cursor < 0) throw new TypeError("Invalid multipart body");
+  cursor += marker.byteLength;
+  while (true) {
+    if (bytes[cursor] === 45 && bytes[cursor + 1] === 45) return form;
+    if (bytes[cursor] !== 13 || bytes[cursor + 1] !== 10) throw new TypeError("Invalid multipart boundary");
+    const headerStart = cursor + 2;
+    const end = findBodyBytes(bytes, headerEnd, headerStart);
+    if (end < 0) throw new TypeError("Invalid multipart headers");
+    const headers = getSharedDecoder().decode(bytes.subarray(headerStart, end)).split("\r\n");
+    let disposition: string | null = null;
+    let partType = "";
+    for (let i = 0; i < headers.length; i++) {
+      const colon = headers[i].indexOf(":");
+      if (colon <= 0) throw new TypeError("Invalid multipart header");
+      const name = headers[i].slice(0, colon).trim().toLowerCase();
+      const value = headers[i].slice(colon + 1).trim();
+      if (name === "content-disposition") disposition = value;
+      else if (name === "content-type") partType = value;
+    }
+    if (disposition === null || disposition.split(";", 1)[0].trim().toLowerCase() !== "form-data") {
+      throw new TypeError("Invalid multipart disposition");
+    }
+    const name = mimeParameter(disposition, "name");
+    if (name === null) throw new TypeError("Multipart field has no name");
+    const begin = end + 4;
+    let next = findBodyBytes(bytes, delimiter, begin);
+    while (next >= 0) {
+      const suffix = next + delimiter.byteLength;
+      if ((bytes[suffix] === 45 && bytes[suffix + 1] === 45) ||
+          (bytes[suffix] === 13 && bytes[suffix + 1] === 10)) break;
+      next = findBodyBytes(bytes, delimiter, next + 1);
+    }
+    if (next < 0) throw new TypeError("Unterminated multipart body");
+    const part = bytes.subarray(begin, next);
+    const filename = mimeParameter(disposition, "filename");
+    if (filename === null) form.append(name, getSharedDecoder().decode(part));
+    else form.append(name, new File([part], filename, { type: partType || "text/plain" }));
+    cursor = next + delimiter.byteLength;
+  }
+}
+
 // A body as Request and Response keep it: a string (kept as text until something needs bytes),
 // bytes, or null for none. A Uint8Array (a Buffer included) is kept as given.
-function bodyValue(body: any): string | Uint8Array {
+interface BodyReadable {
+  readonly locked: boolean;
+  readonly _disturbed: boolean;
+  getReader(): any;
+  tee(): [BodyReadable, BodyReadable];
+}
+type StoredBody = string | Uint8Array | BodyReadable | null;
+
+function isBodyReadable(body: any): body is BodyReadable {
+  const RS = (globalThis as any).ReadableStream;
+  return typeof RS === "function" && body instanceof RS;
+}
+
+function bodyValue(body: any): Exclude<StoredBody, null> {
   if (typeof body === "string") return body;
   if (body instanceof Uint8Array) return body;
   if (body instanceof ArrayBuffer) return new Uint8Array(body);
   if (body instanceof Blob) return body._data;
+  if (isBodyReadable(body)) {
+    if (body.locked || body._disturbed) throw new TypeError("Body stream is locked or disturbed");
+    return body;
+  }
   return String(body);
 }
 
@@ -565,42 +742,71 @@ function newBodyExtra(): BodyExtra {
 }
 
 // The body of a Request or Response for a read that consumes it: throws once it has been read.
-function consumeBody(self: any): string | Uint8Array | null {
+function consumeBody(self: any): StoredBody {
+  if (self._body === null) return null;
   let extra: BodyExtra | null = self._extra;
+  const stream = extra !== null && extra.bodyStream !== undefined ? extra.bodyStream :
+    isBodyReadable(self._body) ? self._body : null;
+  if (bodyUsed(self) || (stream !== null && stream.locked)) {
+    throw new TypeError("Body has already been consumed or is locked");
+  }
   if (extra === null) {
     extra = newBodyExtra();
     self._extra = extra;
-  } else if (extra.bodyUsed) {
-    throw new TypeError("Body has already been consumed");
   }
   extra.bodyUsed = true;
-  return self._body;
+  return stream === null ? self._body : stream;
 }
 
-function bodyText(self: any): string {
+async function readBodyStream(stream: BodyReadable): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    if (!(next.value instanceof Uint8Array)) {
+      throw new TypeError("Body stream chunks must be Uint8Array values");
+    }
+    chunks.push(next.value);
+    length += next.value.byteLength;
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+async function bodyText(self: any): Promise<string> {
   const body = consumeBody(self);
   if (body === null) return "";
   if (typeof body === "string") return body;
+  const bytes = isBodyReadable(body) ? await readBodyStream(body) : body;
   const dec = getSharedDecoder();
-  if (dec) return dec.decode(body);
+  if (dec) return dec.decode(bytes);
   let res = "";
-  for (let i = 0; i < body.length; i++) res += String.fromCharCode(body[i]);
+  for (let i = 0; i < bytes.length; i++) res += String.fromCharCode(bytes[i]);
   return res;
 }
 
-function bodyBytes(self: any): Uint8Array {
+async function bodyBytes(self: any): Promise<Uint8Array> {
   const body = consumeBody(self);
   if (body === null) return new Uint8Array(0);
   if (typeof body === "string") {
     const enc = getSharedEncoder();
     return enc ? enc.encode(body) : new Uint8Array(0);
   }
-  return body;
+  return isBodyReadable(body) ? readBodyStream(body) : body;
 }
 
 function bodyUsed(self: any): boolean {
   const extra: BodyExtra | null = self._extra;
-  return extra !== null && extra.bodyUsed;
+  if (extra !== null && extra.bodyUsed) return true;
+  const stream = extra !== null && extra.bodyStream !== undefined ? extra.bodyStream : self._body;
+  return isBodyReadable(stream) && stream._disturbed;
 }
 
 // A stream over the bytes, made once: node's `body` is a `ReadableStream` of `Uint8Array`
@@ -616,20 +822,59 @@ function bodyStream(self: any): any {
     extra.bodyStream = null;
     return null;
   }
+  if (isBodyReadable(self._body)) {
+    extra.bodyStream = self._body;
+    return self._body;
+  }
   const RS = (globalThis as any).ReadableStream;
   if (typeof RS !== "function") return null;
   const state = extra;
   const body = self._body;
   extra.bodyStream = new RS({
     pull(controller: any) {
-      state.bodyUsed = true;
       const bytes =
         typeof body === "string" ? (getSharedEncoder()?.encode(body) || new Uint8Array(0)) : body;
       if (bytes.length > 0) controller.enqueue(bytes);
       controller.close();
     },
-  });
+  }, { highWaterMark: 0 });
+  if (state.bodyUsed) {
+    // The optimized byte/text read already consumed this body before its stream was requested.
+    // Materialize its closed, disturbed stream only when this otherwise rare getter is used.
+    extra.bodyStream.cancel();
+    extra.bodyStream.getReader();
+  }
   return extra.bodyStream;
+}
+
+// Fetch's body clone tees only an already-materialized stream. Byte sources can retain the
+// lazy stream optimization until either branch is read. https://fetch.spec.whatwg.org/#concept-body-clone
+function cloneBody(self: any): StoredBody {
+  const extra: BodyExtra | null = self._extra;
+  const stream = extra !== null && extra.bodyStream !== undefined ? extra.bodyStream : self._body;
+  if (bodyUsed(self) || (isBodyReadable(stream) && stream.locked)) {
+    throw new TypeError("Body has already been consumed or is locked");
+  }
+  if (!isBodyReadable(stream)) return self._body;
+  const branches = stream.tee();
+  self._body = branches[0];
+  if (extra !== null) extra.bodyStream = branches[0];
+  return branches[1];
+}
+
+function transferBody(self: any): StoredBody {
+  const body = consumeBody(self);
+  if (!isBodyReadable(body)) return body;
+  const reader = body.getReader();
+  const RS = (globalThis as any).ReadableStream;
+  return new RS({
+    async pull(controller: any) {
+      const next = await reader.read();
+      if (next.done) controller.close();
+      else controller.enqueue(next.value);
+    },
+    cancel(reason: any) { return reader.cancel(reason); },
+  }, { highWaterMark: 0 });
 }
 
 // A `status` the Response constructor accepts: WebIDL's `unsigned short` conversion, then the
@@ -685,13 +930,13 @@ function readResponseInit(init: any, caller: string): void {
 const MADE_RESPONSE: any = {};
 let madeStatus = 200;
 let madeList = "";
-let madeBody: string | Uint8Array | null = null;
+let madeBody: StoredBody = null;
 let madeExtra: BodyExtra | null = null;
 
 function makeResponse(
   status: number,
   list: string,
-  body: string | Uint8Array | null,
+  body: StoredBody,
   extra: BodyExtra | null
 ): Response {
   madeStatus = status;
@@ -726,7 +971,7 @@ interface Response {
   // `Headers` view exists; once `headers` has been read, the view owns the list.
   _list: string;
   _headers: Headers | null;
-  _body: string | Uint8Array | null;
+  _body: StoredBody;
   // statusText, type, url and redirected when any is not the default, and the body's state
   // once it has been read; null for nearly every Response a server makes.
   _extra: BodyExtra | null;
@@ -736,7 +981,7 @@ class Response {
   constructor(body?: any, init?: any) {
     let status = 200;
     let list = "";
-    let stored: string | Uint8Array | null = null;
+    let stored: StoredBody = null;
     let extra: BodyExtra | null = null;
     if (body === MADE_RESPONSE) {
       status = madeStatus;
@@ -753,6 +998,10 @@ class Response {
       if (typeof body === "string") {
         stored = body;
         list = list === "" ? TEXT_PLAIN_FIELD : headerListWithContentType(list, TEXT_PLAIN_UTF8);
+      } else if (body instanceof FormData) {
+        const encoded = encodeFormData(body);
+        stored = encoded.bytes;
+        list = headerListWithContentType(list, encoded.type);
       } else if (body !== undefined && body !== null) {
         stored = bodyValue(body);
         list = headerListWithContentType(list, bodyContentType(body));
@@ -818,25 +1067,29 @@ class Response {
   }
 
   async json(): Promise<any> {
-    return JSON.parse(bodyText(this));
+    return JSON.parse(await bodyText(this));
   }
 
   async arrayBuffer(): Promise<ArrayBuffer> {
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   }
 
   async bytes(): Promise<Uint8Array> {
     const body = this._body;
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     // Bytes the Response was given are copied; bytes just encoded are already this call's own.
     return bytes === body ? new Uint8Array(bytes) : bytes;
   }
 
   async blob(): Promise<Blob> {
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     const type = headerListGet(responseHeaderList(this), CONTENT_TYPE_NEEDLE) || "";
     return new Blob([bytes], { type });
+  }
+
+  async formData(): Promise<FormData> {
+    return bodyFormData(this, headerListGet(responseHeaderList(this), CONTENT_TYPE_NEEDLE));
   }
 
   clone(): Response {
@@ -845,7 +1098,7 @@ class Response {
     return makeResponse(
       this._status,
       responseHeaderList(this),
-      this._body,
+      cloneBody(this),
       extra === null ? null : responseExtra(extra.statusText, extra.type, extra.url, extra.redirected)
     );
   }
@@ -927,7 +1180,7 @@ interface Request {
   // it from then on.
   _list: string;
   _headers: Headers | null;
-  _body: string | Uint8Array | null;
+  _body: StoredBody;
   // signal and redirect when either is not the default, and the body's state once read.
   _extra: BodyExtra | null;
 }
@@ -939,6 +1192,8 @@ function requestHeaderList(request: Request): string {
 }
 
 class Request {
+  #duplex: string = "half";
+
   constructor(input: any, init?: any) {
     if (input === SERVED_REQUEST) {
       this._method = servedMethod;
@@ -962,6 +1217,13 @@ class Request {
     const initMethod = hasInit ? init.method : undefined;
     const initSignal = hasInit ? init.signal : undefined;
     const initRedirect = hasInit ? init.redirect : undefined;
+    const initDuplex = hasInit ? init.duplex : undefined;
+    if (initDuplex !== undefined && String(initDuplex) !== "half") {
+      throw new TypeError("Request constructor: duplex must be 'half'");
+    }
+    if (isBodyReadable(initBody) && initDuplex === undefined) {
+      throw new TypeError("Request constructor: duplex is required for a stream body");
+    }
     if (input instanceof Request) {
       url = input._url;
       method = initMethod !== undefined ? requestMethod(initMethod) : input._method;
@@ -979,9 +1241,9 @@ class Request {
         if (bodyUsed(input)) {
           throw new TypeError("Request constructor: Cannot construct a Request with a Request object that has already been used.");
         }
-        bodySource = consumeBody(input);
+        bodySource = transferBody(input);
       } else {
-        bodySource = input._body;
+        bodySource = requestCloning ? cloneBody(input) : input._body;
       }
     } else {
       url = String(input);
@@ -992,7 +1254,14 @@ class Request {
       bodySource = initBody;
       contentType = bodyContentType(bodySource);
     }
-    const body = bodySource === undefined || bodySource === null ? null : bodyValue(bodySource);
+    let body: StoredBody;
+    if (bodySource instanceof FormData) {
+      const encoded = encodeFormData(bodySource);
+      body = encoded.bytes;
+      contentType = encoded.type;
+    } else {
+      body = bodySource === undefined || bodySource === null ? null : bodyValue(bodySource);
+    }
     if (body !== null && (method === "GET" || method === "HEAD")) {
       throw new TypeError("Request constructor: Request with GET/HEAD method cannot have body.");
     }
@@ -1037,6 +1306,8 @@ class Request {
     return extra === null ? "follow" : extra.redirect;
   }
 
+  get duplex(): string { return this.#duplex; }
+
   get body(): any {
     return bodyStream(this);
   }
@@ -1050,24 +1321,28 @@ class Request {
   }
 
   async json(): Promise<any> {
-    return JSON.parse(bodyText(this));
+    return JSON.parse(await bodyText(this));
   }
 
   async arrayBuffer(): Promise<ArrayBuffer> {
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   }
 
   async bytes(): Promise<Uint8Array> {
     const body = this._body;
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     return bytes === body ? new Uint8Array(bytes) : bytes;
   }
 
   async blob(): Promise<Blob> {
-    const bytes = bodyBytes(this);
+    const bytes = await bodyBytes(this);
     const type = headerListGet(requestHeaderList(this), CONTENT_TYPE_NEEDLE) || "";
     return new Blob([bytes], { type });
+  }
+
+  async formData(): Promise<FormData> {
+    return bodyFormData(this, headerListGet(requestHeaderList(this), CONTENT_TYPE_NEEDLE));
   }
 
   clone(): Request {
@@ -1103,7 +1378,7 @@ function headerListFromNodeHeaders(headers: any): string {
   return list;
 }
 
-function fetch(input: any, init?: any): Promise<Response> {
+function fetch(input: any, init?: any, redirectCount: number = 0, alreadyRedirected: boolean = false): Promise<Response> {
   return new Promise((resolve, reject) => {
     let req: Request;
     try {
@@ -1175,16 +1450,26 @@ function fetch(input: any, init?: any): Promise<Response> {
       return reject(new TypeError(`Unsupported protocol: ${parsed.protocol}`));
     }
 
-    const httpModule =
-      typeof process !== "undefined"
-        ? (process as any).__kilnNativeModules?.http || null
-        : null;
+    const processObject = typeof process !== "undefined" ? process as any : null;
+    // Fetch uses the same public node:http facade as an explicit builtin import. That facade
+    // installs the IncomingMessage/Readable prototype relationship used by the transport.
+    // Native planning retains node:http lazily when a program demands fetch, Bun, or Kiln.
+    let httpModule: any = null;
+    if (typeof processObject?.getBuiltinModule === "function") {
+      httpModule = processObject.getBuiltinModule("node:http") || null;
+    }
+    if (!httpModule) {
+      httpModule = processObject?.__kilnNativeModules?.http || null;
+    }
 
     let httpReqFn = httpModule?.request;
     if (!httpReqFn) {
       try {
         const h = typeof require !== "undefined" ? require("node:http") : null;
-        if (h && typeof h.request === "function") httpReqFn = h.request;
+        if (h && typeof h.request === "function") {
+          httpModule = h;
+          httpReqFn = h.request;
+        }
       } catch (_) {}
     }
 
@@ -1197,6 +1482,13 @@ function fetch(input: any, init?: any): Promise<Response> {
     const headersObj: Record<string, string> = {};
     const pairs = headerListPairs(requestHeaderList(req));
     for (let i = 0; i < pairs.length; i++) headersObj[pairs[i][0]] = pairs[i][1];
+    // Fetch knows the length of a materialized body before submitting the request.
+    // Publish it explicitly so transport scheduling cannot turn it into chunked framing.
+    const storedBody = req._body;
+    if (storedBody !== null && !isBodyReadable(storedBody) && headersObj["content-length"] === undefined) {
+      headersObj["content-length"] = String(typeof storedBody === "string"
+        ? getSharedEncoder().encode(storedBody).byteLength : storedBody.byteLength);
+    }
 
     const options = {
       host: parsed.hostname,
@@ -1207,47 +1499,139 @@ function fetch(input: any, init?: any): Promise<Response> {
     };
 
     let clientReq: any;
+    const cancelNativeRequest = processObject?.__kilnNativeModules?.http?.__cancelRequest;
+    const cancelTransport = () => {
+      if (!clientReq) return;
+      if (typeof cancelNativeRequest === "function") cancelNativeRequest(clientReq);
+      else if (typeof clientReq.destroy === "function") clientReq.destroy();
+    };
+    let redirecting = false;
+    const cancelAndReject = (error: any) => {
+      redirecting = true;
+      // Record Fetch's own error before teardown can emit a transport error.
+      reject(error);
+      cancelTransport();
+    };
+    let onAbort: any = null;
+    let failResponse: any = null;
+    const removeAbort = () => {
+      if (onAbort !== null && typeof req.signal?.removeEventListener === "function") {
+        req.signal.removeEventListener("abort", onAbort);
+      }
+    };
+    let finishResponse: any = removeAbort;
     try {
-      clientReq = httpReqFn(options, (res: any) => {
-        const chunks: any[] = [];
-        res.on("data", (chunk: any) => {
-          chunks.push(chunk);
-        });
-        res.on("end", () => {
-          let bodyBytes: Uint8Array;
-          if (typeof Buffer !== "undefined" && typeof Buffer.concat === "function") {
-            const buf = Buffer.concat(chunks);
-            bodyBytes = new Uint8Array(buf);
-          } else {
-            let total = 0;
-            for (let i = 0; i < chunks.length; i++) total += chunks[i].length || 0;
-            bodyBytes = new Uint8Array(total);
-            let off = 0;
-            for (let i = 0; i < chunks.length; i++) {
-              const c = chunks[i];
-              if (c instanceof Uint8Array) {
-                bodyBytes.set(c, off);
-                off += c.length;
-              } else if (typeof c === "string") {
-                const enc = new TextEncoder().encode(c);
-                bodyBytes.set(enc, off);
-                off += enc.length;
-              }
-            }
+      clientReq = httpReqFn.call(httpModule, options, (res: any) => {
+          res.on("error", (error: any) => {
+            if (!redirecting) reject(error);
+          });
+          const status = res.statusCode || 200;
+          const location = res.headers?.location;
+          const isRedirect = status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+          if (isRedirect && typeof location === "string" && req.redirect === "error") {
+            removeAbort();
+            cancelAndReject(new TypeError("fetch: redirect mode is 'error'"));
+            return;
           }
-
-          resolve(
-            makeResponse(
-              res.statusCode || 200,
-              headerListFromNodeHeaders(res.headers),
-              bodyBytes,
-              responseExtra(res.statusMessage || "", "basic", req.url, false)
-            )
-          );
-        });
-        res.on("error", (err: any) => {
-          reject(err);
-        });
+          if (isRedirect && typeof location === "string" && req.redirect === "follow") {
+            removeAbort();
+            if (redirectCount >= 20) {
+              cancelAndReject(new TypeError("fetch: redirect limit exceeded"));
+              return;
+            }
+            let target: string;
+            try {
+              target = new URL(location, req.url).href;
+            } catch (err) {
+              reject(err);
+              return;
+            }
+            const rewriteToGet = (status === 303 && req.method !== "GET" && req.method !== "HEAD") ||
+              ((status === 301 || status === 302) && req.method === "POST");
+            const nextMethod = rewriteToGet ? "GET" : req.method;
+            const headers = new Headers();
+            const nextPairs = headerListPairs(requestHeaderList(req));
+            let oldOrigin = "";
+            let newOrigin = "";
+            try {
+              oldOrigin = new URL(req.url).origin;
+              newOrigin = new URL(target).origin;
+            } catch (_) {}
+            for (let i = 0; i < nextPairs.length; i++) {
+              const name = nextPairs[i][0].toLowerCase();
+              if (rewriteToGet && (name === "content-encoding" || name === "content-language" || name === "content-length" || name === "content-location" || name === "content-type")) continue;
+              if (oldOrigin !== newOrigin && (name === "authorization" || name === "cookie" || name === "cookie2" || name === "proxy-authorization")) continue;
+              headers.append(nextPairs[i][0], nextPairs[i][1]);
+            }
+            const nextInit: any = {
+              method: nextMethod,
+              headers,
+              signal: req.signal,
+              redirect: req.redirect,
+            };
+            if (!rewriteToGet && req._body !== null) nextInit.body = req._body;
+            // A followed redirect intentionally discards the old response. Ignore errors
+            // caused by that teardown; the nested fetch now owns this request's outcome.
+            redirecting = true;
+            cancelTransport();
+            fetch(target, nextInit, redirectCount + 1, true).then(resolve, reject);
+            return;
+          }
+          // Publish headers immediately. A response body can be unbounded, so waiting
+          // for its end here prevents callers from reading or cancelling the response.
+          let ended = false;
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller: any) {
+              let onSocketClose: any = null;
+              const finish = () => {
+                removeAbort();
+                failResponse = null;
+                if (onSocketClose !== null && typeof res.socket?.removeListener === "function") {
+                  res.socket.removeListener("close", onSocketClose);
+                }
+              };
+              finishResponse = finish;
+              const fail = (error: any) => {
+                if (ended) return;
+                ended = true;
+                finish();
+                controller.error(error);
+              };
+              failResponse = fail;
+              res.on("data", (chunk: any) => {
+                if (ended) return;
+                controller.enqueue(typeof chunk === "string"
+                  ? getSharedEncoder().encode(chunk) : new Uint8Array(chunk));
+                if (controller.desiredSize <= 0 && typeof res.pause === "function") res.pause();
+              });
+              res.on("end", () => {
+                if (ended) return;
+                ended = true;
+                finish();
+                controller.close();
+              });
+              res.on("error", fail);
+              res.on("aborted", () => fail(new TypeError("Response body was aborted")));
+              if (res.socket && typeof res.socket.on === "function") {
+                onSocketClose = () => fail(new TypeError("Response body connection closed"));
+                res.socket.on("close", onSocketClose);
+              }
+            },
+            pull() {
+              if (!ended && typeof res.resume === "function") res.resume();
+            },
+            cancel() {
+              ended = true;
+              finishResponse();
+              cancelTransport();
+            },
+          });
+          resolve(makeResponse(
+            status,
+            headerListFromNodeHeaders(res.headers),
+            req.method === "HEAD" || status === 204 || status === 205 || status === 304 ? null : stream,
+            responseExtra(res.statusMessage || "", "basic", req.url, alreadyRedirected)
+          ));
       });
     } catch (err) {
       return reject(err);
@@ -1255,28 +1639,59 @@ function fetch(input: any, init?: any): Promise<Response> {
 
     if (clientReq && typeof clientReq.on === "function") {
       clientReq.on("error", (err: any) => {
-        reject(err);
+        if (!redirecting) reject(err);
       });
     }
 
+    let requestReader: any = null;
     if (req.signal) {
-      const onAbort = () => {
-        if (clientReq && typeof clientReq.destroy === "function") {
-          clientReq.destroy();
+      onAbort = () => {
+        if (requestReader !== null) {
+          requestReader.cancel(req.signal.reason).catch(() => {});
         }
-        reject(req.signal.reason || new Error("The operation was aborted"));
+        const reason = req.signal.reason || new Error("The operation was aborted");
+        if (failResponse !== null) failResponse(reason);
+        cancelTransport();
+        removeAbort();
+        reject(reason);
       };
       if (typeof req.signal.addEventListener === "function") {
         req.signal.addEventListener("abort", onAbort);
       }
     }
 
-    (async () => {
-      try {
-        const body = req._body;
+    {
+      const sendBody = async () => {
+        const body = consumeBody(req);
         if (typeof body === "string") {
           if (clientReq && typeof clientReq.write === "function") {
             clientReq.write(body);
+          }
+        } else if (isBodyReadable(body)) {
+          const reader = body.getReader();
+          requestReader = reader;
+          try {
+            while (true) {
+              const next = await reader.read();
+              if (req.signal?.aborted) throw req.signal.reason;
+              if (next.done) break;
+              if (!(next.value instanceof Uint8Array)) {
+                throw new TypeError("Body stream chunks must be Uint8Array values");
+              }
+              if (clientReq.write(next.value) === false) {
+                await new Promise<void>((resolve, reject) => {
+                  const onDrain = () => { clientReq.off("error", onError); resolve(); };
+                  const onError = (error: any) => { clientReq.off("drain", onDrain); reject(error); };
+                  clientReq.once("drain", onDrain);
+                  clientReq.once("error", onError);
+                });
+              }
+            }
+          } catch (error) {
+            await reader.cancel(error).catch(() => {});
+            throw error;
+          } finally {
+            requestReader = null;
           }
         } else if (body !== null) {
           const bodyBytes = body;
@@ -1290,13 +1705,14 @@ function fetch(input: any, init?: any): Promise<Response> {
         if (clientReq && typeof clientReq.end === "function") {
           clientReq.end();
         }
-      } catch (err) {
+      };
+      sendBody().catch((err: any) => {
         if (clientReq && typeof clientReq.destroy === "function") {
           clientReq.destroy();
         }
         reject(err);
-      }
-    })();
+      });
+    }
   });
 }
 
@@ -1382,6 +1798,17 @@ function serve(
     }
     try {
       const body = response._body;
+      if (isBodyReadable(body)) {
+        bodyBytes(response).then(
+          (bytes: Uint8Array) => {
+            const headers = response._headers;
+            respond(resource, id, response._status,
+              headers === null ? response._list : headers._list, bytes);
+          },
+          (err: any) => fail(resource, id, err)
+        );
+        return;
+      }
       const headers = response._headers;
       respond(
         resource,
@@ -1435,13 +1862,23 @@ function serve(
   return server;
 }
 
-if (typeof (globalThis as any).Kiln === "undefined") {
-  (globalThis as any).Kiln = { serve };
-} else {
-  (globalThis as any).Kiln.serve = serve;
+// `Kiln` and `Bun` are kiln's own globals (ADR 0068): declared in `KILN_EXTENSIONS`, installed only
+// when the realm installs extensions, and non-enumerable like every built-in, so a Node-only
+// program neither finds them nor sees them in `for...in` over `globalThis`.
+function defineServeGlobal(name: string): void {
+  const G = globalThis as any;
+  if (typeof G[name] === "undefined") {
+    Object.defineProperty(G, name, {
+      value: { serve },
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  } else if (!G[name].serve) {
+    G[name].serve = serve;
+  }
 }
-if (typeof (globalThis as any).Bun === "undefined") {
-  (globalThis as any).Bun = { serve };
-} else if (!(globalThis as any).Bun.serve) {
-  (globalThis as any).Bun.serve = serve;
+if (kilnExtensions) {
+  defineServeGlobal("Kiln");
+  defineServeGlobal("Bun");
 }

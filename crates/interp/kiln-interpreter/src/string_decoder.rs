@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{ExecutionError, Native, NodeObject, ObjectData, RealmId, Value};
+use crate::{ExecutionError, Native, NodeObject, ObjectData, RealmId, Value, tracked_object};
 
 #[derive(Debug, Default)]
 pub(crate) struct StringDecoderState {
@@ -28,7 +28,7 @@ pub(crate) fn node_string_decoder() -> Value {
         "end",
         Value::Native(Native::NodeStringDecoderEnd, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 pub(crate) fn node_string_decoder_state(

@@ -1,0 +1,24 @@
+# Interpreter module generations and CommonJS cache policy
+
+`resetModules` creates a fresh interpreter module generation for source-module imports. Static graph records remain in generation zero; closures and queued dynamic imports keep the generation they captured. Host modules are linked to the canonical host record so `require` retains its Node cache identity, while each import generation gets its own namespace wrapper and uses the host record's export cells and cached namespace snapshot/failure.
+
+## Vitest boundary
+
+The reference behavior was checked with the pinned Node 26.8.1 / Vitest 5.0.3 installation, using both a relative `.cjs` file transformed as project source by Vite and a fake package under `node_modules`:
+
+- The transformed relative `.cjs` module is part of Vitest's module graph. `vi.resetModules()` followed by `vi.importActual()` evaluates it again; the probe's evaluation counter reaches three across `require`, the pre-reset import, and the post-reset import.
+- The external package uses Node's `require.cache`. `require()` and `vi.importActual()` share the same `module.exports` object and execute its body once. The dynamic-import namespace object from before reset differs from the namespace after reset, while repeated imports within one generation share the same namespace.
+
+These are different loader policies. The interpreter's host CommonJS loader currently models the external Node cache policy. It does not model Vite's transform of a project-relative `.cjs` file as an ESM graph module. The upstream `resetModules`/`importActual` files in the pinned Effect selection use TypeScript targets (`ConfigProvider.ts`, RPC error source, and Schema/HMR sources); those tests do not establish transformed-relative-CJS parity. Do not claim that behavior is implemented until the graph carries source-versus-external loader identity and has an oracle-backed regression for each policy.
+
+## Generation lifetime
+
+The interpreter now stores source records inside identity-bearing generation owners. The realm map strongly roots the current generation and the static generation zero; it indexes inactive generations weakly. Closures, namespace objects, active VM/frame state, queued imports and top-level-await suspensions retain handles when they still need an old epoch. The cycle collector traces these edges, including the shared physical owner for aliased `Rc<HashMap<String, Value>>` export maps, and clears a proven-unreachable generation's records as a unit.
+
+Generation zero is intentionally retained for the realm lifetime. Static graph closures retain import authority in epoch zero, and static graph records share that same epoch with initial dynamic imports. Therefore those initial dynamic records may accumulate until realm teardown. This change reclaims inactive generations created by later resets; it does not split the static graph from epoch zero or shorten static closure authority.
+
+## Current focused evidence
+
+The module-eval integration suite passes 29/29 tests, including fresh dynamic cycles, reset/current-runner selection, an old module closure retaining its captured generation, host alias identity, per-generation namespace behavior, and TLA ordering/rejection. The interpreter suite passes 255 tests, with 1 ignored; focused owner-graph tests cover dead generation cycles, externally retained namespaces and closures, queued imports, pending module awaits, and suspended-generator census behavior. The unchanged direct Effect selections `Config`, `EffectKeepAlive`, `StackTraceLimit`, `rpc/RpcClient`, and `schema/HMR` are being replayed against the TLA implementation; the latest earlier-generation run passed 195/195 with zero skips or Node/Vitest inventory, mode, or outcome mismatches. Full prior report and raw logs are recorded in [`interpreter-module-generation-reclamation/evidence`](../interpreter-module-generation-reclamation/evidence/).
+
+The owner-graph tests verify retention while a queued import or suspension is pending and reclamation after their owning handles are released. The TLA regressions now cover reset during a pending import, dependency-before-parent evaluation, async SCC startup, independent sibling progress when one dependency is parked, and rejection caching. The engine-private activation regression verifies its global is hidden while parked, reopened across repeated awaits, and removed after rejection. A wake-on-any-completion promise prevents the plan from waiting only on the first pending dependency. The five-file Effect replay now passes against this implementation. Native GC stress, native multi-realm checks, and the full gate remain pending. This evidence also does not cover every Vite/CommonJS transformation policy: the interpreter models the external Node CommonJS cache, not Vite's transformation of a project-relative `.cjs` module into the ESM graph.

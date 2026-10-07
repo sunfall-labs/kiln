@@ -183,21 +183,27 @@
     if (number !== 0) deliverSentToSelf(number);
     return true;
   }
-  Object.defineProperty(proc, "kill", { value: kill, writable: true, enumerable: false, configurable: true });
+  // Enumerable, as Node's own `process.kill` is: `Object.keys(process)` lists it there.
+  Object.defineProperty(proc, "kill", { value: kill, writable: true, enumerable: true, configurable: true });
 
   // Signals are the main realm's: node does not deliver them to a worker's `process`.
   if (workerOp(OP_SELF) !== undefined) return;
 
   // Every way a listener is added runs node's `newListener` hook first. The engines' `process`
   // emitters do not all emit `newListener`, so the methods that add one run it themselves.
+  // Each wrapper replaces the method where it lives, on the prototype chain, so the methods stay
+  // inherited as in node (`Object.hasOwn(process, "on")` is false); it checks `this === proc`, so
+  // another object sharing that prototype is unaffected.
   for (const method of ["on", "addListener", "once", "prependListener", "prependOnceListener"]) {
-    const original = proc[method];
+    let owner = proc;
+    while (owner !== null && !Object.prototype.hasOwnProperty.call(owner, method)) owner = Object.getPrototypeOf(owner);
+    const original = owner === null ? undefined : owner[method];
     if (typeof original !== "function") continue;
     const wrapped = function (this: any, type: any, listener: any) {
       if (this === proc && typeof type === "string" && typeof listener === "function") startListeningIfSignal(type);
       return original.apply(this, arguments as any);
     };
     Object.defineProperty(wrapped, "name", { value: method, configurable: true });
-    Object.defineProperty(proc, method, { value: wrapped, writable: true, enumerable: false, configurable: true });
+    Object.defineProperty(owner, method, { value: wrapped, writable: true, enumerable: false, configurable: true });
   }
 })();

@@ -1,0 +1,9 @@
+# Full 322-file interpreter survey — 2026-10-06
+
+The frozen source/binary receipt is `source.json`: source `efd9e68a8920d764ccc7df1f244d7591d74794d6`, CLI SHA-256 `148946a23bb17b60b6d1f5907364c8950c752992c09949d1eeb287b3bdec4d4b`. Every one of the 322 pinned original upstream Effect test files was selected and attempted directly as TypeScript, preserving original assertions, case modes and deadlines. One worker ran each child with a 4 GiB address-space cap; the service also limited memory to 4 GiB plus 2 GiB swap. Other bounded native compiler lanes ran concurrently, so these durations are not quiet performance measurements.
+
+The runner is terminal, exit 1: **10,941 pass, 27 deadline failures, 45 upstream skips**, with **11,019 registered cases** and **11,013 outcomes recorded**. All 27 emitted failures are original case deadlines (`failures.json`). `arbitrary/Arbitrary` aborts at its address-space limit with six registered cases unrecorded (see the separate Arbitrary memory receipt). Thus 321 files are complete and one is incomplete. This survey is **not a completed passing conformance run**, despite all 322 files being attempted.
+
+All registered cases map to the pinned Node/Vitest oracle, with no inventory, mode or mapping errors and no source-transform gaps. There are 33 oracle outcome mismatches: the 27 emitted deadline failures plus the six unrecorded Arbitrary cases. The 45 skipped cases retain upstream modes. The exact aggregate, complete report, complete raw file streams/envelopes and supervisor terminal receipt are retained here. Executable binaries and dependency sources are excluded; their pin/digests are in the source and report receipts.
+
+Current work targets memory reclamation and the deadline hot paths. This source predates the subsequent string-equality and ordinary-key classifier improvements; no improvement from those changes is claimed by this survey.

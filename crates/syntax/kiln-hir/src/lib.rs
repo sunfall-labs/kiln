@@ -60,6 +60,123 @@ pub struct Diagnostic {
     pub span: Option<Span>,
 }
 
+/// Source identity retained when parser input has a source mapping.
+///
+/// Dynamic UTF-16 transports use `units` and `byte_to_unit` to preserve exact function source.
+/// Static transformed modules retain their separate transform identity on the IR Program; their
+/// richer TypeScript map stays on this transient HIR module for diagnostics and callsite mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOrigin {
+    pub units: StringUnits,
+    /// One entry per parser-source byte boundary, mapping to an original UTF-16 unit offset.
+    pub byte_to_unit: Arc<[u32]>,
+}
+
+impl SourceOrigin {
+    /// Build an origin from the parser transport and its byte-boundary map.
+    ///
+    /// Returns `None` for a malformed map or an offset that cannot be represented by parser
+    /// spans. Those conditions indicate an invalid transport, so callers must reject the parse
+    /// rather than silently omit the origin or retain an incorrect source map.
+    pub fn from_parser_transport(units: &[u16], byte_to_unit: &[usize]) -> Option<Arc<Self>> {
+        // Folding an odd backslash before a lone surrogate removes the source backslash and maps
+        // every byte of its replacement escape to the source range start, so boundaries repeat
+        // but remain monotone.
+        if byte_to_unit.is_empty()
+            || byte_to_unit.first() != Some(&0)
+            || byte_to_unit.last() != Some(&units.len())
+            || byte_to_unit.windows(2).any(|pair| pair[0] > pair[1])
+            || byte_to_unit.iter().any(|&offset| offset > units.len())
+        {
+            return None;
+        }
+        let byte_to_unit = byte_to_unit
+            .iter()
+            .map(|&offset| u32::try_from(offset).ok())
+            .collect::<Option<Vec<_>>>()?;
+        Some(Arc::new(Self {
+            units: StringUnits::from_units(units),
+            byte_to_unit: byte_to_unit.into(),
+        }))
+    }
+
+    /// Return the original source units covered by a parser byte span.
+    pub fn slice_bytes(&self, start: u32, end: u32) -> Option<StringUnits> {
+        let start = *self.byte_to_unit.get(start as usize)? as usize;
+        let end = *self.byte_to_unit.get(end as usize)? as usize;
+        if start > end || end > self.units.len() {
+            return None;
+        }
+        self.units.slice_units(start, end)
+    }
+}
+
+/// One generated-JavaScript byte offset corresponding to an original TypeScript byte offset.
+///
+/// Segments are sorted by `generated_offset`; a lookup uses the nearest preceding segment, which
+/// is the same fallback used by source-map consumers for an unmapped generated column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceMapSegment {
+    pub generated_offset: u32,
+    pub original_offset: u32,
+}
+
+/// The original parser goal and syntax modes of a statically transformed TypeScript module.
+///
+/// This is kept as typed metadata so prepared parses (for example native DCE) do not have to
+/// reconstruct parser behavior from a filename or interpret the transform fingerprint string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StaticSourceType {
+    pub goal: SourceGoal,
+    pub commonjs: bool,
+    pub jsx: bool,
+}
+
+/// Original static TypeScript input and its generated-to-original source locations.
+///
+/// `Module.source` remains the actual JavaScript buffer indexed by every module span. This
+/// sidecar exists only for source-facing diagnostics and stack locations; it is deliberately
+/// separate from [`SourceOrigin`], which translates dynamic UTF-16 transport for source
+/// reflection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticSourceProvenance {
+    pub original_path: Arc<str>,
+    pub original_source: Arc<str>,
+    pub original_type: StaticSourceType,
+    /// Stable identity for transform options, transformer/codegen versions, and policy.
+    pub transform_fingerprint: Arc<str>,
+    /// Digest over original text, transform/source-kind fingerprint, and every source-map segment.
+    /// The original path is retained separately for diagnostics and does not affect reusable code.
+    pub identity: Arc<str>,
+    /// Authored non-type-only import requests captured before TypeScript erasure. Graph building
+    /// filters out requests still present in generated JavaScript and uses only erased requests
+    /// as resolver hints for runtime-package aliases; this metadata is never an execution edge.
+    pub authored_value_imports: Arc<[Arc<str>]>,
+    /// Compiler-generated Oxc helper imports. These are distinct from authored imports so the
+    /// module graph can bind its private helper modules without allowing source code to import
+    /// those implementation details directly.
+    pub generated_helper_imports: Arc<[Arc<str>]>,
+    /// Source-authored static, dynamic, and literal `require` references to Kiln's reserved
+    /// compiler-helper namespace. This lets the graph reject a collision even if Oxc also emits
+    /// a helper import with the same specifier in that module.
+    pub authored_internal_helper_imports: Arc<[Arc<str>]>,
+    pub source_map: Arc<[SourceMapSegment]>,
+}
+
+impl StaticSourceProvenance {
+    /// Map a generated-JS byte offset to its closest preceding original TS source-map segment.
+    #[must_use]
+    pub fn original_offset(&self, generated_offset: u32) -> Option<u32> {
+        let index = self
+            .source_map
+            .partition_point(|segment| segment.generated_offset <= generated_offset);
+        index
+            .checked_sub(1)
+            .and_then(|index| self.source_map.get(index))
+            .map(|segment| segment.original_offset)
+    }
+}
+
 /// Owned module HIR shared by parser adapters, incremental queries, and execution backends.
 //
 // `items` preserves cheap module-structure information while `body` contains the TypeScript-
@@ -67,6 +184,9 @@ pub struct Diagnostic {
 // compiler passes to diagnose it without confusing syntax checking with backend coverage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
+    /// Stable identity of the source within its module graph. Private names use this together
+    /// with their class-local scope so separately compiled modules cannot alias private brands.
+    pub module_id: Arc<str>,
     /// The text every [`Span`] in this module indexes into.
     ///
     /// A span is a byte range and nothing else, so without the text beside it it names a
@@ -79,6 +199,11 @@ pub struct Module {
     /// it. One buffer per module and a span per function is the same information at a fraction
     /// of the size.
     pub source: Arc<str>,
+    /// Original static TypeScript plus a map for source-facing diagnostics/locations, when this
+    /// module was produced by the opt-in per-file TS transform.
+    pub static_source_provenance: Option<Arc<StaticSourceProvenance>>,
+    /// Exact UTF-16 origin when `source` is a parser-safe transport spelling.
+    pub source_origin: Option<Arc<SourceOrigin>>,
     pub source_kind: SourceKind,
     pub source_goal: SourceGoal,
     /// The body opened with a `"use strict"` directive prologue.
@@ -115,6 +240,9 @@ pub struct NodeRuntimeRequest {
     /// `process.getBuiltinModule`. Kept as source identity so relative requests resolve through
     /// the ordinary resolver with the same importer base.
     pub importer: String,
+    /// True for `require.resolve`, whose result is the resolved filename and which must not
+    /// evaluate the target module. The graph still retains the resolution as a lazy capability.
+    pub resolve_only: bool,
 }
 
 /// Coarse TypeScript type annotation hints.
@@ -704,6 +832,14 @@ pub enum ExpressionKind {
         /// call does not happen -- so the arguments are not evaluated either.
         optional: bool,
     },
+    /// A tightly bounded literal direct eval. The callee and argument remain explicit so the
+    /// compiler can guard the fast path against a replaced global `eval` and call that value
+    /// normally; `expression` is the single parsed expression evaluated in the caller's scope.
+    InlineLiteralEval {
+        callee: Box<Expression>,
+        argument: Box<Expression>,
+        expression: Box<Expression>,
+    },
     /// `super(...)` in a derived constructor: run the parent constructor against this instance
     /// rather than allocating a new one.
     SuperCall {
@@ -750,6 +886,16 @@ pub enum ExpressionKind {
     /// `this`. Not an identifier: it cannot be declared, assigned or shadowed, and modelling it
     /// as a name would let a binding called `this` capture it.
     This,
+    /// The realm's global object, loaded as an intrinsic rather than resolving an identifier.
+    /// Frontend-generated references (such as the native `import.meta` bridge) must not be
+    /// captured by a user binding named `globalThis` or `process`.
+    GlobalObject,
+    /// The realm's cached Node process capability, loaded independently of a mutable
+    /// `globalThis.process` property and of lexical bindings named `process`.
+    ///
+    /// This is for compiler-generated capability access (for example the import-meta bridge),
+    /// not an alternate source-level identifier.
+    ProcessObject,
     /// A class expression.
     Class(Box<Class>),
     /// A function expression or arrow function used as a value.
@@ -911,7 +1057,7 @@ pub enum ExpressionKind {
     /// pattern is a value the program can read back through `source`, and compiling it belongs to
     /// whoever owns the engine.
     RegExp {
-        pattern: String,
+        pattern: StringUnits,
         flags: String,
     },
     /// `delete name`, where `name` is an unqualified identifier rather than a property access.
@@ -1261,7 +1407,10 @@ mod tests {
     #[test]
     fn runtime_names_exclude_types_and_unresolved_stars() {
         let module = Module {
+            module_id: "".into(),
             source: "".into(),
+            static_source_provenance: None,
+            source_origin: None,
             strict: false,
             source_kind: SourceKind::TypeScript,
             source_goal: SourceGoal::Module,

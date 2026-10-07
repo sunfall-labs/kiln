@@ -16,21 +16,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         debug_assert_eq!(native, Native::FunctionApply);
         let rest = match arguments.get(1) {
-            Some(Value::Array(items)) => dense_items(&items.borrow()),
             Some(Value::Undefined | Value::Null) | None => Vec::new(),
-            Some(other) => {
-                let length = self.read_property(other, "length", instruction)?;
-                let length = length.as_number();
-                let mut list = Vec::new();
-                for index in 0..(if length.is_finite() {
-                    length.max(0.0) as usize
-                } else {
-                    0
-                }) {
-                    list.push(self.read_property(other, &index.to_string(), instruction)?);
-                }
-                list
-            }
+            other => self.argument_list(other, instruction)?,
         };
         Ok((this_value, rest))
     }
@@ -42,8 +29,37 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        if native == Native::IsOtherRealmArrayConstructorRaw {
+            let constructor = arguments.first().unwrap_or(&Value::Undefined);
+            // This helper is installed as a realm-local native, so current_realm is the realm
+            // whose `%Array%` the shared ArraySpeciesCreate is comparing against. Resolve the
+            // complete GetFunctionRealm chain first: even though bound/proxy wrappers cannot be
+            // identical to an intrinsic Array constructor, a revoked proxy must still throw.
+            return Ok(Value::Boolean(is_other_realm_array_constructor(
+                constructor,
+                self.current_realm,
+            )?));
+        }
         if native == Native::ShareRaw {
             return self.share_value(arguments.first().cloned().unwrap_or(Value::Undefined));
+        }
+        // Node retains the callable form `Buffer(value)` as an alias for its public `from`
+        // method (and the numeric form as `alloc`). Resolve that method through the realm so
+        // string encodings and the rest of the TypeScript facade stay the single implementation.
+        if native == Native::NodeBufferGlobal {
+            let constructor = Value::Native(Native::NodeBufferGlobal, self.current_realm);
+            if matches!(arguments.first(), Some(Value::Number(_))) {
+                if matches!(arguments.get(1), Some(Value::String(_))) {
+                    return self.throw_node_invalid_arg_type(
+                        "The \"string\" argument must be of type string",
+                    );
+                }
+                let method = self.read_property(&constructor, "alloc", instruction)?;
+                let size = arguments.first().cloned().unwrap_or(Value::Number(0.0));
+                return self.call_value(&method, constructor, vec![size], instruction);
+            }
+            let method = self.read_property(&constructor, "from", instruction)?;
+            return self.call_value(&method, constructor, arguments.to_vec(), instruction);
         }
         // Ahead of the wrapper and proxy preambles below: a `Temporal` value is neither a boxed
         // primitive nor a shape-inspecting built-in, and its own dispatch decides which of the
@@ -150,6 +166,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             return self.generic_array_native(native, receiver, arguments, instruction);
         }
+        // URI encoding performs abstract ToString and then UTF-8-encodes scalar values. The
+        // conversion can call @@toPrimitive/toString and can reject Symbols, so it belongs on
+        // the VM. Keep the resulting UTF-16 units until the encoder validates surrogate pairs;
+        // converting through a lossy Rust String here would silently replace lone surrogates.
+        if matches!(native, Native::EncodeUri | Native::EncodeUriComponent) {
+            let units =
+                self.as_text_units(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
+            let converted = [Value::String(units)];
+            return call_native(&self.intrinsics, native, receiver, &converted);
+        }
         // These three answer from the machine because each can run program code -- a set-like's
         // `has`/`keys`, a sort comparator, a getter reached through a generic receiver -- and
         // `call_native` has no VM to run it with. Their arms in `call_native` are `unreachable!`
@@ -185,6 +211,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // and without it every value whose tag lives on a prototype, from a `Map` to `Math`,
             // reports the bare `[object Object]` that the tag exists to replace.
             Native::ObjectToStringTag if is_reflect_target(receiver) => {
+                // IsArray runs before the observable tag getter, and a revoked proxy at any
+                // depth throws before its outer proxy can invoke a get trap.
+                let mut target = receiver;
+                while let Value::Proxy(proxy) = target {
+                    if proxy.revoked.get() {
+                        return Err(ExecutionError::RevokedProxy);
+                    }
+                    target = &proxy.target;
+                }
+                let proxy_tag = if matches!(receiver, Value::Proxy(_)) {
+                    Some(
+                        if matches!(
+                            target,
+                            Value::Array(_)
+                                | Value::Native(Native::PrototypeOf(PrototypeTable::Array), _)
+                        ) || matches!(target, Value::Shared(facade) if facade.is_array())
+                        {
+                            "Array"
+                        } else if is_callable(receiver) {
+                            "Function"
+                        } else {
+                            "Object"
+                        },
+                    )
+                } else {
+                    None
+                };
                 let tag = self.read_property(
                     receiver,
                     WellKnown::ToStringTag.property_key(),
@@ -195,6 +248,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     units.extend(tag.units());
                     units.extend(StringUnits::from("]").units());
                     return Ok(Value::String(StringUnits::from_units(&units)));
+                }
+                if let Some(tag) = proxy_tag {
+                    return Ok(Value::String(format!("[object {tag}]").into()));
                 }
             }
             // `ToString(text)` may run the program's own `toString`, so the validation cannot
@@ -207,7 +263,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::JsonIsRawJson => {
                 return Ok(Value::Boolean(matches!(
                     arguments.first(),
-                    Some(Value::Object(object)) if object.borrow().get_own(RAW_JSON_MARK).is_some()
+                    Some(Value::Object(object)) if object.borrow().raw_json_text.is_some()
                 )));
             }
             // Both of these need the machine for `CanBeHeldWeakly`, which asks the realm's
@@ -319,6 +375,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             native,
             Native::ProcessStartRaw
                 | Native::ProcessCancelRaw
+                | Native::NodeChildProcessExecFileSync
                 | Native::NodeFsReadFile
                 | Native::NodeFsWriteFile
                 | Native::NodeFsAppendFile
@@ -450,6 +507,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::NodeCryptoGetHashes
             | Native::NodeCryptoGetRandomValues
             | Native::NodeCryptoTimingSafeEqual
+            | Native::NodeCryptoKeyImport
+            | Native::NodeCryptoKeyPublic
+            | Native::NodeCryptoKeyInfo
+            | Native::NodeCryptoKeyExport
+            | Native::NodeCryptoKeyFree
+            | Native::WebCryptoPrimitive
+            | Native::WebCompressionPrimitive
             | Native::NodeCryptoCreateHash
             | Native::NodeCryptoCreateHmac
             | Native::NodeHashUpdate
@@ -529,29 +593,55 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let label = arguments
                     .first()
                     .filter(|value| !matches!(value, Value::Undefined))
-                    .map_or_else(|| "utf-8".to_owned(), Value::to_display_string);
-                let encoding = encoding_rs::Encoding::for_label(label.trim().as_bytes())
-                    .ok_or_else(|| ExecutionError::RangeErrorMessage {
-                        message: format!("The encoding label provided ('{label}') is invalid"),
-                    })?;
-                let encoding_name = encoding.name().to_ascii_lowercase();
-                let fatal = arguments
-                    .get(1)
-                    .and_then(|options| own_data_property(options, "fatal"))
-                    .is_some_and(|v| v.is_truthy());
-                let ignore_bom = arguments
-                    .get(1)
-                    .and_then(|options| own_data_property(options, "ignoreBOM"))
-                    .is_some_and(|v| v.is_truthy());
-                return Ok(ordinary_object([
+                    .map_or_else(
+                        || kiln_encoding::DEFAULT_LABEL.to_owned(),
+                        Value::to_display_string,
+                    );
+                // Label resolution is `kiln-encoding`'s, which the native provider calls too.
+                let decoder = kiln_encoding::StreamingDecoder::new(
+                    &label,
+                    arguments
+                        .get(1)
+                        .and_then(|options| own_data_property(options, "fatal"))
+                        .is_some_and(|v| v.is_truthy()),
+                    arguments
+                        .get(1)
+                        .and_then(|options| own_data_property(options, "ignoreBOM"))
+                        .is_some_and(|v| v.is_truthy()),
+                )
+                .map_err(|error| ExecutionError::RangeErrorMessage {
+                    message: error.message(),
+                })?;
+                let encoding_name = decoder.encoding_name().to_ascii_lowercase();
+                let object = ordinary_object([
                     ("encoding".to_owned(), Value::String(encoding_name.into())),
-                    ("fatal".to_owned(), Value::Boolean(fatal)),
-                    ("ignoreBOM".to_owned(), Value::Boolean(ignore_bom)),
+                    (
+                        "fatal".to_owned(),
+                        Value::Boolean(
+                            arguments
+                                .get(1)
+                                .and_then(|options| own_data_property(options, "fatal"))
+                                .is_some_and(|v| v.is_truthy()),
+                        ),
+                    ),
+                    (
+                        "ignoreBOM".to_owned(),
+                        Value::Boolean(
+                            arguments
+                                .get(1)
+                                .and_then(|options| own_data_property(options, "ignoreBOM"))
+                                .is_some_and(|v| v.is_truthy()),
+                        ),
+                    ),
                     (
                         "decode".to_owned(),
                         Value::Native(Native::TextDecoderDecode, RealmId::PRIMARY),
                     ),
-                ]));
+                ]);
+                if let Value::Object(instance) = &object {
+                    instance.borrow_mut().text_decoder = Some(Rc::new(RefCell::new(decoder)));
+                }
+                return Ok(object);
             }
             Native::TextDecoderDecode => {
                 let bytes = match arguments.first() {
@@ -567,29 +657,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     }
                 };
-                let encoding_label = own_data_property(receiver, "encoding")
-                    .and_then(|v| match v {
-                        Value::String(s) => Some(s),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "utf-8".to_owned().into());
-                let fatal = own_data_property(receiver, "fatal").is_some_and(|v| v.is_truthy());
-                let ignore_bom =
-                    own_data_property(receiver, "ignoreBOM").is_some_and(|v| v.is_truthy());
-                let encoding =
-                    encoding_rs::Encoding::for_label(encoding_label.to_lossy_string().as_bytes())
-                        .unwrap_or(encoding_rs::UTF_8);
-                let (decoded, had_errors) = if ignore_bom {
-                    encoding.decode_without_bom_handling(&bytes)
-                } else {
-                    encoding.decode_with_bom_removal(&bytes)
-                };
-                if fatal && had_errors {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "The encoded data was not valid for encoding".to_owned(),
-                    });
+                let decoder = match receiver {
+                    Value::Object(object) => object.borrow().text_decoder.clone(),
+                    _ => None,
                 }
-                return Ok(Value::String(decoded.into_owned().into()));
+                .ok_or_else(|| ExecutionError::TypeErrorMessage {
+                    message: "TextDecoder.decode called on an incompatible receiver".into(),
+                })?;
+                let stream = arguments
+                    .get(1)
+                    .and_then(|options| own_data_property(options, "stream"))
+                    .is_some_and(|value| value.is_truthy());
+                let decoded = decoder
+                    .borrow_mut()
+                    .decode(&bytes, stream)
+                    .map_err(|error| ExecutionError::TypeErrorMessage {
+                        message: error.message(),
+                    })?;
+                return Ok(Value::String(decoded.into()));
             }
             Native::NodeHttpsCreateServer => {
                 return Err(ExecutionError::Host {
@@ -636,6 +721,146 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let require = CommonJsRequire::new([]);
                 return Ok(Value::CommonJsRequire(Rc::new(require)));
             }
+            Native::NodeModuleLoader => {
+                let Some(Value::String(action)) = arguments.first() else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "module loader action must be a string".to_owned(),
+                    });
+                };
+                let action = action.to_lossy_string();
+                let module_key = |value: &Value| -> Option<String> {
+                    let Value::String(value) = value else {
+                        return None;
+                    };
+                    let value = value.to_lossy_string();
+                    if let Ok(url) = ::url::Url::parse(&value) {
+                        if url.scheme() == "file" {
+                            return url
+                                .to_file_path()
+                                .ok()
+                                .map(|path| path.to_string_lossy().into_owned());
+                        }
+                    }
+                    Some(value)
+                };
+                if action == "reset" && arguments.len() == 1 {
+                    if !self
+                        .module_map
+                        .borrow()
+                        .has_registered_runner(self.current_realm)
+                    {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "module reset is only available to the registered test runner"
+                                .to_owned(),
+                        });
+                    }
+                    self.module_generation = self
+                        .module_map
+                        .borrow_mut()
+                        .reset_generation(self.current_realm);
+                    self.module_generation_owner = self
+                        .module_map
+                        .borrow()
+                        .generation_handle(self.current_realm, self.module_generation);
+                    return Ok(Value::Undefined);
+                }
+                if action == "importActual" && arguments.len() == 4 {
+                    if !self
+                        .module_map
+                        .borrow()
+                        .has_registered_runner(self.current_realm)
+                    {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "actual module import is only available to the registered test runner".to_owned(),
+                        });
+                    }
+                    let Some(referrer) = module_key(&arguments[2]) else {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "actual module referrer must be a string path or file URL"
+                                .to_owned(),
+                        });
+                    };
+                    let Some(Value::String(target_url)) = arguments.get(3) else {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "actual module target must be a string path or file URL"
+                                .to_owned(),
+                        });
+                    };
+                    let target = target_url.to_lossy_string();
+                    if module_key(&Value::String(target.clone().into())).is_none() {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "actual module target must be a valid path or file URL"
+                                .to_owned(),
+                        });
+                    }
+                    let previous_path = self.module_path.replace(Rc::from(referrer));
+                    let imported = self.import_module(&target, None);
+                    self.module_path = previous_path;
+                    match imported? {
+                        Ok(namespace) => return Ok(namespace),
+                        Err(thrown) => {
+                            self.caught = Some(thrown);
+                            return Err(ExecutionError::ThrownAcrossNative);
+                        }
+                    }
+                }
+                let bool_result = match action.as_str() {
+                    "registerRunner" if arguments.len() == 2 => {
+                        let Some(key) = module_key(&arguments[1]) else {
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "runner referrer must be a string path or file URL"
+                                    .to_owned(),
+                            });
+                        };
+                        return Ok(Value::Boolean(
+                            self.module_map
+                                .borrow_mut()
+                                .register_runner(self.current_realm, &key),
+                        ));
+                    }
+                    "registerSpyAdapter" if arguments.len() == 2 => {
+                        let Some(key) = module_key(&arguments[1]) else {
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "spy adapter referrer must be a string path or file URL"
+                                    .to_owned(),
+                            });
+                        };
+                        return Ok(Value::Boolean(
+                            self.module_map
+                                .borrow_mut()
+                                .register_spy_adapter(self.current_realm, &key),
+                        ));
+                    }
+                    "spyExport" if arguments.len() == 5 => {
+                        let Some(adapter) = module_key(&arguments[4]) else {
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "spy adapter referrer must be a string path or file URL"
+                                    .to_owned(),
+                            });
+                        };
+                        let Value::String(name) = &arguments[2] else {
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "export name must be a string".to_owned(),
+                            });
+                        };
+                        self.module_map.borrow_mut().spy_export(
+                            self.current_realm,
+                            &arguments[1],
+                            &name.to_lossy_string(),
+                            arguments[3].clone(),
+                            &adapter,
+                        )
+                    }
+                    _ => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "unknown or malformed module loader action '{action}'"
+                            ),
+                        });
+                    }
+                };
+                return Ok(Value::Boolean(bool_result));
+            }
             Native::AbortControllerAbort | Native::AbortSignalAbort => {
                 let reason = arguments.first().cloned();
                 let signal = if matches!(native, Native::AbortSignalAbort) {
@@ -655,32 +880,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::AbortSignalTimeout => {
                 let signal = abort_signal();
                 let milliseconds = self.as_number_argument(arguments.first(), instruction)?;
-                let reason = self.construct_error(
-                    ErrorKind::Error,
-                    &[Value::String(
-                        "The operation was aborted due to timeout".to_owned().into(),
-                    )],
-                );
-                if let Value::Object(object) = &reason {
-                    object.borrow_mut().set_non_enumerable(
-                        "name",
-                        Value::String("TimeoutError".to_owned().into()),
-                    );
-                }
-                let timer = Timer {
-                    callback: Value::Bound(Rc::new(BoundFunction {
+                let reason = self.dom_exception(
+                    "The operation was aborted due to timeout",
+                    "TimeoutError",
+                    instruction,
+                )?;
+                let timer = Timer::plain(
+                    Value::Bound(Rc::new(BoundFunction {
                         target: Value::Native(Native::AbortSignalSettle, RealmId::PRIMARY),
                         this_value: signal.clone(),
                         arguments: vec![reason],
                         properties: RefCell::new(ObjectData::default()),
                     })),
-                    arguments: Vec::new(),
-                    context: Rc::clone(&self.async_context),
-                };
+                    Vec::new(),
+                    Rc::clone(&self.async_context),
+                );
                 // A timer like `setTimeout`'s, so 0 is node's 1 ms here too.
+                // It never keeps the program alive, as in node, where its timer is unreferenced.
+                self.advance_host_scheduler_clock(instruction)?;
                 self.with_realm_mut(|realm| {
                     let (delay, _) = realm.node_timer_delay(Some(milliseconds.max(0.0)));
-                    realm.set_timeout(delay, timer)
+                    let id = realm.set_timeout(delay, timer);
+                    realm.set_timer_referenced(id, false);
                 });
                 return Ok(signal);
             }
@@ -732,6 +953,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::Undefined);
                 }
                 let listener = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                let options = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+                let (capture, once) = if let Value::Boolean(capture) = &options {
+                    (*capture, false)
+                } else if matches!(options, Value::Undefined | Value::Null) {
+                    (false, false)
+                } else {
+                    let capture = self
+                        .read_property(&options, "capture", instruction)?
+                        .is_truthy();
+                    let once = if remove {
+                        false
+                    } else {
+                        self.read_property(&options, "once", instruction)?
+                            .is_truthy()
+                    };
+                    (capture, once)
+                };
                 let Value::Object(object) = receiver else {
                     return Ok(Value::Undefined);
                 };
@@ -739,17 +977,63 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let Some(Value::Array(listeners)) = held else {
                     return Ok(Value::Undefined);
                 };
+                let records = listeners.borrow().clone();
                 if remove {
-                    listeners
-                        .borrow_mut()
-                        .retain(|held| !same_value(held, &listener));
-                } else if is_callable(&listener)
-                    && !listeners
-                        .borrow()
-                        .iter()
-                        .any(|held| same_value(held, &listener))
-                {
-                    listeners.borrow_mut().push(listener);
+                    for record in records {
+                        if self
+                            .read_property(&record, "removed", instruction)?
+                            .is_truthy()
+                        {
+                            continue;
+                        }
+                        let registered = self.read_property(&record, "listener", instruction)?;
+                        let registered_capture = self
+                            .read_property(&record, "capture", instruction)?
+                            .is_truthy();
+                        if same_value(&registered, &listener) && registered_capture == capture {
+                            if let Value::Object(record) = &record {
+                                record
+                                    .borrow_mut()
+                                    .set_non_enumerable("removed", Value::Boolean(true));
+                            }
+                            listeners
+                                .borrow_mut()
+                                .retain(|entry| !same_value(entry, &record));
+                            break;
+                        }
+                    }
+                } else if is_callable(&listener) {
+                    let mut duplicate = false;
+                    for record in records {
+                        if self
+                            .read_property(&record, "removed", instruction)?
+                            .is_truthy()
+                        {
+                            continue;
+                        }
+                        let registered = self.read_property(&record, "listener", instruction)?;
+                        let registered_capture = self
+                            .read_property(&record, "capture", instruction)?
+                            .is_truthy();
+                        if same_value(&registered, &listener) && registered_capture == capture {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if !duplicate {
+                        let record = ordinary_object([
+                            ("listener".to_owned(), listener),
+                            ("capture".to_owned(), Value::Boolean(capture)),
+                            ("once".to_owned(), Value::Boolean(once)),
+                            ("removed".to_owned(), Value::Boolean(false)),
+                        ]);
+                        listeners.borrow_mut().push(record.clone());
+                        if let Some(Value::Array(dispatch)) =
+                            object.borrow().get_own("@@abort-dispatch").cloned()
+                        {
+                            dispatch.borrow_mut().push(record);
+                        }
+                    }
                 }
                 return Ok(Value::Undefined);
             }
@@ -839,6 +1123,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeSocketWrite
                 | Native::NodeSocketEnd
                 | Native::NodeSocketDestroy
+                | Native::NodeSocketCork
+                | Native::NodeSocketUncork
         ) {
             return self.dispatch_node_net(native, receiver, arguments, instruction);
         }
@@ -867,11 +1153,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeHttpGet
                 | Native::NodeHttpCreateFetchServer
                 | Native::NodeHttpFetchRespond
+                | Native::NodeHttpCancelRequest
                 | Native::NodeClientRequestWrite
                 | Native::NodeClientRequestEnd
+                | Native::NodeClientRequestAssignSocket
                 | Native::NodeServerListen
                 | Native::NodeServerClose
                 | Native::NodeServerAddress
+                | Native::NodeServerIsListening
                 | Native::NodeServerSetTimeout
                 | Native::NodeResponseSetHeader
                 | Native::NodeResponseGetHeader
@@ -1101,7 +1390,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(primitive, Value::Symbol(_)) {
                     return Err(ExecutionError::SymbolIsNotAString);
                 }
-                coerced_receiver = Value::String(primitive.to_display_string().into());
+                coerced_receiver = Value::String(primitive.to_string_units_checked()?);
                 &coerced_receiver
             }
         } else {
@@ -1126,7 +1415,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if matches!(primitive, Value::Symbol(_)) {
                 return Err(ExecutionError::SymbolIsNotAString);
             }
-            let coerced = Value::String(primitive.to_display_string().into());
+            let coerced = Value::String(primitive.to_string_units_checked()?);
             return self.dispatch_native(native, &coerced, arguments, instruction);
         }
         // `ToPropertyKey` for every built-in that names a property with an argument. The
@@ -1157,6 +1446,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             converted[index] = coerced;
             return self.dispatch_native(native, receiver, &converted, instruction);
         }
+        // `String.prototype.concat` performs ordinary ToString on each argument. That rejects
+        // Symbols and invokes user conversion methods, unlike String(symbol). Keep the converted
+        // text as UTF-16 units so lone surrogates survive the trip through the VM.
+        if native == Native::StringConcat
+            && arguments
+                .iter()
+                .any(|value| matches!(value, Value::Symbol(_)) || is_reflect_target(value))
+        {
+            let mut converted = arguments.to_vec();
+            for (index, value) in arguments.iter().enumerate() {
+                if matches!(value, Value::Symbol(_)) || is_reflect_target(value) {
+                    converted[index] = Value::String(self.as_text_units(value, instruction)?);
+                }
+            }
+            return self.dispatch_native(native, receiver, &converted, instruction);
+        }
         // `ToString` for every argument a built-in reads as text, on the same terms and in the
         // same place as the numeric pass above: after the receiver, because that is the order a
         // `toString` counting its calls can see.
@@ -1174,8 +1479,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if !needs_text_conversion(argument) {
                     continue;
                 }
-                let text = self.as_text(&argument.clone(), instruction)?;
-                converted[index] = Value::String(text.into());
+                let text = self.as_text_units(&argument.clone(), instruction)?;
+                converted[index] = Value::String(text);
             }
             return self.dispatch_native(native, receiver, &converted, instruction);
         }
@@ -1202,6 +1507,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 converted[index] = Value::Number(number);
             }
             return self.dispatch_native(native, receiver, &converted, instruction);
+        }
+        // Padding reads ToLength(targetLength) before ToString(fillString), and never converts
+        // fillString if the receiver is already long enough. Do the observable conversion only
+        // after the numeric-argument pass above has completed.
+        if matches!(native, Native::StringPadStart | Native::StringPadEnd) {
+            let target = arguments.first().map_or(0.0, Value::as_number);
+            let target = if target.is_nan() || target <= 0.0 {
+                0.0
+            } else {
+                target.trunc()
+            };
+            let current = match receiver {
+                Value::String(text) => text.len(),
+                _ => 0,
+            };
+            let needs_fill = target.is_infinite() && target.is_sign_positive()
+                || (target.is_finite() && target > current as f64);
+            if needs_fill
+                && let Some(fill) = arguments.get(1)
+                && (matches!(fill, Value::Symbol(_)) || is_reflect_target(fill))
+            {
+                let mut converted = arguments.to_vec();
+                converted[1] = Value::String(self.as_text_units(fill, instruction)?);
+                return self.dispatch_native(native, receiver, &converted, instruction);
+            }
         }
         // A prototype is stored rather than read, so the only two things it may be are an object
         // and the explicit absence of one.
@@ -1393,34 +1723,93 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 if let Some(warning) = warning {
                     let text = Value::String(warning.trim_end_matches('\n').to_owned().into());
-                    self.host
-                        .call(HostOp::WriteStderr, &[HostValue::from(text)])
+                    self.host_line(true, vec![HostValue::from(text)])
                         .map_err(|error| ExecutionError::Host {
                             instruction,
                             message: error.to_string(),
                         })?;
                 }
-                let timer = Timer {
-                    callback: arguments.first().cloned().unwrap_or(Value::Undefined),
-                    // Everything after the delay is handed to the callback, which is how a
-                    // timer carries state without a closure.
-                    arguments: arguments
-                        .get(if undelayed { 1.. } else { 2.. })
-                        .unwrap_or_default()
-                        .to_vec(),
-                    // Captured where the timer was set, not where it fires.
-                    context: Rc::clone(&self.async_context),
+                let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+                // Everything after the delay is handed to the callback, which is how a timer
+                // carries state without a closure.
+                let carried = arguments
+                    .get(if undelayed { 1.. } else { 2.. })
+                    .unwrap_or_default()
+                    .to_vec();
+                // Captured where the timer was set, not where it fires.
+                let context = Rc::clone(&self.async_context);
+                // A realm whose bootstrap published the timer prototypes gets a handle: an
+                // object that is the timer's own record, with `ref`/`unref`/`hasRef`/`refresh`
+                // as in node. Any other gets the bare identity.
+                let prototype = (!matches!(native, Native::QueueIoRaw))
+                    .then(|| self.timer_prototype(matches!(native, Native::SetImmediate)))
+                    .flatten();
+                let handle = prototype.map(|prototype| {
+                    let mut data = ObjectData::default();
+                    data.set_prototype(prototype);
+                    data.node_object = Some(NodeObject::TimerHandle(Box::new(TimerRecord {
+                        id: 0,
+                        delay,
+                        interval: matches!(native, Native::SetInterval),
+                        immediate: matches!(native, Native::SetImmediate),
+                        callback: callback.clone(),
+                        arguments: carried.clone(),
+                        context: Rc::clone(&context),
+                        ran: false,
+                        unreferenced: false,
+                        cleared: false,
+                    })));
+                    tracked_object(data)
+                });
+                let timer = match &handle {
+                    Some(handle) => Timer::Handle(Rc::clone(handle)),
+                    None => Timer::plain(callback, carried, context),
                 };
+                // Timeout and interval deadlines are relative to the host clock at the arm
+                // point, including after synchronous JavaScript. Immediates and queued I/O do
+                // not have timer deadlines.
+                if !matches!(native, Native::SetImmediate | Native::QueueIoRaw) {
+                    self.advance_host_scheduler_clock(instruction)?;
+                }
                 let id = self.with_realm_mut(|realm| match native {
                     Native::SetInterval => realm.set_interval(delay, timer),
                     Native::SetImmediate => realm.set_immediate(timer),
                     Native::QueueIoRaw => realm.queue_io(timer),
                     _ => realm.set_timeout(delay, timer),
                 });
-                Ok(Value::Number(id.get() as f64))
+                match handle {
+                    Some(handle) => {
+                        if let Some(NodeObject::TimerHandle(record)) =
+                            &mut handle.borrow_mut().node_object
+                        {
+                            record.id = id.get();
+                        }
+                        Ok(Value::Object(handle))
+                    }
+                    None => Ok(Value::Number(id.get() as f64)),
+                }
+            }
+            Native::TimerRefRaw => {
+                let op = arguments.get(1).map_or(f64::NAN, Value::as_number);
+                if op == 4.0 {
+                    self.advance_host_scheduler_clock(instruction)?;
+                }
+                Ok(self.timer_op(arguments, op))
             }
             Native::ClearTimeout | Native::ClearInterval | Native::ClearImmediate => {
-                let id = arguments.first().map_or(f64::NAN, Value::as_number);
+                // A timer object clears by its identity, which is how `toPrimitive` reads it.
+                if let Some(handle) = arguments.first()
+                    && Self::timer_handle_id(Some(handle)).is_some()
+                {
+                    return Ok(self.clear_timer_handle(handle));
+                }
+                let id = match (Self::timer_handle_id(arguments.first()), arguments.first()) {
+                    (Some(id), _) => id,
+                    (None, Some(handle @ Value::Object(_))) => self
+                        .as_number_argument(Some(handle), instruction)
+                        .unwrap_or(f64::NAN),
+                    (None, other) => other.map_or(f64::NAN, Value::as_number),
+                };
                 if id.is_finite() && id >= 1.0 && id.fract() == 0.0 && id <= u64::MAX as f64 {
                     self.with_realm_mut(|realm| realm.clear_timeout(TimerId::new(id as u64)));
                 }
@@ -1484,7 +1873,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     result.set("promise", promise);
                     result.set("resolve", resolve);
                     result.set("reject", reject);
-                    return Ok(Value::Object(Rc::new(RefCell::new(result))));
+                    return Ok(Value::Object(tracked_object(result)));
                 }
                 call_native(
                     &self.intrinsics,
@@ -1666,9 +2055,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::String(String::new().into()));
                 };
                 // A string hint, because that is what `String(x)` asks for -- so an object with
-                // both `valueOf` and `toString` uses the second.
+                // both `valueOf` and `toString` uses the second. The call form's Symbol
+                // exception applies only when the input itself is a Symbol primitive; a boxed
+                // Symbol still goes through ordinary ToString after ToPrimitive and throws.
                 let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
-                Ok(Value::String(primitive.to_display_string().into()))
+                if matches!(primitive, Value::Symbol(_)) && !matches!(value, Value::Symbol(_)) {
+                    return Err(ExecutionError::SymbolIsNotAString);
+                }
+                Ok(Value::String(primitive.to_string_units_checked()?))
             }
             // `JSON.parse(text, reviver)`. The reviver is called on every value the text
             // produced, deepest first, with the holder as its `this` -- which is how a program
@@ -1677,22 +2071,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::JsonParse => {
                 let text = self
                     .as_text_units(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
-                let parsed = parse_json_text(&text)?;
                 let reviver = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 if !is_callable(&reviver) {
-                    return Ok(parsed);
+                    return parse_json_text(&text);
                 }
+                let (parsed, mut sources, root_source) = parse_json_text_with_sources(&text)?;
                 // The specification's root holder: an ordinary object whose one property is
                 // named by the empty string. The reviver is called for it too, last of all,
                 // which is what lets a reviver replace the whole document.
                 let mut holder = ObjectData::default();
-                holder.set("", parsed);
-                let root = Value::Object(Rc::new(RefCell::new(holder)));
+                holder.set("", parsed.clone());
+                let root_object = tracked_object(holder);
+                let root_identity = Rc::as_ptr(&root_object) as usize;
+                let root = Value::Object(root_object);
+                if let Some(raw) = root_source {
+                    sources.insert((root_identity, StringUnits::default()), (parsed, raw));
+                }
                 self.internalize_json_property(
                     &root,
                     &StringUnits::default(),
                     &reviver,
                     instruction,
+                    &sources,
                 )
             }
             Native::JsonStringify => {
@@ -1792,7 +2192,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let wrapper = {
                     let mut data = ObjectData::default();
                     data.set("", value.clone());
-                    Value::Object(Rc::new(RefCell::new(data)))
+                    Value::Object(tracked_object(data))
                 };
                 let empty = StringUnits::default();
                 Ok(
@@ -1813,7 +2213,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )
             }
             Native::DateNow => Ok(Value::Number(
-                self.wall_clock_milliseconds(self.clock_capability, instruction)?,
+                self.wall_clock_milliseconds(self.clock_capability, instruction)?
+                    .trunc(),
             )),
             // Monotonic measurement stays on the Tokio-owned virtual clock. A host-backed Date
             // must not make elapsed-time APIs jump when the operating-system wall clock changes.
@@ -1855,7 +2256,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Some(v) => v.as_number() as i32,
                     None => 0,
                 };
+                self.flush_stdio();
                 return Err(ExecutionError::ProcessExited(code));
+            }
+            Native::ProcessExitCodeGet => Ok(self
+                .process_exit_code(None)
+                .map_or(Value::Undefined, |code| Value::Number(f64::from(code)))),
+            Native::ProcessExitCodeSet => {
+                let code = match arguments.first() {
+                    None | Some(Value::Undefined) => None,
+                    Some(Value::Number(code)) => Some(*code as i32),
+                    _ => return Ok(Value::Undefined),
+                };
+                self.process_exit_code(Some(code));
+                Ok(Value::Undefined)
+            }
+            // Ordinary objects drop at their last Rc, while weak closure and WeakRef-target
+            // censuses let us discover Rc graphs and cut only cycles proven to have no owner.
+            Native::GcRequest => {
+                self.collect_closure_cycles();
+                Ok(Value::Undefined)
             }
             Native::ProcessStdinSetRawMode => {
                 let mode = arguments.first().map(Value::is_truthy).unwrap_or(false);
@@ -1913,39 +2333,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // store, so the walk below has nothing to read.
                 if matches!(source, Value::Proxy(_)) {
                     let mut items = Vec::new();
-                    for key in self.own_keys(&source, instruction)? {
-                        if is_reserved_units(&key) {
+                    for key in self.own_keys_reflected(&source, instruction)? {
+                        if matches!(key, Value::Symbol(_)) {
+                            continue;
+                        }
+                        let Some(descriptor) =
+                            self.own_descriptor_value(&source, &key, instruction)?
+                        else {
+                            continue;
+                        };
+                        if !self
+                            .read_property(&descriptor, "enumerable", instruction)?
+                            .is_truthy()
+                        {
                             continue;
                         }
                         items.push(match native {
-                            Native::ObjectValues => self.read_property_key(
-                                &source,
-                                PropertyKeyRef::Units(&key),
-                                instruction,
-                            )?,
+                            Native::ObjectValues => {
+                                self.read_computed(&source, &key, instruction)?
+                            }
                             _ => Value::Array(ArrayData::new(vec![
-                                Value::String(key.clone()),
-                                self.read_property_key(
-                                    &source,
-                                    PropertyKeyRef::Units(&key),
-                                    instruction,
-                                )?,
+                                key.clone(),
+                                self.read_computed(&source, &key, instruction)?,
                             ])),
                         });
                     }
                     return Ok(Value::Array(ArrayData::new(items)));
                 }
                 let mut items = Vec::new();
-                for (key, property) in own_string_properties_units(&self.intrinsics, &source) {
-                    let value = match property {
-                        Property::Value(value) => value,
-                        Property::Accessor { get, .. } => match get {
-                            Some(getter) => {
-                                self.call_value(&getter, source.clone(), Vec::new(), instruction)?
-                            }
-                            None => Value::Undefined,
-                        },
-                    };
+                // Snapshot every own string key before any getter runs, then ask about its
+                // current descriptor. Earlier getters may expose, hide or delete later keys.
+                for key in own_property_keys_units(&self.intrinsics, &source) {
+                    let property_key = PropertyKeyRef::Units(&key);
+                    if !own_attributes_key(&self.intrinsics, &source, property_key)
+                        .is_some_and(|attributes| attributes.enumerable)
+                    {
+                        continue;
+                    }
+                    let value = self.read_property_key(&source, property_key, instruction)?;
                     items.push(if matches!(native, Native::ObjectValues) {
                         value
                     } else {
@@ -1985,7 +2410,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     }
                 }
-                Ok(Value::Object(Rc::new(RefCell::new(data))))
+                Ok(Value::Object(tracked_object(data)))
             }
             // `String.raw` is the one built-in written to be used as a template tag: it reads
             // the `raw` half of the template object, which is the text before escapes were
@@ -2197,7 +2622,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         data.set_units(&key, descriptor);
                     }
                 }
-                Ok(Value::Object(Rc::new(RefCell::new(data))))
+                Ok(Value::Object(tracked_object(data)))
             }
             Native::ObjectDefineProperty | Native::ReflectDefineProperty
                 if matches!(arguments.first(), Some(Value::Proxy(_))) =>
@@ -2210,14 +2635,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let inner = proxy.target.clone();
                 let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 let descriptor = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+                // The caller performs ToPropertyDescriptor before entering
+                // [[DefineOwnProperty]], including when the proxy is already revoked.
+                let described = self.read_descriptor(&descriptor, instruction)?;
                 match self.proxy_trap(&proxy, "defineProperty", instruction)? {
                     Some(trap) => {
                         // Read before the trap runs, which is the order the specification
                         // gives: a handler that mutates the descriptor object cannot change
                         // what it is checked against afterwards.
-                        let described = self.read_descriptor(&descriptor, instruction)?;
+                        let trap_descriptor = Self::descriptor_object(&described);
                         let handler = proxy.handler.clone();
-                        let list = vec![inner.clone(), self.trap_key(&key), descriptor];
+                        let list = vec![inner.clone(), self.trap_key(&key), trap_descriptor];
                         let answered = self.call_value(&trap, handler, list, instruction)?;
                         if !answered.is_truthy() {
                             if matches!(native, Native::ReflectDefineProperty) {
@@ -2233,7 +2661,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.dispatch_native(
                             native,
                             receiver,
-                            &[inner, key, descriptor],
+                            &[inner, key, Self::descriptor_object(&described)],
                             instruction,
                         )?;
                     }
@@ -2271,6 +2699,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::CollectionForEach(_) => {
                 let (entries, is_map) = require_collection(receiver, native)?;
                 let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&callback) {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: callback.type_name(),
+                    });
+                }
                 let this_value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 let mut index = 0;
                 // The length is re-read each step: entries added while iterating are visited,
@@ -2476,7 +2910,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(target, Value::Proxy(_)) {
                     return self.proxy_get_prototype_of(&target, instruction);
                 }
-                Ok(prototype_of(&target))
+                Ok(prototype_of_in(&self.intrinsics, &target))
             }
             Native::ReflectSetPrototypeOf => {
                 let target = self.reflect_target(arguments.first(), "setPrototypeOf")?;
@@ -2508,12 +2942,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // `OrdinarySetPrototypeOf` step 3: the prototype it already has is a change that
                 // succeeds -- `Reflect.setPrototypeOf(Object.prototype, null)` is true, although
                 // that object's chain lives in its kind and could not take a different one.
-                if same_value(&prototype_of(&target), &prototype) {
+                if same_value(&prototype_of_in(&self.intrinsics, &target), &prototype) {
                     return Ok(Value::Boolean(true));
                 }
                 // A value with no store keeps its chain in its kind, so there is nowhere to put
                 // a new one. Reported as a refusal, which is what this operation exists to say.
-                Ok(Value::Boolean(record_prototype(&target, prototype)))
+                Ok(Value::Boolean(record_prototype_in(
+                    &self.intrinsics,
+                    &target,
+                    prototype,
+                )))
             }
             Native::ReflectGetOwnPropertyDescriptor => {
                 let target = self.reflect_target(arguments.first(), "getOwnPropertyDescriptor")?;
@@ -2550,6 +2988,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     ));
                 }
                 let closed = match &target {
+                    // A shared value is a frozen graph (ADR 0073): already non-extensible, so
+                    // closing it again is the success a frozen ordinary object reports.
+                    Value::Shared(_) => true,
                     Value::Object(object) => {
                         object.borrow_mut().prevent_extensions();
                         true
@@ -2689,16 +3130,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         value: receiver.type_name(),
                     });
                 };
-                // `ToString(S)`, which for an object *calls* its `toString`. The display
-                // spelling is the machine's: `/\.14/.exec({ toString: () => Math.PI })` matched
-                // against the literal text "[object Object]" and answered null. Units travel
-                // losslessly: a lone surrogate in the subject stays the unit the language
-                // counts rather than becoming U+FFFD before the matcher sees it.
+                // RegExp.exec/test use the language's ToString, which calls object conversion
+                // hooks and rejects Symbols (including boxed Symbols) rather than using their
+                // diagnostic display spelling. Keep the result in UTF-16 units so lone
+                // surrogates remain intact for the matcher.
                 let subject_units: StringUnits = match arguments.first() {
-                    Some(argument) if is_an_object(argument) && !is_callable(argument) => {
-                        self.as_text_units(argument, instruction)?
-                    }
-                    Some(argument) => argument.to_string_units_checked()?,
+                    Some(argument) => self.as_text_units(argument, instruction)?,
                     None => StringUnits::default(),
                 };
                 let subject: Vec<u16> = subject_units.to_units().into_vec();
@@ -2716,6 +3153,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     0
                 };
                 let found = regexp_search(&regexp, &subject, start);
+                if let Some((_, groups, _)) = &found {
+                    self.publish_regexp_legacy_captures(&subject, groups);
+                }
                 if (regexp.global || regexp.sticky) && found.is_none() {
                     // A failed search resets the cursor, which is what stops a `g` regexp from
                     // being permanently stuck past the end.
@@ -2753,17 +3193,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A string method whose argument the specification passes through `ToString`, given
             // an object to convert.
             //
-            // `ToString` on an object *calls* its `toString`, and the implementations of these
-            // ten live in the machine-free table, which has no machine to call it with -- it
-            // reads arguments through a helper that can only ask for the display spelling. So
-            // `"abc".indexOf({ toString: () => "b" })` answered -1, `split` did not split, and
-            // `concat` appended the literal text "[object Object]". Every one of them a plausible
-            // wrong answer in ordinary code rather than a failure.
+            // `ToString` on an object *calls* its `toString`, and these implementations live in
+            // the machine-free table, which has no machine to call it with. It reads arguments
+            // through a helper that can only ask for the display spelling. So
+            // `"abc".indexOf({ toString: () => "b" })` answered -1 and `split` did not split.
             //
             // The conversion happens here, where there is a machine, and the pure implementation
             // is then handed the string it always assumed it had. Which arguments convert is per
             // method and not guessable: `split`'s second argument is a *length*, and `replace`'s
-            // second is a replacement that may be a function and must reach it uncalled.
+            // second is a replacement that may be a function and must reach it uncalled. Concat
+            // and padding use separate paths to preserve their conversion semantics.
             Native::StringSplit
             | Native::StringReplace
             | Native::StringReplaceAll
@@ -2772,15 +3211,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::StringIncludes
             | Native::StringStartsWith
             | Native::StringEndsWith
-            | Native::StringConcat
-            | Native::StringPadStart
-            | Native::StringPadEnd
                 if arguments.iter().enumerate().any(|(index, argument)| {
                     (string_coerced_argument(native, index)
                         || (matches!(native, Native::StringSplit) && index == 1))
                         && is_an_object(argument)
                         && !is_callable(argument)
                         && !matches!(argument, Value::RegExp(_))
+                        && !matches!(native, Native::StringPadStart | Native::StringPadEnd)
                 }) =>
             {
                 let mut converted = Vec::with_capacity(arguments.len());
@@ -2795,8 +3232,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         convertible && matches!(native, Native::StringSplit) && index == 1;
                     converted.push(if numeric {
                         Value::Number(self.as_number_argument(Some(argument), instruction)?)
-                    } else if convertible && string_coerced_argument(native, index) {
-                        Value::String(self.as_text(argument, instruction)?.into())
+                    } else if convertible
+                        && string_coerced_argument(native, index)
+                        && !matches!(native, Native::StringPadStart | Native::StringPadEnd)
+                    {
+                        Value::String(self.as_text_units(argument, instruction)?)
                     } else {
                         argument.clone()
                     });
@@ -2810,18 +3250,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let Some(Value::RegExp(regexp)) = arguments.first() else {
                     unreachable!("checked by the guard");
                 };
+                let cap = match arguments.get(1) {
+                    None | Some(Value::Undefined) => u32::MAX as usize,
+                    Some(limit) => {
+                        to_uint32(self.as_number_argument(Some(limit), instruction)?) as usize
+                    }
+                };
                 let subject: Vec<u16> = text.encode_utf16().collect();
                 let mut parts = Vec::new();
                 let mut copied = 0;
+                if cap == 0 {
+                    return Ok(Value::Array(ArrayData::new(parts)));
+                }
                 if subject.is_empty() {
                     // An empty subject is the one case with no trailing piece: a separator that
                     // matches it splits it into nothing, and one that does not leaves it whole.
-                    if regexp_search(regexp, &subject, 0).is_none() {
+                    if let Some((_, groups, _)) = regexp_search(regexp, &subject, 0) {
+                        self.publish_regexp_legacy_captures(&subject, &groups);
+                    } else {
                         parts.push(Value::String(String::new().into()));
                     }
                     return Ok(Value::Array(ArrayData::new(parts)));
                 }
-                for (range, groups, _) in regexp_search_all(regexp, &subject) {
+                let matches = regexp_search_all(regexp, &subject);
+                for (range, groups, _) in matches {
+                    if parts.len() >= cap {
+                        break;
+                    }
+                    // Split's limit can end the operation before later separators are visited;
+                    // only captures from matches the algorithm reaches become observable.
+                    self.publish_regexp_legacy_captures(&subject, &groups);
                     // A separator that matches nothing would split between every character
                     // *and* produce an empty piece for each; the specification skips an empty
                     // match at the position the last piece started.
@@ -2837,6 +3295,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     parts.push(Value::String(
                         utf16_slice(&subject, copied..range.start).into(),
                     ));
+                    if parts.len() == cap {
+                        return Ok(Value::Array(ArrayData::new(parts)));
+                    }
                     // A capturing separator contributes its groups to the result, which is what
                     // makes `"a1b".split(/(\d)/)` three elements rather than two.
                     for group in groups.iter().skip(1) {
@@ -2846,12 +3307,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             }
                             None => Value::Undefined,
                         });
+                        if parts.len() == cap {
+                            return Ok(Value::Array(ArrayData::new(parts)));
+                        }
                     }
                     copied = range.end;
                 }
-                parts.push(Value::String(
-                    utf16_slice(&subject, copied..subject.len()).into(),
-                ));
+                if parts.len() < cap {
+                    parts.push(Value::String(
+                        utf16_slice(&subject, copied..subject.len()).into(),
+                    ));
+                }
                 Ok(Value::Array(ArrayData::new(parts)))
             }
             // `ArrayBuffer.prototype.slice` builds its result with `SpeciesConstructor`, which
@@ -2931,10 +3397,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::Number(-1.0));
                 };
                 // `search` ignores `lastIndex` entirely and always scans from the start.
-                Ok(Value::Number(
-                    regexp_search(regexp, &subject, 0)
-                        .map_or(-1.0, |(range, _, _)| range.start as f64),
-                ))
+                let found = regexp_search(regexp, &subject, 0);
+                let index = found
+                    .as_ref()
+                    .map_or(-1.0, |(range, _, _)| range.start as f64);
+                if let Some((_, groups, _)) = found {
+                    self.publish_regexp_legacy_captures(&subject, &groups);
+                }
+                Ok(Value::Number(index))
             }
             Native::StringMatch | Native::StringMatchAll => {
                 let Value::String(text) = receiver else {
@@ -2955,24 +3425,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let Value::RegExp(regexp) = &pattern else {
                     return Ok(Value::Null);
                 };
-                let all = matches!(native, Native::StringMatchAll) || regexp.global;
+                if matches!(native, Native::StringMatchAll) {
+                    return self.regexp_match_all_symbol(&pattern, &subject, instruction);
+                }
+                let all = regexp.global;
                 if !all {
                     // Without `g`, `match` is `exec`: one result with its groups.
-                    return Ok(match regexp_search(regexp, &subject, 0) {
+                    let found = regexp_search(regexp, &subject, 0);
+                    if let Some((_, groups, _)) = &found {
+                        self.publish_regexp_legacy_captures(&subject, groups);
+                    }
+                    return Ok(match found {
                         Some((range, groups, names)) => {
                             match_result(&subject, &range, &groups, &names, regexp.has_indices)
                         }
                         None => Value::Null,
                     });
                 }
+                let matches = regexp_search_all(regexp, &subject);
                 let mut results = Vec::new();
-                for (range, groups, names) in regexp_search_all(regexp, &subject) {
-                    results.push(if matches!(native, Native::StringMatchAll) {
-                        // `matchAll` yields full results; `match` with `g` yields only the text.
-                        match_result(&subject, &range, &groups, &names, regexp.has_indices)
-                    } else {
-                        Value::String(utf16_slice(&subject, range).into())
-                    });
+                for (range, groups, _) in matches {
+                    self.publish_regexp_legacy_captures(&subject, &groups);
+                    results.push(Value::String(utf16_slice(&subject, range).into()));
                 }
                 if results.is_empty() && matches!(native, Native::StringMatch) {
                     return Ok(Value::Null);
@@ -3037,12 +3511,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 Ok(self.new_symbol(description))
             }
+            Native::RegExpLegacyCaptureRaw => {
+                let index = arguments.first().and_then(|value| match value {
+                    Value::Number(number)
+                        if number.is_finite()
+                            && number.fract() == 0.0
+                            && (1.0..=9.0).contains(number) =>
+                    {
+                        Some(*number as usize - 1)
+                    }
+                    _ => None,
+                });
+                Ok(index
+                    .and_then(|index| self.regexp_legacy_capture(index + 1))
+                    .map(Value::String)
+                    .unwrap_or(Value::Undefined))
+            }
             // The two built-ins that compile. Both need the machine -- a compiled program is
             // entered as a frame and run -- so neither can live in `call_native`, which is a
             // free function with no VM to enter one on.
-            Native::Eval => self.indirect_eval(arguments),
+            Native::Eval => self.indirect_eval(arguments, instruction),
             Native::FunctionConstructor => {
                 self.function_from_source(arguments, instruction, "function")
+            }
+            Native::AsyncFunctionConstructor => {
+                self.function_from_source(arguments, instruction, "async function")
             }
             Native::GeneratorFunctionConstructor => {
                 self.function_from_source(arguments, instruction, "function*")

@@ -1,0 +1,108 @@
+name: Release
+
+# Builds kiln for every supported target and, on a `v*` tag, publishes a GitHub release with one
+# archive per target. scripts/package-release.sh is the whole recipe -- this workflow only picks
+# runners and moves files -- so a release can be reproduced on a laptop with the same command.
+#
+# Each archive holds bin/kiln and lib/kiln/ (every native provider variant), so a machine with a
+# C compiler and no Rust toolchain can `kiln build`. The script smoke-tests the unpacked archive
+# with no cargo or rustc on PATH before it writes it.
+#
+# Targets are the ones the project measures: macOS on Apple silicon and Linux (glibc) on x86_64
+# and arm64. Intel macOS and Windows are not built: no one measures them, and ADR 0018's target
+# matrix was never adopted. Linux archives carry no GUI provider (the bridge is AppKit today).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create a draft release from this run (a tag push always publishes)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Version check
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: |
+          version=$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A tag that disagrees with the workspace version would publish archives whose
+          # names and `kiln --version` contradict the release they are attached to.
+          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME != "v$version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version $version" >&2
+            exit 1
+          fi
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-unknown-linux-gnu
+            # The oldest supported image, so the binary's glibc floor is as low as it can be.
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      # The packager re-execs under bash 4 (macOS ships 3.2) and the provider build links a
+      # probe with the system C compiler, which every runner image already has.
+      - if: runner.os == 'macOS'
+        run: brew install bash
+      - run: scripts/package-release.sh --target ${{ matrix.target }} dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kiln-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: [version, package]
+    if: github.ref_type == 'tag' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cat dist/*.sha256 > dist/SHA256SUMS
+          tag="v$VERSION"
+          flags=(--title "kiln $VERSION" --generate-notes)
+          # A manual run makes a draft for review; only a tag publishes.
+          if [[ $GITHUB_REF_TYPE != tag ]]; then
+            flags+=(--draft --target "$GITHUB_SHA")
+          fi
+          gh release create "$tag" "${flags[@]}" dist/*.tar.gz dist/SHA256SUMS scripts/install.sh

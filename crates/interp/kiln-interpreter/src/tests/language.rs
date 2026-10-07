@@ -69,13 +69,17 @@ fn a_direct_eval_writes_through_to_the_callers_binding() {
             Instruction::NewCell(0),
             Instruction::Const(0),
             Instruction::StoreCell(0),
+            Instruction::LoadBuiltin(kiln_ir::Builtin::Eval),
             Instruction::Const(1),
             Instruction::DirectEval(Box::new(EvalSite {
+                module_id: "<language-test>".to_owned(),
+                source_offset: 0,
                 bindings: vec![kiln_ir::EvalBinding {
                     name: "x".to_owned(),
                     access: EvalAccess::Cell(0),
                     declaration: kiln_ir::EvalDeclaration::Var,
                 }],
+                with_objects: Vec::new(),
                 strict: false,
                 global_var_scope: false,
                 argc: Some(1),
@@ -162,7 +166,7 @@ fn source_compiler_authority_is_scoped_to_one_execution() {
 }
 
 #[test]
-fn dynamic_source_boundary_rejects_raw_units_and_keeps_parser_errors_distinct() {
+fn dynamic_source_boundary_preserves_raw_units_and_keeps_parser_errors_distinct() {
     fn constant_compiler(
         request: &EvalSource<'_>,
     ) -> Result<(Program, Strictness), EvalCompileError> {
@@ -170,7 +174,11 @@ fn dynamic_source_boundary_rejects_raw_units_and_keeps_parser_errors_distinct() 
             Program {
                 source: "".into(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
                 version: kiln_ir::BYTECODE_VERSION,
+                source_origin: None,
+                static_source_identity: None,
+                static_source_provenance: None,
                 constants: vec![Constant::Number(7.0f64.to_bits())],
                 code: vec![Instruction::Const(0), Instruction::Return],
                 local_count: request.outer.len() as u32,
@@ -190,7 +198,11 @@ fn dynamic_source_boundary_rejects_raw_units_and_keeps_parser_errors_distinct() 
         let program = Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::String(source)],
             code: vec![
                 Instruction::LoadBuiltin(kiln_ir::Builtin::Eval),
@@ -221,11 +233,7 @@ fn dynamic_source_boundary_rejects_raw_units_and_keeps_parser_errors_distinct() 
     assert_eq!(run_eval(escaped, constant_compiler), Ok(Value::Number(7.0)));
 
     let raw = StringUnits::from_units(&[b'"' as u16, 0xd800, b'"' as u16]);
-    assert!(matches!(
-        run_eval(raw, constant_compiler),
-        Err(ExecutionError::EvalUnsupported { message })
-            if message == DYNAMIC_SOURCE_UNPAIRED_SURROGATE
-    ));
+    assert_eq!(run_eval(raw, constant_compiler), Ok(Value::Number(7.0)));
     let program = no_program();
     let mut syntax_host = TestHost {
         calls: Vec::new(),
@@ -252,12 +260,17 @@ fn dynamic_source_boundary_rejects_raw_units_and_keeps_parser_errors_distinct() 
     };
     let program = no_program();
     let mut vm = test_vm(&program, &mut host);
+    vm.source_compiler = Some(constant_compiler);
     let raw_body = Value::String(StringUnits::from_units(&[0xd800]));
-    assert!(matches!(
-        vm.dispatch_native(Native::FunctionConstructor, &Value::Undefined, &[raw_body], 0),
-        Err(ExecutionError::EvalUnsupported { message })
-            if message == DYNAMIC_SOURCE_UNPAIRED_SURROGATE
-    ));
+    assert_eq!(
+        vm.dispatch_native(
+            Native::FunctionConstructor,
+            &Value::Undefined,
+            &[raw_body],
+            0
+        ),
+        Ok(Value::Number(7.0))
+    );
 }
 
 /// A directive prologue decides an eval's strictness, and an escaped spelling is not one.
@@ -277,7 +290,11 @@ fn a_captured_dead_zone_read_names_its_source_binding() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("later".to_owned().into())],
         code: vec![
             Instruction::NewCell(0),
@@ -345,7 +362,11 @@ fn return_signal_rejected_promise_does_not_surface_as_unhandled_rejection() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -478,5 +499,33 @@ fn attributes_are_never_reported_for_an_absent_member() {
                 "{table:?} describes {key} as {described} but publishes it as {published}"
             );
         }
+    }
+}
+
+#[test]
+fn internal_key_classification_skips_ordinary_names_without_widening_reserved_keys() {
+    use crate::symbol::is_internal_key;
+
+    for key in [
+        "map",
+        "length",
+        "value",
+        "@@observable",
+        "@@symbol-observable",
+    ] {
+        assert!(!is_internal_key(key), "{key} is a program-visible key");
+    }
+
+    for key in [
+        "@@symbol:1",
+        "@@private:scope:1",
+        "@@kiln:host-slot",
+        "@@node:timer-handle",
+    ] {
+        assert!(is_internal_key(key), "{key} belongs to an internal family");
+    }
+
+    for key in ["@symbol:1", "@@symbol", "@@private", "@@kiln", "@@node"] {
+        assert!(!is_internal_key(key), "{key} is not a complete family key");
     }
 }

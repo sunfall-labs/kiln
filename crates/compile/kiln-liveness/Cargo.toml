@@ -13,3 +13,7 @@ kiln-module-resolver = { workspace = true }
 kiln-native-provider-contract = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+kiln-hir = { workspace = true }
+kiln-frontend-oxc = { workspace = true }

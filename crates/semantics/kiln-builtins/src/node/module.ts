@@ -68,6 +68,11 @@ export const constants = {
   },
 };
 
+// Capture the host capability while the builtin module is initialized so later writes to the
+// public process object cannot redirect createRequire.
+const hostCreateRequire = (globalThis as any).__kilnPrivate.process?.__kilnNativeModules
+  ?.__kilnHostModuleCreateRequire;
+
 // In a kiln native binary every module is ahead-of-time compiled, so the
 // compile cache is permanently "already enabled" — there is nothing to warm
 // up and no cache directory. This is a semantic no-op, not a stub.
@@ -100,7 +105,7 @@ export function createRequire(filename: string | any): (specifier: string) => an
   // The host captures this immutable filename and binds the returned callable to the
   // graph loader for that importer. Keeping the hook private prevents a process-global
   // require from bypassing graph identity and cache ownership.
-  return __kilnHostModuleCreateRequire(
+  return hostCreateRequire(
     typeof filename === "string" ? filename : filename.href,
   );
 }

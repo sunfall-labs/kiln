@@ -1,14 +1,22 @@
 //! Owned TypeScript syntax retained beside the executable, erased HIR.
 //!
-//! These values deliberately contain no parser nodes, arena references, or checker IDs. Every
-//! range addresses [`Module::source`](crate::Module::source), so metadata remains useful after
-//! the Oxc parse arena and semantic model have been dropped.
+//! These values deliberately contain no parser nodes, arena references, or checker IDs. Their
+//! ranges address [`Module::source`](crate::Module::source), or the source of
+//! [`TypeSyntax::original_module`] when that authored-source snapshot exists, so metadata remains
+//! useful after the Oxc parse arena and semantic model have been dropped.
 
 use crate::{Span, StringUnits};
 
 /// Rich, parser-independent type syntax belonging to one module.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeSyntax {
+    /// Complete authored module metadata before TypeScript erasure or transformation.
+    ///
+    /// The sidecar module's own `type_syntax.original_module` is always `None`, so this is a
+    /// single-level snapshot rather than a recursive chain. It preserves original imports,
+    /// exports, items, body, and source coordinates for checker consumers while the enclosing
+    /// `Module` can retain generated-JavaScript coordinates for execution.
+    pub original_module: Option<std::sync::Arc<crate::Module>>,
     /// Type declarations, including aliases, interfaces, and module-level overloads.
     pub declarations: Vec<TypeDeclaration>,
     /// Type-bearing sites in executable and declaration syntax.

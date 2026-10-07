@@ -1,0 +1,7 @@
+# Post-gate disk cleanup, 2026-10-04
+
+The exclusive allocator milestone gate finished in 1,499 seconds, with eight CPU slots and a 4 GiB Test262 cap. Its source was `9708d8119314ef404c941b8537b1bf4e62998839`; the frozen CLI SHA-256 is `f1c8f22d171e209a929842563e5dd35f2a2226d9c363486497665bcde9189de0`. The aggregate is retained here; complete original logs remain in the owned gate checkout under `target/gate-logs/run.VO6m36gX/`.
+
+The disk reached 153 MiB free. No owned build/test processes remained at cleanup. Cache GC ran only in the owned gate checkout, preserving its grace protection and compile locks. Obsolete per-test compressed native outputs from three superseded diagnostic surveys were removed with a per-file manifest; their frozen compilers, source files, reports and logs remain. Other worktrees and shared mbx outputs were not removed. Physical free space recovered to 16 GiB before the second sweep; logical removed bytes are not physical recovered bytes.
+
+Full Test262 covered all 102,638 cases with no baseline regressions. The overall gate failed: disk exhaustion interrupted native builds, CLI tests and regression reporting; four GUI probes additionally require a provider containing GUI support. The prelude snapshot needs review of two new internal initializer declarations, and three performance rows exceeded the existing threshold. None of these failures is accepted as a successful milestone. No new build was started during cleanup.

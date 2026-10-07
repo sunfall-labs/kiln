@@ -42,6 +42,13 @@ matches_pattern() {
 	echo "$CHANGED_FILES" | grep -qE "$pattern"
 }
 
+# 0. Issue filings. Always runs, whatever changed: it reads only the diff, and a deletion of the
+# tracker is exactly the kind of change the path filters below would wave through.
+echo "=== 0/3: issue filings ==="
+if git rev-parse --verify origin/main >/dev/null 2>&1; then
+	scripts/check-issue-deletions.sh "$(git merge-base origin/main HEAD)..HEAD"
+fi
+
 # 1. HTTP close contract
 echo "=== 1/3: HTTP close contract ==="
 if matches_pattern "(crates/host/kiln-runtime/|crates/native/kiln-native-provider-ffi/src/(realm/|provider/realm[/.])|crates/native/kiln-native/src/.*http|scripts/check-http-close-contract\.sh)"; then

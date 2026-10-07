@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// The parallel family where the pool may not run (.scratch/parallel-builtins issue 10): a
+// The parallel family where the pool may not run (docs/issues/parallel-builtins issue 10): a
 // callback with a side effect, one that throws, one that reads the heap, a capture that is not a
 // number, a receiver that is not a numeric array. Each runs the sequential definition, so the
 // calls, their order, the exception and the answer are exactly the sequential method's.

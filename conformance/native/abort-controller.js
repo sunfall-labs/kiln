@@ -29,3 +29,46 @@ console.log("any", either.aborted, either.reason);
 const timed = AbortSignal.timeout(5);
 console.log("timeout-before", timed.aborted);
 setTimeout(() => console.log("timeout-after", timed.aborted, timed.reason.name), 10);
+
+const dispatch = new AbortController();
+const order = [];
+let selfRuns = 0;
+function selfRemoving() {
+  order.push(`self-${++selfRuns}`);
+  if (selfRuns === 1) {
+    dispatch.signal.removeEventListener("abort", selfRemoving);
+    dispatch.signal.addEventListener("abort", selfRemoving);
+  }
+}
+dispatch.signal.addEventListener("abort", () => {
+  order.push("first");
+  dispatch.signal.removeEventListener("abort", removedListener);
+  dispatch.signal.addEventListener("abort", () => order.push("late"));
+});
+let onceAgain = false;
+const once = () => {
+  order.push("once");
+  if (!onceAgain) {
+    onceAgain = true;
+    dispatch.signal.addEventListener("abort", once, { once: true });
+  }
+};
+dispatch.signal.addEventListener("abort", once, { once: true });
+const removedListener = () => order.push("removed");
+dispatch.signal.addEventListener("abort", removedListener);
+dispatch.signal.addEventListener("abort", (event) => {
+  order.push(event.target === dispatch.signal ? "target" : "wrong-target");
+});
+dispatch.signal.addEventListener("abort", selfRemoving);
+dispatch.abort();
+dispatch.abort();
+console.log("dispatch-mutation", order.join(","));
+
+const singleDispatch = new AbortController();
+const singleOrder = [];
+singleDispatch.signal.addEventListener("abort", () => {
+  singleOrder.push("first");
+  singleDispatch.signal.addEventListener("abort", () => singleOrder.push("late"));
+});
+singleDispatch.abort();
+console.log("single-dispatch-add", singleOrder.join(","));

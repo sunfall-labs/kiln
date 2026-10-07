@@ -1,0 +1,51 @@
+# Current CLI18 npm failures
+
+Full inventory: 360 selected, zero deferred; 313 pass and 47 non-pass. CLI source a469094d; raw evidence 20260930T171935Z.1921509. Source fixes after this build await validation.
+
+- [ ] safe-buffer — wrong-output
+- [ ] iconv-lite — runtime-error
+- [ ] string_decoder — wrong-output
+- [ ] @babel/core — runtime-error
+- [ ] http-errors — runtime-error
+- [ ] buffer — wrong-output
+- [ ] jose — runtime-error
+- [ ] express — runtime-error
+- [ ] prettier — runtime-error
+- [ ] axios — runtime-error
+- [ ] fast-xml-parser — runtime-error
+- [ ] @tanstack/query-core — runtime-error
+- [ ] regenerator-runtime — runtime-error
+- [ ] safe-stable-stringify — runtime-error
+- [ ] bluebird — compile-error
+- [ ] fast-safe-stringify — runtime-error
+- [ ] h3 — runtime-error
+- [ ] uglify-js — runtime-error
+- [ ] @reduxjs/toolkit — runtime-error
+- [ ] underscore — runtime-error
+- [ ] winston — runtime-error
+- [ ] validator — runtime-error
+- [ ] xmlbuilder2 — runtime-error
+- [ ] assert — runtime-error
+- [ ] fast-json-patch — compile-error
+- [ ] @iarna/toml — compile-error
+- [ ] eta — runtime-error
+- [ ] koa — compile-error
+- [ ] @date-fns/utc — runtime-error
+- [ ] arktype — compile-error
+- [ ] showdown — runtime-error
+- [ ] deep-equal — runtime-error
+- [ ] effect — runtime-error
+- [ ] ejs — runtime-error
+- [ ] fastify — runtime-error
+- [ ] handlebars — runtime-error
+- [ ] jsonwebtoken — runtime-error
+- [ ] keyv — runtime-error
+- [ ] kind-of — runtime-error
+- [ ] qs — runtime-error
+- [ ] svelte — compile-error
+- [ ] tapable — wrong-output
+- [ ] through2 — runtime-error
+- [ ] toml — runtime-error
+- [ ] url — runtime-error
+- [ ] ws — runtime-error
+- [ ] yargs — runtime-error

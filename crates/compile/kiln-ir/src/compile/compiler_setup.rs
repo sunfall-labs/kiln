@@ -1,6 +1,11 @@
 use super::*;
 
 impl super::Compiler {
+    pub(super) fn note_call_site(&mut self, span: Span) {
+        self.debug_call_sites
+            .push((self.active_function_span, self.code.len() as u32, span));
+    }
+
     pub(super) fn set_property_instruction(&self, name: u32) -> Instruction {
         Instruction::SetPropertyStrict {
             name,
@@ -43,13 +48,18 @@ impl super::Compiler {
     pub(super) fn new(module: &Module) -> Self {
         let mut compiler = Self {
             source: Arc::clone(&module.source),
+            source_provenance: module.static_source_provenance.clone(),
+            source_origin: module.source_origin.clone(),
             constants: Vec::new(),
             constant_indices: rustc_hash::FxHashMap::default(),
             code: Vec::new(),
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            active_function_span: None,
             strict_functions: Vec::new(),
             removable_declarations: Vec::new(),
+            module_instantiation_end: 0,
             enclosing: Vec::new(),
             upvalues: Vec::new(),
             upvalue_names: HashMap::new(),
@@ -79,7 +89,10 @@ impl super::Compiler {
             // The module body has no parameters and no `arguments`; the flag is a function's.
             mapped_arguments: false,
             with_scopes: Vec::new(),
+            eval_lexical_names: HashSet::new(),
             private_scopes: Vec::new(),
+            private_scope_modules: Vec::new(),
+            private_module_id: module.module_id.to_string(),
             private_brands: Vec::new(),
             next_private_scope: 0,
             private_declarations: Vec::new(),
@@ -87,7 +100,7 @@ impl super::Compiler {
             pending_finalizers: Vec::new(),
             function_finalizer_depth: 0,
             handler_depth: 0,
-            pending_label: None,
+            pending_labels: Vec::new(),
             chains: Vec::new(),
             super_bindings: Vec::new(),
             pending_elements: Vec::new(),
@@ -142,6 +155,10 @@ impl super::Compiler {
                 self.emit_function_declaration(function, statement.span);
             }
         }
+        // Everything above this boundary is part of ModuleDeclarationInstantiation: all
+        // module bindings have been created and every hoisted function declaration has its
+        // closure. Evaluation begins with the first ordinary statement below.
+        self.module_instantiation_end = self.code.len() as u32;
         for statement in list {
             if matches!(statement.kind, StatementKind::Function(_)) {
                 continue;
@@ -209,6 +226,49 @@ impl super::Compiler {
         self,
     ) -> Result<(Program, Strictness), Vec<CompileDiagnostic>> {
         if self.diagnostics.is_empty() {
+            let mut raw_sites = self.debug_call_sites;
+            raw_sites.sort_by_key(|(_, _, span)| span.start);
+            let mut generated_offsets = Vec::with_capacity(raw_sites.len());
+            let mut original_offsets = Vec::with_capacity(raw_sites.len());
+            for (index, (_, _, span)) in raw_sites.iter().enumerate() {
+                let mapped = self
+                    .source_provenance
+                    .as_ref()
+                    .and_then(|origin| origin.original_offset(span.start));
+                if let Some(offset) = mapped {
+                    original_offsets.push((offset, index));
+                } else {
+                    generated_offsets.push((span.start, index));
+                }
+            }
+            let mut positions = vec![(0, 0); raw_sites.len()];
+            fill_source_positions(&self.source, &mut generated_offsets, &mut positions);
+            if let Some(origin) = &self.source_provenance {
+                fill_source_positions(
+                    &origin.original_source,
+                    &mut original_offsets,
+                    &mut positions,
+                );
+            }
+            let mut debug_call_sites = raw_sites
+                .into_iter()
+                .enumerate()
+                .map(|(index, (function_span, instruction, _))| {
+                    let (line, column) = positions[index];
+                    DebugCallSite {
+                        function_span,
+                        instruction,
+                        line,
+                        column,
+                    }
+                })
+                .collect::<Vec<_>>();
+            debug_call_sites.sort_by_key(|site| (site.function_span, site.instruction));
+            let source_origin = self.source_origin;
+            let static_source_provenance = self.source_provenance;
+            let static_source_identity = static_source_provenance
+                .as_ref()
+                .map(|provenance| Arc::clone(&provenance.identity));
             Ok((
                 Program {
                     version: BYTECODE_VERSION,
@@ -217,7 +277,11 @@ impl super::Compiler {
                     local_count: self.local_count,
                     functions: self.functions,
                     source: self.source,
+                    source_origin,
+                    static_source_identity,
+                    static_source_provenance,
                     template_sites: self.template_sites,
+                    debug_call_sites,
                 },
                 Strictness {
                     body: self.strict,
@@ -225,7 +289,20 @@ impl super::Compiler {
                 },
             ))
         } else {
-            Err(self.diagnostics)
+            let mut diagnostics = self.diagnostics;
+            if let Some(origin) = &self.source_provenance {
+                for diagnostic in &mut diagnostics {
+                    if let Some(span) = &mut diagnostic.span {
+                        if let Some(start) = origin.original_offset(span.start) {
+                            span.start = start;
+                        }
+                        if let Some(end) = origin.original_offset(span.end) {
+                            span.end = end.max(span.start);
+                        }
+                    }
+                }
+            }
+            Err(diagnostics)
         }
     }
 
@@ -250,6 +327,7 @@ impl super::Compiler {
                 // is the exporter's own, installed by the host before the first instruction, so
                 // there is nothing for the module prologue to box.
                 celled: true,
+                eval_declaration: None,
             },
         );
         Some(slot)
@@ -266,12 +344,23 @@ impl super::Compiler {
         // a nested class does not shadow a name it never mentioned.
         for (depth, declared) in self.private_declarations.iter().enumerate().rev() {
             if declared.contains(name) {
-                return private_key(self.private_scopes[depth], name);
+                return private_key(
+                    &self.private_scope_modules[depth],
+                    self.private_scopes[depth],
+                    name,
+                );
             }
         }
         // Undeclared anywhere. A syntax error in its own right, reported where the name is used
         // rather than invented into some other class's scope.
-        private_key(self.private_scopes.last().copied().unwrap_or(0), name)
+        let depth = self.private_scopes.len().saturating_sub(1);
+        private_key(
+            self.private_scope_modules
+                .get(depth)
+                .map_or(&self.private_module_id, String::as_str),
+            self.private_scopes.get(depth).copied().unwrap_or(0),
+            name,
+        )
     }
 
     /// The brand binding of the class that *declares* `name`, mirroring [`Self::private_key`].
@@ -291,10 +380,21 @@ impl super::Compiler {
     pub(super) fn private_brand_key(&self, name: &str) -> String {
         for (depth, declared) in self.private_declarations.iter().enumerate().rev() {
             if declared.contains(name) {
-                return private_key(self.private_scopes[depth], "%brand");
+                return private_key(
+                    &self.private_scope_modules[depth],
+                    self.private_scopes[depth],
+                    "%brand",
+                );
             }
         }
-        private_key(self.private_scopes.last().copied().unwrap_or(0), "%brand")
+        let depth = self.private_scopes.len().saturating_sub(1);
+        private_key(
+            self.private_scope_modules
+                .get(depth)
+                .map_or(&self.private_module_id, String::as_str),
+            self.private_scopes.get(depth).copied().unwrap_or(0),
+            "%brand",
+        )
     }
 
     pub(super) fn resolve_module_local(&self, name: &str) -> Option<u32> {
@@ -380,7 +480,7 @@ impl super::Compiler {
     }
 
     pub(super) fn delete_binding_lexically(&mut self, name: &str) {
-        match self.resolve(name) {
+        match self.resolve_or_capture(name) {
             // Anything a scope declared is undeletable -- `var`, `let`, a parameter, a
             // function declaration, an import -- so the answer is known here and nothing
             // needs to run.
@@ -442,5 +542,39 @@ impl super::Compiler {
         }
         self.push_private_brand(&brand);
         self.code.push(Instruction::SetPrivate(name));
+    }
+}
+
+/// Compute one-based line and UTF-16 column coordinates for sorted byte offsets.
+fn fill_source_positions(source: &str, offsets: &mut [(u32, usize)], output: &mut [(u32, u32)]) {
+    offsets.sort_unstable_by_key(|(offset, _)| *offset);
+    let mut chars = source.char_indices().peekable();
+    let (mut line, mut column) = (1u32, 1u32);
+    for &(offset, index) in offsets.iter() {
+        while chars
+            .peek()
+            .is_some_and(|(byte_offset, _)| *byte_offset < offset as usize)
+        {
+            let (_, ch) = chars.next().expect("peeked source character");
+            match ch {
+                '\n' => {
+                    line += 1;
+                    column = 1;
+                }
+                '\r' => {
+                    if chars.peek().is_some_and(|(_, next)| *next == '\n') {
+                        chars.next();
+                    }
+                    line += 1;
+                    column = 1;
+                }
+                '\u{2028}' | '\u{2029}' => {
+                    line += 1;
+                    column = 1;
+                }
+                _ => column += ch.len_utf16() as u32,
+            }
+        }
+        output[index] = (line, column);
     }
 }

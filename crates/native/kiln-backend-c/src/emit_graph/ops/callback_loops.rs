@@ -59,7 +59,7 @@ pub(super) fn closure_call(
     let args = args.join(", ");
     format!(
         "{{ kiln_val vargs[{n}] = {{ {args} }}; int status; \
-             if (!{closure}->publishes_frame) {{ kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; status = {closure}->body(&ctx_call, &{out}, {closure}->upvalues, &{recv}, vargs, (size_t){n}); }} \
+             if (!{closure}->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, {closure}, &call_host), thrown, NULL, depth + 1 }}; status = {closure}->body(&ctx_call, &{out}, {closure}->upvalues, &{recv}, vargs, (size_t){n}); }} \
              else status = kiln_c99_invoke_closure(host, &{out}, {closure}, {recv}, vargs, (size_t){n}, depth, thrown, NULL, 0); \
              if (KILN_UNLIKELY(status != KILN_C99_OK)) {{ {check} }} }}"
     )
@@ -70,7 +70,7 @@ pub(super) fn closure_call(
 fn receiver(closure: &str, recv: &str, this_arg: &str) -> String {
     format!(
         "kiln_val {recv} = {closure}->arrow ? {closure}->captured_this : {this_arg}; \
-         if (!{closure}->arrow && !{closure}->strict) (void)kiln_c99_global_object_val(&{recv});"
+         kiln_c99_normalize_closure_receiver(&{recv}, {closure});"
     )
 }
 

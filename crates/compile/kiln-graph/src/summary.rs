@@ -209,7 +209,9 @@ fn collect_sites(
             | GraphOp::SetProperty { site, .. }
             | GraphOp::SetPropertyStrict { site, .. }
             | GraphOp::SetComputed { site, .. }
-            | GraphOp::SetComputedStrict { site, .. } => {
+            | GraphOp::SetComputedStrict { site, .. }
+            | GraphOp::DefineOwnProperty { site, .. }
+            | GraphOp::DefineOwnComputed { site, .. } => {
                 sites.push(site.0);
             }
             GraphOp::Phi { inputs } => {
@@ -248,11 +250,15 @@ mod tests {
     fn empty_program() -> Program {
         Program {
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: Vec::new(),
             local_count: 0,
             functions: Vec::new(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             source: "".into(),
         }
     }

@@ -29,6 +29,22 @@ export const lstat = unmaterialized("lstat");
 export const mkdir = unmaterialized("mkdir");
 export const mkdtemp = unmaterialized("mkdtemp");
 
+// The native host currently exposes directory enumeration as a synchronous filesystem
+// capability. Keep the public Promise contract here: invoking the host operation from an async
+// function turns both its result and any filesystem error into the corresponding Promise
+// fulfillment or rejection. The interpreter/Node adapter's own promise implementation remains
+// authoritative when it provides `readdir` directly.
+export const readdir: (...args: any[]) => Promise<any[]> =
+  nativeModule && typeof nativeModule.readdir === "function"
+    ? nativeModule.readdir
+    : async function readdir(path: any, options?: any): Promise<any[]> {
+        const fs = (process as any).__kilnNativeModules?.fs;
+        if (fs && typeof fs.readdirSync === "function") {
+          return fs.readdirSync(path, options);
+        }
+        return unmaterialized("readdir")(path, options);
+      };
+
 export class FileHandle {
   readonly fd: number;
   constructor(fd: number) {
@@ -178,7 +194,6 @@ export async function open(path: string, flags: string = "r", mode?: number): Pr
   throw new Error("node:fs/promises open requires an FS host capability that this realm does not provide");
 }
 
-export const readdir = unmaterialized("readdir");
 export const readFile = unmaterialized("readFile");
 export const readlink = unmaterialized("readlink");
 export const realpath = unmaterialized("realpath");

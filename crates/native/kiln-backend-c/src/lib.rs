@@ -6,12 +6,14 @@
 //! otherwise bakes CLI policy into an object file).
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Write as _,
     sync::Arc,
 };
 
-use kiln_host_abi::{HOST_ABI_VERSION, HOST_OP_MODULE_CREATE_REQUIRE, HostOp};
+use kiln_host_abi::{
+    HOST_ABI_VERSION, HOST_OP_MODULE_CREATE_REQUIRE, HOST_OP_MODULE_LOADER, HostOp,
+};
 use kiln_ir::{
     BYTECODE_VERSION, BinaryOp, Constant, FunctionProto, Instruction, ModuleProgram, Program,
     UnaryOp, Upvalue,
@@ -24,6 +26,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// Internal host callback code for realm-owned `createRequire` values. The emitted C macro and
 /// generated launchers mirror the typed host-ABI authority rather than defining another number.
 pub const C99_HOST_MODULE_CREATE_REQUIRE: u16 = HOST_OP_MODULE_CREATE_REQUIRE;
+pub const C99_HOST_MODULE_LOADER: u16 = HOST_OP_MODULE_LOADER;
 
 /// Revision of the complete generated translation-unit format.
 ///
@@ -39,8 +42,9 @@ pub const C99_HOST_MODULE_CREATE_REQUIRE: u16 = HOST_OP_MODULE_CREATE_REQUIRE;
 // epoch 45 packs source ranges observable through live closures; epoch 46 decouples compact C
 // source from generic-only emission. Epoch 47 preserves inherited class evaluation and budgets
 // release specialization using only retained code. Epoch 48 carries the canonical unit-string
-// value bridge and its provider-boundary codecs through generated C.
-pub const C_GENERATOR_VERSION: u32 = 48;
+// value bridge and its provider-boundary codecs through generated C. Epoch 49 includes source
+// coordinates at generated call and construction sites for native stack frames.
+pub const C_GENERATOR_VERSION: u32 = 49;
 
 /// Content identity of this emitter checkout, including dirty source changes. Input-keyed
 /// caches must not trust a manually advanced generator epoch alone across active worktrees.
@@ -185,6 +189,21 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, url_parse) => {
         concat!("int ", stringify!($name), "(const uint8_t *input, uint64_t input_len, const uint8_t *base, uint64_t base_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };
+    ($group:ident, $name:ident, text_decoder_label) => {
+        concat!("int ", stringify!($name), "(const uint8_t *label, uint64_t label_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, text_decode) => {
+        concat!("int ", stringify!($name), "(const uint8_t *name, uint64_t name_len, const uint8_t *bytes, uint64_t bytes_len, uint32_t flags, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, text_decoder_state_create) => {
+        concat!("int ", stringify!($name), "(const uint8_t *label, uint64_t label_len, uint32_t flags, void **out_state, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, text_decoder_state_decode) => {
+        concat!("int ", stringify!($name), "(void *state, const uint8_t *bytes, uint64_t bytes_len, uint32_t stream, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, text_decoder_state_free) => {
+        concat!("void ", stringify!($name), "(void *state);\n")
+    };
     ($group:ident, $name:ident, string_case) => {
         concat!("int ", stringify!($name), "(const uint16_t *units, uint64_t count, uint32_t upper, uint16_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };
@@ -193,6 +212,12 @@ macro_rules! provider_c_declaration {
     };
     ($group:ident, $name:ident, intl_collate) => {
         concat!("int ", stringify!($name), "(const uint16_t *left, uint64_t left_len, const uint16_t *right, uint64_t right_len, const uint8_t *spec, uint64_t spec_len, int32_t *out_order);\n")
+    };
+    ($group:ident, $name:ident, intl_string_case) => {
+        concat!("int ", stringify!($name), "(const uint16_t *units, uint64_t count, const uint8_t *locale, uint64_t locale_len, uint32_t uppercase, uint16_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, intl_datetime_format) => {
+        concat!("int ", stringify!($name), "(const uint8_t *spec, uint64_t spec_len, double epoch_milliseconds, uint32_t operation, const uint8_t **out, uint64_t *out_len);\n")
     };
     ($group:ident, $name:ident, url_set) => {
         concat!("int ", stringify!($name), "(const uint8_t *href, uint64_t href_len, uint32_t field, const uint8_t *value, uint64_t value_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
@@ -254,11 +279,24 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, realm_cancel_active_request) => {
         concat!("int ", stringify!($name), "(uint64_t request);\n")
     };
+    ($group:ident, $name:ident, realm_cancel_active_request_if_pending) => {
+        concat!("int ", stringify!($name), "(uint64_t request);\n")
+    };
     ($group:ident, $name:ident, realm_cancel_request) => {
         concat!("int ", stringify!($name), "(uint64_t realm, uint64_t request);\n")
     };
     ($group:ident, $name:ident, realm_clear_timer) => {
         concat!("int ", stringify!($name), "(uint64_t id);\n")
+    };
+    ($group:ident, $name:ident, realm_rearm_timer) => {
+        concat!(
+            "int ",
+            stringify!($name),
+            "(uint64_t id, double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);\n"
+        )
+    };
+    ($group:ident, $name:ident, realm_set_timer_ref) => {
+        concat!("int ", stringify!($name), "(uint64_t id, int referenced);\n")
     };
     ($group:ident, $name:ident, realm_create) => {
         concat!("int ", stringify!($name), "(uint64_t *out_realm);\n")
@@ -450,13 +488,46 @@ pub struct CModule {
     /// Whether this unit intentionally contains only generic bodies and should favor the
     /// cheapest downstream compilation tier.
     pub generic_only: bool,
+    /// Whether this generated unit contains selected generic boxed bodies which are compiled at
+    /// O1 while their neighboring generic bodies remain O0.
+    pub generic_mixed_optimization: bool,
     /// If non-empty, contains multi-chunk C99 sources for parallel compilation.
     pub chunks: Vec<String>,
+    /// Per-chunk value aligned with [`Self::chunks`], identifying chunks with selected generic
+    /// bodies. Empty when [`Self::chunks`] is empty.
+    pub chunk_generic_mixed_optimization: Vec<bool>,
     /// With [`EmissionPolicy::parallel_workers_unit`], and only when the module has a
     /// qualifying `parallelMap` site: one more translation unit holding the sites' parallel
     /// clones and chunk workers, which [`Self::source`] (or a chunk) declares and calls. It is
     /// to be compiled at the profile's optimising level and linked with the module.
     pub parallel_workers: Option<String>,
+    /// C entrypoint source that runs only ModuleDeclarationInstantiation. Native graph launchers
+    /// call it for every ESM module before starting evaluation.
+    pub instantiation: Option<CModuleUnit>,
+}
+
+/// An auxiliary source unit exported with the same native artifact as its evaluation module.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CModuleUnit {
+    pub symbol: String,
+    /// Helper that allocates and publishes this module's export cells before instantiation.
+    pub prepare_symbol: String,
+    pub source: String,
+    /// Whether the instantiation unit contains selected generic boxed bodies that need O1
+    /// compilation while its other generic bodies retain the O0 attribute.
+    #[serde(default)]
+    pub generic_mixed_optimization: bool,
+}
+
+fn generic_mixed_for_program(program: &Program, policy: &EmissionPolicy) -> bool {
+    policy.generic_only
+        && direct::select_generic_optimization_functions(
+            program,
+            &compute_publishes_frame(program),
+            None,
+        )
+        .into_iter()
+        .any(|selected| selected)
 }
 
 /// Backwards-compatible descriptive alias for callers that call an emitted unit a module.
@@ -507,8 +578,11 @@ pub fn emit_with_policy(program: &Program, policy: EmissionPolicy) -> Result<CMo
         source,
         program_hash,
         generic_only: policy.generic_only,
+        generic_mixed_optimization: generic_mixed_for_program(program, &policy),
         chunks: Vec::new(),
+        chunk_generic_mixed_optimization: Vec::new(),
         parallel_workers: None,
+        instantiation: None,
     })
 }
 
@@ -548,8 +622,11 @@ pub fn emit_module_with_policy(
         source: rendered.source,
         program_hash,
         generic_only: policy.generic_only,
+        generic_mixed_optimization: rendered.generic_mixed_optimization,
         chunks: rendered.chunks,
+        chunk_generic_mixed_optimization: rendered.chunk_generic_mixed_optimization,
         parallel_workers: rendered.parallel_workers,
+        instantiation: None,
     })
 }
 
@@ -573,8 +650,24 @@ pub fn emit_module_with_logical_path_and_policy(
     logical_path: &str,
     policy: EmissionPolicy,
 ) -> Result<CModule, EmitError> {
+    emit_module_with_logical_path_and_policy_and_instantiation(module, logical_path, policy, false)
+}
+
+/// Emit a graph module, optionally splitting ModuleDeclarationInstantiation from evaluation.
+/// The split is used for modules in a cycle; ordinary modules retain their single-entry ABI.
+pub fn emit_module_with_logical_path_and_policy_and_instantiation(
+    module: &ModuleProgram,
+    logical_path: &str,
+    policy: EmissionPolicy,
+    instantiate: bool,
+) -> Result<CModule, EmitError> {
     let (symbol, program_hash, _) =
         module_identity_with_logical_path_and_policy(module, logical_path, &policy)?;
+    // A cycle's split entrypoints no longer contain the full module's initialization stores.
+    // Preserve only their bounded loop-ranking facts; all call resolution remains phase-local.
+    let generic_loop_profile = (instantiate && policy.generic_only)
+        .then(|| direct::generic_loop_profile_for_program(&module.program))
+        .flatten();
     // The runtime bootstrap reads its captured bindings from the realm's unit block, so that its
     // closures capture nothing and live in the shared immutable region (realms issue 08).
     let region = policy
@@ -582,7 +675,7 @@ pub fn emit_module_with_logical_path_and_policy(
         .then(|| module_cells::plan(&module.program))
         .flatten();
     let rewritten;
-    let (module, region) = match region {
+    let (module, mut region) = match region {
         Some((program, mut plan)) => {
             // A module import/export can pass a cell pointer through the boundary ABI to a
             // different unit. Compact unit-owned cells have no GC block header, so retain the
@@ -599,17 +692,321 @@ pub fn emit_module_with_logical_path_and_policy(
         }
         None => (module, None),
     };
-    let rendered = module_cells::with_plan(region, || {
-        render_module(module, program_hash, &symbol, &policy, false, logical_path)
+    if instantiate {
+        // Export cells are allocated before graph-wide instantiation. Every module-level read or
+        // write of an exported binding must therefore go through that preallocated cell, even
+        // when no closure in this source happened to require the compiler's ordinary cell flag.
+        let mut plan = region
+            .take()
+            .map(|plan| plan.as_ref().clone())
+            .unwrap_or_default();
+        plan.cell_globals
+            .extend(module.exports.iter().map(|binding| binding.local_slot));
+        // Link-time ESM binding imports arrive as cells when the provider is in an instantiated
+        // cycle, and as values written into an importer-owned cell otherwise. The module body
+        // must dereference either representation before using an imported binding. Namespace
+        // imports remain ordinary object values and must not be interpreted as cells.
+        plan.cell_globals.extend(
+            module
+                .imports
+                .iter()
+                .filter(|binding| binding.imported != kiln_ir::NAMESPACE_IMPORT)
+                .map(|binding| binding.local_slot),
+        );
+        region = Some(std::rc::Rc::new(plan));
+    }
+    let mut linked_cells = module
+        .exports
+        .iter()
+        .map(|export| export.local_slot)
+        .collect::<HashSet<_>>();
+    if instantiate {
+        linked_cells.extend(
+            module
+                .imports
+                .iter()
+                .filter(|binding| binding.imported != kiln_ir::NAMESPACE_IMPORT)
+                .map(|binding| binding.local_slot),
+        );
+        linked_cells.extend(
+            module
+                .program
+                .code
+                .iter()
+                .take(module.link_facts.module_instantiation_end as usize)
+                .filter_map(|instruction| match instruction {
+                    Instruction::NewCell(slot) => Some(*slot),
+                    _ => None,
+                }),
+        );
+    }
+    // Splitting removes hoisted MakeFunction instructions from evaluation. Compute their
+    // captured binding roots while the complete module still establishes closure ownership.
+    let mut evaluation_policy = policy.clone();
+    if instantiate {
+        if let Some(demanded) = &policy.live_module_slots {
+            let retained = closed_world_function_liveness(
+                &module.program,
+                demanded,
+                module.link_facts.direct_eval,
+                &module.link_facts.removable_declarations,
+            )
+            .2;
+            evaluation_policy.live_module_slots = Some(Arc::new(retained));
+        }
+    }
+    let (module, instantiation) = if instantiate {
+        let mut module = module.clone();
+        let mut binding_slots = module
+            .exports
+            .iter()
+            .map(|binding| binding.local_slot)
+            .collect::<HashSet<_>>();
+        binding_slots.extend(
+            module
+                .imports
+                .iter()
+                .filter(|binding| binding.imported != kiln_ir::NAMESPACE_IMPORT)
+                .map(|binding| binding.local_slot),
+        );
+        // The graph linker installs each binding slot as a cell before this code runs. The
+        // ordinary module-body instructions were compiled as locals, though, so convert those
+        // accesses to the cell operations the backend already uses for captured bindings.
+        // `NewCell` is redundant for these slots and would replace the shared cell.
+        for instruction in &mut module.program.code {
+            match instruction {
+                Instruction::LoadLocal(slot) if binding_slots.contains(slot) => {
+                    *instruction = Instruction::LoadCell(*slot);
+                }
+                Instruction::StoreLocal(slot) if binding_slots.contains(slot) => {
+                    *instruction = Instruction::StoreCell(*slot);
+                }
+                Instruction::NewCell(slot) if binding_slots.contains(slot) => {
+                    *instruction = Instruction::Nop;
+                }
+                _ => {}
+            }
+        }
+        let instantiation_symbol = format!("{symbol}_instantiate");
+        let mut evaluation = module.clone();
+        for instruction in evaluation
+            .program
+            .code
+            .iter_mut()
+            .take(module.link_facts.module_instantiation_end as usize)
+        {
+            *instruction = Instruction::Nop;
+        }
+        let mut instantiation = module.clone();
+        instantiation
+            .program
+            .code
+            .truncate(module.link_facts.module_instantiation_end as usize);
+        instantiation.program.code.push(Instruction::Return);
+        // Declaration ranges describe evaluation's original bytecode, not this truncated
+        // prefix. In particular the appended Return occupies the first initializer's PC.
+        instantiation.link_facts.removable_declarations.clear();
+        // An instantiation entrypoint is linked as one auxiliary object. Do not let the normal
+        // large-module splitter return chunks that CModuleUnit cannot currently retain.
+        let mut instantiation_policy = policy.clone();
+        instantiation_policy.compact = false;
+        instantiation_policy.parallel_workers_unit = false;
+        // Liveness is normally computed independently for each emitted entrypoint. Splitting a
+        // cycle module separates the declaration's `MakeFunction` from the evaluation code that
+        // calls it, however, so the instantiation pass can otherwise prune a closure that the
+        // evaluation pass still loads from its binding cell. Retain only top-level function
+        // bindings whose slots are read by the post-instantiation body; this preserves DCE for
+        // unrelated declarations and keeps the two phase views consistent.
+        if let Some(demanded) = &policy.live_module_slots {
+            let boundary = module.link_facts.module_instantiation_end as usize;
+            let evaluation_reads = module
+                .program
+                .code
+                .iter()
+                .skip(boundary)
+                .filter_map(|instruction| match instruction {
+                    Instruction::LoadLocal(slot)
+                    | Instruction::LoadCell(slot)
+                    | Instruction::LoadGlobal(slot) => Some(*slot),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            // Seed phase-one DCE from the same full-module liveness closure that protects the
+            // evaluation entrypoint. A hoisted helper can be reachable only through another
+            // function which runs after initialization, so scanning only top-level evaluation
+            // reads misses it and leaves its exported/imported cell empty.
+            let mut retained = evaluation_policy
+                .live_module_slots
+                .as_ref()
+                .map(|slots| (**slots).clone())
+                .unwrap_or_else(|| (**demanded).clone());
+            for (pc, instruction) in module.program.code[..boundary.min(module.program.code.len())]
+                .iter()
+                .enumerate()
+            {
+                let Instruction::MakeFunction(function_index) = instruction else {
+                    continue;
+                };
+                let Some(store) = module.program.code.get(pc + 1) else {
+                    continue;
+                };
+                let slot = match store {
+                    Instruction::StoreLocal(slot)
+                    | Instruction::StoreCell(slot)
+                    | Instruction::StoreGlobal(slot) => *slot,
+                    _ => continue,
+                };
+                // The slot may be used by another module through an exported/imported live
+                // binding without appearing in this module's evaluation instructions. `demanded`
+                // contains those graph-level roots; their closures and captured locals must be
+                // present before any member of the cycle begins evaluation.
+                if evaluation_reads.contains(&slot) || demanded.contains(&slot) {
+                    retained.insert(slot);
+                    // The closure is retained for local evaluation or an imported export, but
+                    // module locals its upvalues point at must also survive instantiation DCE.
+                    // Otherwise the closure survives while its captured lexical cell is pruned,
+                    // so a class or let declaration can leave it permanently in TDZ.
+                    if let Some(function) = module.program.functions.get(*function_index as usize) {
+                        for upvalue in &function.upvalues {
+                            match upvalue {
+                                kiln_ir::Upvalue::ParentLocal(captured)
+                                | kiln_ir::Upvalue::NamedParentLocal { slot: captured, .. } => {
+                                    retained.insert(*captured);
+                                }
+                                kiln_ir::Upvalue::ParentUpvalue(_)
+                                | kiln_ir::Upvalue::NamedParentUpvalue { .. } => {}
+                            }
+                        }
+                    }
+                }
+            }
+            instantiation_policy.live_module_slots = Some(Arc::new(retained));
+        }
+        let mut source = module_cells::with_plan(region.clone(), || {
+            render_module_with_unit(
+                &instantiation,
+                program_hash,
+                &instantiation_symbol,
+                Some(&symbol),
+                true,
+                true,
+                &instantiation_policy,
+                false,
+                logical_path,
+                true,
+                generic_loop_profile.clone(),
+            )
+        })?;
+        render_prepare_module_cells(
+            &mut source.source,
+            &format!("{instantiation_symbol}_prepare_cells"),
+            &symbol,
+            &instantiation,
+        );
+        (
+            evaluation,
+            Some(CModuleUnit {
+                symbol: instantiation_symbol.clone(),
+                prepare_symbol: format!("{instantiation_symbol}_prepare_cells"),
+                source: source.source,
+                generic_mixed_optimization: source.generic_mixed_optimization,
+            }),
+        )
+    } else {
+        (module.clone(), None)
+    };
+    let rendered = module_cells::with_linked_cells(linked_cells, || {
+        module_cells::with_plan(region, || {
+            render_module_with_unit(
+                &module,
+                program_hash,
+                &symbol,
+                instantiate.then_some(symbol.as_str()),
+                instantiate,
+                false,
+                &evaluation_policy,
+                false,
+                logical_path,
+                instantiate,
+                generic_loop_profile,
+            )
+        })
     })?;
     Ok(CModule {
         symbol,
         source: rendered.source,
         program_hash,
         generic_only: policy.generic_only,
+        generic_mixed_optimization: rendered.generic_mixed_optimization,
         chunks: rendered.chunks,
+        chunk_generic_mixed_optimization: rendered.chunk_generic_mixed_optimization,
         parallel_workers: rendered.parallel_workers,
+        instantiation,
     })
+}
+
+fn render_prepare_module_cells(
+    output: &mut String,
+    prepare_symbol: &str,
+    unit_symbol: &str,
+    module: &ModuleProgram,
+) {
+    let imports = module
+        .imports
+        .iter()
+        .map(|binding| binding.local_slot)
+        .collect::<HashSet<_>>();
+    let tdz = module
+        .program
+        .code
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::MarkUninitialized(slot) => Some(*slot),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let slots = module
+        .exports
+        .iter()
+        .filter_map(|binding| {
+            let slot = binding.local_slot;
+            (!imports.contains(&slot)).then_some((slot, tdz.contains(&slot)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    writeln!(
+        output,
+        "int {prepare_symbol}(kiln_host *host, kiln_value *cells, size_t count) {{"
+    )
+    .unwrap();
+    writeln!(output, "    if (count != (size_t){} || (count != 0 && cells == NULL)) return KILN_C99_INVALID_ARGUMENT;", module.exports.len()).unwrap();
+    writeln!(output, "    if (kiln_realm_is_active()) {{ int status = kiln_realm_gc_register_roots_with_visitor({unit_symbol}_gc_roots, {unit_symbol}_gc_visit_roots, NULL, 0); if (status != KILN_C99_OK) return status; }}").unwrap();
+    writeln!(output, "    kiln_val *locals = {unit_symbol}_globals;").unwrap();
+    for (slot, uninitialized) in &slots {
+        writeln!(
+            output,
+            "    locals[{slot}] = {};",
+            if *uninitialized {
+                "KILN_VAL_UNINITIALIZED"
+            } else {
+                "KILN_VAL_UNDEFINED"
+            }
+        )
+        .unwrap();
+        writeln!(output, "    {{ int status = kiln_c99_val_make_cell_owned(&locals[{slot}], host != NULL ? host->module_owner : NULL); if (status != KILN_C99_OK) return status; }}").unwrap();
+    }
+    for (index, binding) in module.exports.iter().enumerate() {
+        if slots.contains_key(&binding.local_slot) {
+            writeln!(
+                output,
+                "    cells[{index}] = kiln_val_to_boundary(locals[{}]);",
+                binding.local_slot
+            )
+            .unwrap();
+        } else {
+            writeln!(output, "    cells[{index}] = kiln_c99_undefined();").unwrap();
+        }
+    }
+    output.push_str("    return KILN_C99_OK;\n}\n");
 }
 
 /// Compute the stable symbol and both program hashes without rendering the C body.
@@ -659,8 +1056,11 @@ pub fn emit_commonjs_module_with_logical_path_and_policy(
         source: rendered.source,
         program_hash,
         generic_only: policy.generic_only,
+        generic_mixed_optimization: rendered.generic_mixed_optimization,
         chunks: rendered.chunks,
+        chunk_generic_mixed_optimization: rendered.chunk_generic_mixed_optimization,
         parallel_workers: rendered.parallel_workers,
+        instantiation: None,
     })
 }
 
@@ -706,8 +1106,11 @@ pub fn emit_runtime_module_with_logical_path_and_policy(
         source,
         program_hash,
         generic_only: policy.generic_only,
+        generic_mixed_optimization: false,
         chunks: Vec::new(),
+        chunk_generic_mixed_optimization: Vec::new(),
         parallel_workers: None,
+        instantiation: None,
     })
 }
 
@@ -801,6 +1204,22 @@ fn produces_references(program: &Program) -> bool {
     if has_top_level_await(program) {
         return true;
     }
+    // A cell read can be a temporal-dead-zone read. The scalar entry has no `thrown` slot,
+    // while the boxed entry must preserve the actual ReferenceError for the host (and for JS
+    // catch blocks). Do not classify a program containing one as a non-throwing scalar body.
+    let reads_shared_cell = |code: &[Instruction]| {
+        code.iter().any(|instruction| {
+            matches!(instruction, Instruction::LoadGlobal(slot) if module_cells::is_cell_global(*slot))
+        })
+    };
+    if reads_shared_cell(&program.code)
+        || program
+            .functions
+            .iter()
+            .any(|proto| reads_shared_cell(&proto.code))
+    {
+        return true;
+    }
     let scalar_only = |code: &[Instruction]| {
         code.iter().all(|instruction| {
             matches!(
@@ -811,7 +1230,6 @@ fn produces_references(program: &Program) -> bool {
                     | Instruction::LoadGlobal(_)
                     | Instruction::StoreGlobal(_)
                     | Instruction::NewCell(_)
-                    | Instruction::LoadCell(_)
                     | Instruction::StoreCell(_)
                     | Instruction::Pop
                     | Instruction::Dup
@@ -1000,6 +1418,10 @@ pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
         kiln_ir::Builtin::EvalError => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_EVAL_ERROR)")
         }
+        // Reading `eval` as a value (for example through `%eval%` in get-intrinsic) is supported.
+        // Direct calls carry a `DirectEval` instruction and remain separately guarded by
+        // validation until the native backend can compile them with the caller's lexical cells.
+        kiln_ir::Builtin::Eval => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_EVAL)"),
         kiln_ir::Builtin::AggregateError => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR)")
         }
@@ -1104,9 +1526,9 @@ pub(crate) fn builtin_load(builtin: kiln_ir::Builtin) -> BuiltinLoad {
         kiln_ir::Builtin::Buffer => BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER)"),
         kiln_ir::Builtin::NotANumber => BuiltinLoad::Value("kiln_c99_number(0.0 / 0.0)"),
         kiln_ir::Builtin::Infinity => BuiltinLoad::Value("kiln_c99_number(1.0 / 0.0)"),
-        kiln_ir::Builtin::AbortController => {
-            BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_ABORT_CONTROLLER)")
-        }
+        // The public WebIDL class is installed by the shared TypeScript bootstrap; the
+        // primitive controller remains reachable only through its captured private kernel.
+        kiln_ir::Builtin::AbortController => BuiltinLoad::Global("AbortController"),
         kiln_ir::Builtin::AbortSignal => {
             BuiltinLoad::Value("kiln_c99_builtin(KILN_C99_BUILTIN_ABORT_SIGNAL)")
         }
@@ -1370,6 +1792,7 @@ fn compact_closure_source(
         packed.push_str(&original[start..end]);
         packed_intervals.push((start, end, packed_start));
     }
+    let mut span_map = HashMap::new();
     for (index, function) in program.functions.iter_mut().enumerate() {
         let start = function.span.start as usize;
         let end = function.span.end as usize;
@@ -1382,6 +1805,13 @@ fn compact_closure_source(
             })
             .flatten();
         if let Some((start, end)) = mapped {
+            span_map.insert(
+                function.span,
+                kiln_ir::Span {
+                    start: start as u32,
+                    end: end as u32,
+                },
+            );
             function.span.start = start as u32;
             function.span.end = end as u32;
         } else {
@@ -1390,6 +1820,16 @@ fn compact_closure_source(
             function.span.end = 0;
         }
     }
+    for site in &mut program.debug_call_sites {
+        if let Some(original) = site.function_span
+            && let Some(compacted) = span_map.get(&original)
+        {
+            site.function_span = Some(*compacted);
+        }
+    }
+    program
+        .debug_call_sites
+        .sort_by_key(|site| (site.function_span, site.instruction));
     program.source = packed.into();
 }
 
@@ -1401,6 +1841,8 @@ struct RenderedFunctions {
 struct RenderedModule {
     source: String,
     chunks: Vec<String>,
+    generic_mixed_optimization: bool,
+    chunk_generic_mixed_optimization: Vec<bool>,
     parallel_workers: Option<String>,
 }
 
@@ -1587,10 +2029,16 @@ fn render_functions(
             };
             typed_callees[index] = typed_entry_calls(body, symbol);
             let found = direct::TypedNeeds {
-                runtime: names(body, "host") || names(body, "thrown"),
+                // Instance-global lookup is emitted in the activation prologue, before block 0.
+                // Include that host use without counting the host parameter in the signature.
+                runtime: names(scratch.split_once('{').map_or("", |(_, body)| body), "host")
+                    || names(body, "thrown"),
                 upvalues: names(body, "upvalues"),
                 receiver: names(body, "receiver"),
-                row: names(body, "recv_row"),
+                // The typed receiver-row prologue is emitted before block 0 and can consume
+                // `recv_row_in` even when the body itself never calls another typed entry.
+                // Include that prologue use in the signature fixed point.
+                row: names(&scratch, "recv_row_in") || names(body, "recv_row"),
             };
             let merged = direct::TypedNeeds {
                 runtime: needs[index].runtime || found.runtime,
@@ -1627,6 +2075,21 @@ fn render_functions(
             break;
         }
     }
+    // A typed recursive call normally reaches its typed entry. When that entry can fall back
+    // because one of its guarded built-ins was changed earlier in the call, the fallback calls
+    // the generic body using this closure's upvalue table. That table can be needed by the
+    // generic body even when the typed fast path itself emitted no upvalue read, so carry it in
+    // the typed signature whenever the guarded self-call can take that edge.
+    for index in 0..typed_callees.len() {
+        if needs[index].runtime
+            && typed_callees[index].contains(&index)
+            && !relies[index].is_empty()
+            && !program.functions[index].upvalues.is_empty()
+        {
+            needs[index].upvalues = true;
+        }
+    }
+    direct.set_typed_needs(&needs);
     let guards: Vec<String> = relies
         .iter()
         .map(|terms| terms.iter().cloned().collect::<Vec<_>>().join(" && "))
@@ -2447,6 +2910,57 @@ fn entry_proto(program: &Program) -> FunctionProto {
     }
 }
 
+/// Replace direct-eval instructions in bytecode-unreachable regions with Nop and report whether
+/// any reachable direct eval remains. Both conditional paths and registered exception handlers
+/// are treated as reachable; only unconditional control flow proves a site dead.
+fn prune_unreachable_direct_eval(program: &mut Program) -> bool {
+    fn prune_body(code: &mut [Instruction]) {
+        let mut reachable = HashSet::new();
+        let mut pending = vec![0usize];
+        while let Some(pc) = pending.pop() {
+            if pc >= code.len() || !reachable.insert(pc) {
+                continue;
+            }
+            let next = pc + 1;
+            match &code[pc] {
+                Instruction::Jump(target) => pending.push(*target as usize),
+                Instruction::JumpIfFalse(target)
+                | Instruction::JumpIfTruthy(target)
+                | Instruction::JumpIfNotNullish(target)
+                | Instruction::JumpIfReturnSignal(target) => {
+                    pending.push(*target as usize);
+                    pending.push(next);
+                }
+                // A handler can be entered by any throwing operation in the protected region.
+                // Conservatively count it as reachable as soon as its registration executes.
+                Instruction::PushHandler(target) => {
+                    pending.push(*target as usize);
+                    pending.push(next);
+                }
+                Instruction::Return | Instruction::Throw => {}
+                // YieldStar carries the resumption target in addition to its ordinary
+                // continuation. Mark both to avoid pruning eval code entered by resumption.
+                Instruction::YieldStar(target) => {
+                    pending.push(*target as usize);
+                    pending.push(next);
+                }
+                _ => pending.push(next),
+            }
+        }
+        for (pc, instruction) in code.iter_mut().enumerate() {
+            if matches!(instruction, Instruction::DirectEval(_)) && !reachable.contains(&pc) {
+                *instruction = Instruction::Nop;
+            }
+        }
+    }
+
+    prune_body(&mut program.code);
+    for function in &mut program.functions {
+        prune_body(&mut function.code);
+    }
+    program.has_direct_eval()
+}
+
 /// The typed entries of this unit that `body` calls: every `{symbol}_fn_{index}_t(`.
 fn typed_entry_calls(body: &str, symbol: &str) -> std::collections::BTreeSet<usize> {
     let prefix = format!("{symbol}_fn_");
@@ -2498,6 +3012,7 @@ fn plan_unit(
     parallel_in_generic: bool,
     speculate: Option<bool>,
     extra_entry_slots: Option<&HashSet<u32>>,
+    generic_loop_profile: Option<Arc<direct::LoopCallProfile>>,
 ) -> Result<
     (
         Vec<FunctionGraph>,
@@ -2526,7 +3041,7 @@ fn plan_unit(
         entry_graph.mark_non_escaping_objects_with_extra_slots(program, Some(extra));
     }
     let publishes_frame = compute_publishes_frame(program);
-    let direct = direct::DirectPlan::plan(
+    let direct = direct::DirectPlan::plan_with_loop_profile(
         program,
         &graphs,
         &entry_graph,
@@ -2536,6 +3051,7 @@ fn plan_unit(
         generic_only,
         parallel_in_generic,
         speculate,
+        generic_loop_profile,
     );
     Ok((graphs, body, entry_graph, direct))
 }
@@ -2543,6 +3059,50 @@ fn plan_unit(
 /// The unit's entry point: opened with the embedding signature, its locals declared and the
 /// imports bound into them, then the body from its graph.
 ///
+fn render_module_local_reset(
+    output: &mut String,
+    unit_symbol: &str,
+    locals: usize,
+    module: Option<(&ModuleProgram, bool)>,
+    preserve_export_cells: bool,
+) {
+    if preserve_export_cells {
+        return;
+    }
+    let exports = module
+        .filter(|(_, commonjs)| !commonjs && preserve_export_cells)
+        .map(|(module, _)| {
+            module
+                .exports
+                .iter()
+                .map(|binding| binding.local_slot)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    if exports.is_empty() {
+        writeln!(
+            output,
+            "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
+        )
+        .unwrap();
+        return;
+    }
+    writeln!(
+        output,
+        "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) {{ switch (slot) {{"
+    )
+    .unwrap();
+    for slot in exports {
+        writeln!(
+            output,
+            "        case {slot}: if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) locals[{slot}] = KILN_VAL_UNDEFINED; break;"
+        )
+        .unwrap();
+    }
+    output.push_str("        default: locals[slot] = KILN_VAL_UNDEFINED; break;\n    } }\n");
+    let _ = unit_symbol;
+}
+
 /// The locals are the unit's globals -- named rather than automatic -- whenever a function reads
 /// module scope, because an exported closure reads it after the entry point has returned, and a
 /// frame that has returned is not somewhere to read from. Every slot then lives in the array.
@@ -2563,6 +3123,7 @@ fn render_entry(
     graph: &FunctionGraph,
     calls: &direct::CallPlan,
     policy: &EmissionPolicy,
+    preserve_export_cells: bool,
     site_offset: usize,
 ) -> Result<usize, EmitError> {
     if body.asynchronous {
@@ -2643,11 +3204,7 @@ fn render_entry(
             .unwrap();
         }
 
-        writeln!(
-            output,
-            "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
-        )
-        .unwrap();
+        render_module_local_reset(output, unit_symbol, locals, module, preserve_export_cells);
 
         if let Some((module_prog, _)) = module {
             let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
@@ -2655,13 +3212,13 @@ fn render_entry(
                 let slot = binding.local_slot;
                 writeln!(
                     output,
-                    "    locals[{slot}] = kiln_val_from_boundary(imports[{index}]);"
+                    "    {{ kiln_val imported = kiln_val_from_boundary(imports[{index}]); if ((locals[{slot}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX && (imported & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR(locals[{slot}]), imported); else locals[{slot}] = imported; }}"
                 )
                 .unwrap();
                 if boxed_imports.contains(&slot) {
                     writeln!(
                         output,
-                        "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX && kiln_c99_val_make_cell(&locals[{slot}]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;"
+                        "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) {{ int cell_status = kiln_c99_val_make_cell_owned(&locals[{slot}], host != NULL ? host->module_owner : NULL); if (cell_status != KILN_C99_OK) return cell_status; }}"
                     )
                     .unwrap();
                 }
@@ -2693,6 +3250,9 @@ fn render_entry(
         0, NULL, 0
     );
     if (status != KILN_C99_OK) return status;
+    kiln_c99_closure_of(entry_closure)->module_host = kiln_c99_module_host(host);
+    kiln_c99_closure_set_external_owner(kiln_c99_closure_of(entry_closure),
+                                        host != NULL ? host->module_owner : NULL);
     status = kiln_c99_call(host, result, entry_closure, kiln_c99_undefined(), NULL, 0, depth, thrown);
     if (status == KILN_C99_THROWN) {{
         *result = kiln_c99_text(*thrown);
@@ -2726,13 +3286,18 @@ fn render_entry(
     }
 
     let entry_start = output.len();
-    let callables = produces_references(program) || (policy.compact && module.is_some());
+    // A split module phase calls the private `_body` symbol from the realm wrapper even when
+    // this entry has no closures of its own. Keep its naming/linkage decision aligned with the
+    // module-level `callables` policy above or the instantiation wrapper links an undefined body.
+    let callables = produces_references(program)
+        || (policy.compact && module.is_some())
+        || (preserve_export_cells && module.is_some());
     let entry_symbol = if callables {
         format!("{unit_symbol}_body")
     } else {
         unit_symbol.to_owned()
     };
-    let module_scope = uses_module_scope(program);
+    let module_scope = uses_module_scope(program) || (preserve_export_cells && module.is_some());
     let linkage = if callables { "static " } else { "" };
     match module {
         None => writeln!(
@@ -2823,11 +3388,7 @@ fn render_entry(
         }
     }
     if module_scope || !array_slots.is_empty() {
-        writeln!(
-            output,
-            "    for (size_t slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
-        )
-        .unwrap();
+        render_module_local_reset(output, unit_symbol, locals, module, preserve_export_cells);
     }
     if let Some((module, _)) = module {
         let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
@@ -2835,7 +3396,7 @@ fn render_entry(
             let slot = binding.local_slot;
             writeln!(
                 output,
-                "    locals[{slot}] = kiln_val_from_boundary(imports[{index}]);"
+                "    {{ kiln_val imported = kiln_val_from_boundary(imports[{index}]); if ((locals[{slot}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX && (imported & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX) kiln_c99_val_store_cell((kiln_val *)KILN_VAL_PTR(locals[{slot}]), imported); else locals[{slot}] = imported; }}"
             )
             .unwrap();
             // The exporter boxes only what can change, so an immutable export arrives as a plain
@@ -2891,7 +3452,7 @@ fn render_publish_exports(
         if module_scope {
             writeln!(
                 output,
-                "void {public_symbol}_publish_exports(kiln_value *exports) {{\n    if (exports == NULL) return;"
+                "void {public_symbol}_publish_exports(kiln_host *host, kiln_value *exports) {{\n    if (exports == NULL) return;"
             )
             .unwrap();
             for (index, binding) in module_prog.exports.iter().enumerate() {
@@ -3183,12 +3744,14 @@ fn property_key_constants(program: &Program) -> Vec<u32> {
         match instruction {
             Instruction::GetProperty(name)
             | Instruction::SetProperty(name)
+            | Instruction::DefineOwnProperty(name)
             | Instruction::DeleteProperty(name)
             | Instruction::LoadSuperProperty(name)
             | Instruction::SetPropertyStrict { name, .. }
             | Instruction::SetSuperPropertyStrict { name, .. }
             | Instruction::DeletePropertyStrict { name, .. }
-            | Instruction::CallMethod { name, .. } => Some(*name),
+            | Instruction::CallMethod { name, .. }
+            | Instruction::CallMethodPrepared { name, .. } => Some(*name),
             _ => None,
         }
     }
@@ -3527,7 +4090,7 @@ fn render_template_sites(output: &mut String, program: &Program, symbol: &str, s
     let linkage = if should_chunk { "" } else { "static " };
     writeln!(
         output,
-        "{linkage}int {symbol}_materialize_template_site(size_t site) {{"
+        "{linkage}int {symbol}_materialize_template_site(kiln_host *host, size_t site) {{"
     )
     .unwrap();
     writeln!(output, "    switch (site) {{").unwrap();
@@ -3653,6 +4216,7 @@ fn render_unit_state(
     compact_cells: usize,
     should_chunk: bool,
     extern_only: bool,
+    external: bool,
 ) {
     if globals + template_sites + compact_cells == 0 {
         return;
@@ -3660,7 +4224,11 @@ fn render_unit_state(
     if extern_only {
         writeln!(output, "extern kiln_c99_unit {symbol}_unit;").unwrap();
     } else {
-        let linkage = if should_chunk { "" } else { "static " };
+        let linkage = if should_chunk || external {
+            ""
+        } else {
+            "static "
+        };
         writeln!(
             output,
             "{linkage}kiln_c99_unit {symbol}_unit = {{ 0, {} }};",
@@ -3671,23 +4239,27 @@ fn render_unit_state(
     writeln!(
         output,
         "static _Thread_local kiln_c99_unit_cache {symbol}_unit_cached;\n\
-         static inline __attribute__((unused)) kiln_val *{symbol}_unit_vals(void) {{ return kiln_c99_unit_vals(&{symbol}_unit, &{symbol}_unit_cached); }}"
+         static inline __attribute__((unused)) kiln_val *{symbol}_unit_vals(kiln_host *host) {{ return kiln_c99_unit_vals_for_host(host, &{symbol}_unit, &{symbol}_unit_cached); }}"
     )
     .unwrap();
     if globals > 0 {
-        writeln!(output, "#define {symbol}_globals ({symbol}_unit_vals())").unwrap();
+        writeln!(
+            output,
+            "#define {symbol}_globals ({symbol}_unit_vals(host))"
+        )
+        .unwrap();
     }
     if template_sites > 0 {
         writeln!(
             output,
-            "#define {symbol}_template_sites ({symbol}_unit_vals() + {globals})"
+            "#define {symbol}_template_sites ({symbol}_unit_vals(host) + {globals})"
         )
         .unwrap();
     }
     if compact_cells > 0 {
         writeln!(
             output,
-            "#define {symbol}_cell_slots ({symbol}_unit_vals() + {})",
+            "#define {symbol}_cell_slots ({symbol}_unit_vals(host) + {})",
             globals + template_sites
         )
         .unwrap();
@@ -3773,7 +4345,36 @@ int {symbol}(kiln_host *host, kiln_value *result) {{
     .unwrap();
 }
 
-fn render_module_realm_wrapper(output: &mut String, symbol: &str, unit_symbol: &str) {
+fn render_module_realm_wrapper(
+    output: &mut String,
+    symbol: &str,
+    unit_symbol: &str,
+    commonjs_site: Option<&str>,
+) {
+    let invocation = if let Some(site) = commonjs_site {
+        // CommonJS evaluation is a real wrapper activation. It enters the module body directly,
+        // rather than calling a closure, so publish its frame here and restore it on every return.
+        // Otherwise captureStackTrace loses the caller of module-level depd initialization.
+        let source = c_string(site);
+        writeln!(
+            output,
+            r#"
+static int {unit_symbol}_invoke_body(kiln_host *host, kiln_value *result,
+    const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{
+    kiln_js_frame module_frame;
+    kiln_c99_js_frame_enter(&module_frame, NULL);
+    kiln_c99_js_frame_note_instruction({source}, 0, 0, 0);
+    int status = {unit_symbol}_body(host, result, imports, import_count, exports, export_count);
+    kiln_c99_js_frame_leave(&module_frame);
+    return status;
+}}
+"#
+        )
+        .unwrap();
+        format!("{unit_symbol}_invoke_body")
+    } else {
+        format!("{unit_symbol}_body")
+    };
     writeln!(
         output,
         r#"
@@ -3801,7 +4402,7 @@ static int {unit_symbol}_realm_entry(void *opaque) {{
     {unit_symbol}_realm_context *context = ({unit_symbol}_realm_context *)opaque;
     int status;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
-    status = {unit_symbol}_body(context->host, context->result, context->imports,
+    status = {invocation}(context->host, context->result, context->imports,
                            context->import_count, context->exports, context->export_count);
     /* A graph is linked from one C translation unit per JavaScript module. Diagnostic state is
      * deliberately private to each unit, so the module that owns the refusing instruction must
@@ -3821,7 +4422,7 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (kiln_realm_is_active()) {{
         (void)kiln_realm_diagnostic_reset();
-        status = {unit_symbol}_body(host, result, imports, import_count, exports, export_count);
+        status = {invocation}(host, result, imports, import_count, exports, export_count);
         if (status == KILN_C99_CONTROL_ERROR)
             *result = kiln_c99_control_diagnostic();
         return status;
@@ -3877,7 +4478,9 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
     kiln_object *data = NULL;
     size_t *order = NULL;
     size_t index;
-    int status;
+    size_t insert_at;
+    int status = KILN_C99_OK;
+    int extending = 0;
     if (result == NULL || (count != 0 && (names == NULL || name_lengths == NULL || values == NULL)))
         return KILN_C99_INVALID_ARGUMENT;
     for (index = 0; index < count; ++index) {{
@@ -3925,24 +4528,40 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
             }}
         }}
     }}
-    status = kiln_c99_new_object(&object);
-    if (status != KILN_C99_OK) {{
-        free(order);
-        return status;
+    if (result->tag == KILN_VALUE_OBJECT &&
+        kiln_c99_object_of(*result)->module_namespace) {{
+        object = *result;
+        data = kiln_c99_object_of(object);
+        extending = 1;
+    }} else {{
+        status = kiln_c99_new_object(&object);
+        if (status != KILN_C99_OK) {{
+            free(order);
+            return status;
+        }}
+        data = kiln_c99_object_of(object);
+        data->shape = NULL;
+        kiln_c99_heap_store_value(data, &data->prototype, kiln_c99_null());
     }}
-    data = kiln_c99_object_of(object);
-    data->shape = NULL;
-    kiln_c99_heap_store_value(data, &data->prototype, kiln_c99_null());
     for (index = 0; index < count; ++index) {{
         size_t source = order[index];
         kiln_property *slot;
         kiln_value value = values[source];
-        while (value.tag == KILN_VALUE_CELL) {{
-            if (value.bits == 0) {{
-                status = KILN_C99_CONTROL_ERROR;
-                goto namespace_failure;
+        const kiln_string *key = kiln_c99_intern(names[source], name_lengths[source]);
+        size_t existing;
+        if (key == NULL) {{
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto namespace_failure;
+        }}
+        /* An instantiated namespace is first created empty, then filled with its export cells.
+         * After evaluation the launcher publishes the same export names again. Treat that as a
+         * value refresh, not a second property insertion: namespace [[OwnPropertyKeys]] is
+         * unique, and existing export descriptors remain writable/non-configurable. */
+        for (existing = 0; existing < data->count; ++existing) {{
+            if (data->properties[existing].key == key) {{
+                kiln_c99_heap_store_value(data, &data->properties[existing].value, value);
+                goto namespace_entry_done;
             }}
-            value = kiln_val_to_boundary(*kiln_c99_cell_of(value));
         }}
         status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
                                   sizeof *data->properties);
@@ -3952,14 +4571,18 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         /* Namespace export keys stay in the linker's lexical order. Ordinary object insertion
          * would move integer-looking names to numeric order, which is not the namespace exotic
          * object's [[OwnPropertyKeys]] rule. */
-        slot = &data->properties[data->count];
+        insert_at = data->count;
+        if (extending && data->count != 0 &&
+            kiln_string_equals_ascii(data->properties[data->count - 1].key,
+                                     "@@toStringTag", 13)) {{
+            insert_at = data->count - 1;
+            memmove(&data->properties[insert_at + 1], &data->properties[insert_at],
+                    (data->count - insert_at) * sizeof *data->properties);
+        }}
+        slot = &data->properties[insert_at];
         /* Canonical like every stored key (ADR 0047). Copied rather than registered as static:
          * the launcher's names are its own, and this seam promises nothing about their life. */
-        slot->key = kiln_c99_intern(names[source], name_lengths[source]);
-        if (slot->key == NULL) {{
-            status = KILN_C99_OUT_OF_MEMORY;
-            goto namespace_failure;
-        }}
+        slot->key = key;
         data->count += 1;
         kiln_c99_heap_store_value(data, &slot->value, value);
         slot->symbol_hidden = 0;
@@ -3968,8 +4591,9 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         slot->configurable = 0;
         slot->accessor = 0;
         slot->refused = 0;
+namespace_entry_done:;
     }}
-    {{
+    if (!extending) {{
         kiln_property *tag;
         status = kiln_c99_own_slot(object, "@@toStringTag", 13, &tag);
         if (status == KILN_C99_OK) {{
@@ -3978,6 +4602,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
             tag->writable = 0;
             kiln_c99_object_of(object)->read_only_seen = 1;
             tag->enumerable = 0;
+            tag->symbol_hidden = 1;
             tag->configurable = 0;
             tag->accessor = 0;
         }}
@@ -3991,7 +4616,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
 namespace_failure:
     free(order);
 namespace_failure_without_order:
-    if (data != NULL) {{
+    if (data != NULL && !extending) {{
         for (index = 0; index < data->count; ++index) {{
             if (data->properties[index].key != NULL &&
                 kiln_string_equals_ascii(data->properties[index].key, "@@toStringTag", 13) &&
@@ -4085,7 +4710,9 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 *has_read_property = true;
                 *has_status = true;
             }
-            Instruction::SetProperty(_) | Instruction::SetPropertyStrict { .. } => {
+            Instruction::SetProperty(_)
+            | Instruction::SetPropertyStrict { .. }
+            | Instruction::DefineOwnProperty(_) => {
                 *has_write_property = true;
                 *has_status = true;
             }
@@ -4096,6 +4723,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
             }
             Instruction::SetComputed
             | Instruction::SetComputedStrict { .. }
+            | Instruction::DefineOwnComputed
             | Instruction::SetPrototype
             | Instruction::SetSuperPropertyStrict { .. }
             | Instruction::SetSuperElementStrict { .. }
@@ -4251,10 +4879,13 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
         kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(callee);\n\
         if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
             kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;\n\
-            if (KILN_UNLIKELY(!plain->arrow && !plain->strict)) (void)kiln_c99_global_object_val(&recv);\n\
-            kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
+            kiln_c99_normalize_closure_receiver(&recv, plain);\n\
+            kiln_host call_host; kiln_call_context ctx_call = { kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 };\n\
             kiln_val res = KILN_VAL_UNDEFINED;\n\
+            kiln_js_frame call_frame;\n\
+            kiln_c99_js_frame_enter(&call_frame, plain);\n\
             int status = plain->body(&ctx_call, &res, plain->upvalues, &recv, args, argc);\n\
+            kiln_c99_js_frame_leave(&call_frame);\n\
             if (KILN_LIKELY(status == KILN_C99_OK)) {\n\
                 *dst = res;\n\
                 return KILN_C99_OK;\n\
@@ -4295,7 +4926,7 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
     if has_call_method {
         output.push_str("static __attribute__((unused)) inline int ku_call_method_fast(kiln_host *host, kiln_val ku_recv, const kiln_val *args, size_t argc, const kiln_string *key, kiln_c99_site *ku_s, const char *ku_site, size_t pc, const char *op, int depth, kiln_value *thrown, kiln_val *dst) {\n\
     if (KILN_LIKELY(ku_s != NULL)) {\n\
-        if (KILN_UNLIKELY(kiln_c99_cached_method_matches(ku_s, ku_recv) && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
+        if (KILN_UNLIKELY(kiln_c99_cached_method_matches(ku_s, ku_recv, key) && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
             return kiln_c99_val_invoke_cached_method(host, ku_s->cached_method, ku_recv, args, argc, depth, thrown, dst);\n\
         }\n\
         if (KILN_LIKELY(KILN_VAL_IS_OBJECT(ku_recv) && kiln_c99_site_count(ku_s) > 0)) {\n\
@@ -4305,12 +4936,13 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(cached_fn);\n\
                 if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {\n\
                     kiln_val vreceiver = plain->arrow ? plain->captured_this : ku_recv;\n\
-                    if (KILN_UNLIKELY(!plain->arrow && !plain->strict && (vreceiver == KILN_VAL_UNDEFINED || vreceiver == KILN_VAL_NULL))) {\n\
-                        (void)kiln_c99_global_object_val(&vreceiver);\n\
-                    }\n\
-                    kiln_call_context ctx_call = { host, thrown, NULL, depth + 1 };\n\
+                    kiln_c99_normalize_closure_receiver(&vreceiver, plain);\n\
+                    kiln_host call_host; kiln_call_context ctx_call = { kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 };\n\
                     kiln_val res = KILN_VAL_UNDEFINED;\n\
+                    kiln_js_frame call_frame;\n\
+                    kiln_c99_js_frame_enter(&call_frame, plain);\n\
                     int status = plain->body(&ctx_call, &res, plain->upvalues, &vreceiver, args, argc);\n\
+                    kiln_c99_js_frame_leave(&call_frame);\n\
                     if (KILN_LIKELY(status == KILN_C99_OK)) {\n\
                         *dst = res;\n\
                         return KILN_C99_OK;\n\
@@ -4368,7 +5000,7 @@ static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *o
             kiln_object *obj = kiln_c99_object_of(built);\n\
             obj->shape = (kiln_shape *)shape;\n\
             for (size_t i = 0; i < count; ++i) {\n\
-                obj->inline_slots[i] = pairs[i * 2 + 1];\n\
+                kiln_c99_heap_store_val(obj, &obj->inline_slots[i], pairs[i * 2 + 1]);\n\
             }\n\
             *out = kiln_val_from_boundary(built);\n\
             return KILN_C99_OK;\n\
@@ -4452,6 +5084,7 @@ fn render_positioned(
         module_cells::compact_cell_count(),
         false,
         false,
+        false,
     );
     render_template_sites(&mut output, program, symbol, false);
     render_unit_roots(&mut output, symbol, !keys.is_empty());
@@ -4490,6 +5123,7 @@ fn render_positioned(
         policy.parallel_in_generic,
         policy.speculate,
         extra_entry_slots.as_ref(),
+        None,
     )?;
     if program.has_dynamic_import() {
         output.push_str(
@@ -4526,6 +5160,7 @@ fn render_positioned(
         &entry_graph,
         &direct.entry,
         policy,
+        false,
         func_sites,
     )?;
     let total_sites = func_sites + entry_sites;
@@ -4625,6 +5260,34 @@ fn render_module(
     commonjs: bool,
     diagnostic_site: &str,
 ) -> Result<RenderedModule, EmitError> {
+    render_module_with_unit(
+        module,
+        program_hash,
+        symbol,
+        None,
+        false,
+        false,
+        policy,
+        commonjs,
+        diagnostic_site,
+        false,
+        None,
+    )
+}
+
+fn render_module_with_unit(
+    module: &ModuleProgram,
+    program_hash: u64,
+    symbol: &str,
+    shared_unit_symbol: Option<&str>,
+    external_unit: bool,
+    export_cells: bool,
+    policy: &EmissionPolicy,
+    commonjs: bool,
+    diagnostic_site: &str,
+    force_module_scope: bool,
+    generic_loop_profile: Option<Arc<direct::LoopCallProfile>>,
+) -> Result<RenderedModule, EmitError> {
     // `parallelMap` site records name positions in the module as written; emission packs the
     // source below. See `parallel::SiteRecord`.
     parallel::with_original_source(&module.program, || {
@@ -4635,6 +5298,11 @@ fn render_module(
             policy,
             commonjs,
             diagnostic_site,
+            shared_unit_symbol,
+            external_unit,
+            export_cells,
+            force_module_scope,
+            generic_loop_profile,
         )
     })
 }
@@ -4646,6 +5314,11 @@ fn render_module_positioned(
     policy: &EmissionPolicy,
     commonjs: bool,
     diagnostic_site: &str,
+    shared_unit_symbol: Option<&str>,
+    external_unit: bool,
+    export_cells: bool,
+    force_module_scope: bool,
+    generic_loop_profile: Option<Arc<direct::LoopCallProfile>>,
 ) -> Result<RenderedModule, EmitError> {
     let program = &module.program;
     let should_chunk =
@@ -4654,13 +5327,19 @@ fn render_module_positioned(
     // therefore do not need the link-visible content hash; retain it only on exported adapters.
     // Chunked modules must retain the module symbol prefix so their non-static chunk symbols
     // do not collide with other chunked modules in the same binary.
-    let unit_symbol = if policy.compact && !should_chunk {
+    let default_unit_symbol = if policy.compact && !should_chunk {
         "ku"
     } else {
         symbol
     };
-    let plan = validate_program(program).expect("render called after validation");
-    let callables = produces_references(program) || policy.compact;
+    let unit_symbol = shared_unit_symbol.unwrap_or(default_unit_symbol);
+    let plan = validate_module_program(program)?;
+    // Split ESM modules render evaluation and instantiation as separate translation units that
+    // share `unit_symbol`. Even an entry with no closures needs a private body symbol in each
+    // unit; otherwise both units define the public `unit_symbol` entrypoint. The realm wrapper
+    // below owns that public symbol and dispatches to this phase's body.
+    let split_module_phase = external_unit || export_cells;
+    let callables = produces_references(program) || policy.compact || split_module_phase;
     // What the compiler said, padded with the strict answer. A `ModuleProgram` assembled by hand
     // -- a builtin's export shape, a fixture -- carries no table, and reading its absence as
     // strict is what keeps every unit that is really ESM emitting the bytes it emitted before.
@@ -4738,11 +5417,16 @@ fn render_module_positioned(
     render_unit_state(
         &mut output,
         unit_symbol,
-        unit_global_count(program),
+        unit_global_count(program).max(if force_module_scope {
+            usize::try_from(program.local_count).unwrap().max(1)
+        } else {
+            0
+        }),
         program.template_sites.len(),
         module_cells::compact_cell_count(),
         should_chunk,
-        false,
+        shared_unit_symbol.is_some_and(|shared| shared != symbol),
+        external_unit && shared_unit_symbol.is_some_and(|shared| shared == symbol),
     );
     render_template_sites(&mut output, program, unit_symbol, should_chunk);
     render_unit_roots(&mut output, unit_symbol, !keys.is_empty());
@@ -4761,15 +5445,22 @@ fn render_module_positioned(
     if policy.compact {
         output.push_str("/* KILN_C99_SITES_PLACEHOLDER */\n");
     }
+    // A module-wide syntax fact is deliberately conservative for linking, but it is too broad
+    // for native emission: a direct eval after an unconditional return cannot execute and must
+    // not disable closed-world function liveness for the whole module. Use the same CFG that
+    // drives emission to distinguish unreachable eval bytecode from a live eval (which remains
+    // unsupported below).
+    let mut reachable_program = program.clone();
+    let live_direct_eval = prune_unreachable_direct_eval(&mut reachable_program);
     let liveness = policy.live_module_slots.as_ref().map(|demanded| {
         closed_world_function_liveness(
-            program,
+            &reachable_program,
             demanded,
-            module.link_facts.direct_eval,
+            live_direct_eval,
             &module.link_facts.removable_declarations,
         )
     });
-    let mut pruned = program.clone();
+    let mut pruned = reachable_program;
     if let Some((_, dead_pcs, _)) = &liveness {
         for (pc, instruction) in pruned.code.iter_mut().enumerate() {
             if dead_pcs[0].contains(&(pc as u32)) {
@@ -4784,6 +5475,8 @@ fn render_module_positioned(
             }
         }
     }
+    // Direct eval is admitted to the shared dynamic expression seam. Unsupported runtime source
+    // refuses at the actual instruction, while supported factories close over caller cells.
     if policy.compact || policy.omit_source {
         compact_closure_source(
             &mut pruned,
@@ -4796,17 +5489,18 @@ fn render_module_positioned(
     } else {
         program
     };
-    let extra_entry_slots: HashSet<u32> = if uses_module_scope(emitted_program) {
-        (0..emitted_program.local_count).collect()
-    } else {
-        let mut slots = HashSet::new();
-        slots.extend(module.imports.iter().map(|binding| binding.local_slot));
-        slots.extend(module.exports.iter().map(|binding| binding.local_slot));
-        if commonjs {
-            slots.insert(2);
-        }
-        slots
-    };
+    let extra_entry_slots: HashSet<u32> =
+        if force_module_scope || uses_module_scope(emitted_program) {
+            (0..emitted_program.local_count).collect()
+        } else {
+            let mut slots = HashSet::new();
+            slots.extend(module.imports.iter().map(|binding| binding.local_slot));
+            slots.extend(module.exports.iter().map(|binding| binding.local_slot));
+            if commonjs {
+                slots.insert(2);
+            }
+            slots
+        };
     let (graphs, body, entry_graph, mut direct) = plan_unit(
         emitted_program,
         diagnostic_site,
@@ -4816,6 +5510,7 @@ fn render_module_positioned(
         policy.parallel_in_generic,
         policy.speculate,
         Some(&extra_entry_slots),
+        generic_loop_profile,
     )?;
     if should_chunk {
         direct.set_should_chunk(true);
@@ -4825,7 +5520,7 @@ fn render_module_positioned(
         let available = (0..emitted_program.functions.len())
             .map(|index| reachable.contains(&index))
             .collect::<Vec<_>>();
-        direct.set_available(&available);
+        direct.set_available(emitted_program, &available);
     }
     if emitted_program.has_dynamic_import() {
         output.push_str(
@@ -4860,6 +5555,15 @@ fn render_module_positioned(
         chunked_bodies.as_mut(),
         split_workers.then_some((symbol, &mut workers_unit)),
     );
+    let generic_optimized_functions = direct
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(index, plan)| {
+            plan.generic_function_optimized && reachable.is_none_or(|set| set.contains(&index))
+        })
+        .collect::<Vec<_>>();
+    let generic_mixed_optimization = generic_optimized_functions.iter().any(|&selected| selected);
     let parallel_workers = (!workers_unit.is_empty()).then(|| {
         let mut unit = String::with_capacity(workers_unit.len() + 256);
         render_emission_policy(&mut unit, policy);
@@ -4887,6 +5591,7 @@ fn render_module_positioned(
         &entry_graph,
         &direct.entry,
         policy,
+        external_unit || export_cells,
         func_sites,
     )?;
     let total_sites = func_sites + entry_sites;
@@ -4906,13 +5611,18 @@ fn render_module_positioned(
          * public scalar embedding header or ABI. */
         writeln!(
             output,
-            "int {symbol}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, void *require_context, kiln_gc_visit_roots_fn require_visit_roots, void *require_root_context) {{\n    kiln_value initial;\n    kiln_value module;\n    int status;\n    if (imports == NULL || import_count != (size_t)5) return KILN_C99_INVALID_ARGUMENT;\n    status = kiln_c99_new_object(&initial);\n    if (status == KILN_C99_OK) status = kiln_c99_new_object(&module);\n    if (status == KILN_C99_OK) status = kiln_c99_put(NULL, module, \"exports\", 7, initial, 0, NULL);\n    if (status == KILN_C99_OK) status = kiln_c99_commonjs_require_value_with_roots(&imports[1], require_call, require_context, require_visit_roots, require_root_context);\n    if (status != KILN_C99_OK) return status;\n    imports[0] = initial;\n    imports[2] = module;\n    imports[3] = kiln_c99_copy_text(filename, filename_len);\n    imports[4] = kiln_c99_copy_text(dirname, dirname_len);\n    return KILN_C99_OK;\n}}"
+            "int {symbol}_commonjs_wrapper(kiln_value *imports, size_t import_count, const char *filename, size_t filename_len, const char *dirname, size_t dirname_len, kiln_commonjs_require_fn require_call, kiln_commonjs_resolve_fn require_resolve, void *require_context, kiln_gc_visit_roots_fn require_visit_roots, void *require_root_context) {{\n    kiln_value initial;\n    kiln_value module;\n    int status;\n    if (imports == NULL || import_count != (size_t)5) return KILN_C99_INVALID_ARGUMENT;\n    status = kiln_c99_new_object(&initial);\n    if (status == KILN_C99_OK) imports[0] = initial;\n    if (status == KILN_C99_OK) status = kiln_c99_new_object(&module);\n    if (status == KILN_C99_OK) imports[2] = module;\n    if (status == KILN_C99_OK) status = kiln_c99_put(NULL, imports[2], \"exports\", 7, imports[0], 0, NULL);\n    if (status == KILN_C99_OK) status = kiln_c99_commonjs_require_value_with_resolver(&imports[1], require_call, require_resolve, require_context, require_visit_roots, require_root_context);\n    if (status != KILN_C99_OK) return status;\n    imports[3] = kiln_c99_copy_text(filename, filename_len);\n    imports[4] = kiln_c99_copy_text(dirname, dirname_len);\n    return KILN_C99_OK;\n}}"
         )
         .unwrap();
     }
     render_namespace_wrapper(&mut output, symbol);
     if callables {
-        render_module_realm_wrapper(&mut output, symbol, unit_symbol);
+        render_module_realm_wrapper(
+            &mut output,
+            symbol,
+            unit_symbol,
+            commonjs.then_some(diagnostic_site),
+        );
     }
     if should_chunk {
         let function_texts = chunked_bodies.expect("chunked_bodies present when should_chunk");
@@ -4980,6 +5690,13 @@ fn render_module_positioned(
             c_string(diagnostic_site)
         )
         .unwrap();
+        // The weak fallback is defined in chunk 0, and the graph launcher can replace it.
+        // Nested functions in other chunks still need its declaration at their call sites.
+        if emitted_program.has_dynamic_import() {
+            chunk_header.push_str(
+                "int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown);\n",
+            );
+        }
         render_compact_macros(&mut chunk_header, emitted_program, &closure_fn);
         render_constant_declarations_extern(
             &mut chunk_header,
@@ -5001,6 +5718,7 @@ fn render_module_positioned(
             module_cells::compact_cell_count(),
             true,
             true,
+            false,
         );
         if total_sites > 0 {
             writeln!(chunk_header, "extern kiln_c99_site {unit_symbol}_sites[];").unwrap();
@@ -5030,38 +5748,56 @@ fn render_module_positioned(
         if !emitted_program.template_sites.is_empty() {
             writeln!(
                 chunk_header,
-                "extern int {unit_symbol}_materialize_template_site(size_t site);"
+                "extern int {unit_symbol}_materialize_template_site(kiln_host *host, size_t site);"
             )
             .unwrap();
         }
 
         let mut chunks = Vec::new();
-        chunks.push(chunk_0);
-        let mut start = chunk_0_funcs;
-        for &end in &chunk_ends[1..] {
-            let referenced =
-                scan_referenced_functions(&function_texts[start..end], unit_symbol, total_funcs);
-            let decl_len: usize = (0..total_funcs)
-                .filter(|&i| (i >= start && i < end) || referenced[i])
-                .map(|i| rendered_funcs.function_declarations[i].len())
-                .sum();
-            let bodies_len: usize = function_texts[start..end].iter().map(String::len).sum();
-            let mut chunk_k = String::with_capacity(chunk_header.len() + decl_len + bodies_len);
-            chunk_k.push_str(&chunk_header);
-            for i in 0..total_funcs {
-                if (i >= start && i < end) || referenced[i] {
-                    chunk_k.push_str(&rendered_funcs.function_declarations[i]);
+        let mut chunk_generic_mixed_optimization = Vec::new();
+        if chunk_ends.len() > 1 {
+            chunks.push(chunk_0);
+            chunk_generic_mixed_optimization.push(
+                generic_optimized_functions[..chunk_0_funcs]
+                    .iter()
+                    .any(|&selected| selected),
+            );
+            let mut start = chunk_0_funcs;
+            for &end in &chunk_ends[1..] {
+                let referenced = scan_referenced_functions(
+                    &function_texts[start..end],
+                    unit_symbol,
+                    total_funcs,
+                );
+                let decl_len: usize = (0..total_funcs)
+                    .filter(|&i| (i >= start && i < end) || referenced[i])
+                    .map(|i| rendered_funcs.function_declarations[i].len())
+                    .sum();
+                let bodies_len: usize = function_texts[start..end].iter().map(String::len).sum();
+                let mut chunk_k = String::with_capacity(chunk_header.len() + decl_len + bodies_len);
+                chunk_k.push_str(&chunk_header);
+                for i in 0..total_funcs {
+                    if (i >= start && i < end) || referenced[i] {
+                        chunk_k.push_str(&rendered_funcs.function_declarations[i]);
+                    }
                 }
+                for f in &function_texts[start..end] {
+                    chunk_k.push_str(f);
+                }
+                chunks.push(chunk_k);
+                chunk_generic_mixed_optimization.push(
+                    generic_optimized_functions[start..end]
+                        .iter()
+                        .any(|&selected| selected),
+                );
+                start = end;
             }
-            for f in &function_texts[start..end] {
-                chunk_k.push_str(f);
-            }
-            chunks.push(chunk_k);
-            start = end;
         }
         Ok(RenderedModule {
             source,
             chunks,
+            generic_mixed_optimization,
+            chunk_generic_mixed_optimization,
             parallel_workers,
         })
     } else {
@@ -5077,6 +5813,8 @@ fn render_module_positioned(
         Ok(RenderedModule {
             source: output,
             chunks: Vec::new(),
+            generic_mixed_optimization,
+            chunk_generic_mixed_optimization: Vec::new(),
             parallel_workers,
         })
     }
@@ -5139,11 +5877,11 @@ fn render_runtime_module(
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_OK;\n}\n");
     writeln!(
         output,
-        "void {symbol}_publish_exports(kiln_value *exports) {{\n    (void)exports;\n}}"
+        "void {symbol}_publish_exports(kiln_host *host, kiln_value *exports) {{\n    (void)host; (void)exports;\n}}"
     )
     .unwrap();
     render_namespace_wrapper(&mut output, symbol);
-    render_module_realm_wrapper(&mut output, symbol, symbol);
+    render_module_realm_wrapper(&mut output, symbol, symbol, None);
     output
 }
 
@@ -5216,6 +5954,7 @@ fn unary_code(operator: UnaryOp) -> u16 {
         UnaryOp::ToNumeric => 7,
         UnaryOp::Increment => 8,
         UnaryOp::Decrement => 9,
+        UnaryOp::ToString => 10,
     }
 }
 
@@ -5353,9 +6092,10 @@ mod parallel_tests;
 
 /// The reserved key an instance stores its class's brand under, derived from a private name.
 ///
-/// `@@private:{scope}:{member}` becomes `@@private:{scope}:%brand`: one brand per class, shared
-/// by every private member it declares. Derived here rather than passed, so the instruction
-/// keeps the shape the interpreter gives it.
+/// The first token is an opaque module-and-scope identity, so it becomes the brand key by
+/// replacing only the final member token. One brand is shared by every private member declared
+/// by that class. Derived here rather than passed, so the instruction keeps the shape the
+/// interpreter gives it.
 fn private_brand_key_of(name: &str) -> String {
     match name
         .strip_prefix("@@private:")

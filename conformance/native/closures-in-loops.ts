@@ -16,6 +16,20 @@ function three(): string {
 }
 console.log(three());
 
+// A block-local captured binding is also recreated each time a loop enters the block. Reusing
+// one cell makes both closures observe the last iteration's value.
+function blockBindings(): string {
+  let first = (): number => -1;
+  let second = first;
+  for (const value of [1, 2]) {
+    const saved = value;
+    const f = (): number => saved;
+    if (value === 1) { first = f; } else { second = f; }
+  }
+  return `${first()} ${second()}`;
+}
+console.log(blockBindings());
+
 // `var` has one binding for the whole function, which is the difference that matters.
 function shared(): string {
   let a = (): number => 0;

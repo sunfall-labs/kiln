@@ -9,10 +9,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// promise the engine could never keep.
     pub(super) fn can_be_held_weakly(&self, value: &Value) -> bool {
         match value {
-            Value::Symbol(_) => !self
-                .symbol_registry
-                .iter()
-                .any(|(_, registered)| strict_equal(registered, value)),
+            Value::Symbol(_) => match &self.module_realm {
+                Some(realm) => !realm
+                    .borrow()
+                    .symbol_registry
+                    .iter()
+                    .any(|(_, registered)| strict_equal(registered, value)),
+                None => !self
+                    .symbol_registry
+                    .iter()
+                    .any(|(_, registered)| strict_equal(registered, value)),
+            },
             other => is_reflect_target(other),
         }
     }
@@ -30,17 +37,41 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         }
         let mut data = ObjectData::default();
-        if let Value::Shared(facade) = target {
+        if let Value::Object(object) = &target {
+            data.weak_ref_object_target = Some(Rc::downgrade(object));
+            let module_map = self.gc_module_map();
+            let mut module_map = module_map.borrow_mut();
+            if module_map.gc_weak_ref_objects.len() >= module_map.gc_weak_ref_objects_prune_at {
+                module_map
+                    .gc_weak_ref_objects
+                    .retain(|entry| entry.strong_count() > 0);
+                module_map.gc_weak_ref_objects_prune_at = module_map
+                    .gc_weak_ref_objects
+                    .len()
+                    .saturating_add(module_map.gc_weak_ref_objects.len().max(1024));
+            }
+            module_map.gc_weak_ref_objects.push(Rc::downgrade(object));
+            data.set_non_enumerable(WEAK_REF_TARGET, Value::Undefined);
+        } else if let Value::Shared(facade) = &target {
             data.weak_shared_target = Some(Rc::downgrade(&facade));
             data.set_non_enumerable(WEAK_REF_TARGET, Value::Undefined);
         } else {
-            data.set_non_enumerable(WEAK_REF_TARGET, target);
+            data.set_non_enumerable(WEAK_REF_TARGET, target.clone());
+        }
+        // A SharedFacade owns the graph lease. Keeping the facade alive through this realm's
+        // job would therefore make a WeakRef extend the lifetime of an otherwise dead graph.
+        // The graph is immutable and its weak target can be upgraded directly at deref time.
+        if !matches!(target, Value::Shared(_)) {
+            self.gc_module_map()
+                .borrow_mut()
+                .weak_ref_keepalive
+                .push(target);
         }
         data.set_prototype(Value::Native(
             Native::PrototypeOf(PrototypeTable::WeakRef),
             RealmId::PRIMARY,
         ));
-        Ok(Value::Object(Rc::new(RefCell::new(data))))
+        Ok(Value::Object(tracked_object(data)))
     }
 
     /// `new FinalizationRegistry(cleanupCallback)`.
@@ -63,7 +94,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::PrototypeOf(PrototypeTable::FinalizationRegistry),
             RealmId::PRIMARY,
         ));
-        Ok(Value::Object(Rc::new(RefCell::new(data))))
+        Ok(Value::Object(tracked_object(data)))
     }
 
     /// The reserved slot of a `WeakRef` or a registry, or a `TypeError` naming the receiver.
@@ -93,14 +124,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         _instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let stored = self.weak_slot(receiver, WEAK_REF_TARGET, "WeakRef.prototype.deref")?;
-        if let Value::Object(object) = receiver
-            && let Some(target) = &object.borrow().weak_shared_target
-        {
-            return Ok(target
-                .upgrade()
-                .map(Value::Shared)
-                .unwrap_or(Value::Undefined));
+        if let Value::Object(object) = receiver {
+            let data = object.borrow();
+            if let Some(target) = &data.weak_ref_object_target {
+                if let Some(target) = target.upgrade() {
+                    let value = Value::Object(target);
+                    self.gc_module_map()
+                        .borrow_mut()
+                        .weak_ref_keepalive
+                        .push(value.clone());
+                    return Ok(value);
+                }
+                return Ok(Value::Undefined);
+            }
+            if let Some(target) = &data.weak_shared_target {
+                if let Some(target) = target.upgrade() {
+                    let value = Value::Shared(target);
+                    return Ok(value);
+                }
+                return Ok(Value::Undefined);
+            }
         }
+        self.gc_module_map()
+            .borrow_mut()
+            .weak_ref_keepalive
+            .push(stored.clone());
         Ok(stored)
     }
 

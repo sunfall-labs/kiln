@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "coverage": "14 focused native probes; parity is not the full npm corpus",
+  "source_commit": "45a7fc24a382a52f0d5f9c00ba0497cadc9315ad",
+  "kiln_sha256": "1335615307e437a053f5e3fbad155e6b97f68f40933400db2a37aed088a6f1ed",
+  "counts": {
+    "matched": 11,
+    "refused": 1,
+    "diverged": 0,
+    "invalid": 2
+  },
+  "blockers": [
+    "Inherited TypedArray.from remains refused by native backend",
+    "Interpreter require.resolve excludes resolution-only metadata",
+    "Guarded eval fallback used the wrong Apply operand order; corrected in e790b249"
+  ],
+  "raw_log": "target/npm-compat-evidence/bootstrap-native-twenty-seventh.log",
+  "full_npm_coverage": false
+}

@@ -26,8 +26,14 @@ if (isMainThread) {
       }
       const poll = () => {
         if (Atomics.load(cells, 2) !== 1) return setTimeout(poll, 1);
+        // The ready flag precedes Atomics.wait, so it cannot prove the waiter
+        // has registered. Notify until the real wait queue reports a wakeup.
+        const woken = Atomics.notify(cells, 1);
+        if (woken === 0) return setTimeout(poll, 1);
         Atomics.store(cells, 1, 1);
-        answers.push(`woke ${Atomics.notify(cells, 1)}`);
+        Atomics.store(cells, 2, 2);
+        Atomics.notify(cells, 2);
+        answers.push(`woke ${woken}`);
       };
       poll();
     });
@@ -44,6 +50,8 @@ if (isMainThread) {
     parentPort.postMessage("waiting");
     Atomics.store(cells, 2, 1);
     const first = Atomics.wait(cells, 1, 0);
+    // Wait for the parent to publish the changed value before the second wait.
+    while (Atomics.load(cells, 2) !== 2) Atomics.wait(cells, 2, 1);
     const second = Atomics.wait(cells, 1, 0);
     cells[3] = 42;
     parentPort.postMessage(`first ${first}, second ${second}`);

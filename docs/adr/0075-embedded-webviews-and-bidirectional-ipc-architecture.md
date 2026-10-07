@@ -10,9 +10,9 @@ runloop integration.
 
 ## Context
 
-ADR 0074 establishes Kiln's native desktop capability (`kiln:gui`), providing native widgets (GTK4,
-AppKit, WinUI) driven by SolidJS 2.0 fine-grained reactivity with sub-10ms startup and zero
-Chromium/Node.js baggage.
+ADR 0074 establishes Kiln's native desktop capability (`kiln:gui`): native widgets (AppKit today;
+GTK4 and Windows are follow-ups behind the same ABI) driven by kiln's own fine-grained reactivity,
+with no bundled Chromium or Node.js.
 
 While native controls provide optimal memory, speed, and OS accessibility for standard desktop
 interfaces (forms, toolbars, buttons, dialogs, tray icons), many production applications require
@@ -44,9 +44,8 @@ unblocked reactive turns, memory safety, and minimal binary footprint.
    link WebKit or WebView2 libraries.
 3. **Turn-Safe Main-Thread Execution:**
    Platform web views strictly require creation and manipulation on the primary OS thread. The Kiln
-   host runloop (`runLoop` / `turnMailbox`) pumps platform events during the event drain cycle,
-   ensuring IPC messages from the webview arrive as discrete mailbox turns without preempting active
-   computations.
+   event loop (ADR 0074 §5–6) drains the native event queue between turns, so IPC messages from
+   the webview arrive as queued events dispatched in a batch, never preempting active computations.
 4. **Pure In-Memory Protocol Routing (`kiln://`):**
    Assets and virtual endpoints are resolved through registered custom URI scheme handlers directly
    in memory. No local HTTP/TCP servers are spawned, eliminating port collision risks and network
@@ -95,7 +94,8 @@ Inside the webview DOM, a global `window.__kiln` interface is injected prior to 
 window.__kiln.postMessage({ action: "saveFile", content: "..." });
 ```
 
-The native webview platform handler catches the message and forwards it via `turnMailbox.post()`:
+The native webview platform handler catches the message and appends it to the native event queue
+(ADR 0074 §5):
 
 ```text
 [WebKitGTK / WKWebView / WebView2]
@@ -104,10 +104,10 @@ The native webview platform handler catches the message and forwards it via `tur
    [kiln_gui_webview_post_message]
                │ (C FFI boundary)
                ▼
-         [turnMailbox]
-               │ (reentrancy-safe turn queue)
+      [native event queue]
+               │ (drained between turns, one batch)
                ▼
- [WebView.dispatchEvent("message", data)]
+    [WebView.emit("message", data)]
                │
                ▼
    [Kiln Reactive Listener]

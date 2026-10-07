@@ -12,6 +12,7 @@ Rules (same as bench/compare.sh, extended to AOT competitors and servers):
   startup-dominated, which is exactly what this suite measures.
 - The server row reports requests/s plus body verification from drive-server.mjs.
 """
+import hashlib
 import json
 import os
 import select
@@ -23,17 +24,14 @@ import sys
 import tempfile
 import time
 
-try:
-    import resource
-
-    HAVE_RESOURCE = True
-except ImportError:  # pragma: no cover
-    HAVE_RESOURCE = False
-
 PASSES = int(os.environ.get("PASSES", "3"))
 SERVER_REQUESTS = os.environ.get("SERVER_REQUESTS", "2000")
 KILN = os.environ.get("KILN_BIN", "target/release/kiln")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ROOT)
+from bench.checksum_validation import validate_repeated_checksums
+from bench.process_measurement import measure_process
+
 _TOOLCHAIN_BIN = os.path.join(
     ROOT, "bench", "realworld", ".toolchains", "node_modules", ".bin"
 )
@@ -74,12 +72,6 @@ def run(argv, timeout=120):
     wall = (time.perf_counter() - started) * 1000.0
     err = done.stderr.decode("utf-8", errors="replace").strip().splitlines()
     return wall, done.stdout, done.returncode, "\n".join(err[-3:])
-
-
-def peak_rss_kb():
-    if not HAVE_RESOURCE:
-        return None
-    return resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
 
 
 def artifact_bytes(path):
@@ -156,20 +148,14 @@ def measure_cli(name, src, needs_node, argv, work):
     artifacts = {}
     unsupported = {}
 
-    # Tier A (pure compute) builds a standalone binary: nothing it needs lives
-    # outside it. Tier B needs host capabilities (FS) that standalone binaries
-    # are not provisioned with, so it runs native in-process (`run --native`),
-    # exactly like scripts/native.sh's parity pairs.
-    if not needs_node:
-        native, note = build_kiln(src, needs_node, work, name)
-        if native:
-            commands["kiln-native"] = [native, *argv]
-            artifacts["kiln-native"] = artifact_bytes(native)
-        else:
-            unsupported["kiln-native"] = note
+    # Both tiers use the same native-release AOT path. `--node` provisions the
+    # filesystem adapter for Tier B while keeping the executable standalone.
+    native, note = build_kiln(src, needs_node, work, name)
+    if native:
+        commands["kiln-native"] = [native, *argv]
+        artifacts["kiln-native"] = artifact_bytes(native)
     else:
-        commands["kiln-native"] = [KILN, "--one-shot", *kiln_flags, "run",
-                                   "--native", src, *argv]
+        unsupported["kiln-native"] = note
 
     if name in ("json-transform", "template-render"):  # tier A: portable subset
         porf_bin, note = build_porffor(src, work, name)
@@ -190,36 +176,46 @@ def measure_cli(name, src, needs_node, argv, work):
 
     measured, rss, checksums, divergences = {}, {}, {}, []
     for runtime, argv in commands.items():
-        samples, rss_before = [], peak_rss_kb()
-        stdout = b""
+        samples, outputs, peaks = [], [], []
         for _ in range(PASSES):
-            wall, stdout, code, err = run(argv)
+            wall, stdout, code, err, peak = measure_process(argv)
             if wall is None or code != 0:
                 divergences.append(f"{name} {runtime}: exit {code} {err[:100]}")
                 samples = []
                 break
             samples.append(wall)
+            outputs.append(stdout)
+            if peak is not None:
+                peaks.append(peak)
         if samples:
             measured[runtime] = statistics.median(samples)
-            after = peak_rss_kb()
-            if rss_before is not None and after is not None:
-                rss[runtime] = max(after - rss_before, 0) or after
-            checksums[runtime] = stdout
-    want = checksums.get("node")
-    if want is not None:
-        for runtime, got in list(checksums.items()):
-            if got != want:
-                divergences.append(
-                    f"{name} {runtime}: stdout differs from node's "
-                    f"({len(got)} vs {len(want)} bytes)"
-                )
-                measured.pop(runtime, None)
+            if peaks:
+                rss[runtime] = max(peaks)
+            checksums[runtime] = outputs
+    excluded, checksum_diagnostics = validate_repeated_checksums(checksums, PASSES)
+    divergences.extend(f"{name} {diagnostic}" for diagnostic in checksum_diagnostics)
+    for runtime in excluded:
+        measured.pop(runtime, None)
     return (
         {
             "program": name,
             "ms": measured,
+            "checksum_reference": "node",
+            "checksum_sha256": {
+                runtime: [hashlib.sha256(output).hexdigest() for output in outputs]
+                for runtime, outputs in checksums.items()
+            },
+            "checksum_excluded": sorted(excluded),
             "peak_rss_kb": rss,
+            "peak_rss_scope": "maximum child-lifetime peak across repetitions; excludes builds; includes inherited pre-exec image",
             "artifact_bytes": artifacts,
+            "execution_modes": {
+                "node": "direct TypeScript",
+                "bun": "direct TypeScript",
+                "kiln": {"kind": "interpreter", "node_adapter": needs_node},
+                "kiln-native": {"kind": "AOT", "profile": "native-release",
+                                "node_adapter": needs_node},
+            },
         },
         unsupported,
         divergences,
@@ -291,7 +287,7 @@ def measure_server(work):
     unsupported["porffor"] = "no node:http capability (tier B)"
     unsupported["hermes"] = "no node:http capability (tier B)"
 
-    rps, notes, divergences = {}, {}, []
+    rps, notes, divergences, driver_reports = {}, {}, [], {}
     for runtime, argv in commands.items():
         server = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
@@ -321,9 +317,10 @@ def measure_server(work):
             except (ValueError, IndexError):
                 divergences.append(f"{name} {runtime}: driver output unreadable")
                 continue
-            if report.get("wrong"):
+            driver_reports[runtime] = report
+            if report.get("requests") != int(SERVER_REQUESTS) or report.get("wrong") != 0:
                 divergences.append(
-                    f"{name} {runtime}: {report['wrong']} wrong responses"
+                    f"{name} {runtime}: incomplete or wrong responses: {report}"
                 )
                 continue
             rps[runtime] = report["rps"]
@@ -331,18 +328,35 @@ def measure_server(work):
             server.kill()
             server.wait()
         wait_for_port_closed(18091)
-    return {"program": name, "rps": rps}, unsupported, divergences, notes
+    return {"program": name, "rps": rps,
+            "driver_reports": driver_reports,
+            "connection_mode": "sequential requests with one shared keep-alive agent",
+            "execution_modes": {
+                "node": "direct TypeScript",
+                "bun": "direct TypeScript",
+                "kiln": {"kind": "interpreter", "node_adapter": True},
+                "kiln-native": {"kind": "AOT", "profile": "native-release",
+                                "node_adapter": True},
+            }}, unsupported, divergences, notes
 
 
 def repo_provenance():
-    """Record what was measured: kiln commit, binary mtime, competitor versions."""
+    """Record binary identity separately from the checkout running the harness."""
     def run_quiet(argv):
         try:
             done = subprocess.run(argv, capture_output=True, timeout=30)
             return done.stdout.decode().strip()
         except Exception:
             return ""
-    kiln_rev = run_quiet(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"])
+    runner_rev = run_quiet(["git", "-C", ROOT, "rev-parse", "HEAD"])
+    binary_path = os.path.abspath(os.path.join(ROOT, KILN))
+    binary_digest = hashlib.sha256()
+    with open(binary_path, "rb") as binary:
+        for chunk in iter(lambda: binary.read(1024 * 1024), b""):
+            binary_digest.update(chunk)
+    binary_sha256 = binary_digest.hexdigest()
+    with open(__file__, "rb") as runner:
+        runner_sha256 = hashlib.sha256(runner.read()).hexdigest()
     try:
         kiln_mtime = int(os.path.getmtime(os.path.join(ROOT, KILN)))
     except OSError:
@@ -356,7 +370,12 @@ def repo_provenance():
         if argv:
             versions[name] = run_quiet(argv)[:40]
     return {
-        "kiln_rev": kiln_rev,
+        "kiln_rev": os.environ.get("KILN_SOURCE_REV"),
+        "kiln_rev_source": "caller declaration; binary identity recorded independently",
+        "kiln_binary": binary_path,
+        "kiln_binary_sha256": binary_sha256,
+        "runner_rev": runner_rev,
+        "runner_sha256": runner_sha256,
         "kiln_bin_mtime": kiln_mtime,
         "versions": versions,
     }
@@ -371,6 +390,7 @@ def main():
     if not (os.path.exists(KILN) and os.access(KILN, os.X_OK)):
         print(f"realworld/compare: no kiln binary at {KILN}", file=sys.stderr)
         sys.exit(1)
+    provenance = repo_provenance()
     work = tempfile.mkdtemp(prefix="kiln-realworld.")
     rows, unsupported_all, divergences = [], {}, []
     server_notes = {}
@@ -430,7 +450,7 @@ def main():
             json.dump(
                 {"passes": PASSES, "rows": rows, "unsupported": unsupported_all,
                  "server_notes": server_notes, "divergences": divergences,
-                 "provenance": repo_provenance()},
+                 "provenance": provenance},
                 handle, indent=2,
             )
             handle.write("\n")

@@ -131,6 +131,7 @@ static int kiln_c99_truthy(kiln_value value) {
     case KILN_VALUE_COLLECTION:
     case KILN_VALUE_REGEXP:
     case KILN_VALUE_PROMISE:
+    case KILN_VALUE_TIMER:
     case KILN_VALUE_ARRAY_BUFFER:
     case KILN_VALUE_TYPED_ARRAY:
     /* A DataView is an object and objects are truthy. Listed rather than left to `default:` for
@@ -571,6 +572,58 @@ static kiln_value kiln_c99_text_value(kiln_text *text) {
     return result;
 }
 
+/* Restore the sentinel used by lossless JavaScript-string builders. Ordinary text stays on the
+ * fast canonical UTF-8 copy path. */
+static kiln_value kiln_c99_text_preserving_surrogates_value(kiln_text *text) {
+    size_t offset = 0, unit_count = 0, output = 0;
+    kiln_string *string;
+    uint16_t *units;
+    if (text->len == 0 || memchr(text->bytes, 0xFF, text->len) == NULL)
+        return kiln_c99_text_value(text);
+    while (offset < text->len) {
+        if ((unsigned char)text->bytes[offset] == 0xFF) {
+            if (text->len - offset < 3) goto malformed;
+            unit_count++;
+            offset += 3;
+        } else {
+            uint32_t point = kiln_c99_utf8_next(text->bytes, text->len, &offset);
+            unit_count += point > 0xFFFF ? 2 : 1;
+        }
+    }
+    string = kiln_c99_gc_alloc_units(unit_count, KILN_STRING_UTF16);
+    if (string == NULL) goto malformed;
+    units = (uint16_t *)(uintptr_t)string->data;
+    offset = 0;
+    while (offset < text->len) {
+        if ((unsigned char)text->bytes[offset] == 0xFF) {
+            units[output++] = (uint16_t)((unsigned char)text->bytes[offset + 1] |
+                                         ((uint16_t)(unsigned char)text->bytes[offset + 2] << 8));
+            offset += 3;
+        } else {
+            uint32_t point = kiln_c99_utf8_next(text->bytes, text->len, &offset);
+            if (point > 0xFFFF) {
+                point -= 0x10000;
+                units[output++] = (uint16_t)(0xD800 | (point >> 10));
+                units[output++] = (uint16_t)(0xDC00 | (point & 0x3FF));
+            } else {
+                units[output++] = (uint16_t)point;
+            }
+        }
+    }
+    if (!text->borrowed) free(text->bytes);
+    text->borrowed = 0;
+    text->bytes = NULL;
+    text->len = text->capacity = 0;
+    return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)string, string->unit_len);
+
+malformed:
+    if (!text->borrowed) free(text->bytes);
+    text->borrowed = 0;
+    text->bytes = NULL;
+    text->len = text->capacity = 0;
+    return kiln_c99_undefined();
+}
+
 /* The same escape as `kiln_c99_text_value`, answering the heap's own representation.
  *
  * A boundary `kiln_value` string is a bare pointer and length with no heap identity, so a caller
@@ -709,6 +762,53 @@ static int kiln_c99_text_append_string(kiln_text *text, kiln_value value) {
     if (status == KILN_C99_OK) status = kiln_c99_text_append(text, (const char *)owned, length);
     free(owned);
     return status;
+}
+
+/* Replacement results are JavaScript strings, not host text: preserve isolated UTF-16
+ * surrogates across the UTF-8 scratch builder with a sentinel impossible in valid UTF-8. */
+static int kiln_c99_text_append_js_string(kiln_text *text, kiln_value value) {
+    const kiln_string *string;
+    size_t index;
+    if (text == NULL || value.tag != KILN_VALUE_STRING || value.ptr == NULL)
+        return KILN_C99_INVALID_ARGUMENT;
+    string = (const kiln_string *)value.ptr;
+    for (index = 0; index < string->unit_len; ++index) {
+        uint32_t point = kiln_string_unit_at(string, index);
+        char bytes[4];
+        size_t length;
+        if (point >= 0xD800 && point <= 0xDBFF && index + 1 < string->unit_len) {
+            uint32_t low = kiln_string_unit_at(string, index + 1);
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                point = UINT32_C(0x10000) + ((point - 0xD800) << 10) + (low - 0xDC00);
+                ++index;
+            }
+        }
+        if (point >= 0xD800 && point <= 0xDFFF) {
+            unsigned char marker[3] = {0xFF, (unsigned char)(point & 0xFF),
+                                       (unsigned char)(point >> 8)};
+            if (kiln_c99_text_append(text, (const char *)marker, sizeof marker) != KILN_C99_OK)
+                return KILN_C99_OUT_OF_MEMORY;
+            continue;
+        }
+        if (point <= 0x7F) {
+            bytes[0] = (char)point; length = 1;
+        } else if (point <= 0x7FF) {
+            bytes[0] = (char)(0xC0 | (point >> 6));
+            bytes[1] = (char)(0x80 | (point & 0x3F)); length = 2;
+        } else if (point <= 0xFFFF) {
+            bytes[0] = (char)(0xE0 | (point >> 12));
+            bytes[1] = (char)(0x80 | ((point >> 6) & 0x3F));
+            bytes[2] = (char)(0x80 | (point & 0x3F)); length = 3;
+        } else {
+            bytes[0] = (char)(0xF0 | (point >> 18));
+            bytes[1] = (char)(0x80 | ((point >> 12) & 0x3F));
+            bytes[2] = (char)(0x80 | ((point >> 6) & 0x3F));
+            bytes[3] = (char)(0x80 | (point & 0x3F)); length = 4;
+        }
+        if (kiln_c99_text_append(text, bytes, length) != KILN_C99_OK)
+            return KILN_C99_OUT_OF_MEMORY;
+    }
+    return KILN_C99_OK;
 }
 
 static kiln_value kiln_c99_text(kiln_value value) {
@@ -864,20 +964,31 @@ static kiln_value kiln_c99_text(kiln_value value) {
         return kiln_c99_text_value(&built);
     }
     case KILN_VALUE_SYMBOL: {
-        /* `String(sym)` spells the symbol out. Concatenation is a different question -- the
-         * language throws for `sym + ""` -- and neither engine draws that line yet. */
+        /* SymbolDescriptiveString is a JavaScript string, so its description keeps every
+         * UTF-16 code unit. The diagnostic UTF-8 builder would replace lone surrogates. */
         kiln_symbol *symbol = kiln_c99_symbol_of(value);
-        kiln_text built = {NULL, 0, 0};
-        if (kiln_c99_text_append_c(&built, "Symbol(") != KILN_C99_OK ||
-            (symbol->description_value.tag == KILN_VALUE_STRING
-                 ? kiln_c99_text_append_string(&built, symbol->description_value)
-                 : kiln_c99_text_append(&built, symbol->description, symbol->description_len)) !=
-                KILN_C99_OK ||
-            kiln_c99_text_append_c(&built, ")") != KILN_C99_OK) {
-            free(built.bytes);
-            return kiln_c99_undefined();
+        const kiln_string *description = symbol->description_value.tag == KILN_VALUE_STRING
+                                            ? (const kiln_string *)symbol->description_value.ptr
+                                            : NULL;
+        size_t length = description != NULL ? description->unit_len : symbol->description_len;
+        uint32_t flags = description != NULL && kiln_string_is_utf16(description)
+                             ? KILN_STRING_UTF16 : KILN_STRING_LATIN1;
+        kiln_string *built;
+        static const char prefix[] = "Symbol(";
+        if (length > UINT32_MAX - 8) return kiln_c99_undefined();
+        built = kiln_c99_gc_alloc_units(length + 8, flags);
+        if (built == NULL) return kiln_c99_undefined();
+        for (size_t index = 0; index < length + 8; ++index) {
+            uint16_t unit = index < 7 ? (unsigned char)prefix[index]
+                            : index == length + 7 ? ')'
+                            : description != NULL ? kiln_string_unit_at(description, index - 7)
+                            : (unsigned char)symbol->description[index - 7];
+            if (flags == KILN_STRING_UTF16)
+                ((uint16_t *)(uintptr_t)built->data)[index] = unit;
+            else
+                ((unsigned char *)(uintptr_t)built->data)[index] = (unsigned char)unit;
         }
-        return kiln_c99_text_value(&built);
+        return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)built, length + 8);
     }
     case KILN_VALUE_METHOD:
     case KILN_VALUE_BUILTIN: {
@@ -955,6 +1066,11 @@ static kiln_value kiln_c99_text(kiln_value value) {
     }
     case KILN_VALUE_PROMISE:
         return kiln_c99_copy_text("[object Promise]", 16);
+    /* A timer handle reduces through its own `Symbol.toPrimitive` first, which answers its
+     * identity; this is what a handle that has none (a program deleted it from the prototype)
+     * says, as an ordinary object does. */
+    case KILN_VALUE_TIMER:
+        return kiln_c99_copy_text("[object Object]", 15);
     case KILN_VALUE_GENERATOR:
         return kiln_c99_copy_text("[object Generator]", 18);
     /* The remaining callables, each of which `kiln_c99_is_callable` already answers `1` for.
@@ -1007,6 +1123,40 @@ static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
         memcpy(bytes + ls->unit_len, rs->data, rs->unit_len);
     }
     return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)joined, total);
+}
+
+/* Grow an Array.join buffer in UTF-16 code units. Using `kiln_text` here would route through
+ * UTF-8 and replace lone surrogates, even though JavaScript strings retain those units. */
+static int kiln_c99_join_units_append(uint16_t **units, size_t *length, size_t *capacity,
+                                      kiln_value value) {
+    const kiln_string *text;
+    size_t needed;
+    if (units == NULL || length == NULL || capacity == NULL || value.tag != KILN_VALUE_STRING ||
+        value.ptr == NULL) return KILN_C99_INVALID_ARGUMENT;
+    text = (const kiln_string *)value.ptr;
+    if (text->unit_len > UINT32_MAX - *length) return KILN_C99_OUT_OF_MEMORY;
+    needed = *length + text->unit_len;
+    if (needed > *capacity) {
+        size_t next = *capacity == 0 ? 16 : *capacity;
+        uint16_t *grown;
+        while (next < needed) {
+            if (next > SIZE_MAX / 2) {
+                next = needed;
+                break;
+            }
+            next *= 2;
+        }
+        if (next > SIZE_MAX / sizeof **units) return KILN_C99_OUT_OF_MEMORY;
+        grown = realloc(*units, next * sizeof **units);
+        if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
+        *units = grown;
+        *capacity = next;
+    }
+    for (size_t at = 0; at < text->unit_len; ++at) {
+        (*units)[*length + at] = kiln_string_unit_at(text, at);
+    }
+    *length = needed;
+    return KILN_C99_OK;
 }
 
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {

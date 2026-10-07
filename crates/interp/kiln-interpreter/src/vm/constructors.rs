@@ -20,6 +20,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 });
             }
             Native::NodeEventEmitter => node_event_emitter(),
+            // `new Buffer(value)` retains Node's deprecated constructor behavior and shares the
+            // same allocation semantics as the callable form and `Buffer.from`.
+            Native::NodeBufferGlobal => {
+                self.dispatch_native(parent, &Value::Undefined, arguments, current)?
+            }
             Native::ConsoleConstructor => self.construct_console(arguments, current)?,
             Native::NodeStringDecoderConstructor => string_decoder::node_string_decoder(),
             Native::NodeReadable => node_readable(arguments, None),
@@ -64,9 +69,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `Iterator` is abstract but deliberately *subclassable*: writing an iterator in
             // JavaScript is what it exists for, and such a class needs `super()` to work. Only a
             // direct `new Iterator()` is refused, and that never reaches here.
-            Native::IteratorConstructor => {
-                Value::Object(Rc::new(RefCell::new(ObjectData::default())))
-            }
+            Native::IteratorConstructor => Value::Object(tracked_object(ObjectData::default())),
             // The rest of the constructible built-ins, each doing through `super()` exactly what
             // it does through `new`. They were reachable one way and not the other, which is not
             // a distinction the language draws: `class MyF64 extends Float64Array {}` is how
@@ -96,11 +99,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Native(Native::WebStub(kind), realm),
                     Attributes::DEFAULT,
                 );
-                Value::Object(Rc::new(RefCell::new(obj)))
+                Value::Object(tracked_object(obj))
             }
             Native::PromiseConstructor => self.construct_promise(arguments, current)?,
             Native::FunctionConstructor => {
                 self.function_from_source(arguments, current, "function")?
+            }
+            Native::AsyncFunctionConstructor => {
+                self.function_from_source(arguments, current, "async function")?
             }
             Native::GeneratorFunctionConstructor => {
                 self.function_from_source(arguments, current, "function*")?
@@ -203,11 +209,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .to_owned(),
                     });
                 }
-                self.stack.push(Value::Proxy(Rc::new(ProxyData {
+                let proxy = Rc::new(ProxyData {
                     target,
                     handler,
+                    private_elements: RefCell::new(ObjectData::default()),
                     revoked: std::cell::Cell::new(false),
-                })));
+                });
+                crate::gc_census::register_proxy(&proxy);
+                self.stack.push(Value::Proxy(proxy));
             }
             Value::Proxy(proxy) => {
                 let inner = proxy.target.clone();
@@ -300,16 +309,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::NodeStringDecoderConstructor, _) => {
                 self.stack.push(string_decoder::node_string_decoder());
             }
-            // `new Object(v)` and `Object(v)` are the same operation: the specification routes
-            // both to ToObject, and differs only in a `NewTarget` this interpreter has no other
-            // use for.  Sharing the call behaviour keeps them from drifting apart.
+            // The call form delegates to ToObject. Construction shares that behavior unless
+            // Reflect.construct supplied a distinct new.target, which the constructor branch
+            // below preserves as an ordinary allocation.
             Value::Native(Native::ObjectConstructor, _) => {
-                let object = call_native(
-                    &self.intrinsics,
-                    Native::ObjectConstructor,
-                    &Value::Undefined,
-                    &arguments,
-                )?;
+                // `Object(value)` normally returns `value` when it is already an object. With
+                // a distinct `new.target`, [[Construct]] instead performs
+                // OrdinaryCreateFromConstructor and ignores that argument. The shared tail
+                // below applies `new_target.prototype` (including its realm fallback).
+                let object = if subclassed {
+                    Value::Object(tracked_object(ObjectData::default()))
+                } else {
+                    call_native(
+                        &self.intrinsics,
+                        Native::ObjectConstructor,
+                        &Value::Undefined,
+                        &arguments,
+                    )?
+                };
                 self.stack.push(object);
             }
             // `new Uint8Array(arrayLike)` and `new Uint8Array(iterable)` read their elements
@@ -370,25 +387,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let built = call_native(&self.intrinsics, native, &Value::Undefined, &arguments)?;
                 self.stack.push(built);
             }
-            // `new String(x)` is `String(x)` in a box. The conversion is the same one the call
-            // form does -- which for an object argument runs its `toString`, so it goes through
-            // the machine -- and only the boxing differs.
-            // `String(symbol)` describes the symbol; `new String(symbol)` refuses it. A symbol
-            // is the one value with no string of its own, and boxing the description would hand
-            // back an object that no longer knows which symbol it came from.
-            Value::Native(Native::StringConstructor, _)
-                if matches!(arguments.first(), Some(Value::Symbol(_))) =>
-            {
-                return Err(ExecutionError::TypeErrorMessage {
-                    message: "a symbol cannot be converted to a string".to_owned(),
-                });
+            // Construction uses ordinary ToString after ToPrimitive, so a direct or boxed
+            // Symbol throws here. The call form `String(symbol)` has a deliberate special case
+            // that returns its description instead.
+            Value::Native(Native::StringConstructor, _) => {
+                let primitive = match arguments.first() {
+                    Some(value) => self.as_primitive(value, PrimitiveHint::String, current)?,
+                    None => Value::String(StringUnits::default()),
+                };
+                if matches!(primitive, Value::Symbol(_)) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "a symbol cannot be converted to a string".to_owned(),
+                    });
+                }
+                self.stack.push(wrap_primitive(Value::String(
+                    primitive.to_string_units_checked()?,
+                )));
             }
-            Value::Native(
-                native @ (Native::StringConstructor
-                | Native::NumberConstructor
-                | Native::BooleanConstructor),
-                _,
-            ) => {
+            Value::Native(native @ (Native::NumberConstructor | Native::BooleanConstructor), _) => {
                 let primitive =
                     self.dispatch_native(native, &Value::Undefined, &arguments, current)?;
                 self.stack.push(wrap_primitive(primitive));
@@ -398,6 +414,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // that decides which prototype the result inherits, which this realm does not model.
             Value::Native(Native::FunctionConstructor, _) => {
                 let built = self.function_from_source(&arguments, current, "function")?;
+                self.stack.push(built);
+            }
+            Value::Native(Native::AsyncFunctionConstructor, _) => {
+                let built = self.function_from_source(&arguments, current, "async function")?;
                 self.stack.push(built);
             }
             Value::Native(Native::GeneratorFunctionConstructor, _) => {
@@ -432,7 +452,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Native(Native::WebStub(kind), realm),
                     Attributes::DEFAULT,
                 );
-                self.stack.push(Value::Object(Rc::new(RefCell::new(obj))));
+                self.stack.push(Value::Object(tracked_object(obj)));
             }
             // `new Intl.NumberFormat(...)`. The engine builds the formatter; what is decided
             // here is only what the options meant, which is the half the language owns.
@@ -464,6 +484,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Native(Native::AbortControllerConstructor, _) => {
                 self.stack.push(abort_controller());
+            }
+            // `Buffer` is both callable and constructible in Node. Keep construction on the
+            // same public facade path as `Buffer(...)`; its dispatcher owns the legacy numeric,
+            // string, and view conversion rules.
+            Value::Native(Native::NodeBufferGlobal, _) => {
+                let built = self.dispatch_native(
+                    Native::NodeBufferGlobal,
+                    &Value::Undefined,
+                    &arguments,
+                    current,
+                )?;
+                self.stack.push(built);
             }
             Value::Native(Native::TextEncoderConstructor, _) => {
                 self.stack.push(text_encoder());
@@ -550,6 +582,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instance.clone(),
                     Some(instance),
                     Some(new_target.clone()),
+                    None,
                 )?;
             }
             other => {

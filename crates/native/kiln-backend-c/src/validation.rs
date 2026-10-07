@@ -5,6 +5,19 @@ pub(crate) fn validate(program: &Program) -> Result<usize, EmitError> {
 }
 
 pub(crate) fn validate_program(program: &Program) -> Result<StackPlan, EmitError> {
+    validate_program_with_eval_policy(program, false)
+}
+
+/// Module emission can prune unreachable function bodies before deciding whether a direct eval
+/// is a live unsupported operation. All other instruction checks remain identical.
+pub(crate) fn validate_module_program(program: &Program) -> Result<StackPlan, EmitError> {
+    validate_program_with_eval_policy(program, true)
+}
+
+fn validate_program_with_eval_policy(
+    program: &Program,
+    allow_direct_eval: bool,
+) -> Result<StackPlan, EmitError> {
     if program.version != BYTECODE_VERSION {
         return Err(EmitError::Unsupported {
             feature: format!(
@@ -41,7 +54,13 @@ pub(crate) fn validate_program(program: &Program) -> Result<StackPlan, EmitError
             });
         }
     }
-    let body = validate_code(&program.code, program, program.local_count, 0)?;
+    let body = validate_code(
+        &program.code,
+        program,
+        program.local_count,
+        0,
+        allow_direct_eval,
+    )?;
     let functions = program
         .functions
         .iter()
@@ -51,6 +70,7 @@ pub(crate) fn validate_program(program: &Program) -> Result<StackPlan, EmitError
                 program,
                 proto.local_count,
                 proto.upvalues.len(),
+                allow_direct_eval,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -66,9 +86,12 @@ pub(crate) fn validate_code(
     program: &Program,
     local_count: u32,
     upvalue_count: usize,
+    allow_direct_eval: bool,
 ) -> Result<usize, EmitError> {
     for (index, instruction) in code.iter().enumerate() {
-        validate_supported_instruction(instruction)?;
+        if !allow_direct_eval || !matches!(instruction, Instruction::DirectEval(_)) {
+            validate_supported_instruction(instruction)?;
+        }
         match instruction {
             Instruction::Const(constant) if (*constant as usize) >= program.constants.len() => {
                 return Err(invalid(
@@ -83,6 +106,25 @@ pub(crate) fn validate_code(
                     index,
                     format!("template site {site} is out of bounds"),
                 ));
+            }
+            Instruction::HasPrivate { name, brand_key } => {
+                for constant in [name, brand_key] {
+                    match program.constants.get(*constant as usize) {
+                        Some(Constant::String(_)) => {}
+                        Some(_) => {
+                            return Err(invalid(
+                                index,
+                                format!("private-in name constant {constant} is not a string"),
+                            ));
+                        }
+                        None => {
+                            return Err(invalid(
+                                index,
+                                format!("private-in name constant {constant} is out of bounds"),
+                            ));
+                        }
+                    }
+                }
             }
             // The interpreter can make a second realm; this backend cannot. Its global object is
             // built once in C, in one copy, so a compiled program that reached the hook would get
@@ -105,6 +147,7 @@ pub(crate) fn validate_code(
             | Instruction::DeclareGlobalBinding { name, .. }
             | Instruction::GetProperty(name)
             | Instruction::CallMethod { name, .. }
+            | Instruction::CallMethodPrepared { name, .. }
                 if matches!(
                     program.constants.get(*name as usize),
                     Some(Constant::String(text))
@@ -130,6 +173,7 @@ pub(crate) fn validate_code(
             // string constant has one.
             Instruction::GetProperty(name)
             | Instruction::SetProperty(name)
+            | Instruction::DefineOwnProperty(name)
             | Instruction::DeleteProperty(name)
             | Instruction::SetPropertyStrict { name, .. }
             | Instruction::SetSuperPropertyStrict { name, .. }
@@ -139,7 +183,8 @@ pub(crate) fn validate_code(
             | Instruction::RequireGlobalBinding(name)
             | Instruction::LoadGlobalBindingOrUndefined(name)
             | Instruction::DeclareGlobalBinding { name, .. }
-            | Instruction::CallMethod { name, .. } => match program.constants.get(*name as usize) {
+            | Instruction::CallMethod { name, .. }
+            | Instruction::CallMethodPrepared { name, .. } => match program.constants.get(*name as usize) {
                 Some(Constant::String(_)) => {}
                 Some(_) => {
                     return Err(invalid(
@@ -159,6 +204,7 @@ pub(crate) fn validate_code(
             | Instruction::NewCell(local)
             | Instruction::LoadCell(local)
             | Instruction::StoreCell(local)
+            | Instruction::MarkCellFunctionName(local)
             | Instruction::MarkUninitialized(local)
                 if (*local as u64) >= u64::from(local_count) =>
             {
@@ -317,6 +363,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::SyntaxError
             | kiln_ir::Builtin::UriError
             | kiln_ir::Builtin::EvalError
+            | kiln_ir::Builtin::Eval
             | kiln_ir::Builtin::AggregateError
             | kiln_ir::Builtin::SuppressedError
             | kiln_ir::Builtin::DisposableStack
@@ -369,21 +416,25 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Performance
             | kiln_ir::Builtin::StructuredClone,
         ) => Ok(()),
-        Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
-            feature: format!("the `{builtin:?}` builtin in the native backend"),
+        // These have canonical native values in builtin_load. Compiler-created private
+        // references do not read the replaceable source-level global binding.
+        Instruction::LoadIntrinsicBuiltin(
+            kiln_ir::Builtin::Eval
+            | kiln_ir::Builtin::TypeError
+            | kiln_ir::Builtin::Math
+            | kiln_ir::Builtin::Number
+            | kiln_ir::Builtin::String
+            | kiln_ir::Builtin::Date
+            | kiln_ir::Builtin::ParseInt,
+        ) => Ok(()),
+        Instruction::LoadIntrinsicBuiltin(builtin) => Err(EmitError::Unsupported {
+            feature: format!("the intrinsic `{builtin:?}` builtin in the native backend"),
         }),
-        // A direct `eval` needs the compiler at run time: it reads the caller's bindings and
-        // compiles source that does not exist until the call happens. The native backend ships
-        // without a compiler, so this is refused rather than approximated -- an indirect `eval`
-        // is a different instruction and is unaffected.
-        Instruction::DirectEval(_) => Err(EmitError::Unsupported {
-            feature: "a direct `eval` call in the native backend".to_owned(),
-        }),
-        // `import(specifier)` resolves and loads a module while the program runs. A generated
-        // unit is a closed object file: the module graph was settled when it was emitted, and
-        // there is nothing at run time to resolve a specifier against or to compile what it
-        // names. Refused rather than answered with a rejected promise, which would be a wrong
-        // answer wearing the right shape.
+        // Source admission is checked by the dynamic expression seam at execution time.
+        Instruction::DirectEval(_) => Ok(()),
+        // Direct-eval bytecode is evaluated only by the interpreter's dynamic compiler; the
+        // native dynamic compiler carries immutability in its binding descriptors instead.
+        Instruction::MarkCellFunctionName(_) => Ok(()),
         Instruction::ToObject | Instruction::WithHas(_) => Err(EmitError::Unsupported {
             feature: "a `with` statement in the native backend".to_owned(),
         }),
@@ -405,12 +456,15 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::GetProperty(_)
         | Instruction::SetProperty(_)
         | Instruction::SetPropertyStrict { .. }
+        | Instruction::DefineOwnProperty(_)
         | Instruction::NewArray { .. }
         | Instruction::ToPropertyKey
         | Instruction::GetComputed
         | Instruction::SetComputed
         | Instruction::SetComputedStrict { .. }
+        | Instruction::DefineOwnComputed
         | Instruction::CallMethod { .. }
+        | Instruction::CallMethodPrepared { .. }
         | Instruction::LoadThis
         | Instruction::PushHandler(_)
         | Instruction::PopHandler
@@ -423,6 +477,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::DeleteGlobalBinding(_)
         | Instruction::DeclareGlobalBinding { .. }
         | Instruction::GetPrivate(_)
+        | Instruction::HasPrivate { .. }
         | Instruction::SetPrivate(_)
         | Instruction::Dup2
         | Instruction::CallComputed { .. }
@@ -476,7 +531,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
 }
 
 pub(crate) fn validate_module(module: &ModuleProgram) -> Result<usize, EmitError> {
-    let max_stack = validate(&module.program)?;
+    let max_stack = validate_module_program(&module.program)?.body;
     let local_count = u64::from(module.program.local_count);
     let mut initialized_slots = HashSet::with_capacity(module.imports.len());
     for (index, binding) in module.imports.iter().enumerate() {

@@ -1,4 +1,4 @@
-// Issue 14 of `.scratch/realms-and-concurrency`, what remained open after r17: where a port's
+// Issue 14 of `docs/issues/realms-and-concurrency`, what remained open after r17: where a port's
 // delivery sits among the event loop's phases, and the event's own symbol-keyed slots.
 //
 // Node delivers a port's messages in libuv's poll phase: after the timers due when a turn begins,

@@ -1,0 +1,7 @@
+# Live namespace resolver: Hash deadline check
+
+The frozen real-wall-clock interpreter CLI `ef591fd4a838d683c877315b3e3c519d75f5e6fc4ce011e60c287ab882c8df23`, production source `ac0099b7`, completed the pinned direct-TypeScript Hash file with exit 1: 25 registered and recorded cases, 15 passed, ten failed at their unchanged 5,000 ms deadlines. All 25 map exactly to the official Node/Vitest inventory; no missing cases, outer file timeout, mode mismatch or mapping errors. This does not prove all upstream tests working, nor a quiet performance result: the one-worker native survey and namespace build ran concurrently within the three-CPU budget.
+
+The coherent namespace resolver improves individual reads, but this file still exposes performance debt. Source inspection finds linear WeakMap/WeakSet entry scans in the interpreter (`intrinsics/dispatch.rs`); Effect Hash uses a global WeakMap hash cache and WeakSet visited-object set. Identity-indexed weak lookup is the next candidate, with conditional-value tracing and collection behavior preserved. This is a source-based candidate explanation, not sampled attribution or proof that the change will meet the deadlines.
+
+The complete report, case inventory, raw streams and frozen CLI source receipt are retained. The receipt predates the empty collection forEach fix and the subsequently pending inherited native namespace and retained-tier budget fixes. No test bodies, assertions, skips or deadlines were changed.

@@ -104,6 +104,17 @@ static int kiln_c99_inspect_key_units(kiln_text *text, const kiln_string *key) {
 
 static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth);
 
+static int kiln_c99_inspect_indent(kiln_text *text, size_t depth) {
+    static const char spaces[] = "                                                                ";
+    size_t count = depth * 2;
+    while (count != 0) {
+        size_t part = count < sizeof spaces - 1 ? count : sizeof spaces - 1;
+        if (kiln_c99_text_append(text, spaces, part) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
+        count -= part;
+    }
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth) {
     size_t index;
     if (value.tag == KILN_VALUE_ARRAY) {
@@ -203,25 +214,25 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
         if (enumerated == 0) {
             return kiln_c99_text_append_c(text, "{}");
         }
-        if (kiln_c99_text_append_c(text, "{ ") != KILN_C99_OK) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        enumerated = 0;
+        {
+        kiln_text body = {NULL, 0, 0};
+        size_t *bounds;
+        size_t row_count = 0;
+        size_t column = 0, scan;
+        int flat_fits;
+        int status = KILN_C99_OK;
+        if (count > SIZE_MAX / (2 * sizeof *bounds)) return KILN_C99_OUT_OF_MEMORY;
+        bounds = count == 0 ? NULL : (size_t *)malloc(count * 2 * sizeof *bounds);
+        if (count != 0 && bounds == NULL) return KILN_C99_OUT_OF_MEMORY;
         for (index = 0; index < count; ++index) {
             kiln_property property;
             if (!kiln_c99_property_view_value(value, index, &property)) break;
             if (!property.enumerable) {
                 continue;
             }
-            if (enumerated++ != 0 && kiln_c99_text_append_c(text, ", ") != KILN_C99_OK) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            if (kiln_c99_inspect_key_units(text, property.key) != KILN_C99_OK) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            if (kiln_c99_text_append_c(text, ": ") != KILN_C99_OK) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
+            bounds[row_count * 2] = body.len;
+            if (kiln_c99_inspect_key_units(&body, property.key) != KILN_C99_OK ||
+                kiln_c99_text_append_c(&body, ": ") != KILN_C99_OK) status = KILN_C99_OUT_OF_MEMORY;
             if (property.accessor) {
                 /* Named rather than called: showing a value here would run the program's code
                  * because something was printed. */
@@ -229,17 +240,46 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
                     property.getter.tag == KILN_VALUE_UNDEFINED  ? "[Setter]"
                     : property.setter.tag == KILN_VALUE_UNDEFINED ? "[Getter]"
                                                                                    : "[Getter/Setter]";
-                if (kiln_c99_text_append_c(text, shown) != KILN_C99_OK) {
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-                continue;
+                if (status == KILN_C99_OK && kiln_c99_text_append_c(&body, shown) != KILN_C99_OK)
+                    status = KILN_C99_OUT_OF_MEMORY;
+            } else if (status == KILN_C99_OK && kiln_c99_inspect_into(&body, property.value, depth + 1) != KILN_C99_OK) {
+                status = KILN_C99_OUT_OF_MEMORY;
             }
-            if (kiln_c99_inspect_into(text, property.value, depth + 1) !=
-                KILN_C99_OK) {
-                return KILN_C99_OUT_OF_MEMORY;
-            }
+            bounds[row_count * 2 + 1] = body.len;
+            row_count += 1;
+            if (status != KILN_C99_OK) break;
         }
-        return kiln_c99_text_append_c(text, " }");
+        for (scan = text->len; scan > 0 && text->bytes[scan - 1] != '\n'; --scan) column += 1;
+        flat_fits = body.len <= 80 && row_count <= (SIZE_MAX - body.len - 4) / 2;
+        if (flat_fits) {
+            size_t flat_len = body.len + 4 + (row_count == 0 ? 0 : 2 * (row_count - 1));
+            flat_fits = (body.len == 0 || !memchr(body.bytes, '\n', body.len)) &&
+                        column <= 80 && flat_len <= 80 - column;
+        }
+        if (status == KILN_C99_OK && flat_fits) {
+            status = kiln_c99_text_append_c(text, "{ ");
+            for (index = 0; status == KILN_C99_OK && index < row_count; ++index) {
+                if (index != 0) status = kiln_c99_text_append_c(text, ", ");
+                if (status == KILN_C99_OK) status = kiln_c99_text_append(text,
+                    body.bytes + bounds[index * 2], bounds[index * 2 + 1] - bounds[index * 2]);
+            }
+            if (status == KILN_C99_OK) status = kiln_c99_text_append_c(text, " }");
+        } else if (status == KILN_C99_OK) {
+            status = kiln_c99_text_append_c(text, "{\n");
+            for (index = 0; status == KILN_C99_OK && index < row_count; ++index) {
+                status = kiln_c99_inspect_indent(text, (size_t)(depth + 1));
+                if (status == KILN_C99_OK) status = kiln_c99_text_append(text,
+                    body.bytes + bounds[index * 2], bounds[index * 2 + 1] - bounds[index * 2]);
+                if (status == KILN_C99_OK) status = kiln_c99_text_append_c(text,
+                    index + 1 == row_count ? "\n" : ",\n");
+            }
+            if (status == KILN_C99_OK) status = kiln_c99_inspect_indent(text, (size_t)depth);
+            if (status == KILN_C99_OK) status = kiln_c99_text_append_c(text, "}");
+        }
+        free(bounds);
+        free(body.bytes);
+        return status;
+        }
     }
 }
 
@@ -364,6 +404,10 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
     }
     case KILN_VALUE_GENERATOR:
         return kiln_c99_text_append_c(text, "Object [Generator] {}");
+    case KILN_VALUE_TIMER:
+        return kiln_c99_text_append_c(
+            text, kiln_c99_timer_of(value)->kind == KILN_C99_TIMER_IMMEDIATE ? "Immediate {}"
+                                                                              : "Timeout {}");
     case KILN_VALUE_DATA_VIEW: {
         /* `DataView { byteLength: 8, byteOffset: 0 }`, which is what a console shows and what the
          * interpreter prints. Two numbers and no list: a DataView holds no elements to walk, and

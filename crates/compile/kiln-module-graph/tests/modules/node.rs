@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn private_module_identity_is_checkout_stable_and_module_specific() {
+    let source = "class Cache { #value = 1; get() { return this.#value; } }";
+    let first_root = Path::new("/checkout/one/project");
+    let second_root = Path::new("/checkout/two/project");
+    let first_id = graph_module_identity(first_root, &first_root.join("src/cache.js"));
+    let same_logical_id = graph_module_identity(second_root, &second_root.join("src/cache.js"));
+    let other_module_id = graph_module_identity(second_root, &second_root.join("src/other.js"));
+    assert_eq!(first_id, same_logical_id);
+    assert_ne!(first_id, other_module_id);
+
+    let compile_private_key = |module_id: &str| {
+        let mut hir = kiln_frontend_oxc::parse("fixture.js", source);
+        hir.module_id = Arc::from(module_id);
+        let program = compile_module(&hir)
+            .expect("private class compiles")
+            .program;
+        program
+            .constants
+            .into_iter()
+            .filter_map(|constant| match constant {
+                kiln_ir::Constant::String(value) => value
+                    .to_scalar_string()
+                    .ok()
+                    .filter(|value| value.starts_with("@@private:")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_keys = compile_private_key(&first_id);
+    assert_eq!(first_keys, compile_private_key(&same_logical_id));
+    assert_ne!(first_keys, compile_private_key(&other_module_id));
+}
+
+#[test]
 fn module_addressed_actor_runs_in_a_worker_realm() {
     let project = TempProject::new();
     project.write(
@@ -96,6 +130,63 @@ fn declared_node_include_is_linked_but_not_evaluated_with_the_entry() {
         )
         .expect("execute included module");
     assert_eq!(worker_host.output, ["task function 42"]);
+}
+
+#[test]
+fn lazy_node_builtin_extension_links_facade_without_making_it_startup_reachable() {
+    let project = TempProject::new();
+    let entry = project.write("main.js", "console.log('hello');");
+    let graph = project.graph(&entry).expect("build ordinary graph");
+    // The graph keys every module, builtins included, under the canonical project root. On macOS
+    // `temp_dir()` exposes `/var` while `canonicalize` returns `/private/var`, so deriving the
+    // virtual path from the raw fixture root names a module the graph never contains.
+    let canonical_root = fs::canonicalize(&project.root).expect("canonical project root");
+    let http_path = kiln_module_resolver::NodeBuiltin::Http.virtual_path(&canonical_root);
+
+    assert!(!graph.module_map().contains_key(&http_path));
+    let extended = graph
+        .with_lazy_node_builtin(
+            graph.entry(),
+            "/kiln/runtime-bootstrap.ts",
+            kiln_module_resolver::NodeBuiltin::Http,
+        )
+        .expect("materialize lazy HTTP facade");
+
+    let http = extended.module(&http_path).expect("HTTP facade is linked");
+    assert!(matches!(&http.source, ModuleSource::NodeBuiltin(_)));
+    for dependency in ["node:net", "node:stream"] {
+        let edge = http
+            .dependencies
+            .iter()
+            .find(|edge| edge.specifier == dependency)
+            .unwrap_or_else(|| panic!("HTTP facade is missing its `{dependency}` import"));
+        assert!(matches!(
+            &extended
+                .module(&edge.target)
+                .expect("facade dependency is linked")
+                .source,
+            ModuleSource::NodeBuiltin(_)
+        ));
+    }
+    assert!(
+        extended
+            .module(graph.entry())
+            .expect("entry remains linked")
+            .runtime_dependencies
+            .iter()
+            .any(|dependency| dependency.target == http_path)
+    );
+    assert!(!extended.statically_reachable().contains(&http_path));
+    assert_eq!(
+        extended
+            .with_lazy_node_builtin(
+                graph.entry(),
+                "/kiln/runtime-bootstrap.ts",
+                kiln_module_resolver::NodeBuiltin::Http,
+            )
+            .expect("reusing an already linked facade is cheap and idempotent"),
+        extended
+    );
 }
 
 #[test]
@@ -367,6 +458,39 @@ fn runtime_commonjs_cycle_preserves_partially_initialized_exports() {
 }
 
 #[test]
+fn runtime_commonjs_cycle_observes_replaced_module_exports_during_evaluation() {
+    let project = TempProject::new();
+    project.write(
+        "range.cjs",
+        "class Range {} module.exports = Range; const Comparator = require('./comparator.cjs'); Range.Comparator = Comparator;",
+    );
+    project.write(
+        "comparator.cjs",
+        "const Range = require('./range.cjs'); class Comparator {} Comparator.Range = Range; module.exports = Comparator;",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { createRequire } from 'node:module'; const Range = createRequire(import.meta.url)('./range.cjs'); console.log(Range.Comparator.Range === Range);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path).map_err(|error| error.to_string()),
+        OxcFrontend,
+    )
+    .expect("build replacement CommonJS cycle");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute replacement CommonJS cycle");
+    assert_eq!(host.output, ["true"]);
+}
+
+#[test]
 fn create_require_url_object_passes_its_href_to_the_host() {
     let project = TempProject::new();
     let entry = project.write(
@@ -536,6 +660,34 @@ console.log(fs === nodeFs, typeof processBuiltin.run);
             "11",
         ]
     );
+}
+
+#[test]
+fn commonjs_resolve_only_target_metadata_survives_live_reduction() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let project = TempProject::new();
+    let entry = project.write("main.cjs", "console.log(require.resolve('./target.cjs'));");
+    project.write("target.cjs", "globalThis.shouldNotLoad = true;\n");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build resolve-only graph");
+    let demand = reduce_all_live_demand(&graph);
+    let (reduced, _) = graph
+        .reduce_to_live(&demand)
+        .expect("reduce resolve-only graph");
+    let reduced_entry = reduced.module(&entry).expect("reduced entry");
+    let request = reduced_entry
+        .runtime_dependencies
+        .iter()
+        .find(|dependency| dependency.specifier == "./target.cjs")
+        .expect("resolve-only request metadata retained");
+    assert!(request.resolve_only);
+    assert!(reduced.module(&request.target).is_none());
 }
 
 #[test]
@@ -820,7 +972,7 @@ fn node_entry_with_an_unsettled_top_level_await_exits_13() {
         ExecutionLimits::default(),
         ExecutionCapabilities::default(),
     );
-    // Node's answer (issue 09 of `.scratch/full-runtime`): the warning and status 13, where
+    // Node's answer (issue 09 of `docs/issues/full-runtime`): the warning and status 13, where
     // this exited 0 and read as success to every shell.
     assert!(
         matches!(
@@ -901,6 +1053,54 @@ fn node_executes_commonjs_require_and_esm_default_interop() {
         .expect("execute mixed graph");
     assert_eq!(host.into_stdout(), "42\n");
     assert_eq!(execution.value, Value::Undefined);
+}
+
+#[test]
+fn typeless_nested_package_keeps_commonjs_default_interop_under_module_project() {
+    let project = TempProject::new();
+    project.write("package.json", r#"{"type":"module"}"#);
+    fs::create_dir_all(project.root.join("node_modules/form-data/lib")).unwrap();
+    project.write(
+        "node_modules/form-data/package.json",
+        r#"{"name":"form-data","main":"./lib/form_data"}"#,
+    );
+    project.write(
+        "node_modules/form-data/lib/form_data.js",
+        "module.exports = function FormData() {};",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import FormData from 'form-data'; console.log(typeof FormData);",
+    );
+    let form_data = fs::canonicalize(project.root.join("node_modules/form-data/lib/form_data.js"))
+        .expect("canonical CommonJS main");
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("typeless package is CommonJS despite the parent module package");
+    let node = graph.module(&form_data).expect("form-data module");
+    assert_eq!(node.source, ModuleSource::CommonJs);
+    assert!(matches!(
+        graph.resolved_export(&form_data, "default"),
+        Some(kiln_module_graph::ResolvedExport::Local {
+            module,
+            local_slot: 0,
+        }) if module == &form_data
+    ));
+
+    let mut host = kiln_runtime::CaptureHost::new();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute default import from CommonJS");
+    assert_eq!(host.into_stdout(), "function\n");
 }
 
 #[test]
@@ -1639,6 +1839,126 @@ fn package_policy_links_a_named_package_import() {
         )
         .expect("execute package graph");
     assert_eq!(host.output, ["42"]);
+}
+
+#[test]
+fn generated_oxc_using_helper_links_internally_but_authored_internal_import_is_refused() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mts",
+        "await using resource = makeResource(); void resource;",
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("compiler-generated helper edge links to Kiln's typed helper module");
+    let helper = NodeBuiltin::OxcUsingCtx.virtual_path(&project.root);
+    let helper_node = graph.module(&helper).expect("helper module is linked");
+    assert_eq!(
+        helper_node.source,
+        ModuleSource::NodeBuiltin(NodeBuiltin::OxcUsingCtx)
+    );
+    assert!(
+        graph
+            .module(&entry)
+            .expect("entry module")
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.target == helper),
+        "the generated helper is an ordinary graph dependency"
+    );
+
+    let commonjs_project = TempProject::new();
+    let commonjs_entry = commonjs_project.write(
+        "main.cts",
+        "using resource = makeResource(); void resource;",
+    );
+    let resolver = NodeRuntimeResolver::new(&commonjs_project.root).expect("Node resolver");
+    let commonjs_graph = ModuleGraph::build_node(
+        &commonjs_entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("CommonJS static TypeScript also links its compiler-owned helper");
+    let commonjs_helper = NodeBuiltin::OxcUsingCtx.virtual_path(&commonjs_project.root);
+    assert!(
+        commonjs_graph
+            .module(&commonjs_entry)
+            .expect("CommonJS entry exists")
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.target == commonjs_helper),
+        "the CommonJS transformed helper request is linked"
+    );
+
+    let authored_project = TempProject::new();
+    let authored_entry = authored_project.write(
+        "main.mts",
+        "import usingCtx from 'kiln:compiler-runtime/helpers/usingCtx'; void usingCtx; await using resource = makeResource();",
+    );
+    let resolver = NodeRuntimeResolver::new(&authored_project.root).expect("Node resolver");
+    let error = ModuleGraph::build_node(
+        &authored_entry,
+        resolver,
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect_err("source-authored imports cannot link compiler internals");
+    assert!(
+        error
+            .to_string()
+            .contains("kiln:compiler-runtime/helpers/usingCtx` is internal"),
+        "got {error}"
+    );
+}
+
+#[test]
+fn graph_retains_resolver_verified_package_aliases_for_linked_runtime_imports() {
+    let project = TempProject::new();
+    let package = project.root.join("node_modules/pkg");
+    fs::create_dir_all(&package).expect("create package");
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"pkg","exports":{".":"./index.js","./*":"./src/*.js","./private/*":null}}"#,
+    )
+    .expect("write package manifest");
+    fs::create_dir_all(package.join("src")).expect("create package source directory");
+    let target = project.write(
+        "node_modules/pkg/src/runtime.js",
+        "export const value = 42;",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { value } from 'pkg/runtime'; console.log(value);",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build package graph");
+    let target = fs::canonicalize(target).expect("canonical target");
+    assert!(
+        graph
+            .runtime_package_aliases()
+            .contains(&RuntimePackageAlias {
+                package_root: fs::canonicalize(package).expect("canonical package root"),
+                specifier: "pkg/runtime".to_owned(),
+                target,
+            })
+    );
+    assert!(
+        graph
+            .runtime_package_aliases()
+            .iter()
+            .all(|alias| !alias.specifier.starts_with("pkg/private/"))
+    );
 }
 
 #[test]
@@ -4087,7 +4407,7 @@ fn node_http_create_server_accepts_options_before_the_listener() {
             "import { createServer } from 'node:http';",
             "let server;",
             "server = createServer({ keepAlive: false }, (request, response) => {",
-            "  response.end('options ' + request.url);",
+            "  response.end('options ' + request.url + 'x'.repeat(131072));",
             "  server.close();",
             "});",
             "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
@@ -4157,7 +4477,113 @@ fn node_http_create_server_accepts_options_before_the_listener() {
         .expect("serve options-form request");
     let response = client.join().expect("client thread");
     assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
-    assert_eq!(http_body(&response), b"options /configured");
+    let body = http_body(&response);
+    assert_eq!(&body[..19], b"options /configured");
+    assert_eq!(body.len(), 19 + 131072);
+    assert!(body[19..].iter().all(|byte| *byte == b'x'));
+}
+
+#[test]
+fn node_http_keep_alive_request_then_fin_flushes_the_final_response() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{Shutdown, TcpStream};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn read_response(reader: &mut BufReader<TcpStream>) -> String {
+        let mut response = String::new();
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read response status");
+        response.push_str(&line);
+        let mut content_length = 0;
+        loop {
+            line.clear();
+            reader.read_line(&mut line).expect("read response header");
+            response.push_str(&line);
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().expect("valid content length");
+            }
+        }
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).expect("read response body");
+        response.push_str(std::str::from_utf8(&body).expect("UTF-8 test response"));
+        response
+    }
+
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import { createServer } from 'node:http';",
+            "let server;",
+            "server = createServer((request, response) => {",
+            "  response.end(request.url);",
+            "  if (request.url === '/second') server.close();",
+            "});",
+            "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = kiln_frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build keep-alive HTTP graph");
+
+    let (port_sender, port_receiver) = mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let port = port_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server publishes its port");
+        let stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let mut stream = BufReader::new(stream);
+        stream
+            .get_mut()
+            .write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write first request");
+        let first = read_response(&mut stream);
+        stream
+            .get_mut()
+            .write_all(b"GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("write final request");
+        stream
+            .get_mut()
+            .shutdown(Shutdown::Write)
+            .expect("finish final request");
+        let second = read_response(&mut stream);
+        (first, second)
+    });
+    let mut host = ServerHostForPort {
+        sender: Some(port_sender),
+        output: Vec::new(),
+    };
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("serve keep-alive requests");
+    let (first, second) = client.join().expect("client completes");
+    assert_eq!(http_status(&first), "HTTP/1.1 200 OK");
+    assert_eq!(http_body(&first), b"/first");
+    assert_eq!(http_status(&second), "HTTP/1.1 200 OK");
+    assert_eq!(http_body(&second), b"/second");
 }
 
 #[test]
@@ -4225,6 +4651,138 @@ fn node_http_request_and_response_share_the_accepted_socket_identity() {
     let response = client.join().expect("client completes");
     assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
     assert_eq!(http_body(&response), b"identity");
+}
+
+#[test]
+fn node_http_default_half_close_does_not_send_a_late_response() {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpStream};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import { createServer } from 'node:http';",
+            "let server;",
+            "server = createServer((request, response) => {",
+            "  setTimeout(() => { response.end('late'); server.close(); }, 20);",
+            "});",
+            "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = kiln_frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build delayed HTTP graph");
+
+    let (port_sender, port_receiver) = mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let port = port_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server publishes its port");
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write request");
+        stream.shutdown(Shutdown::Write).expect("finish request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        response
+    });
+    let mut host = ServerHostForPort {
+        sender: Some(port_sender),
+        output: Vec::new(),
+    };
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("serve delayed response");
+    let response = client.join().expect("client completes");
+    assert!(response.is_empty(), "late default response: {response:?}");
+}
+
+#[test]
+fn node_http_allow_half_open_preserves_a_late_response() {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpStream};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.js",
+        concat!(
+            "import { createServer } from 'node:http';",
+            "let server;",
+            "server = createServer((request, response) => {",
+            "  setTimeout(() => { response.end('late'); server.close(); }, 20);",
+            "});",
+            "server.httpAllowHalfOpen = true;",
+            "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+        ),
+    );
+    let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+    let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+        let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let hir = kiln_frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+        compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            path: path.to_path_buf(),
+            diagnostics,
+        })
+    })
+    .expect("build half-open HTTP graph");
+
+    let (port_sender, port_receiver) = mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let port = port_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server publishes its port");
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("write request");
+        stream.shutdown(Shutdown::Write).expect("finish request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        response
+    });
+    let mut host = ServerHostForPort {
+        sender: Some(port_sender),
+        output: Vec::new(),
+    };
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("serve half-open delayed response");
+    let response = client.join().expect("client completes");
+    assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
+    assert_eq!(http_body(&response), b"late");
 }
 
 #[test]
@@ -4679,5 +5237,45 @@ fn mts_with_static_imports_builds_as_esm_under_commonjs_manifest() {
     assert_eq!(
         graph.module(&entry).expect("entry node").source,
         ModuleSource::Source
+    );
+}
+
+#[test]
+fn fetch_abort_and_reader_cancel_release_live_http_connections() {
+    let project = TempProject::new();
+    let entry = project.write(
+        "main.mjs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../conformance/native/fetch-live-response-cancel.mjs"
+        )),
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build live fetch cancellation graph");
+    let mut host = TestHost::default();
+    graph
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("cancel live fetch connections");
+    assert_eq!(
+        host.output,
+        [
+            "abort 200 first false",
+            "read rejected AbortError",
+            "server closed",
+            "cancel 200 first false",
+            "reader cancelled",
+            "server closed",
+            "pending rejected AbortError",
+            "pending server closed",
+        ]
     );
 }

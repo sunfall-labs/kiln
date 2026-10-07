@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// The parallel/sequential differential harness (.scratch/parallel-builtins issue 02): typed
+// The parallel/sequential differential harness (docs/issues/parallel-builtins issue 02): typed
 // arrays of every kind. The pooled lowering reads and writes element storage directly, so each
 // kind's conversion -- wrapping for the integers, rounding for Float32, clamping with
 // round-half-to-even for Uint8Clamped -- must be exactly the one `map` applies when it stores

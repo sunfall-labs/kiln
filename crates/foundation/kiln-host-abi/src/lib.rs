@@ -6,14 +6,16 @@
 use kiln_string::StringUnits;
 
 /// Version of the host operation and value contract.
-pub const HOST_ABI_VERSION: u32 = 4;
+pub const HOST_ABI_VERSION: u32 = 8;
 
 /// Internal native runtime operation that returns a realm-owned GC callable. It intentionally
 /// lives outside [`HostOp`], whose result is the scalar `HostValue` ABI.
 pub const HOST_OP_MODULE_CREATE_REQUIRE: u16 = 0x7FF0;
+pub const HOST_OP_MODULE_LOADER: u16 = 0x7FF1;
 
 const _: () = {
     assert!(HOST_OP_MODULE_CREATE_REQUIRE > HostOp::TransferRegion as u16);
+    assert!(HOST_OP_MODULE_LOADER > HostOp::TransferRegion as u16);
 };
 
 /// Operations a compiled program can request from its host.
@@ -297,6 +299,8 @@ pub enum AsyncHostValue {
 /// Owned output from a completed child process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessOutput {
+    /// Operating-system process identity assigned when the child was spawned.
+    pub pid: Option<u32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
@@ -307,6 +311,8 @@ pub struct ProcessOutput {
 /// Stable error information that a Node compatibility Adapter can turn into a JavaScript error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsyncHostError {
+    /// Positive native OS error number when the host supplied one.
+    pub os_errno: Option<i32>,
     /// Node-compatible short error code where one exists, such as `ENOENT`.
     pub code: String,
     /// Operation name, such as `open` or `stat`.
@@ -326,6 +332,7 @@ impl AsyncHostError {
         message: impl Into<String>,
     ) -> Self {
         Self {
+            os_errno: None,
             code: code.into(),
             syscall: syscall.into(),
             path,
@@ -353,6 +360,17 @@ pub struct Completion {
     pub result: Result<AsyncHostValue, AsyncHostError>,
 }
 
+/// Result of cancelling unfinished work while preserving a completed operation's result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingCancellation {
+    /// No operation or undelivered completion is owned by this host.
+    Unknown,
+    /// The unfinished operation was cancelled; no completion will be delivered.
+    Cancelled,
+    /// A terminal completion remains owned by the ordinary completion pump.
+    CompletionReady,
+}
+
 /// Starts and controls asynchronous operations without exposing an executor implementation.
 pub trait AsyncHostOps {
     /// Start a non-resource operation and return its opaque request identity immediately.
@@ -364,6 +382,10 @@ pub trait AsyncHostOps {
 
     /// Cancel a pending operation, returning whether it was still owned by this host.
     fn cancel(&mut self, request: RequestId) -> bool;
+
+    /// Cancel only unfinished work. Completed results must remain available to the completion
+    /// pump so language callbacks retain the operation's actual success or failure.
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation;
 
     /// Return whether referenced work currently keeps the realm alive.
     fn has_referenced_work(&self) -> bool;
@@ -384,6 +406,10 @@ pub trait ActiveAsyncHostOps {
 
     /// Cancel a pending operation, returning whether it was still owned by this host.
     fn cancel(&mut self, request: RequestId) -> bool;
+
+    /// Cancel only unfinished work. Completed results must remain available to the completion
+    /// pump so language callbacks retain the operation's actual success or failure.
+    fn cancel_if_pending(&mut self, request: RequestId) -> PendingCancellation;
 }
 
 /// A number as `String(value)` renders it.
@@ -446,6 +472,22 @@ pub fn transfer_region_op(ptr: u64) -> Result<HostValue, HostError> {
 pub trait HostOps {
     fn call(&mut self, operation: HostOp, arguments: &[HostValue]) -> Result<HostValue, HostError>;
 
+    /// Run a child process synchronously for Node's `child_process.execFileSync` adapter.
+    ///
+    /// This is a separate capability from [`AsyncHostOps`]: JavaScript observes this operation
+    /// before the current call returns, so adapting an asynchronous request by scheduling a
+    /// Promise would change the API. Hosts that do not expose synchronous process execution
+    /// keep the default named refusal.
+    fn run_process_sync(
+        &mut self,
+        _command: &str,
+        _args: &[String],
+    ) -> Result<SyncProcessOutput, HostError> {
+        Err(HostError::new(
+            "synchronous process execution is unavailable in this host",
+        ))
+    }
+
     /// Optional synchronous filesystem capability.
     fn fs(&mut self) -> Option<&mut (dyn FileSystemOps + '_)> {
         None
@@ -455,6 +497,17 @@ pub trait HostOps {
     fn clone_fs(&self) -> Option<Box<dyn FileSystemOps>> {
         None
     }
+}
+
+/// Owned result of a synchronous child process launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncProcessOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub status: Option<i32>,
+    pub signal: Option<String>,
+    pub pid: Option<u32>,
+    pub error: Option<String>,
 }
 
 /// Portable metadata about a filesystem entry, usable by both OS and virtual filesystems.

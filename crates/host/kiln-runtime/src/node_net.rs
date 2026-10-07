@@ -69,6 +69,12 @@ impl TcpServerDriver {
         self.closed
     }
 
+    /// Node's `server.listening` becomes true once bind completion publishes the listener and
+    /// becomes false immediately when close begins.
+    pub fn listening(&self) -> bool {
+        !self.closing && !self.closed && self.listener.is_some()
+    }
+
     /// Whether an accept action produced before a synchronous listener callback is still valid.
     ///
     /// A `listening` callback may call `server.close()` before the following accept action from

@@ -20,7 +20,7 @@ use kiln_runtime::{
     RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimeZoneCapability, TimerId, WorkItem,
     duration_from_milliseconds,
     node_http::HttpResponseEvent,
-    node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
+    node_http_agent::{AgentCancellation, AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
     node_net::{ServerAction, TcpServerDriver},
     node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, StreamEvent},
 };
@@ -37,6 +37,7 @@ mod intl;
 mod agent;
 use agent::{AgentGroup, AgentOwner, Bytes};
 // `crypto` houses node:crypto and Web Crypto primitives (hashes, HMAC, entropy, constant-time compare).
+mod compression;
 mod crypto;
 #[cfg(test)]
 pub(crate) use crypto::{node_hash, node_hash_digest, node_hash_state};
@@ -92,17 +93,16 @@ pub(crate) use stream::{
 // `net` houses node:net TCP server and socket implementations.
 mod net;
 pub(crate) use net::{
-    NetSocketState, NodeConnection, NodeServerState, ServerProtocol, node_connect_arguments,
-    node_listen_arguments, node_net_socket_state, node_net_socket_value, node_server_object,
-    node_socket_object, sync_node_socket_ready_state,
+    NetSocketState, NodeConnection, NodeServerState, ServerProtocol, node_listen_arguments,
+    node_net_socket_state, node_net_socket_value, node_server_object, node_socket_object,
+    sync_node_socket_ready_state,
 };
 // `http` houses node:http, node:https, and node:http2 implementations.
 mod http;
 pub(crate) use http::{
     HttpClientRequestState, HttpIncomingState, HttpResponseState, node_body_bytes,
     node_http_client_request, node_http_client_request_object, node_http_incoming,
-    node_http_request_arguments, node_http_response, node_http_server, node_http_socket_facade,
-    readable_chunk_length,
+    node_http_request_arguments, node_http_response, node_http_server, readable_chunk_length,
 };
 // `fs` houses node:fs and node:fs/promises implementations.
 mod fs;
@@ -114,6 +114,8 @@ pub(crate) use async_hooks::{
 };
 mod object_model;
 pub use object_model::*;
+mod gc_census;
+pub(crate) use gc_census::tracked_object;
 mod shared;
 use shared::SharedCache;
 pub use shared::SharedFacade;
@@ -240,6 +242,9 @@ impl ErrorKind {
 
 mod native;
 pub use native::*;
+
+mod module_map;
+pub use module_map::{ModuleMap, ModuleStatus, SharedModuleMap, lookup_export};
 
 /// Which built-in's method table a `Native::PrototypeOf` marker stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -618,6 +623,9 @@ impl AtomicsOp {
 pub struct ProxyData {
     target: Value,
     handler: Value,
+    /// Private elements belong to the proxy object itself. They are internal slots, so class
+    /// initialization and `#name` access bypass the public proxy traps and never touch `target`.
+    private_elements: RefCell<ObjectData>,
     /// `Proxy.revocable`'s second half was called.
     ///
     /// A revoked proxy is not an empty one: every operation on it is a TypeError, which is the
@@ -674,6 +682,28 @@ pub struct WrappedFunction {
     properties: RefCell<ObjectData>,
 }
 
+/// A generator owns ordinary properties independently of its suspended execution state.
+/// Keeping the stores separate lets property access work while its frame is running.
+#[derive(Debug)]
+pub struct GeneratorData {
+    state: RefCell<GeneratorState>,
+    properties: RefCell<ObjectData>,
+}
+
+impl PartialEq for GeneratorData {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl std::ops::Deref for GeneratorData {
+    type Target = RefCell<GeneratorState>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
 /// A generator's saved execution state.
 ///
 /// A generator is the first thing in this VM whose frame does not run to completion, so its
@@ -724,6 +754,27 @@ pub struct GeneratorState {
     delegate: Option<(Value, usize, bool)>,
 }
 
+impl GeneratorState {
+    /// Mark the generator completed and release values that are only needed while it can run.
+    ///
+    /// The generator object keeps its closure and own properties after completion, but its
+    /// suspended frame is no longer reachable by a future `next`, `return`, or `throw` call.
+    /// Keeping that frame here would retain every local and argument for as long as callers keep
+    /// the completed iterator alive.
+    pub(crate) fn complete(&mut self) {
+        self.done = true;
+        self.locals.clear();
+        self.stack.clear();
+        self.arguments.clear();
+        self.handlers.clear();
+        self.this_value = Value::Undefined;
+        self.new_target = Value::Undefined;
+        self.awaiting = false;
+        self.returning = None;
+        self.delegate = None;
+    }
+}
+
 impl PartialEq for GeneratorState {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other)
@@ -735,6 +786,35 @@ struct ModuleSuspension {
     stack: Vec<Value>,
     handlers: Vec<Handler>,
     instruction: usize,
+    module_generation: Option<module_map::ModuleGenerationHandle>,
+    completion: Rc<PromiseData>,
+    nested: Option<SuspendedModuleContext>,
+}
+
+/// The module activation that must be parked when a dynamically imported module reaches TLA.
+/// Unlike an async function, a module body is the machine's active program rather than a
+/// `GeneratorData`; preserve its program and lexical slots as well as the instruction offset.
+#[derive(Debug)]
+struct SuspendedModuleContext {
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    strict: bool,
+    module_path: Option<Rc<str>>,
+    module_generation: u64,
+    module_generation_owner: Option<module_map::ModuleGenerationHandle>,
+    locals: Vec<Value>,
+    self_bindings: Vec<(Cell, u32)>,
+    self_namespaces: Vec<SelfNamespace>,
+    realm: RealmId,
+    target: ModuleEvaluationTarget,
+}
+
+#[derive(Debug)]
+struct ModuleEvaluationTarget {
+    key: String,
+    exports: Vec<String>,
+    reexports: Vec<(String, ModuleBinding)>,
+    private_window: Option<PrivateWindow>,
 }
 
 impl PartialEq for ModuleSuspension {
@@ -748,7 +828,7 @@ impl PartialEq for ModuleSuspension {
 /// It has to come off on every path -- a suspension, a return, an unwind, or a `?` out of the
 /// middle of `resume_generator_with` -- because a generator left marked as executing would
 /// refuse every later `next()`.
-struct RunningGuard<'a>(&'a Rc<RefCell<GeneratorState>>);
+struct RunningGuard<'a>(&'a Rc<GeneratorData>);
 
 impl Drop for RunningGuard<'_> {
     fn drop(&mut self) {
@@ -774,6 +854,11 @@ pub struct Closure {
     pub strictness: Rc<Strictness>,
     /// The module whose lexical code created this closure, used to resolve later import().
     pub module_path: Option<Rc<str>>,
+    /// Dynamic import generation captured with the module context that created this closure.
+    pub module_generation: u64,
+    /// Identity-bearing owner for the captured generation. Interior mutability lets the cycle
+    /// collector drop this edge after proving an otherwise unreachable closure/epoch cycle.
+    pub(crate) module_generation_owner: RefCell<Option<module_map::ModuleGenerationHandle>>,
     /// The declared name, for a console to show. Shared with every other closure over the same
     /// proto rather than copied, because a function expression in a loop makes one closure per
     /// pass and the name is the same every time.
@@ -856,6 +941,30 @@ pub trait CommonJsModuleLoader {
         specifier: &str,
         instruction: usize,
     ) -> Result<Value, ExecutionError>;
+
+    /// The body of the module at `module_path` has run to its end (or its top-level `await` has
+    /// settled), and `exports` are its own bindings. Synchronous bodies publish before queued
+    /// jobs run; suspended bodies publish before their module-record completion is resolved.
+    fn module_evaluated(&mut self, _module_path: &str, _exports: &[ModuleExportValue]) {}
+
+    /// Materialize an already evaluated CommonJS module's ESM namespace only when ESM linking
+    /// needs it. A require-only execution must not invoke exported property getters.
+    fn prepare_module_namespace(
+        &mut self,
+        _key: &str,
+        _instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        Ok(())
+    }
+
+    /// Evaluate the CommonJS or JSON module `key` into the realm's module map, as `import()`
+    /// of it needs, through the same cache `require` uses. A loader that cannot answers with
+    /// the refusal it has always given.
+    fn evaluate_module(&mut self, key: &str, _instruction: usize) -> Result<(), ExecutionError> {
+        Err(ExecutionError::DynamicImportUnsupported {
+            message: format!("`import()` of `{key}` needs a CommonJS loader"),
+        })
+    }
 }
 
 /// One statically resolved CommonJS `require` environment.
@@ -865,6 +974,7 @@ pub trait CommonJsModuleLoader {
 #[derive(Debug, PartialEq)]
 pub struct CommonJsRequire {
     targets: Vec<(String, String, Cell)>,
+    resolutions: Vec<(String, String)>,
     importer: Option<String>,
 }
 
@@ -872,6 +982,7 @@ impl CommonJsRequire {
     pub fn new(targets: impl IntoIterator<Item = (String, String, Cell)>) -> Self {
         Self {
             targets: targets.into_iter().collect(),
+            resolutions: Vec::new(),
             importer: None,
         }
     }
@@ -879,6 +990,7 @@ impl CommonJsRequire {
     pub fn for_importer(importer: impl Into<String>) -> Self {
         Self {
             targets: Vec::new(),
+            resolutions: Vec::new(),
             importer: Some(importer.into()),
         }
     }
@@ -889,8 +1001,19 @@ impl CommonJsRequire {
     ) -> Self {
         Self {
             targets: targets.into_iter().collect(),
+            resolutions: Vec::new(),
             importer: Some(importer.into()),
         }
+    }
+
+    /// Add importer-scoped literal resolver answers without turning them into eager `require`
+    /// targets. `require.resolve` observes the selected filename but never evaluates the module.
+    pub fn with_resolutions(
+        mut self,
+        resolutions: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.resolutions = resolutions.into_iter().collect();
+        self
     }
 
     pub fn importer(&self) -> Option<&str> {
@@ -909,6 +1032,12 @@ impl CommonJsRequire {
             .iter()
             .find(|(candidate, _, _)| candidate == specifier)
             .map(|(_, target, _)| target.clone())
+            .or_else(|| {
+                self.resolutions
+                    .iter()
+                    .find(|(candidate, _)| candidate == specifier)
+                    .map(|(_, target)| target.clone())
+            })
     }
 
     /// Return the cache cell selected by one statically discovered specifier.
@@ -960,14 +1089,43 @@ impl Closure {
 
     /// The text this function was written as, which is what `Function.prototype.toString` answers.
     ///
-    /// A borrow into the program's one copy of its source, so asking costs nothing and asking
-    /// twice costs nothing twice. The closure already carries the program for the reason
-    /// documented on `program` -- a function value that crossed a module boundary must be read
-    /// against its own tables -- and that is exactly what makes the span resolvable here.
+    /// The source slice as JavaScript UTF-16 units. The program and its optional parser-origin
+    /// mapping are shared across closures; this materializes only the requested slice. The
+    /// closure already carries the program for the reason documented on `program` -- a function
+    /// value that crossed a module boundary must be read against its own tables.
     ///
-    /// An empty answer where the span does not resolve. Every proto the compiler emits has a real
-    /// span, so this is unreachable in practice; it is written as an empty string rather than a
-    /// panic because a `toString` is not worth ending a program over.
+    /// A malformed proto index or scalar-source span retains the historical empty fallback. If
+    /// an origin is present, however, its map is the only lossless authority: a bad span is a
+    /// compiler invariant violation and must not silently return the escaped parser transport.
+    pub fn source_units(&self) -> StringUnits {
+        let Some(proto) = self.program.functions.get(self.function as usize) else {
+            return StringUnits::default();
+        };
+        if let Some(origin) = &self.program.source_origin {
+            return origin
+                .slice_bytes(proto.span.start, proto.span.end)
+                .expect("compiler function span must resolve in its retained source origin");
+        }
+        StringUnits::from(
+            self.program
+                .source
+                .get(proto.span.start as usize..proto.span.end as usize)
+                .unwrap_or(""),
+        )
+    }
+
+    /// Lossy host/diagnostic spelling without paying the UTF-16 slice cost for ordinary source.
+    pub(crate) fn source_display_text(&self) -> String {
+        if self.program.source_origin.is_none() {
+            self.source_text().to_owned()
+        } else {
+            self.source_units().to_lossy_string()
+        }
+    }
+
+    /// Parser-source spelling for metadata and diagnostics that require Rust `str`.
+    /// Language reflection should use [`Self::source_units`] so a lossless UTF-16 origin is
+    /// preserved when the parser transport escaped lone surrogate code units.
     pub fn source_text(&self) -> &str {
         let Some(proto) = self.program.functions.get(self.function as usize) else {
             return "";
@@ -1045,7 +1203,7 @@ struct ExoticElement {
 
 impl ArrayData {
     fn new(items: Vec<Value>) -> Rc<Self> {
-        Rc::new(Self {
+        let array = Rc::new(Self {
             sparse: std::cell::Cell::new(
                 items
                     .iter()
@@ -1057,7 +1215,9 @@ impl ArrayData {
             length_writable: std::cell::Cell::new(true),
             elements: RefCell::new(Vec::new()),
             collection_index: RefCell::new(None),
-        })
+        });
+        gc_census::register_array(&array);
+        array
     }
 
     fn borrow(&self) -> std::cell::Ref<'_, Vec<Value>> {
@@ -1441,8 +1601,18 @@ impl Default for ExecutionLimits {
 /// scope. A direct eval fills it with the caller's visible bindings, in the slot order
 /// [`kiln_ir::compile_eval`] promises to bind them to.
 pub struct EvalSource<'a> {
+    /// Scalar UTF-8 view for compatibility with existing compiler callbacks. When
+    /// [`Self::source_units`] is `Some`, this may contain replacement characters; compilers must
+    /// treat the exact UTF-16 units as authoritative source.
     pub source: &'a str,
+    /// Exact JavaScript UTF-16 source when the transport string cannot represent it (for example,
+    /// a source body containing a lone surrogate). Compilers should prefer this when present.
+    pub source_units: Option<&'a StringUnits>,
+    /// Stable module/call-site identity for private scopes created by this dynamic compilation.
+    pub module_id: &'a str,
     pub outer: &'a [kiln_ir::EvalOuter],
+    /// Names among `outer` that hold the caller's active `with` object records.
+    pub with_objects: &'a [String],
     pub strict: bool,
     /// Whether this eval's `var` and function declarations belong to the global environment
     /// record, and so become properties of the global object rather than slots of its own frame.
@@ -1460,9 +1630,6 @@ pub struct EvalSource<'a> {
     /// Names a `var` in this source may not create, from [`kiln_ir::EvalSite::blocked_var_names`].
     pub blocked_var_names: &'a [String],
 }
-
-const DYNAMIC_SOURCE_UNPAIRED_SURROGATE: &str =
-    "dynamic source contains unpaired UTF-16 surrogate code units";
 
 /// Why a run-time compilation produced no program.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1515,6 +1682,7 @@ pub struct ExecutionCapabilities {
     source_compiler: Option<SourceCompiler>,
     realm_bootstrap: Option<RealmBootstrap>,
     module_loader: Option<Arc<dyn ModuleLoaderService + Send + Sync>>,
+    disallow_string_code_generation: bool,
     host_realms: bool,
     host_agents: Option<&'static str>,
     /// The command line this execution's `process.argv` reports, exactly as the host spelled it.
@@ -1524,6 +1692,8 @@ pub struct ExecutionCapabilities {
     /// would put a made-up executable path in front of a program that asked where it came from.
     /// A host that has one states it, which is the same bargain as every other entry here.
     argv: Vec<String>,
+    /// Runtime flags this execution reports through `process.execArgv`.
+    exec_argv: Vec<String>,
     /// How this execution starts a `node:worker_threads` worker's realm, when it can.
     worker_host: Option<Arc<dyn WorkerHost>>,
 }
@@ -1540,6 +1710,17 @@ pub trait WorkerHost: Send + Sync {
 }
 
 impl ExecutionCapabilities {
+    /// Disallow `eval` and function constructors when this execution is launched with Node's
+    /// `--disallow-code-generation-from-strings` policy.
+    pub const fn with_string_code_generation(mut self, allowed: bool) -> Self {
+        self.disallow_string_code_generation = !allowed;
+        self
+    }
+
+    pub const fn string_code_generation_allowed(&self) -> bool {
+        !self.disallow_string_code_generation
+    }
+
     pub const fn with_source_compiler(mut self, compiler: SourceCompiler) -> Self {
         self.source_compiler = Some(compiler);
         self
@@ -1616,8 +1797,18 @@ impl ExecutionCapabilities {
         self
     }
 
+    /// State the startup flags this execution reports through `process.execArgv`.
+    pub fn with_exec_argv(mut self, exec_argv: Vec<String>) -> Self {
+        self.exec_argv = exec_argv;
+        self
+    }
+
     pub fn argv(&self) -> &[String] {
         &self.argv
+    }
+
+    pub fn exec_argv(&self) -> &[String] {
+        &self.exec_argv
     }
 
     /// Let this execution start workers, through `host`.
@@ -1631,52 +1822,72 @@ impl ExecutionCapabilities {
     }
 }
 
-/// One module a dynamic import has to evaluate, compiled and linked by the host.
+/// One module a dynamic import may have to evaluate, compiled and linked by the host.
 ///
 /// The interpreter deliberately owns no linker for the same reason it owns no parser: resolving
 /// a specifier is filesystem policy and reading a star re-export is graph work, and neither
-/// belongs in a machine that runs bytecode. What arrives here is already decided.
+/// belongs in a machine that runs bytecode. What arrives here is already decided -- and linked
+/// by *name* against the realm's [`ModuleMap`], so a module some other importer (the static
+/// graph, or another `import()`) already evaluated is linked to rather than run again.
 pub struct PlannedModule {
-    /// A stable identity for this module -- its canonical path. Two imports naming the same key
-    /// share one evaluation, which is the whole of what a module cache is.
+    /// The module's canonical key -- its path -- which is its key in the realm's module map.
     pub key: String,
-    /// The body to run. Its `Return` yields an array holding, in order, the values the rest of
-    /// the plan refers to by index.
-    ///
-    /// The epilogue that builds that array is the host's work, because only the host has a
-    /// compiler: nothing here can look inside a module and decide which slots an importer wants.
-    pub program: Rc<Program>,
-    /// The `kiln:shared` initializer alone captures temporary realm-local engine hooks.
-    pub kiln_shared: bool,
+    /// How the module is evaluated if the map does not already hold it.
+    pub body: PlannedBody,
     /// Module-scope slots to fill before the body runs, and where each value comes from.
     pub bindings: Vec<(u32, ModuleBinding)>,
+    /// Names this module exports that are not its own bindings (`export *`, `export * as ns`),
+    /// and where each one comes from.
+    pub reexports: Vec<(String, ModuleBinding)>,
+    /// Canonical static dependencies, including side-effect-only imports. The interpreter uses
+    /// these edges to preserve module evaluation ordering when one body suspends at top-level
+    /// await; bindings alone omit side-effect-only edges.
+    pub dependencies: Vec<String>,
+    /// Strongly-connected component in the host's dependency graph. Members of one component
+    /// begin evaluation together before an external importer waits for their completion.
+    pub evaluation_component: u32,
+}
+
+/// How a planned module is evaluated.
+pub enum PlannedBody {
+    /// A body to run. Its `Return` yields an array holding the module's own exports, in the
+    /// order `exports` names them.
+    ///
+    /// The epilogue that builds that array is the host's work, because only the host has a
+    /// compiler: nothing here can look inside a module and decide which slots it exports.
+    Source {
+        program: Rc<Program>,
+        exports: Vec<String>,
+        /// An engine builtin module: while its top-level initialization runs, the realm's
+        /// engine-private object is readable as the global `__kilnPrivate` (see
+        /// [`open_private_window`]). No program module ever sees it.
+        engine_private: bool,
+    },
+    /// Exports the host computed without running anything (a file asset's path).
+    Exports(Vec<(String, Value)>),
+    /// A module the host's CommonJS loader evaluates (CommonJS, JSON), through the same cache
+    /// `require` uses, so `import()` and `require` of it share one `module.exports`.
+    Host,
 }
 
 /// Where one value a planned module imports comes from.
+#[derive(Clone, Debug)]
 pub enum ModuleBinding {
-    /// A value an earlier plan entry returned.
-    Value(ModuleValueRef),
-    /// `import * as ns`: an object over values earlier plan entries returned.
-    Namespace(Vec<(String, ModuleValueRef)>),
-    /// A value the host already holds -- a JSON module's default, a Node builtin's exports.
+    /// The export `name` of the module whose key is `module`.
+    Export { module: String, name: String },
+    /// `import * as ns`: the namespace object of the module whose key is `module`.
+    Namespace { module: String },
+    /// A value the host already holds.
     Ready(Value),
-}
-
-/// The `index`-th value returned by plan entry `module`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ModuleValueRef {
-    pub module: usize,
-    pub index: usize,
 }
 
 /// Everything one `import(specifier)` needs, in the order it has to happen.
 pub struct ModulePlan {
     /// The key of the module that was asked for, which is one of `modules`' keys.
     pub key: String,
-    /// Dependencies first, with the requested module last. Every entry is evaluated once.
+    /// Dependencies first, with the requested module last. A module the realm's map already
+    /// holds is not evaluated again.
     pub modules: Vec<PlannedModule>,
-    /// The requested module's namespace: each visible export and where its value comes from.
-    pub namespace: Vec<(String, ModuleValueRef)>,
 }
 
 /// Why a host produced no plan for a specifier.
@@ -1706,7 +1917,7 @@ pub struct ModuleLoadRequest {
     pub attributes: Option<ImportAttributes>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportAttributes {
     pub type_: Option<String>,
 }
@@ -1790,6 +2001,8 @@ fn skip_trivia(source: &str) -> &str {
 pub struct ExecutionResult {
     pub value: Value,
     pub steps: u64,
+    /// The exit status requested through `process.exitCode`, if any.
+    pub process_exit_code: Option<i32>,
 }
 
 /// One value published by a completed module evaluation.
@@ -1868,53 +2081,153 @@ impl ModuleRealmSession {
         }
     }
 
-    /// Temporarily publish the engine hooks while `kiln:shared` captures them. The module
-    /// evaluator calls `end_kiln_shared` on both normal and throwing exits.
-    pub fn begin_kiln_shared(&mut self) {
+    /// Open the engine-private window for one engine builtin module's top-level initialization.
+    /// The module evaluator calls `end_engine_module` on both normal and throwing exits; windows
+    /// nest, as a lazily loaded builtin may initialize inside another's window.
+    pub fn begin_engine_module(&mut self) {
         let mut shared = self.shared.borrow_mut();
-        shared.shared_hooks_pending = true;
-        if let Some(Value::Object(global)) = shared.global_objects.first().cloned().flatten() {
-            let mut global = global.borrow_mut();
-            shared.saved_shared_global = Some(global.properties.clone());
-            install_kiln_shared_hooks(
-                &mut global,
-                RealmId(0),
-                kiln_builtin_surface::kiln_extensions_installed(),
-            );
-        }
+        let window = match shared.global_objects.first().cloned().flatten() {
+            Some(Value::Object(global)) => open_private_window(&mut global.borrow_mut()),
+            // The realm is built lazily inside this module's own run, after the window opens;
+            // `realize_realm` finishes opening it once the realm's bootstrap has returned.
+            _ => PrivateWindow::Absent,
+        };
+        shared.private_windows.push(window);
     }
 
-    pub fn end_kiln_shared(&mut self) {
+    /// The realm's module map, which the graph executor evaluates its modules into.
+    pub fn module_map(&self) -> SharedModuleMap {
+        Rc::clone(&self.shared.borrow().module_map)
+    }
+
+    pub fn end_engine_module(&mut self) {
         let mut shared = self.shared.borrow_mut();
-        shared.shared_hooks_pending = false;
-        if let Some(Value::Object(global)) = shared.global_objects.first().cloned().flatten() {
-            let mut global = global.borrow_mut();
-            if let Some(saved) = shared.saved_shared_global.take() {
-                global.properties = saved;
-            }
+        let window = shared.private_windows.pop();
+        if let (Some(window), Some(Value::Object(global))) =
+            (window, shared.global_objects.first().cloned().flatten())
+        {
+            close_private_window(&mut global.borrow_mut(), window);
         }
     }
 }
 
-fn install_kiln_shared_hooks(global: &mut ObjectData, realm: RealmId, available: bool) {
-    for (name, native) in [
-        ("__kilnShare", Native::ShareRaw),
-        ("__kilnSharedIs", Native::SharedIsRaw),
-    ] {
-        let value = if available {
-            Value::Native(native, realm)
-        } else {
-            Value::Undefined
-        };
-        if let Some(slot) = global
-            .properties
-            .iter_mut()
-            .find(|slot| PropertyKeyRef::Utf8(name).matches_slot(slot))
-        {
-            slot.property = Property::Value(value);
-        } else {
-            global.set_non_enumerable(name, value);
+/// The internal slot of a realm's global object that holds its engine-private object. Not a
+/// property: reflection never lists it and a program's own string key cannot reach it.
+pub(crate) const ENGINE_PRIVATE_SLOT: &str = "@@kiln:engine-private";
+/// The one global name that exposes the engine-private object, and only inside a window.
+const ENGINE_PRIVATE_GLOBAL: &str = "__kilnPrivate";
+const ENGINE_PRIVATE_FOR_TESTS_ENV: &str = "KILN_ENGINE_PRIVATE_FOR_TESTS";
+
+/// The realm's engine-private object: the one channel between the engine, the realm bootstrap and
+/// the builtin modules (ADR 0068). It carries the engine's own operations -- present only when
+/// kiln's extensions are -- and whatever one builtin hands another (the message-port internals,
+/// the structured clone's marks). A program can never read it: the bootstrap captures it from
+/// `globalThis` and deletes the name, and each builtin module sees it only while its top-level
+/// initialization runs, in a window the evaluator opens and closes around that code alone.
+pub(crate) fn new_engine_private(realm: RealmId) -> Value {
+    let mut private = ObjectData::default();
+    let extensions = kiln_builtin_surface::kiln_extensions_installed();
+    private.set_non_enumerable("extensions", Value::Boolean(extensions));
+    // A developer switch for the conformance probes that drive the actor protocol directly: the
+    // bootstrap then leaves the global name in place. Off unless the process is started with it.
+    let exposed = std::env::var(ENGINE_PRIVATE_FOR_TESTS_ENV).is_ok_and(|value| value == "1");
+    private.set_non_enumerable("exposed", Value::Boolean(exposed));
+    if extensions {
+        for (name, native) in [
+            ("share", Native::ShareRaw),
+            ("sharedIs", Native::SharedIsRaw),
+        ] {
+            private.set_non_enumerable(name, Value::Native(native, realm));
         }
+    }
+    // Node's child_process adapter shares this private asynchronous host capability with
+    // kiln:process. Keep it available when public Kiln extensions are disabled as well.
+    private.set_non_enumerable(
+        "hostProcessStart",
+        Value::Native(Native::ProcessStartRaw, realm),
+    );
+    private.set_non_enumerable(
+        "hostProcessCancel",
+        Value::Native(Native::ProcessCancelRaw, realm),
+    );
+    private.set_non_enumerable(
+        "processExitCodeGet",
+        Value::Native(Native::ProcessExitCodeGet, realm),
+    );
+    private.set_non_enumerable(
+        "processExitCodeSet",
+        Value::Native(Native::ProcessExitCodeSet, realm),
+    );
+    private.set_non_enumerable("gcRequest", Value::Native(Native::GcRequest, realm));
+    Value::Object(tracked_object(private))
+}
+
+/// What closing a window has to undo.
+#[derive(Clone, Debug)]
+pub(crate) enum PrivateWindow {
+    /// No window was opened: the realm has no engine-private object yet.
+    Absent,
+    /// The name was already reading the engine-private object (an enclosing window).
+    Nested,
+    /// This window set the name, over `prior` when a program had defined one.
+    Open(Option<Slot>),
+    /// The activation is suspended. The global name has been restored and will be opened again
+    /// when this module body resumes.
+    Parked,
+}
+
+/// Make the realm's engine-private object readable as `globalThis.__kilnPrivate`.
+///
+/// Only this one property is added and removed again: nothing else a builtin defines on the
+/// global object during its initialization is touched, and a program's own property of that name
+/// is put back as it was.
+pub(crate) fn open_private_window(global: &mut ObjectData) -> PrivateWindow {
+    let Some(Value::Object(private)) = global.get_own(ENGINE_PRIVATE_SLOT).cloned() else {
+        return PrivateWindow::Absent;
+    };
+    let existing = global
+        .properties
+        .iter()
+        .position(|slot| PropertyKeyRef::Utf8(ENGINE_PRIVATE_GLOBAL).matches_slot(slot));
+    if let Some(index) = existing
+        && matches!(
+            &global.properties[index].property,
+            Property::Value(Value::Object(current)) if Rc::ptr_eq(current, &private)
+        )
+    {
+        return PrivateWindow::Nested;
+    }
+    let prior = existing.map(|index| global.properties[index].clone());
+    global.set_non_enumerable(ENGINE_PRIVATE_GLOBAL, Value::Object(private));
+    PrivateWindow::Open(prior)
+}
+
+pub(crate) fn close_private_window(global: &mut ObjectData, window: PrivateWindow) {
+    if let PrivateWindow::Open(prior) = window {
+        global.remove(ENGINE_PRIVATE_GLOBAL);
+        if let Some(slot) = prior {
+            global.properties.push(slot);
+        }
+    }
+}
+
+pub(crate) fn park_private_window(global: &mut ObjectData, window: &mut Option<PrivateWindow>) {
+    let Some(current) = window.take() else {
+        return;
+    };
+    match current {
+        PrivateWindow::Open(prior) => {
+            close_private_window(global, PrivateWindow::Open(prior));
+            *window = Some(PrivateWindow::Parked);
+        }
+        PrivateWindow::Nested => *window = Some(PrivateWindow::Parked),
+        other => *window = Some(other),
+    }
+}
+
+pub(crate) fn resume_private_window(global: &mut ObjectData, window: &mut Option<PrivateWindow>) {
+    if matches!(window, Some(PrivateWindow::Parked)) {
+        *window = Some(open_private_window(global));
     }
 }
 
@@ -1927,22 +2240,33 @@ type TemplateObjectCache =
 struct ModuleRealmShared {
     realm: Realm<Scheduled, Timer>,
     global_objects: Vec<Option<Value>>,
-    shared_hooks_pending: bool,
-    saved_shared_global: Option<Vec<Slot>>,
+    regexp_legacy_captures: Vec<[StringUnits; 9]>,
+    /// One entry per engine module initializing right now, innermost last.
+    private_windows: Vec<PrivateWindow>,
     pending_host: Vec<PendingHostRequest>,
     pending_node: Vec<PendingNodeRequest>,
     rejections: Rejections,
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
+    /// Strong roots for server EventEmitter objects while their listeners are live. Kept apart
+    /// from NodeServerState so ObjectData -> state does not form an Rc cycle; dropping the shared
+    /// realm also releases every active root on abort/teardown.
+    active_node_server_objects: std::collections::HashMap<usize, Value>,
+    active_node_socket_objects: std::collections::HashMap<usize, Value>,
     http_client_requests: std::collections::BTreeMap<u64, Rc<RefCell<HttpClientRequestState>>>,
     next_http_client_request_id: u64,
     symbol_serial: u64,
     symbol_registry: Vec<(StringUnits, Value)>,
     symbols: Vec<Rc<UniqueSymbol>>,
     template_objects: TemplateObjectCache,
+    /// Immutable eval bindings travel with closures across module VMs in this graph realm.
+    readonly_cells: vm::SharedReadonlyCellRegistry,
     intrinsics: Rc<Intrinsics>,
     isolated_graphs: Rc<RefCell<Vec<(Weak<RefCell<ObjectData>>, Value)>>>,
     actor_realm_id: u64,
     actor_graph_requests: Rc<RefCell<std::collections::HashMap<u64, u8>>>,
+    /// The realm's module map: one record per module, shared by the static graph executor and
+    /// every machine that runs `import()` in this realm.
+    module_map: SharedModuleMap,
 }
 
 impl Default for ModuleRealmSession {
@@ -1952,22 +2276,26 @@ impl Default for ModuleRealmSession {
             shared: Rc::new(RefCell::new(ModuleRealmShared {
                 realm: Realm::new(),
                 global_objects: vec![None],
-                shared_hooks_pending: false,
-                saved_shared_global: None,
+                regexp_legacy_captures: vec![std::array::from_fn(|_| StringUnits::default())],
+                private_windows: Vec::new(),
                 pending_host: Vec::new(),
                 pending_node: Vec::new(),
                 rejections: Rejections::default(),
                 node_servers: Vec::new(),
+                active_node_server_objects: std::collections::HashMap::new(),
+                active_node_socket_objects: std::collections::HashMap::new(),
                 http_client_requests: std::collections::BTreeMap::new(),
                 next_http_client_request_id: 1,
                 symbol_serial: 0,
                 symbol_registry: Vec::new(),
                 symbols: Vec::new(),
                 template_objects: std::collections::HashMap::new(),
+                readonly_cells: Rc::new(RefCell::new(vm::ReadonlyCellRegistry::default())),
                 intrinsics: Rc::new(Intrinsics::default()),
                 isolated_graphs: Rc::new(RefCell::new(Vec::new())),
                 actor_realm_id: kiln_runtime::workers::actor_request_id(),
                 actor_graph_requests: Rc::new(RefCell::new(std::collections::HashMap::new())),
+                module_map: SharedModuleMap::default(),
             })),
         }
     }
@@ -1979,7 +2307,8 @@ pub use execution_api::{
     execute, execute_in_runtime_with_strictness, execute_module, execute_module_in_runtime,
     execute_module_in_runtime_with_loader, execute_node, execute_node_in_runtime_with_strictness,
     execute_node_module_in_runtime, execute_node_module_in_session,
-    execute_node_module_in_session_with_loader, execute_node_with_strictness, execute_reclaiming,
+    execute_node_module_in_session_with_loader, execute_node_with_clock_and_strictness,
+    execute_node_with_strictness, execute_reclaiming,
     execute_reclaiming_in_runtime_with_strictness, execute_reclaiming_with_strictness,
     execute_with_strictness, namespace_entries, namespace_object, ordinary_object,
     own_data_property, parse_json_module, read_through_cell, worker_error_tokens,
@@ -2024,6 +2353,8 @@ mod vm_constructors;
 mod vm_control;
 #[path = "vm/conversions.rs"]
 mod vm_conversions;
+#[path = "vm/cycle_gc.rs"]
+mod vm_cycle_gc;
 #[path = "vm/data_view.rs"]
 mod vm_data_view;
 #[path = "vm/date_ops.rs"]
@@ -2079,7 +2410,7 @@ fn abort_signal() -> Value {
         Value::Native(Native::AbortSignalThrowIfAborted, RealmId::PRIMARY),
     );
     data.set_non_enumerable(ABORT_LISTENERS, Value::Array(ArrayData::new(Vec::new())));
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// `new AbortController()`: a signal, and the one handle that can abort it.
@@ -2093,7 +2424,7 @@ fn abort_controller() -> Value {
         "abort",
         Value::Native(Native::AbortControllerAbort, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// `new TextEncoder()`. UTF-8 and nothing else, which is all the encoder half is defined to do.
@@ -2104,7 +2435,7 @@ fn text_encoder() -> Value {
         "encode",
         Value::Native(Native::TextEncoderEncode, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 fn unary(operator: UnaryOp, value: Value) -> Result<Value, ExecutionError> {
@@ -2154,6 +2485,7 @@ fn unary_of_number(operator: UnaryOp, value: &Value) -> Value {
         UnaryOp::Not => Value::Boolean(!value.is_truthy()),
         // `typeof` never coerces and never throws; it reports the type tag directly.
         UnaryOp::TypeOf => Value::String(value.type_of().to_owned().into()),
+        UnaryOp::ToString => unreachable!("abstract ToString requires VM coercion"),
         // `~x` is `-(ToInt32(x) + 1)`: a numeric operator, despite reading as a logical one.
         UnaryOp::BitwiseNot => Value::Number(f64::from(!to_int32(value.as_number()))),
         // `void x` evaluates its operand -- which already happened -- and discards it.

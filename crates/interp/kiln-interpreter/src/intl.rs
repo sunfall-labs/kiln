@@ -13,15 +13,15 @@
 //! proxies, so it has to happen on the machine, here, rather than inside an adapter that only
 //! sees the values that came out.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use kiln_host_abi::HostOps;
 use kiln_intl as engine;
+use kiln_string::StringUnits;
 
 use crate::{
     ArrayData, ErrorKind, ExecutionError, Native, ObjectData, PrimitiveHint, RealmId, Value, Vm,
-    WellKnown,
+    WellKnown, tracked_object,
 };
 
 /// Which `Intl` service a constructor, prototype or instance belongs to.
@@ -592,24 +592,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         "String.prototype case mapping called on null or undefined",
                     ));
                 }
-                let text = self.intl_string_argument(Some(receiver), instruction)?;
-                // The locale list is validated even though this build maps case the same way in
-                // every locale: `"x".toLocaleLowerCase("i")` is a `RangeError`, and swallowing a
-                // malformed tag would make a program that mistyped one believe it worked.
-                //
-                // The mapping itself is the locale-independent one. Turkish dotless `i`, Azeri and
-                // the Lithuanian retained dot are conditional mappings that need CLDR's
-                // special-casing data, which this build does not link; producing the default
-                // mapping for those three locales is the specification's own fallback, and it is
-                // the same string `toLowerCase` gives.
-                self.canonicalize_locale_list(arguments.first(), instruction)?;
-                Ok(Value::String(
-                    if matches!(adapter, Adapter::StringToLocaleLowerCase) {
-                        text.to_lowercase().into()
-                    } else {
-                        text.to_uppercase().into()
-                    },
-                ))
+                let text = self.intl_string_units_argument(Some(receiver), instruction)?;
+                let locales = self.canonicalize_locale_list(arguments.first(), instruction)?;
+                let mapped = kiln_intl::casemap::map_case_utf16(
+                    &text.to_units(),
+                    locales.first().map(String::as_str),
+                    matches!(adapter, Adapter::StringToLocaleUpperCase),
+                )
+                .map_err(failure)?;
+                Ok(Value::String(StringUnits::from_units(&mapped)))
             }
         }
     }
@@ -893,7 +884,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     // accessors rely on the difference.
                     data.set(name, setting_to_value(&setting));
                 }
-                Ok(Value::Object(Rc::new(RefCell::new(data))))
+                Ok(Value::Object(tracked_object(data)))
             }
             (Method::Format, IntlValue::NumberFormat(formatter)) => {
                 let numeric = self.intl_numeric_argument(arguments.first(), instruction)?;
@@ -980,7 +971,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             data.set("type", Value::String(kind.to_owned().into()));
                             data.set("value", Value::String(text.into()));
                             data.set("source", Value::String(source.to_owned().into()));
-                            Value::Object(Rc::new(RefCell::new(data)))
+                            Value::Object(tracked_object(data))
                         })
                         .collect(),
                 )))
@@ -1005,7 +996,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             if let Some(unit) = unit {
                                 data.set("unit", Value::String(unit.to_owned().into()));
                             }
-                            Value::Object(Rc::new(RefCell::new(data)))
+                            Value::Object(tracked_object(data))
                         })
                         .collect(),
                 )))
@@ -1041,7 +1032,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                             if numeric {
                                 data.set("unit", Value::String(unit.to_owned().into()));
                             }
-                            Value::Object(Rc::new(RefCell::new(data)))
+                            Value::Object(tracked_object(data))
                         })
                         .collect(),
                 )))
@@ -1167,60 +1158,67 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         if matches!(value, Value::Undefined) {
             return Ok(Vec::new());
         }
-        // A bare string is treated as a one-element list, and so is a `Intl.Locale`.
-        let elements: Vec<Value> = match value {
-            Value::String(_) | Value::Intl(_) => vec![value.clone()],
-            Value::Array(array) => array.borrow().clone(),
-            Value::Undefined | Value::Null => {
-                return Err(type_error("locales is not an object"));
-            }
-            _ => {
-                let length = self.read_property(value, "length", instruction)?;
-                let length = self.as_number_argument(Some(&length), instruction)?;
-                if !length.is_finite() || length < 0.0 {
-                    Vec::new()
-                } else {
-                    let mut out = Vec::new();
-                    for index in 0..(length as u64) {
-                        let key = index.to_string();
-                        let element = self.read_property(value, &key, instruction)?;
-                        if matches!(element, Value::Undefined) {
-                            continue;
-                        }
-                        out.push(element);
-                    }
-                    out
-                }
-            }
-        };
-
         let mut seen: Vec<String> = Vec::new();
-        for element in elements {
-            let tag = match &element {
-                Value::Intl(value) => match value.as_ref() {
-                    IntlValue::Locale(tag) => tag.clone(),
-                    _ => return Err(type_error("a locale list element is not a string")),
-                },
-                Value::String(text) => text
-                    .to_scalar_string()
-                    .map_err(|_| range("locale contains a lone surrogate"))?,
-                Value::Object(_) | Value::Array(_) => {
-                    let primitive =
-                        self.as_primitive(&element, PrimitiveHint::String, instruction)?;
-                    primitive.to_display_string()
-                }
-                _ => {
-                    return Err(type_error(
-                        "a locale list element is not a string or object",
-                    ));
-                }
-            };
-            let canonical = engine::locale::canonicalize(&tag).map_err(failure)?;
-            if !seen.contains(&canonical) {
-                seen.push(canonical);
+        // A bare string is treated as a one-element list, and so is a `Intl.Locale`.
+        if matches!(value, Value::String(_))
+            || matches!(value, Value::Intl(intl) if matches!(intl.as_ref(), IntlValue::Locale(_)))
+        {
+            self.add_canonical_locale(value.clone(), instruction, &mut seen)?;
+            return Ok(seen);
+        }
+        // CanonicalizeLocaleList performs ToObject before LengthOfArrayLike. This matters for
+        // primitive receivers: inherited accessors on Symbol.prototype must observe the boxed
+        // Symbol as `this`, and inherited indexed accessors must use the same wrapper.
+        let object = crate::properties::to_object(value)
+            .ok_or_else(|| type_error("locales is not an object"))?;
+
+        let length = self.array_like_length(&object, instruction)?;
+        // Read and validate each entry before touching the next one. A malformed locale at index
+        // zero must throw before a getter at index one runs. HasProperty also distinguishes a
+        // sparse hole (which is skipped) from a present `undefined` (which is an invalid locale).
+        for index in 0..length {
+            let key = Value::String(StringUnits::from(index.to_string()));
+            if !self.has(&object, &key, instruction)? {
+                continue;
             }
+            let key = index.to_string();
+            let element = self.read_property(&object, &key, instruction)?;
+            self.add_canonical_locale(element, instruction, &mut seen)?;
         }
         Ok(seen)
+    }
+
+    fn add_canonical_locale(
+        &mut self,
+        element: Value,
+        instruction: usize,
+        seen: &mut Vec<String>,
+    ) -> Result<(), ExecutionError> {
+        let tag = match &element {
+            Value::Intl(value) if matches!(value.as_ref(), IntlValue::Locale(_)) => {
+                let IntlValue::Locale(tag) = value.as_ref() else {
+                    unreachable!()
+                };
+                tag.clone()
+            }
+            Value::String(text) => text
+                .to_scalar_string()
+                .map_err(|_| range("locale contains a lone surrogate"))?,
+            object if crate::object_helpers::is_object_type(object) => self
+                .as_text_units(object, instruction)?
+                .to_scalar_string()
+                .map_err(|_| range("locale contains a lone surrogate"))?,
+            _ => {
+                return Err(type_error(
+                    "a locale list element is not a string or object",
+                ));
+            }
+        };
+        let canonical = engine::locale::canonicalize(&tag).map_err(failure)?;
+        if !seen.contains(&canonical) {
+            seen.push(canonical);
+        }
+        Ok(())
     }
 
     /// `CoerceOptionsToObject`/`GetOptionsObject`: `undefined` becomes an empty bag.
@@ -1971,6 +1969,27 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         }
         Ok(primitive.to_display_string())
     }
+
+    /// The UTF-16-preserving counterpart used by String locale case methods. A Rust `String`
+    /// cannot carry a lone JavaScript surrogate, so taking the scalar display path here would
+    /// silently turn it into U+FFFD before the shared ICU4X mapper sees it.
+    fn intl_string_units_argument(
+        &mut self,
+        value: Option<&Value>,
+        instruction: usize,
+    ) -> Result<StringUnits, ExecutionError> {
+        let Some(value) = value else {
+            return Ok(StringUnits::from("undefined"));
+        };
+        if matches!(value, Value::Symbol(_)) {
+            return Err(ExecutionError::SymbolIsNotAString);
+        }
+        let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
+        if matches!(primitive, Value::Symbol(_)) {
+            return Err(ExecutionError::SymbolIsNotAString);
+        }
+        primitive.to_string_units_checked()
+    }
 }
 
 /// One segment, as the `{ segment, index, input }` record the language hands out.
@@ -1989,7 +2008,7 @@ fn segment_record(
     if let Some(word_like) = segment.word_like {
         data.set("isWordLike", Value::Boolean(word_like));
     }
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// A `formatToParts` result: an array of `{ type, value }` objects.
@@ -2001,7 +2020,7 @@ fn parts_array(parts: &[(&'static str, String)], value_key: &str) -> Value {
                 let mut data = ObjectData::default();
                 data.set("type", Value::String((*kind).to_owned().into()));
                 data.set(value_key, Value::String(text.clone().into()));
-                Value::Object(Rc::new(RefCell::new(data)))
+                Value::Object(tracked_object(data))
             })
             .collect(),
     ))
@@ -2015,7 +2034,7 @@ fn parts_array(parts: &[(&'static str, String)], value_key: &str) -> Value {
 fn empty_options() -> Value {
     let mut data = ObjectData::default();
     data.set_prototype(Value::Null);
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(tracked_object(data))
 }
 
 /// `thisNumberValue`: the Number a `Number.prototype` method is running on.

@@ -1,0 +1,14 @@
+import moment from '../../../conformance/npm-compat/node_modules/moment/moment.js';
+console.log('numeric duration', moment.duration(86400000).asDays());
+const duration = moment.duration({days: 1});
+console.log('days duration', duration.asDays());
+console.log('clone abs', duration.clone().abs().asDays());
+for (const unit of ['s', 'm', 'h', 'd', 'M', 'w', 'y']) console.log('as', unit, duration.as(unit));
+const locale = moment.localeData();
+console.log('locale text', locale._relativeTime.d);
+console.log('locale relativeTime', locale.relativeTime(1, true, 'd', true));
+console.log('postformat', locale.postformat('a day'));
+console.log('humanize start');
+console.log(duration.humanize());
+console.log('from start');
+console.log(moment('2026-09-29T12:00:00Z').from(moment('2026-09-30T12:00:00Z')));

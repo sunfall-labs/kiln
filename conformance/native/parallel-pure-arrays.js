@@ -1,6 +1,6 @@
 // kiln-native: profile=native-release parallelism=1,2,max
 //
-// Tier 4 (.scratch/parallel-builtins issue 09), arrays: a callback may call `slice`, `join`,
+// Tier 4 (docs/issues/parallel-builtins issue 09), arrays: a callback may call `slice`, `join`,
 // `indexOf`, `includes`, and `map`, `filter`, `some`, `every` whose own callback the proof covers
 // (a closure written in the callback, a function of the program, or a pure global such as
 // `Number`) -- over plain arrays, holes included, and answer exactly what `map` answers.

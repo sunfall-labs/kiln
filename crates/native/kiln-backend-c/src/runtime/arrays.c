@@ -20,6 +20,7 @@ static int kiln_c99_new_array(kiln_value *out) {
     kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
     array->frozen = 0;
     array->not_extensible = 0;
+    array->has_index_descriptors = 0;
     array->match_index = -1;
     kiln_c99_heap_store_value(array, &array->match_input, kiln_c99_undefined());
     kiln_c99_heap_store_value(array, &array->match_groups, kiln_c99_undefined());
@@ -27,6 +28,38 @@ static int kiln_c99_new_array(kiln_value *out) {
     array->candidate_elements = 0;
     *out = kiln_c99_value(KILN_VALUE_ARRAY, (uint64_t)(uintptr_t)array, NULL, 0);
     return KILN_C99_OK;
+}
+
+/* Array algorithms with a direct dense walk use these two helpers so their common case remains
+ * one bounds/slot read, while a sparse slot, inherited index or materialized descriptor follows
+ * the authoritative [[HasProperty]] / [[Get]] path. In particular, an accessor is called once
+ * with the array itself as receiver, even when an algorithm suspends between visits. */
+int kiln_c99_array_get_index(kiln_host *host, kiln_value value, size_t index,
+                             kiln_value *out, int depth, kiln_value *thrown) {
+    kiln_array *array;
+    if (value.tag != KILN_VALUE_ARRAY) return KILN_C99_INVALID_ARGUMENT;
+    array = kiln_c99_array_of(value);
+    if (!array->has_index_descriptors && index < array->count &&
+        array->elements[index] != KILN_VAL_HOLE) {
+        *out = kiln_val_to_boundary(array->elements[index]);
+        return KILN_C99_OK;
+    }
+    return kiln_c99_get_computed(host, value, kiln_c99_number((double)index), out, depth,
+                                 thrown);
+}
+
+int kiln_c99_array_has_index(kiln_host *host, kiln_value value, size_t index,
+                             int *answer, int depth, kiln_value *thrown) {
+    kiln_array *array;
+    if (value.tag != KILN_VALUE_ARRAY) return KILN_C99_INVALID_ARGUMENT;
+    array = kiln_c99_array_of(value);
+    if (!array->has_index_descriptors && index < array->count &&
+        array->elements[index] != KILN_VAL_HOLE) {
+        *answer = 1;
+        return KILN_C99_OK;
+    }
+    return kiln_c99_has_computed(host, value, kiln_c99_number((double)index), answer, depth,
+                                 thrown);
 }
 
 /* Only the active isolate factory gives a new side allocation graph provenance. The common
@@ -140,6 +173,7 @@ static void kiln_c99_array_init(kiln_array *array, int is_numeric) {
     kiln_c99_heap_store_value(array, &array->properties, kiln_c99_undefined());
     array->frozen = 0;
     array->not_extensible = 0;
+    array->has_index_descriptors = 0;
     array->match_index = -1;
     kiln_c99_heap_store_value(array, &array->match_input, kiln_c99_undefined());
     kiln_c99_heap_store_value(array, &array->match_groups, kiln_c99_undefined());
@@ -183,7 +217,8 @@ static size_t kiln_c99_typed_width(kiln_typed_kind kind) {
     case KILN_TYPED_UINT8:
     case KILN_TYPED_UINT8_CLAMPED: return 1;
     case KILN_TYPED_INT16:
-    case KILN_TYPED_UINT16: return 2;
+    case KILN_TYPED_UINT16:
+    case KILN_TYPED_FLOAT16: return 2;
     case KILN_TYPED_INT32:
     case KILN_TYPED_UINT32:
     case KILN_TYPED_FLOAT32: return 4;
@@ -205,6 +240,7 @@ static const char *kiln_c99_typed_name(kiln_typed_kind kind) {
     case KILN_TYPED_UINT32: return "Uint32Array";
     case KILN_TYPED_FLOAT32: return "Float32Array";
     case KILN_TYPED_FLOAT64: return "Float64Array";
+    case KILN_TYPED_FLOAT16: return "Float16Array";
     case KILN_TYPED_BIG_INT64: return "BigInt64Array";
     case KILN_TYPED_BIG_UINT64: return "BigUint64Array";
     }
@@ -222,6 +258,7 @@ static int kiln_c99_builtin_typed_kind(uint64_t builtin, kiln_typed_kind *kind) 
     case KILN_C99_BUILTIN_UINT32_ARRAY: *kind = KILN_TYPED_UINT32; return 1;
     case KILN_C99_BUILTIN_FLOAT32_ARRAY: *kind = KILN_TYPED_FLOAT32; return 1;
     case KILN_C99_BUILTIN_FLOAT64_ARRAY: *kind = KILN_TYPED_FLOAT64; return 1;
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY: *kind = KILN_TYPED_FLOAT16; return 1;
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY: *kind = KILN_TYPED_BIG_INT64; return 1;
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: *kind = KILN_TYPED_BIG_UINT64; return 1;
     default: return 0;
@@ -239,6 +276,7 @@ static uint64_t kiln_c99_typed_constructor(kiln_typed_kind kind) {
     case KILN_TYPED_UINT32: return KILN_C99_BUILTIN_UINT32_ARRAY;
     case KILN_TYPED_FLOAT32: return KILN_C99_BUILTIN_FLOAT32_ARRAY;
     case KILN_TYPED_FLOAT64: return KILN_C99_BUILTIN_FLOAT64_ARRAY;
+    case KILN_TYPED_FLOAT16: return KILN_C99_BUILTIN_FLOAT16_ARRAY;
     case KILN_TYPED_BIG_INT64: return KILN_C99_BUILTIN_BIG_INT64_ARRAY;
     case KILN_TYPED_BIG_UINT64: return KILN_C99_BUILTIN_BIG_UINT64_ARRAY;
     }
@@ -256,6 +294,7 @@ static uint64_t kiln_c99_typed_prototype(kiln_typed_kind kind) {
     case KILN_TYPED_UINT32: return KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE;
     case KILN_TYPED_FLOAT32: return KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE;
     case KILN_TYPED_FLOAT64: return KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE;
+    case KILN_TYPED_FLOAT16: return KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE;
     case KILN_TYPED_BIG_INT64: return KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE;
     case KILN_TYPED_BIG_UINT64: return KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE;
     }
@@ -275,6 +314,7 @@ static int kiln_c99_typed_prototype_kind(uint64_t builtin, kiln_typed_kind *kind
     case KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE: *kind = KILN_TYPED_UINT32; return 1;
     case KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE: *kind = KILN_TYPED_FLOAT32; return 1;
     case KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE: *kind = KILN_TYPED_FLOAT64; return 1;
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY_PROTOTYPE: *kind = KILN_TYPED_FLOAT16; return 1;
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY_PROTOTYPE: *kind = KILN_TYPED_BIG_INT64; return 1;
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY_PROTOTYPE: *kind = KILN_TYPED_BIG_UINT64; return 1;
     default: return 0;
@@ -435,6 +475,26 @@ static int kiln_c99_array_buffer_detach_raw(kiln_value *out, const kiln_value *a
     source->moved_external = 0;
     source->detached = 1;
     *out = kiln_c99_value(KILN_VALUE_ARRAY_BUFFER, (uint64_t)(uintptr_t)moved, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* `__kilnArrayBufferByteLength(buffer)`: the internal-slot read used by the shared TypeScript
+ * accessor function exposed as `ArrayBuffer.prototype.byteLength`. Keeping this private lets the
+ * public accessor and its reflected descriptor have one TypeScript owner while preserving the
+ * engine's brand check and avoiding a recursive property read. */
+static size_t kiln_c99_shared_length(kiln_typed_buffer *buffer);
+static int kiln_c99_array_buffer_byte_length_raw(kiln_value *out, const kiln_value *args,
+                                                  size_t argc, kiln_value *thrown) {
+    kiln_typed_buffer *buffer;
+    int shared = argc > 1 && kiln_c99_truthy(args[1]);
+    if (argc == 0 || args[0].tag != KILN_VALUE_ARRAY_BUFFER ||
+        (buffer = kiln_c99_typed_buffer_of(args[0])) == NULL ||
+        (buffer->shared != NULL) != shared) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, shared
+            ? "Method get SharedArrayBuffer.prototype.byteLength called on incompatible receiver"
+            : "Method get ArrayBuffer.prototype.byteLength called on incompatible receiver");
+    }
+    *out = kiln_c99_number((double)(shared ? kiln_c99_shared_length(buffer) : buffer->byte_length));
     return KILN_C99_OK;
 }
 
@@ -632,7 +692,8 @@ static int kiln_c99_atomics_raw(kiln_value *out, const kiln_value *args, size_t 
     buffer = view->buffer;
     width = kiln_c99_typed_width(view->kind);
     index = (size_t)kiln_c99_as_number(args[2]);
-    if (view->kind == KILN_TYPED_FLOAT32 || view->kind == KILN_TYPED_FLOAT64 ||
+    if (view->kind == KILN_TYPED_FLOAT16 || view->kind == KILN_TYPED_FLOAT32 ||
+        view->kind == KILN_TYPED_FLOAT64 ||
         view->kind == KILN_TYPED_UINT8_CLAMPED)
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Atomics: not an integer typed array");
     if (index >= view->length || buffer->detached)
@@ -871,6 +932,9 @@ static double kiln_c99_typed_get(kiln_typed_array *view, size_t index) {
                  ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
         memcpy(&float32, &bits32, sizeof float32);
         return (double)float32;
+    case KILN_TYPED_FLOAT16:
+        unsigned16 = (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
+        return kiln_c99_half_to_double(unsigned16);
     case KILN_TYPED_FLOAT64:
         bits64 = (uint64_t)bytes[0] | ((uint64_t)bytes[1] << 8) |
                  ((uint64_t)bytes[2] << 16) | ((uint64_t)bytes[3] << 24) |
@@ -1017,6 +1081,11 @@ static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double valu
         bytes[2] = (uint8_t)(bits32 >> 16);
         bytes[3] = (uint8_t)(bits32 >> 24);
         return;
+    case KILN_TYPED_FLOAT16:
+        unsigned16 = kiln_c99_double_to_half(value);
+        bytes[0] = (uint8_t)unsigned16;
+        bytes[1] = (uint8_t)(unsigned16 >> 8);
+        return;
     case KILN_TYPED_FLOAT64:
         float64 = value;
         memcpy(&bits64, &float64, sizeof bits64);
@@ -1059,6 +1128,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
             return KILN_C99_OUT_OF_MEMORY;
         }
         kiln_c99_heap_store_pointer(view, &view->buffer, buffer);
+        kiln_c99_heap_store_value(view, &view->properties, kiln_c99_undefined());
         view->byte_offset = byte_offset;
         view->length = count;
         view->kind = kind;
@@ -1088,6 +1158,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
         return KILN_C99_OUT_OF_MEMORY;
     }
     kiln_c99_heap_store_pointer(view, &view->buffer, kiln_c99_typed_buffer_of(buffer_value));
+    kiln_c99_heap_store_value(view, &view->properties, kiln_c99_undefined());
     view->byte_offset = 0;
     view->length = count;
     view->kind = kind;
@@ -1146,6 +1217,7 @@ static int kiln_c99_typed_alloc_ex(kiln_value *out, kiln_typed_kind kind, size_t
         return KILN_C99_OUT_OF_MEMORY;
     }
     kiln_c99_heap_store_pointer(view, &view->buffer, kiln_c99_typed_buffer_of(buffer));
+    kiln_c99_heap_store_value(view, &view->properties, kiln_c99_undefined());
     view->byte_offset = 0;
     view->length = count;
     view->kind = kind;
@@ -1156,6 +1228,11 @@ static int kiln_c99_typed_alloc_ex(kiln_value *out, kiln_typed_kind kind, size_t
 
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count) {
     return kiln_c99_typed_alloc_ex(out, kind, count, 1);
+}
+
+/* The shared WebCrypto bridge writes a Rust-provider result straight into this fresh Uint8Array. */
+int kiln_c99_webcrypto_output_array(kiln_value *out, size_t length) {
+    return kiln_c99_typed_alloc_ex(out, KILN_TYPED_UINT8, length, 1);
 }
 
 /* `new DataView(buffer[, byteOffset[, byteLength]])`.

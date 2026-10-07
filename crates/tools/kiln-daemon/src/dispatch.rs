@@ -35,6 +35,9 @@ pub(crate) enum PreparedRun {
         graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
         path: String,
         args: Vec<String>,
+        exec_argv: Vec<String>,
+        disallow_string_code_generation: bool,
+        has_preloads: bool,
         file: kiln_db::FileId,
         revision: u64,
         overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
@@ -43,6 +46,8 @@ pub(crate) enum PreparedRun {
         program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
         path: String,
         args: Vec<String>,
+        exec_argv: Vec<String>,
+        disallow_string_code_generation: bool,
         file: kiln_db::FileId,
         revision: u64,
         overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
@@ -114,6 +119,7 @@ pub fn dispatch<E: QueryEngine>(engine: &mut E, request: Request) -> (Response, 
         Request::SetSource { .. }
             | Request::Check { .. }
             | Request::Run { .. }
+            | Request::NodeRun { .. }
             | Request::NativeBuild { .. }
             | Request::NativeBuildAtRevision { .. }
             | Request::NativeSharedBuild { .. }
@@ -193,10 +199,47 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             project_root,
             args,
             node,
+            wall_clock,
             steps,
             source_view: _,
+            stream_output: _,
         } => (
-            run(engine, resolutions, path, project_root, args, node, steps),
+            run(
+                engine,
+                resolutions,
+                path,
+                project_root,
+                args,
+                node,
+                wall_clock,
+                steps,
+            ),
+            Next::Continue,
+        ),
+        Request::NodeRun {
+            path,
+            project_root,
+            args,
+            preloads,
+            exec_argv,
+            disallow_string_code_generation,
+            wall_clock,
+            steps,
+            source_view: _,
+            stream_output: _,
+        } => (
+            node_run(
+                engine,
+                resolutions,
+                path,
+                project_root,
+                args,
+                preloads,
+                exec_argv,
+                disallow_string_code_generation,
+                wall_clock,
+                steps,
+            ),
             Next::Continue,
         ),
         Request::NativeBuild {
@@ -306,10 +349,12 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             args: _,
             profile,
             node,
+            wall_clock,
             source_view: _,
             static_link,
             pgo_generate,
             pgo_use,
+            stream_output: _,
         } => {
             let pgo_gen = pgo_generate.map(PathBuf::from);
             let pgo_u = pgo_use.map(PathBuf::from);
@@ -321,6 +366,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                         project_root,
                         profile,
                         node,
+                        wall_clock,
                         static_link,
                         pgo_gen,
                         pgo_u,
@@ -534,24 +580,77 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
     resolutions: Option<&kiln_proto::ResolutionMap>,
     node: bool,
 ) -> Result<PreparedRun, String> {
+    prepare_run_with_launch_options(
+        engine,
+        cache,
+        path,
+        args,
+        project_root,
+        resolutions,
+        node,
+        Vec::new(),
+        Vec::new(),
+        false,
+    )
+}
+
+pub(crate) fn prepare_run_with_launch_options<E: QueryEngine>(
+    engine: &mut E,
+    cache: Option<&mut GraphCache>,
+    path: String,
+    args: Vec<String>,
+    project_root: String,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
+    node: bool,
+    preloads: Vec<String>,
+    exec_argv: Vec<String>,
+    disallow_string_code_generation: bool,
+) -> Result<PreparedRun, String> {
     let overlay = build_vfs_overlay(engine);
     let entry = resolve_source_path(&path, &project_root);
     let prepared = if let Some(entry) = entry {
         let file = ensure_canonical_source(engine, &path, &entry, &project_root)?;
+        let preload_paths = preloads
+            .iter()
+            .map(|preload| {
+                let resolved = resolve_source_path(preload, &project_root).ok_or_else(|| {
+                    format!("cannot resolve source preload `{preload}` from `{project_root}`")
+                })?;
+                ensure_canonical_source(engine, preload, &resolved, &project_root)?;
+                Ok::<_, String>(resolved)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_preloads = !preload_paths.is_empty();
         PreparedRun::Graph {
-            graph: graph_snapshot(engine, cache, &entry, &project_root, resolutions, node),
+            graph: graph_snapshot_with_preloads(
+                engine,
+                cache,
+                &entry,
+                &project_root,
+                resolutions,
+                node,
+                &preload_paths,
+            ),
             path,
             args,
+            exec_argv,
+            disallow_string_code_generation,
+            has_preloads,
             file,
             revision: engine.revision().0,
             overlay,
         }
     } else {
+        if !preloads.is_empty() {
+            return Err("source preloads require a module-graph entry".to_owned());
+        }
         let file = ensure_source(engine, &path)?;
         PreparedRun::Program {
             program: engine.ir(file),
             path,
             args,
+            exec_argv,
+            disallow_string_code_generation,
             file,
             revision: engine.revision().0,
             overlay,
@@ -840,6 +939,18 @@ pub(crate) fn build_graph_from_snapshot(
             )
         })
         .collect::<Vec<_>>();
+    let runtime_package_aliases = snapshot
+        .resolutions
+        .iter()
+        .flat_map(|map| &map.runtime_package_aliases)
+        .map(|alias| {
+            (
+                PathBuf::from(&alias.package_root),
+                alias.specifier.clone(),
+                PathBuf::from(&alias.target),
+            )
+        })
+        .collect::<Vec<_>>();
     let resolver = if snapshot.node {
         kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
             &snapshot.project_root,
@@ -857,7 +968,8 @@ pub(crate) fn build_graph_from_snapshot(
         importer: PathBuf::new(),
         specifier: String::new(),
         error,
-    })?;
+    })?
+    .with_runtime_package_aliases(runtime_package_aliases);
     ModuleGraph::build_with_typed_policy_includes(
         &snapshot.entry,
         resolver,
@@ -986,8 +1098,10 @@ fn snapshot_module_payload(
         None
     };
     if source_kind == kiln_module_graph::ModuleSource::CommonJs {
-        let (hir, static_requires) =
+        let (mut hir, static_requires) =
             kiln_frontend_oxc::parse_commonjs_with_requires(path_string, &source.text);
+        hir.module_id =
+            kiln_module_graph::graph_module_identity(&snapshot.project_root, path).into();
         if hir.has_static_module_syntax() {
             return Err(kiln_module_graph::ModuleGraphError::CjsStaticModuleSyntax {
                 path: path.to_path_buf(),
@@ -1014,11 +1128,12 @@ fn snapshot_module_payload(
         }
         return Ok(kiln_module_graph::ModulePayload::Program(program));
     }
-    let hir = source_types
+    let mut hir = source_types
         .and_then(|source_types| source_types.modules.get(path))
-        .cloned()
-        .unwrap_or_else(|| Arc::new(kiln_frontend_oxc::parse(path_string, &source.text)));
-    let mut program = kiln_ir::compile_module(hir.as_ref()).map_err(|diagnostics| {
+        .map(|module| module.as_ref().clone())
+        .unwrap_or_else(|| kiln_frontend_oxc::parse(path_string, &source.text));
+    hir.module_id = kiln_module_graph::graph_module_identity(&snapshot.project_root, path).into();
+    let mut program = kiln_ir::compile_module(&hir).map_err(|diagnostics| {
         kiln_module_graph::ModuleGraphError::Compile {
             path: path.to_path_buf(),
             diagnostics,
@@ -1029,7 +1144,7 @@ fn snapshot_module_payload(
     {
         kiln_ir::apply_source_types(
             path_string,
-            hir.as_ref(),
+            &hir,
             &source_types.checked,
             &source_types.checked.checker_identity,
             &mut program.program,
@@ -1085,8 +1200,14 @@ fn graph_uses_typescript(graph: &ModuleGraph) -> bool {
 pub(crate) fn execute_prepared_run(
     prepared: PreparedRun,
     node: bool,
+    wall_clock: bool,
     steps: StepBudget,
 ) -> Response {
+    if wall_clock && !node {
+        return Response::Error {
+            message: "wall-clock scheduling requires the Node host adapter".to_owned(),
+        };
+    }
     #[cfg(test)]
     wait_for_run_gate(prepared.path());
 
@@ -1099,18 +1220,48 @@ pub(crate) fn execute_prepared_run(
             graph,
             path,
             args,
+            exec_argv,
+            disallow_string_code_generation,
+            has_preloads,
             file,
             revision,
             overlay,
-        } => execute_graph(graph, path, args, file, revision, node, limits, overlay),
+        } => execute_graph(
+            graph,
+            path,
+            args,
+            exec_argv,
+            disallow_string_code_generation,
+            has_preloads,
+            file,
+            revision,
+            node,
+            wall_clock,
+            limits,
+            overlay,
+        ),
         PreparedRun::Program {
             program,
             path,
             args,
+            exec_argv,
+            disallow_string_code_generation,
             file,
             revision,
             overlay,
-        } => execute_program(program, path, args, file, revision, node, limits, overlay),
+        } => execute_program(
+            program,
+            path,
+            args,
+            exec_argv,
+            disallow_string_code_generation,
+            file,
+            revision,
+            node,
+            wall_clock,
+            limits,
+            overlay,
+        ),
     };
     if let (Some(signal), Response::Ran(summary)) = (hosted.terminated_by(), &mut response) {
         summary.signal = Some(signal);
@@ -1262,10 +1413,41 @@ fn run<E: QueryEngine>(
     project_root: String,
     args: Vec<String>,
     node: bool,
+    wall_clock: bool,
     steps: StepBudget,
 ) -> Response {
     match prepare_run(engine, resolutions, path, args, project_root, node) {
-        Ok(prepared) => execute_prepared_run(prepared, node, steps),
+        Ok(prepared) => execute_prepared_run(prepared, node, wall_clock, steps),
+        Err(message) => Response::Error { message },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn node_run<E: QueryEngine>(
+    engine: &mut E,
+    resolutions: Option<&ResolutionMap>,
+    path: String,
+    project_root: String,
+    args: Vec<String>,
+    preloads: Vec<String>,
+    exec_argv: Vec<String>,
+    disallow_string_code_generation: bool,
+    wall_clock: bool,
+    steps: StepBudget,
+) -> Response {
+    match prepare_run_with_launch_options(
+        engine,
+        None,
+        path,
+        args,
+        project_root,
+        resolutions,
+        true,
+        preloads,
+        exec_argv,
+        disallow_string_code_generation,
+    ) {
+        Ok(prepared) => execute_prepared_run(prepared, true, wall_clock, steps),
         Err(message) => Response::Error { message },
     }
 }
@@ -1290,27 +1472,61 @@ pub(crate) fn interpreted_argv(path: &str, args: &[String]) -> Vec<String> {
     argv
 }
 
+/// A capture host that delivers its output as it is written when the request asked for that.
+fn streaming_host(host: kiln_runtime::CaptureHost) -> kiln_runtime::CaptureHost {
+    match crate::stream::current() {
+        Some(sink) => host.with_stream(Box::new(move |is_stderr, text| {
+            let stream = if is_stderr {
+                kiln_proto::OutputStream::Stderr
+            } else {
+                kiln_proto::OutputStream::Stdout
+            };
+            sink.emit(stream, text.to_owned());
+        })),
+        None => host,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_graph(
     graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
     path: String,
     args: Vec<String>,
+    exec_argv: Vec<String>,
+    disallow_string_code_generation: bool,
+    has_preloads: bool,
     file: kiln_db::FileId,
     revision: u64,
     node: bool,
+    wall_clock: bool,
     limits: kiln_interpreter::ExecutionLimits,
     overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
 ) -> Response {
-    let capabilities =
-        kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path, &args));
-    let mut host = kiln_runtime::CaptureHost::new().with_fs(Box::new(
-        kiln_host_abi::OverlayFileSystem::new(kiln_host_abi::OsFileSystem, overlay),
-    ));
+    let capabilities = kiln_conformance::source_compiler_capability()
+        .with_argv(interpreted_argv(&path, &args))
+        .with_exec_argv(exec_argv)
+        .with_string_code_generation(!disallow_string_code_generation);
+    let mut host = streaming_host(
+        kiln_runtime::CaptureHost::new()
+            .with_fs(Box::new(kiln_host_abi::OverlayFileSystem::new(
+                kiln_host_abi::OsFileSystem,
+                overlay,
+            )))
+            .with_sync_process(node)
+            .with_clock(if wall_clock {
+                kiln_runtime::ClockCapability::Host
+            } else {
+                kiln_runtime::ClockCapability::Virtual
+            }),
+    );
     // One shaken graph feeds execution: reduce to the closed-world live
     // subset first, so dead modules never evaluate. Development selection
     // keeps the interpreter conservative; a reduction failure runs the full
     // graph rather than refusing a program liveness could not classify.
     let graph = graph.map(|graph| {
+        if has_preloads {
+            return graph;
+        }
         kiln_liveness::executable_demand(&graph, &kiln_liveness::SelectionOptions::development())
             .and_then(|demand| {
                 graph
@@ -1324,7 +1540,16 @@ fn execute_graph(
             let capabilities = capabilities.with_module_loader_service(std::sync::Arc::new(
                 kiln_module_eval::GraphModuleLoader::new(std::sync::Arc::clone(&graph)),
             ));
-            graph.execute_node(&mut host, limits, capabilities)
+            graph.execute_node_with_clock(
+                &mut host,
+                limits,
+                capabilities,
+                if wall_clock {
+                    kiln_runtime::ClockCapability::Host
+                } else {
+                    kiln_runtime::ClockCapability::Virtual
+                },
+            )
         }
         Ok(graph) => {
             let capabilities = capabilities.with_module_loader_service(std::sync::Arc::new(
@@ -1337,12 +1562,13 @@ fn execute_graph(
     match result {
         Ok(execution) => {
             let scalar_value = scalar_value_summary(&execution.value);
+            let exit_code = execution.process_exit_code.unwrap_or(0);
             Response::Ran(RunSummary {
                 revision,
                 path,
                 file: FileId(file.0),
-                succeeded: true,
-                exit_code: Some(0),
+                succeeded: exit_code == 0,
+                exit_code: Some(exit_code),
                 signal: None,
                 stdout: host.stdout().to_owned(),
                 stderr: host.stderr().to_owned(),
@@ -1392,6 +1618,7 @@ fn build_graph<E: QueryEngine>(
     entry: &Path,
     project_root: &str,
     node: bool,
+    preloads: &[PathBuf],
 ) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
     let declared_includes = declared_include_sources(resolutions)?;
     let entries = resolutions
@@ -1430,8 +1657,19 @@ fn build_graph<E: QueryEngine>(
             )
         })
         .collect::<Vec<_>>();
+    let runtime_package_aliases = resolutions
+        .into_iter()
+        .flat_map(|map| &map.runtime_package_aliases)
+        .map(|alias| {
+            (
+                PathBuf::from(&alias.package_root),
+                alias.specifier.clone(),
+                PathBuf::from(&alias.target),
+            )
+        })
+        .collect::<Vec<_>>();
     let provider = |module_path: &Path, source_kind: kiln_module_graph::ModuleSource| {
-        module_payload(engine, module_path, source_kind)
+        module_payload(engine, module_path, project_root, source_kind)
     };
     let resolver = if node {
         kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
@@ -1450,13 +1688,25 @@ fn build_graph<E: QueryEngine>(
         importer: PathBuf::new(),
         specifier: String::new(),
         error,
-    })?;
-    ModuleGraph::build_with_typed_policy_includes(entry, resolver, provider, declared_includes)
+    })?
+    .with_runtime_package_aliases(runtime_package_aliases);
+    if !preloads.is_empty() {
+        ModuleGraph::build_with_typed_policy_preloads_and_includes(
+            entry,
+            resolver,
+            provider,
+            preloads.to_vec(),
+            declared_includes,
+        )
+    } else {
+        ModuleGraph::build_with_typed_policy_includes(entry, resolver, provider, declared_includes)
+    }
 }
 
 fn module_payload<E: QueryEngine>(
     engine: &mut E,
     module_path: &Path,
+    project_root: &str,
     source_kind: kiln_module_graph::ModuleSource,
 ) -> Result<kiln_module_graph::ModulePayload, kiln_module_graph::ModuleGraphError> {
     if source_kind == kiln_module_graph::ModuleSource::Asset {
@@ -1471,6 +1721,7 @@ fn module_payload<E: QueryEngine>(
                 path: module_path.to_path_buf(),
             })?;
     let module_file = engine.intern(module_path_string);
+    let identity = kiln_module_graph::graph_module_identity(Path::new(project_root), module_path);
     if engine.source(module_file).is_none() {
         return Err(kiln_module_graph::ModuleGraphError::Source {
             path: module_path.to_path_buf(),
@@ -1490,8 +1741,9 @@ fn module_payload<E: QueryEngine>(
     }
     if source_kind == kiln_module_graph::ModuleSource::CommonJs {
         let source = engine.source(module_file).expect("source checked above");
-        let (hir, static_requires) =
+        let (mut hir, static_requires) =
             kiln_frontend_oxc::parse_commonjs_with_requires(module_path_string, source);
+        hir.module_id = identity.clone().into();
         if hir.has_static_module_syntax() {
             return Err(kiln_module_graph::ModuleGraphError::CjsStaticModuleSyntax {
                 path: module_path.to_path_buf(),
@@ -1508,12 +1760,91 @@ fn module_payload<E: QueryEngine>(
         return Ok(kiln_module_graph::ModulePayload::Program(program));
     }
     engine
-        .module_ir(module_file)
+        .module_ir_with_identity(module_file, &identity)
         .map(kiln_module_graph::ModulePayload::Program)
         .map_err(|diagnostics| kiln_module_graph::ModuleGraphError::Compile {
             path: module_path.to_path_buf(),
             diagnostics,
         })
+}
+
+#[cfg(test)]
+mod module_identity_tests {
+    use super::*;
+    use kiln_db::{MemoEngine, QueryEngine};
+    use kiln_module_graph::{ModulePayload, ModuleSource};
+
+    fn private_constants(payload: ModulePayload) -> Vec<String> {
+        let ModulePayload::Program(program) = payload else {
+            panic!("source module compiles to a program");
+        };
+        program
+            .program
+            .constants
+            .into_iter()
+            .filter_map(|constant| match constant {
+                kiln_ir::Constant::String(value) => value
+                    .to_scalar_string()
+                    .ok()
+                    .filter(|value| value.starts_with("@@private:")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn memoized_module_ir_tracks_graph_identity_changes_for_same_file() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "kiln-private-module-identity-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let project = dir.join("project");
+        let source_dir = project.join("src");
+        std::fs::create_dir_all(&source_dir).expect("create project source directory");
+        // Canonical, like every path the resolver hands the daemon: `graph_module_identity`
+        // strips the *canonical* project root, and on macOS `temp_dir()` is `/var/folders/...`
+        // while its canonical form is `/private/var/...`, so an uncanonicalized fixture path
+        // never has the root as a prefix and both identities collapse to the absolute path.
+        let dir = std::fs::canonicalize(&dir).expect("canonicalize temporary project");
+        let project = dir.join("project");
+        let source_dir = project.join("src");
+        let path = source_dir.join("private.ts");
+        let path_string = path.to_str().expect("UTF-8 test path");
+        let source = "class Cache { #value = 1; read() { return this.#value; } }";
+        let mut engine = MemoEngine::new(kiln_frontend_oxc::parse);
+        let file = engine.intern(path_string);
+        engine.set_source(file, source.to_owned());
+
+        let project_payload = module_payload(
+            &mut engine,
+            &path,
+            project.to_str().expect("UTF-8 project path"),
+            ModuleSource::Source,
+        )
+        .expect("compile under project identity");
+        let project_keys = private_constants(project_payload);
+        assert!(!project_keys.is_empty(), "fixture contains a private name");
+
+        let cached_payload = module_payload(
+            &mut engine,
+            &path,
+            project.to_str().expect("UTF-8 project path"),
+            ModuleSource::Source,
+        )
+        .expect("reuse cached graph identity");
+        assert_eq!(project_keys, private_constants(cached_payload));
+
+        let parent = dir.to_str().expect("UTF-8 parent path");
+        let parent_payload = module_payload(&mut engine, &path, parent, ModuleSource::Source)
+            .expect("compile under changed graph identity");
+        let parent_keys = private_constants(parent_payload);
+        assert_ne!(project_keys, parent_keys);
+        assert_eq!(engine.stats().ir_computed, 2);
+
+        std::fs::remove_dir_all(dir).expect("remove temporary project");
+    }
 }
 
 fn graph_sources<E: QueryEngine>(
@@ -1557,6 +1888,18 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
     resolutions: Option<&kiln_proto::ResolutionMap>,
     node: bool,
 ) -> Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError> {
+    graph_snapshot_with_preloads(engine, cache, entry, project_root, resolutions, node, &[])
+}
+
+fn graph_snapshot_with_preloads<E: QueryEngine>(
+    engine: &mut E,
+    cache: Option<&mut GraphCache>,
+    entry: &Path,
+    project_root: &str,
+    resolutions: Option<&kiln_proto::ResolutionMap>,
+    node: bool,
+    preloads: &[PathBuf],
+) -> Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError> {
     let canonical_root = std::fs::canonicalize(project_root).map_err(|error| {
         kiln_module_graph::ModuleGraphError::Source {
             path: PathBuf::from(project_root),
@@ -1581,7 +1924,24 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
             kind: error.kind(),
         }
     })?;
-    let mut key = GraphCacheKey::new(canonical_root, canonical_entry.clone(), resolutions, node);
+    let canonical_preloads = preloads
+        .iter()
+        .map(|path| {
+            std::fs::canonicalize(path).map_err(|error| {
+                kiln_module_graph::ModuleGraphError::Entry {
+                    path: path.clone(),
+                    kind: error.kind(),
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut key = GraphCacheKey::new_with_startup_roots(
+        canonical_root,
+        canonical_entry.clone(),
+        resolutions,
+        node,
+        canonical_preloads,
+    );
     key.source_check_identity = source_check_identity(engine);
     if let Some(cache) = cache {
         match cache.lookup(&key, |file| engine.source_revision(file)) {
@@ -1605,6 +1965,7 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
                     let payload = match module_payload(
                         engine,
                         &path,
+                        project_root,
                         kiln_module_graph::ModuleSource::Source,
                     ) {
                         Ok(payload) => payload,
@@ -1630,7 +1991,14 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
             GraphCacheLookup::Stale { .. } => cache.record_miss(),
             GraphCacheLookup::Miss => {}
         }
-        let graph = build_graph(engine, resolutions, &canonical_entry, project_root, node)?;
+        let graph = build_graph(
+            engine,
+            resolutions,
+            &canonical_entry,
+            project_root,
+            node,
+            &key.startup_roots,
+        )?;
         return Ok(match graph_sources(engine, &graph) {
             Some(sources) => cache.insert(key, sources, graph),
             // Graph construction rejects non-UTF-8 and unsynchronized modules, so this is a
@@ -1638,7 +2006,15 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
             None => Arc::new(graph),
         });
     }
-    build_graph(engine, resolutions, &canonical_entry, project_root, node).map(Arc::new)
+    build_graph(
+        engine,
+        resolutions,
+        &canonical_entry,
+        project_root,
+        node,
+        &key.startup_roots,
+    )
+    .map(Arc::new)
 }
 
 fn module_evaluation_diagnostics(error: ModuleEvaluationError) -> Vec<Diagnostic> {
@@ -1739,14 +2115,19 @@ fn execute_program(
     program: Result<kiln_ir::Program, Vec<kiln_ir::CompileDiagnostic>>,
     path: String,
     args: Vec<String>,
+    exec_argv: Vec<String>,
+    disallow_string_code_generation: bool,
     file: kiln_db::FileId,
     revision: u64,
     node: bool,
+    wall_clock: bool,
     limits: kiln_interpreter::ExecutionLimits,
     overlay: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
 ) -> Response {
     let capabilities = kiln_conformance::source_compiler_capability()
         .with_argv(interpreted_argv(&path, &args))
+        .with_exec_argv(exec_argv)
+        .with_string_code_generation(!disallow_string_code_generation)
         .with_realm_bootstrap(kiln_module_eval::realm_bootstrap(node));
     let program = match program {
         Ok(program) => program,
@@ -1776,23 +2157,51 @@ fn execute_program(
         }
     };
 
-    let mut host = kiln_runtime::CaptureHost::new().with_fs(Box::new(
-        kiln_host_abi::OverlayFileSystem::new(kiln_host_abi::OsFileSystem, overlay),
-    ));
+    let mut host = streaming_host(
+        kiln_runtime::CaptureHost::new()
+            .with_fs(Box::new(kiln_host_abi::OverlayFileSystem::new(
+                kiln_host_abi::OsFileSystem,
+                overlay,
+            )))
+            .with_sync_process(node)
+            .with_clock(if wall_clock {
+                kiln_runtime::ClockCapability::Host
+            } else {
+                kiln_runtime::ClockCapability::Virtual
+            }),
+    );
     let result = if node {
-        kiln_interpreter::execute_node(std::rc::Rc::new(program), &mut host, limits, capabilities)
+        if wall_clock {
+            let strictness = std::rc::Rc::new(kiln_ir::Strictness::sloppy(&program));
+            kiln_interpreter::execute_node_with_clock_and_strictness(
+                std::rc::Rc::new(program),
+                strictness,
+                &mut host,
+                limits,
+                capabilities,
+                kiln_runtime::ClockCapability::Host,
+            )
+        } else {
+            kiln_interpreter::execute_node(
+                std::rc::Rc::new(program),
+                &mut host,
+                limits,
+                capabilities,
+            )
+        }
     } else {
         kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, limits, capabilities)
     };
     match result {
         Ok(execution) => {
             let scalar_value = scalar_value_summary(&execution.value);
+            let exit_code = execution.process_exit_code.unwrap_or(0);
             Response::Ran(RunSummary {
                 revision,
                 path,
                 file: FileId(file.0),
-                succeeded: true,
-                exit_code: Some(0),
+                succeeded: exit_code == 0,
+                exit_code: Some(exit_code),
                 signal: None,
                 stdout: host.stdout().to_owned(),
                 stderr: host.stderr().to_owned(),
@@ -2306,6 +2715,39 @@ pub(crate) fn native_build_graph(
     }
 }
 
+/// Run a native build-and-launch, passing it a sink for the child's output when the request
+/// asked to stream, and flushing any incomplete UTF-8 tail once the child is gone.
+fn run_streaming_native(
+    run: impl FnOnce(
+        Option<&mut dyn FnMut(kiln_native::ChildStream, &[u8])>,
+        bool,
+    ) -> Result<kiln_native::NativeRunReport, kiln_native::NativeError>,
+) -> Result<kiln_native::NativeRunReport, kiln_native::NativeError> {
+    let inherit = crate::stream::inherit_native_output();
+    if inherit {
+        return run(None, true);
+    }
+    let Some(sink) = crate::stream::current() else {
+        return run(None, false);
+    };
+    let mut chunker = crate::stream::Utf8Chunker::default();
+    let wire = |stream: kiln_native::ChildStream| match stream {
+        kiln_native::ChildStream::Stdout => kiln_proto::OutputStream::Stdout,
+        kiln_native::ChildStream::Stderr => kiln_proto::OutputStream::Stderr,
+    };
+    let outcome = run(
+        Some(&mut |stream, bytes| {
+            let stream = wire(stream);
+            sink.emit(stream, chunker.push(stream, bytes));
+        }),
+        false,
+    );
+    for (stream, text) in chunker.finish() {
+        sink.emit(stream, text);
+    }
+    outcome
+}
+
 pub(crate) fn native_run_program(
     program: kiln_ir::Program,
     path: String,
@@ -2325,19 +2767,39 @@ pub(crate) fn native_run_program(
             Ok(output) => output,
             Err(message) => return Response::Error { message },
         };
-    match builder.run(
-        &program,
-        &kiln_native::NativeBuildOptions {
-            output,
-            profile: native_profile(profile),
-            realm: kiln_native::NativeRealmPolicy::default(),
-            march_native: false,
-            static_link,
-            pgo_generate,
-            pgo_use,
-            node: false,
-        },
-    ) {
+    let result = run_streaming_native(|sink, inherit| {
+        if inherit {
+            builder.run_inheriting_output(
+                &program,
+                &kiln_native::NativeBuildOptions {
+                    output,
+                    profile: native_profile(profile),
+                    realm: kiln_native::NativeRealmPolicy::default(),
+                    march_native: false,
+                    static_link,
+                    pgo_generate,
+                    pgo_use,
+                    node: false,
+                },
+            )
+        } else {
+            builder.run_streaming(
+                &program,
+                &kiln_native::NativeBuildOptions {
+                    output,
+                    profile: native_profile(profile),
+                    realm: kiln_native::NativeRealmPolicy::default(),
+                    march_native: false,
+                    static_link,
+                    pgo_generate,
+                    pgo_use,
+                    node: false,
+                },
+                sink,
+            )
+        }
+    });
+    match result {
         Ok(report) => native_ran(&project_root, &builder, report),
         Err(error) => Response::Error {
             message: error.to_string(),
@@ -2352,6 +2814,7 @@ pub(crate) fn native_run_graph(
     project_root: String,
     profile: NativeProfile,
     node: bool,
+    wall_clock: bool,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
@@ -2366,19 +2829,31 @@ pub(crate) fn native_run_graph(
             Ok(output) => output,
             Err(message) => return Response::Error { message },
         };
-    match builder.run_graph(
-        graph,
-        &kiln_native::NativeBuildOptions {
+    let result = run_streaming_native(|sink, inherit| {
+        let options = kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
-            realm: kiln_native::NativeRealmPolicy::default(),
+            // A directly-run native Node program has the same host-backed clock policy as a
+            // node-enabled launcher built for later execution. Keep plain native scripts on
+            // the deterministic clock.
+            realm: if wall_clock {
+                kiln_native::NativeRealmPolicy::host_clock()
+            } else {
+                kiln_native::NativeRealmPolicy::default()
+            },
             march_native: false,
             static_link,
             pgo_generate,
             pgo_use,
             node,
-        },
-    ) {
+        };
+        if inherit {
+            builder.run_graph_inheriting_output(graph, &options)
+        } else {
+            builder.run_graph_streaming(graph, &options, sink)
+        }
+    });
+    match result {
         Ok(report) => native_ran(&project_root, &builder, report),
         Err(error) => Response::Error {
             message: error.to_string(),

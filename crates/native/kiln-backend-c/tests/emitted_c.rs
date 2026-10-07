@@ -48,11 +48,15 @@ fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -
     Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants,
         code,
         local_count,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     }
 }
 
@@ -385,6 +389,9 @@ fn assert_numeric_id_invariants(prelude: &str) {
     // are open at once, so the numbers are handed out in advance and the branch holding the
     // lower range lands into a hole. Keep the two lists in step.
     const RESERVED_METHOD_IDS: &[u64] = &[442, 443, 444, 445, 446, 447, 448, 449];
+    // Retired, never reused: 494 was `Array.prototype.parallelMap`, now one TypeScript
+    // definition (`kiln-builtins/src/parallel.ts`). Mirrors `RETIRED_METHOD_IDS` in prelude.rs.
+    const RETIRED_METHOD_IDS: &[u64] = &[494];
     let custom_values: Vec<_> = methods
         .keys()
         .copied()
@@ -394,7 +401,11 @@ fn assert_numeric_id_invariants(prelude: &str) {
         .last()
         .expect("prelude declares the append-only method tail");
     let missing_custom: Vec<_> = (APPEND_ONLY_METHOD_BASE..=custom_max)
-        .filter(|value| !methods.contains_key(value) && !RESERVED_METHOD_IDS.contains(value))
+        .filter(|value| {
+            !methods.contains_key(value)
+                && !RESERVED_METHOD_IDS.contains(value)
+                && !RETIRED_METHOD_IDS.contains(value)
+        })
         .collect();
     assert!(
         missing_custom.is_empty(),
@@ -680,8 +691,15 @@ fn every_global_reports_the_name_it_is_published_under() {
         }
     }
     for (published, constant) in &functions {
+        // The TypeScript JSON bootstrap captures these existing native methods, then deletes
+        // their private global aliases. The function retains its canonical JSON method name.
+        let expected = match (published.as_str(), constant.as_str()) {
+            ("__kilnJsonSerialize", "KILN_C99_METHOD_JSON_STRINGIFY") => "stringify",
+            ("__kilnJsonParse", "KILN_C99_METHOD_JSON_PARSE") => "parse",
+            _ => published.as_str(),
+        };
         match method_names.get(constant) {
-            Some(reported) if reported == published => {}
+            Some(reported) if reported == expected => {}
             Some(reported) => wrong.push(format!(
                 "  globalThis.{published} is {constant}, which kiln_c99_method_name calls \
                  \"{reported}\""
@@ -816,16 +834,26 @@ fn emitted_http_socket_close_is_runtime_owned_and_modeled() {
     );
 
     let branch_start = source
-        .find("if (socket->server != NULL && socket->server->protocol_http)")
+        .find("if (socket->server != NULL && socket->server->protocol_http && !socket->http_upgraded)")
         .expect("HTTP socket close branch is emitted");
-    let generic_start = source[branch_start..]
-        .find("    kiln_c99_node_cancel_request(&socket->write_request")
+    let client_start = source[branch_start..]
+        .find("    if (socket->http_client_owned && !socket->http_upgraded)")
         .map(|offset| branch_start + offset)
-        .expect("generic node:net close branch follows HTTP branch");
-    let http_branch = &source[branch_start..generic_start];
+        .expect("HTTP client close branch follows server branch");
+    let http_branch = &source[branch_start..client_start];
     assert!(http_branch.contains("kiln_realm_http_server_close_active("));
     assert!(http_branch.contains("KILN_REALM_HTTP_CLOSE_ABORT"));
     assert!(!http_branch.contains("KILN_REALM_OP_CLOSE_RESOURCE"));
+
+    let generic_start = source[client_start..]
+        .find("    if (socket->write_request != 0) {")
+        .map(|offset| client_start + offset)
+        .expect("generic socket close follows the HTTP client branch");
+    let client_branch = &source[client_start..generic_start];
+    assert!(client_branch.contains("kiln_realm_http_server_close_active("));
+    assert!(client_branch.contains("KILN_REALM_HTTP_CLOSE_ABORT"));
+    assert!(client_branch.contains("KILN_REALM_HTTP_CLOSE_GRACEFUL"));
+    assert!(!client_branch.contains("KILN_REALM_OP_CLOSE_RESOURCE"));
 
     let server_close = source
         .find("static int kiln_c99_node_server_maybe_emit_close(")
@@ -1105,9 +1133,97 @@ fn runtime_prelude_size() {
     // Independent context witnesses and canonical-key ownership enable candidate-scaled
     // admission (66,653 lines before the symbol change). Sum both branches' ceiling growth.
     // Function/constructor parity repairs and custom-species map authority, intrinsic identity, and species walk: 66,858 measured.
-    // The inherited Reflect.construct newTarget support (a79fa089) adds the shared
-    // construct_with_new_target and is_constructor helpers; the measured prelude is 66,945 lines.
-    const CEILING_LINES: usize = 66_960;
+    // Reviewed against d21d39e4c: runtime/header sources grew by 12,076 lines, chiefly
+    // dynamic Function syntax/environments (+5,720) and Node transport lifecycle (+2,247).
+    // Current emission is 79,010 lines; the remaining growth is generated metadata.
+    // The compiled runtime fixtures verify that sections are not emitted twice.
+    // Shared exotic spread snapshots, named array deletion and live namespace enumeration
+    // bring the inspected prelude to 79,082 lines; runtime sections are still emitted once.
+    // Typed-array indexed descriptor projection and array deletion invariants add 43 lines.
+    // Reviewed realm-private dictionary index: 104 runtime/header lines for ordinal hashing,
+    // malloc ownership, mutation invalidation and profile accounting. No built-in is added;
+    // each section is emitted once. The inspected total is 79,165 lines.
+    // Reviewed shared closure-receiver normalization and guarded iterator selection:
+    // 79,165 -> 79,182 lines, with each runtime section emitted once.
+    // Shared collection-method cache eligibility and hash-aware dictionary lookup add 133 net
+    // runtime/header lines (79,182 -> 79,315). The ABI additions are private helpers and existing
+    // runtime sections remain emitted once; no built-in implementation was added. Keep 85 lines
+    // of headroom for the next small edit.
+    // Widened on 2026-10-02 after the final native compatibility gate measured 79,432 lines.
+    // The 117-line net increase since 79,315 comes from reviewed runtime changes: WeakMap/WeakSet
+    // symbol-key handling, the nonrecursive canonical String iterator, DataView private state,
+    // Object.prototype.toString tags, realm-private host capability storage, and boxed-primitive
+    // accessor receiver preservation. The ABI snapshot records the crypto retention macro and
+    // relocation of the base realm-slot definitions; no runtime section is duplicated.
+    // Widened again on 2026-10-02 to 79,531 measured: native TextDecoder moved onto the provider's
+    // encoding_rs exports (ADR 0060). The C label whitelist and UTF-8-only decode were replaced by
+    // glue that calls kiln_text_decoder_label/kiln_text_decode and maps their errors, 103 net
+    // source lines for 99 emitted; no runtime section is duplicated. Keep ~120 lines of headroom.
+    // The same day the parallel-family unification (IsCallable checks before the callback walks,
+    // species-aware filter/flatMap, the Reflect refusal paths; method 494 removed) and the
+    // engine-private channel's overlay and realm slot (ADR 0068) added reviewed runtime lines:
+    // 79,797 measured with all three. Keep ~120 lines of headroom.
+    // The timer record as the handle (`KILN_VALUE_TIMER`): the record carries its callback,
+    // arguments and flags, a program's `Timeout` is that record, and a timeout that already ran
+    // re-arms under its own identity on `refresh()`. Reviewed: the tag's arms in the object
+    // predicates, the exotic store, `in`, `delete`, spread and the prototype read, and 140 net
+    // lines over the previous ceiling for the record's run, drop, op and re-arm functions; no
+    // runtime section is duplicated and no built-in is added. 80,060 measured; ~140 headroom.
+    // Indirect eval now uses the existing evaluator and validates syntax through
+    // its parse-only grammar walk. Reviewed: 324 net runtime source lines account
+    // for the 329 emitted lines (80,060 -> 80,389); sections remain emitted once.
+    // The ABI snapshot adds three private preflight helpers and a parser label.
+    // The syntax-only allocation guards and generic external-owner tracing/finalization
+    // add 263 emitted lines (80,389 -> 80,652). Reviewed the separate dynamic/heap/
+    // value sections and host context edges; no section is duplicated or built-in added.
+    // Stateful decoder provider glue and process-status get/set primitives bring the
+    // reviewed prelude to 80,806 lines. Builtin policy remains in TypeScript; the C
+    // changes retain codec state and a realm status slot, with no duplicated sections.
+    // Reviewed 2026-10-03: generation-local unit storage, external-owner detach and
+    // compact-cell tracing, deferred GC requests, and scoped direct-eval completion
+    // bring the shared prelude to 80,983 lines. These are language/ownership kernels;
+    // the Node VM and loader policy remain in TypeScript and the explicit runner.
+    // Reviewed 2026-10-03: Script-goal eval validation (+38 lines), response-end
+    // completion callbacks (+20), Date TimeClip (+2), and the constructor predicate /
+    // default typed-constructor inheritance kernel (+19) bring the prelude to 81,062.
+    // The TypedArray.from algorithm is shared TypeScript; no runtime section is duplicated.
+    // Reviewed 2026-10-03: per-realm Error frame/accessor kernels, runner spy cell stores,
+    // dynamic object binding initialization, literal callback search patterns and correct
+    // Proxy object-tag reads bring the prelude to 81,432 lines. Error formatting and brand
+    // policy remain shared TypeScript; these are activation, binding and property kernels.
+    // Implicit errors reuse the subtype prototypes installed by shared TypeScript.
+    // Reviewed 2026-10-03: dynamic object-binding defaults, lexical alias initialization and
+    // unary void, AggregateError prototype repair, the private server-listening query and
+    // retained process capability, plus shared timer arities bring the prelude to 81,652 lines.
+    // These extend existing evaluation/ownership kernels; no runtime section is duplicated.
+    // Reviewed 2026-10-03: array index descriptor overlays and the existing array
+    // algorithms' descriptor-aware paths add 492 lines; unconditional TDZ checks
+    // add three. The 82,147-line prelude has no repeated runtime section. These
+    // repair property/evaluation kernels rather than introduce public built-ins.
+    // Reviewed 2026-10-03: Module-goal parsing/preflight and public class-field
+    // evaluation account for most of the new 1,359 lines. Raw JSON branding,
+    // shared lossless UTF-16 text assembly and call-site method metadata make up
+    // the remainder. The 83,506-line unit contains each runtime section once;
+    // public validation/formatting remains in shared TypeScript.
+    // Reviewed 2026-10-03: remembered-owner minor collection adds the generation barrier,
+    // diagnostic audit and safe full-collection fallback; it remains in the existing heap
+    // runtime and adds 55 prelude lines without duplicating a runtime section.
+    // Reviewed 2026-10-04: private HTTP cancellation/late-close state, the canonical
+    // method-name index, and object-owner/finalizer fixes add 105 net runtime lines.
+    // The minimal unit is 84,572 lines; these extend existing kernels, with no
+    // duplicated section or new public C builtin implementation.
+    // Reviewed 2026-10-05: shared ToPropertyDescriptor/FromPropertyDescriptor handling
+    // and proxy defineProperty invariant checks add 440 lines to existing kernels. The
+    // descriptor parser is shared by ordinary definitions, defineProperties staging, and
+    // proxy traps; prepared descriptor values are rooted across allocations. No new public
+    // C builtin or repeated runtime section was added.
+    // Reviewed 2026-10-06: private-brand membership and proxy-owned brand storage,
+    // superclass receiver adoption, and custom array prototype dispatch extend existing
+    // kernels. The minimal unit is 85,707 lines; runtime sections still appear once and
+    // the additional ABI entries are private operations, not public C builtins.
+    // String-wrapper own-slot construction and direct-call attribution bring the final
+    // measured unit to 85,732 lines, still with no duplicated section or new public C builtin.
+    const CEILING_LINES: usize = 86_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
@@ -1312,6 +1428,9 @@ fn typed_array_borrowed_generic_methods() {
     let unit = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             number(1.0),
             number(2.0),
@@ -1338,6 +1457,7 @@ fn typed_array_borrowed_generic_methods() {
         local_count: 0,
         functions: vec![callback],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("borrowed typed-array method emits");
     insta::assert_snapshot!(body(&unit));
@@ -1603,6 +1723,9 @@ fn rejected_programs() {
         "unsupported bytecode version",
         emit(&Program {
             version: BYTECODE_VERSION + 1,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             ..minimal_program()
         })
         .expect_err("must be rejected"),

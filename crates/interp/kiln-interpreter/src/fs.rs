@@ -2,11 +2,12 @@
 //!
 //! Provides filesystem operation bindings, options parsing, and property lookups.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::buffer::node_bytes_value;
-use crate::{ArrayData, ExecutionError, HostOps, Native, ObjectData, RealmId, Value, Vm};
+use crate::{
+    ArrayData, ExecutionError, HostOps, Native, ObjectData, RealmId, Value, Vm, tracked_object,
+};
 
 /// An open virtual file handle: either an in-memory buffer or an underlying OS file.
 #[derive(Debug)]
@@ -83,7 +84,7 @@ pub(crate) fn node_encoding(option: Option<&Value>) -> Result<bool, ExecutionErr
                 }
             })?)
         }
-        Some(Value::Object(options)) => match options.borrow().get_own("encoding") {
+        Some(Value::Object(options)) => match options.borrow().get_own_value("encoding") {
             None | Some(Value::Undefined) | Some(Value::Null) => Ok(false),
             Some(Value::String(encoding)) => {
                 parse_node_encoding(&encoding.to_scalar_string().map_err(|_| {
@@ -123,7 +124,7 @@ pub(crate) fn constants_object() -> Value {
     obj.set("COPYFILE_EXCL", Value::Number(1.0));
     obj.set("COPYFILE_FICLONE", Value::Number(2.0));
     obj.set("COPYFILE_FICLONE_FORCE", Value::Number(4.0));
-    Value::Object(Rc::new(RefCell::new(obj)))
+    Value::Object(tracked_object(obj))
 }
 
 pub(crate) fn property(prop: &str) -> Option<Value> {
@@ -265,6 +266,7 @@ fn throw_node_error<H: HostOps + ?Sized>(
         format!("{code}: {err}, {syscall}")
     };
     let error = kiln_host_abi::AsyncHostError {
+        os_errno: err.raw_os_error(),
         code: code.to_owned(),
         message,
         syscall: syscall.to_owned(),
@@ -321,7 +323,7 @@ pub(crate) fn stats_object(meta: &kiln_host_abi::FsMetadata) -> Value {
         "isSymbolicLink",
         Value::Native(Native::NodeStatIsSymbolicLink, RealmId::PRIMARY),
     );
-    Value::Object(Rc::new(RefCell::new(object)))
+    Value::Object(tracked_object(object))
 }
 
 pub(crate) fn dispatch<H: HostOps + ?Sized>(
@@ -392,10 +394,12 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             };
             let mode = match arguments.get(2) {
                 Some(Value::Number(n)) => Some(*n as u32),
-                Some(Value::Object(obj)) => obj.borrow().get_own("mode").and_then(|v| match v {
-                    Value::Number(n) => Some(*n as u32),
-                    _ => None,
-                }),
+                Some(Value::Object(obj)) => {
+                    obj.borrow().get_own_value("mode").and_then(|v| match v {
+                        Value::Number(n) => Some(n as u32),
+                        _ => None,
+                    })
+                }
                 _ => None,
             };
             let write_res = with_fs(vm, |fs| {
@@ -442,8 +446,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 Some(Value::Boolean(b)) => *b,
                 Some(Value::Object(obj)) => obj
                     .borrow()
-                    .get_own("recursive")
-                    .map_or(false, Value::is_truthy),
+                    .get_own_value("recursive")
+                    .is_some_and(|value| value.is_truthy()),
                 _ => false,
             };
             let res = with_fs(vm, |fs| {
@@ -466,8 +470,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let throw_if_no_entry = match arguments.get(1) {
                 Some(Value::Object(obj)) => obj
                     .borrow()
-                    .get_own("throwIfNoEntry")
-                    .map_or(true, Value::is_truthy),
+                    .get_own_value("throwIfNoEntry")
+                    .is_none_or(|value| value.is_truthy()),
                 _ => true,
             };
             let is_lstat = matches!(native, Native::NodeFsLstatSync);
@@ -519,8 +523,8 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
             let with_file_types = match arguments.get(1) {
                 Some(Value::Object(obj)) => obj
                     .borrow()
-                    .get_own("withFileTypes")
-                    .map_or(false, Value::is_truthy),
+                    .get_own_value("withFileTypes")
+                    .is_some_and(|value| value.is_truthy()),
                 _ => false,
             };
             let read_dir_res = with_fs(vm, |fs| fs.read_dir(std::path::Path::new(&path_str)));
@@ -555,7 +559,7 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                         "isSymbolicLink",
                         Value::Native(Native::NodeStatIsSymbolicLink, RealmId::PRIMARY),
                     );
-                    out.push(Value::Object(Rc::new(RefCell::new(dirent))));
+                    out.push(Value::Object(tracked_object(dirent)));
                 } else {
                     out.push(Value::String(name.into()));
                 }
@@ -570,12 +574,12 @@ pub(crate) fn dispatch<H: HostOps + ?Sized>(
                 Some(Value::Object(obj)) => {
                     let rec = obj
                         .borrow()
-                        .get_own("recursive")
-                        .map_or(false, Value::is_truthy);
+                        .get_own_value("recursive")
+                        .is_some_and(|value| value.is_truthy());
                     let frc = obj
                         .borrow()
-                        .get_own("force")
-                        .map_or(false, Value::is_truthy);
+                        .get_own_value("force")
+                        .is_some_and(|value| value.is_truthy());
                     (rec, frc)
                 }
                 _ => (false, false),
@@ -1313,7 +1317,11 @@ mod tests {
         let program = Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: Vec::new(),
             local_count: 0,
@@ -1443,7 +1451,11 @@ mod tests {
         let program = Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: Vec::new(),
             local_count: 0,
@@ -1539,7 +1551,11 @@ mod tests {
         let program = Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: Vec::new(),
             local_count: 0,

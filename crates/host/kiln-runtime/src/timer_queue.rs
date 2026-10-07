@@ -122,6 +122,9 @@ pub(crate) struct TimerEntry<T> {
     pub(crate) id: TimerId,
     pub(crate) work: T,
     pub(crate) interval: Option<Duration>,
+    /// The delay this entry was armed with, which is what `Realm::refresh_timer` measures from
+    /// its new base: the run it sits in.
+    pub(crate) delay: Duration,
 }
 
 impl<T> TimerEntry<T> {
@@ -291,6 +294,7 @@ mod tests {
             id: TimerId::new(sequence + 1),
             work: sequence,
             interval: None,
+            delay: Duration::ZERO,
         }
     }
 

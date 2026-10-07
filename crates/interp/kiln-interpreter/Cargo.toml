@@ -10,15 +10,22 @@ kiln-builtin-surface = { workspace = true }
 kiln-builtins = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-ir = { workspace = true }
+kiln-graph = { workspace = true }
 kiln-string = { workspace = true }
+kiln-regexp = { workspace = true }
 kiln-runtime = { workspace = true }
 kiln-shared-graph = { workspace = true }
 kiln-temporal = { workspace = true }
 kiln-json = { workspace = true }
-kiln-intl = { workspace = true }
+kiln-intl = { workspace = true, features = ["timezone_database"] }
 kiln-url = { workspace = true }
+kiln-encoding = { workspace = true }
 kiln-node-path = { workspace = true }
 kiln-number-core = { workspace = true }
+kiln-key-core = { workspace = true }
+kiln-webcrypto = { workspace = true }
+kiln-compression = { workspace = true }
+kiln-date-core = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
 regress = { workspace = true }

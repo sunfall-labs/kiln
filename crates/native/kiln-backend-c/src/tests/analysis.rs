@@ -49,11 +49,15 @@ fn proven_numbers_reach_a_loop_carried_phi_and_stop_at_a_parameter() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::Number(0), Constant::Number(1)],
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &program).unwrap();
     verify_function_graph(&graph).unwrap();
@@ -139,11 +143,15 @@ fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
     let prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::Number(0), Constant::Number(1)],
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &prog).unwrap();
     let candidates = crate::graph::candidate_number_parameters(&graph, &proto);
@@ -232,11 +240,15 @@ fn speculation_disabled_emits_generic_clone_alone() {
     let prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::Number(0), Constant::Number(1)],
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let generated = emit_with_policy(
         &prog,
@@ -302,6 +314,9 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::Number(0),
             Constant::Number(10),
@@ -311,6 +326,7 @@ fn value_graph_merges_locals_at_a_loop_header_with_phis() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -412,6 +428,9 @@ fn value_graph_builds_and_verifies_scalar_loop() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::Number(0),
             Constant::Number(10),
@@ -421,6 +440,7 @@ fn value_graph_builds_and_verifies_scalar_loop() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -463,11 +483,15 @@ fn value_graph_builds_and_verifies_try_catch() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("err".into()), Constant::Number(42)],
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -508,11 +532,15 @@ fn value_graph_does_not_protect_an_operation_before_try() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::Undefined],
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -555,6 +583,9 @@ fn closed_world_module_omits_an_unread_exported_function_body() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -567,6 +598,7 @@ fn closed_world_module_omits_an_unread_exported_function_body() {
             local_count: 2,
             functions: vec![function(), function()],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![
@@ -601,7 +633,7 @@ fn closed_world_module_omits_an_unread_exported_function_body() {
 
 #[test]
 fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
-    let function = |upvalues| FunctionProto {
+    let function = |upvalues: Vec<Upvalue>| FunctionProto {
         inferred_name: None,
         span: kiln_ir::Span::default(),
         prologue_end: 0,
@@ -624,6 +656,9 @@ fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -639,6 +674,7 @@ fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
                 function(vec![Upvalue::ParentLocal(0)]),
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -670,6 +706,237 @@ fn closed_world_module_keeps_a_declaration_captured_by_a_live_function() {
 }
 
 #[test]
+fn split_module_instantiation_retains_cells_captured_by_live_hoisted_functions() {
+    let function = FunctionProto {
+        inferred_name: None,
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: Some("cached".into()),
+        parameter_count: 0,
+        local_count: 0,
+        code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        is_class: false,
+        mapped_arguments: false,
+        upvalues: vec![Upvalue::ParentLocal(1)],
+        type_annotations: None,
+    };
+    let mut module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
+            constants: vec![Constant::Undefined],
+            code: vec![
+                Instruction::NewCell(1),
+                Instruction::MarkUninitialized(1),
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::Const(0),
+                Instruction::StoreCell(1),
+                Instruction::Return,
+            ],
+            local_count: 3,
+            functions: vec![function],
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "cached".into(),
+            local_slot: 0,
+        }],
+    );
+    module.link_facts.module_instantiation_end = 4;
+    // Evaluation-only dead declaration metadata must not erase instantiation's new return.
+    module
+        .link_facts
+        .removable_declarations
+        .push(kiln_ir::RemovableDeclaration {
+            local_slots: vec![2],
+            pc_start: 4,
+            pc_end: 7,
+        });
+    let emitted = emit_module_with_logical_path_and_policy_and_instantiation(
+        &module,
+        "fixture.js",
+        EmissionPolicy {
+            compact: true,
+            live_module_slots: Some(std::sync::Arc::new([0].into_iter().collect())),
+            ..EmissionPolicy::default()
+        },
+        true,
+    )
+    .expect("split module emits");
+
+    let instantiation = emitted
+        .instantiation
+        .expect("split module has an instantiation entrypoint");
+    assert!(
+        instantiation
+            .source
+            .contains("kiln_c99_val_make_cell_owned(&locals[1]")
+    );
+    assert!(instantiation.source.contains("KILN_VAL_UNINITIALIZED"));
+    assert!(
+        instantiation
+            .source
+            .contains(&format!("{}_fn_0(", emitted.symbol))
+    );
+    assert!(instantiation.source.contains("return KILN_C99_OK;"));
+    assert!(
+        !instantiation
+            .source
+            .contains("\n    goto kiln_refusal;\nkiln_refusal:;")
+    );
+}
+
+#[test]
+fn split_module_without_closures_gives_each_phase_a_distinct_entry_symbol() {
+    let module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
+            constants: vec![Constant::Undefined],
+            code: vec![
+                Instruction::Const(0),
+                Instruction::StoreLocal(0),
+                Instruction::Return,
+            ],
+            local_count: 1,
+            functions: Vec::new(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "value".into(),
+            local_slot: 0,
+        }],
+    );
+    let emitted = emit_module_with_logical_path_and_policy_and_instantiation(
+        &module,
+        "cycle/value.mjs",
+        EmissionPolicy::default(),
+        true,
+    )
+    .expect("split module emits");
+    let instantiation = emitted.instantiation.expect("instantiation unit");
+
+    assert!(emitted.source.contains(&format!("int {}(", emitted.symbol)));
+    assert!(
+        instantiation
+            .source
+            .contains(&format!("int {}_instantiate(", emitted.symbol))
+    );
+    assert!(
+        !instantiation
+            .source
+            .contains(&format!("int {}(", emitted.symbol))
+    );
+}
+
+#[test]
+fn split_module_instantiation_keeps_transitively_reachable_hoisted_functions() {
+    let function = |upvalues: Vec<Upvalue>| FunctionProto {
+        inferred_name: None,
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: 0,
+        name: None,
+        parameter_count: 0,
+        local_count: 0,
+        code: if upvalues.is_empty() {
+            vec![Instruction::Const(0), Instruction::Return]
+        } else {
+            vec![Instruction::LoadUpvalue(0), Instruction::Return]
+        },
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        is_class: false,
+        mapped_arguments: false,
+        upvalues,
+        type_annotations: None,
+    };
+    let mut module = module(
+        Program {
+            source: "".into(),
+            version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
+            constants: vec![Constant::Undefined],
+            code: vec![
+                Instruction::MakeFunction(0),
+                Instruction::StoreLocal(0),
+                Instruction::MakeFunction(1),
+                Instruction::StoreLocal(1),
+                Instruction::MakeFunction(2),
+                Instruction::StoreLocal(2),
+                Instruction::MakeFunction(3),
+                Instruction::StoreLocal(3),
+                Instruction::Const(0),
+                Instruction::Return,
+            ],
+            local_count: 4,
+            functions: vec![
+                function(Vec::new()),
+                function(vec![Upvalue::ParentLocal(0)]),
+                function(vec![Upvalue::ParentLocal(1)]),
+                function(Vec::new()),
+            ],
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+        },
+        Vec::new(),
+        vec![kiln_ir::ExportBinding {
+            exported: "run".into(),
+            local_slot: 2,
+        }],
+    );
+    module.link_facts.module_instantiation_end = 8;
+    let emitted = emit_module_with_logical_path_and_policy_and_instantiation(
+        &module,
+        "fixture.js",
+        EmissionPolicy {
+            compact: true,
+            live_module_slots: Some(std::sync::Arc::new([2].into_iter().collect())),
+            ..EmissionPolicy::default()
+        },
+        true,
+    )
+    .expect("split module emits");
+    let instantiation = emitted.instantiation.expect("instantiation entrypoint");
+    for function in [0, 1, 2] {
+        assert!(
+            instantiation
+                .source
+                .contains(&format!("{}_fn_{function}(", emitted.symbol)),
+            "function {function} must remain available to evaluation"
+        );
+    }
+    assert!(
+        !instantiation
+            .source
+            .contains(&format!("{}_fn_3(", emitted.symbol)),
+        "unreachable declaration remains dead"
+    );
+}
+
+#[test]
 fn closed_world_module_omits_an_unread_declaration_inside_a_live_function() {
     let function = |local_count, code| FunctionProto {
         inferred_name: None,
@@ -694,6 +961,9 @@ fn closed_world_module_omits_an_unread_declaration_inside_a_live_function() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -715,6 +985,7 @@ fn closed_world_module_omits_an_unread_declaration_inside_a_live_function() {
                 function(0, vec![Instruction::Const(0), Instruction::Return]),
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -762,6 +1033,9 @@ fn closed_world_module_keeps_a_nested_declaration_captured_by_a_live_sibling() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -795,6 +1069,7 @@ fn closed_world_module_keeps_a_nested_declaration_captured_by_a_live_sibling() {
                 ),
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -843,6 +1118,9 @@ fn nested_parent_local_does_not_keep_an_unrelated_module_slot() {
         Program {
             source: "".into(),
             version: BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![Constant::Undefined],
             code: vec![
                 Instruction::MakeFunction(0),
@@ -870,6 +1148,7 @@ fn nested_parent_local_does_not_keep_an_unrelated_module_slot() {
                 ),
             ],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         },
         Vec::new(),
         vec![kiln_ir::ExportBinding {
@@ -898,6 +1177,9 @@ fn closed_world_namespace_records_named_reads_across_argument_evaluation() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("Literals".into()), Constant::Number(1)],
         code: vec![
             Instruction::LoadLocal(0),
@@ -911,6 +1193,7 @@ fn closed_world_namespace_records_named_reads_across_argument_evaluation() {
         local_count: 1,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     assert_eq!(
@@ -924,6 +1207,9 @@ fn closed_world_namespace_traces_a_captured_module_binding() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("fromInputUnsafe".into())],
         code: vec![
             Instruction::MakeFunction(0),
@@ -956,6 +1242,7 @@ fn closed_world_namespace_traces_a_captured_module_binding() {
             type_annotations: None,
         }],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     assert_eq!(
@@ -965,10 +1252,67 @@ fn closed_world_namespace_traces_a_captured_module_binding() {
 }
 
 #[test]
+fn closed_world_namespace_traces_local_alias_across_generator_suspension() {
+    let program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
+        constants: vec![Constant::String("member".into()), Constant::Number(1)],
+        code: vec![
+            Instruction::MakeFunction(0),
+            Instruction::StoreLocal(1),
+            Instruction::Const(1),
+            Instruction::Return,
+        ],
+        local_count: 2,
+        functions: vec![FunctionProto {
+            inferred_name: None,
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            declared_length: 0,
+            name: None,
+            parameter_count: 0,
+            local_count: 1,
+            code: vec![
+                Instruction::LoadUpvalue(0),
+                Instruction::StoreLocal(0),
+                Instruction::Const(1),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::LoadLocal(0),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::Return,
+            ],
+            arrow: false,
+            generator: true,
+            asynchronous: false,
+            async_generator: false,
+            is_method: false,
+            is_class: false,
+            mapped_arguments: false,
+            upvalues: vec![Upvalue::ParentLocal(0)],
+            type_annotations: None,
+        }],
+        template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
+    };
+
+    assert_eq!(
+        closed_world_namespace_members(&program, 0, false),
+        Some(["member".to_owned()].into_iter().collect())
+    );
+}
+
+#[test]
 fn closed_world_namespace_keeps_every_member_when_a_capture_escapes() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::Number(0)],
         code: vec![
             Instruction::MakeFunction(0),
@@ -997,6 +1341,7 @@ fn closed_world_namespace_keeps_every_member_when_a_capture_escapes() {
             type_annotations: None,
         }],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     assert_eq!(closed_world_namespace_members(&program, 0, false), None);
@@ -1007,11 +1352,15 @@ fn closed_world_namespace_keeps_every_member_when_the_value_escapes() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::LoadLocal(0), Instruction::Return],
         local_count: 1,
         functions: Vec::new(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     assert_eq!(closed_world_namespace_members(&program, 0, false), None);
@@ -1062,6 +1411,9 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::Number(0),
             Constant::Number(10),
@@ -1071,6 +1423,7 @@ fn value_graph_lowers_to_c_without_stack_or_sp() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &program).unwrap();
@@ -1154,20 +1507,28 @@ fn typed_dist_compiles_to_guarded_unboxed_clone_with_entry_guards_matching_untyp
     let untyped_prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![untyped_proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let typed_prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![typed_proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let untyped_graph = build_function_graph(&untyped_proto, &untyped_prog).unwrap();
@@ -1265,20 +1626,28 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
     let untyped_prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![untyped_proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let typed_prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![typed_proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     // Source facts can change after an imported alias edit even when this
@@ -1389,11 +1758,15 @@ fn type_profile_drives_candidate_speculation_and_recording() {
     let prog = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: vec![Instruction::Return],
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&proto, &prog).unwrap();
@@ -1485,6 +1858,9 @@ fn pure_closure_classification_and_parallel_map_emission() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::Number(2f64.to_bits()),
             Constant::String("parallelMap".into()),
@@ -1493,6 +1869,7 @@ fn pure_closure_classification_and_parallel_map_emission() {
         local_count: 0,
         functions: vec![callback.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let graph = build_function_graph(&callback, &program).expect("callback graph builds");
@@ -1513,6 +1890,9 @@ fn pure_closure_classification_and_parallel_map_emission() {
     let full_program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::Number(2f64.to_bits()),
             Constant::String("parallelMap".into()),
@@ -1521,6 +1901,7 @@ fn pure_closure_classification_and_parallel_map_emission() {
         local_count: 0,
         functions: vec![callback],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&full_program).expect("parallelMap emission succeeds");
@@ -1588,6 +1969,9 @@ fn test_proven_types_recognize_new_object_and_method_returns() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String("indexOf".to_owned().into()),   // 0
             Constant::String("push".to_owned().into()),      // 1
@@ -1601,6 +1985,7 @@ fn test_proven_types_recognize_new_object_and_method_returns() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &program).unwrap();
     let proven = proven_types_with_bounds(&graph, &HashMap::new(), &HashSet::new());
@@ -1724,6 +2109,9 @@ fn integer_remainder_is_an_int_only_for_a_non_negative_dividend() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::Number(0.0f64.to_bits()),
             Constant::Number(2.0f64.to_bits()),
@@ -1732,6 +2120,7 @@ fn integer_remainder_is_an_int_only_for_a_non_negative_dividend() {
         local_count: 0,
         functions: vec![proto.clone()],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
     let graph = build_function_graph(&proto, &program).unwrap();
     verify_function_graph(&graph).unwrap();
@@ -1768,4 +2157,61 @@ fn integer_remainder_is_an_int_only_for_a_non_negative_dividend() {
             other => panic!("unexpected dividend {other:?}"),
         }
     }
+}
+
+#[test]
+fn large_generic_units_share_planning_tables_and_publish_updates() {
+    use std::sync::Arc;
+    let mut program = program(
+        vec![Constant::Undefined],
+        vec![Instruction::Const(0), Instruction::Return],
+        0,
+    );
+    program.functions = vec![entry_proto(&program); 1024];
+    let (_, _, _, mut plans) = plan_unit(
+        &program,
+        "large npm unit",
+        true,
+        false,
+        true,
+        false,
+        None,
+        None,
+        None,
+    )
+    .expect("a generic unit should plan without specialization");
+    for plan in &plans.functions {
+        assert!(Arc::ptr_eq(&plan.typed_returns, &plans.entry.typed_returns));
+        assert!(Arc::ptr_eq(&plan.typed_needs, &plans.entry.typed_needs));
+        assert!(Arc::ptr_eq(
+            &plan.publishes_frame,
+            &plans.entry.publishes_frame
+        ));
+    }
+    // Updating one unit-wide fact publishes a new immutable table to every body, without
+    // changing plans retained by a speculative clone or another reader.
+    let previous = plans.entry.fast.clone();
+    let mut fast = vec![false; program.functions.len()];
+    fast[17] = true;
+    plans.set_fast(&fast);
+    assert!(!previous[17]);
+    assert!(plans.entry.fast[17]);
+    assert!(
+        plans
+            .functions
+            .iter()
+            .all(|p| Arc::ptr_eq(&p.fast, &plans.entry.fast))
+    );
+    plans.entry.typed_entries = Arc::new(vec![true; program.functions.len()]);
+    let mut available = vec![true; program.functions.len()];
+    available[17] = false;
+    plans.set_available(&program, &available);
+    assert!(!plans.entry.typed_entries[17]);
+    assert!(plans.entry.typed_entries[18]);
+    assert!(
+        plans
+            .functions
+            .iter()
+            .all(|p| Arc::ptr_eq(&p.typed_entries, &plans.entry.typed_entries))
+    );
 }

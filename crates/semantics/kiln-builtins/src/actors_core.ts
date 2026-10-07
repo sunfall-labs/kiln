@@ -1,16 +1,21 @@
 // State shared by the public actor module and its worker entry within one realm. Keeping it
 // here makes their static dependency graph acyclic while ticket identities stay private.
-// Structured clone owns the shared-value predicate for every message path. Its private bridge
-// is installed by the bootstrap before this module loads. Importing kiln:shared here would make
-// that extension's refusal run before kiln:actors can give its own when extensions are disabled.
-const nativeIsShared: ((value: any) => boolean) | undefined =
-  (globalThis as any).structuredClone?.[Symbol.for("kiln.structuredClone")]?.isShared;
+//
+// This module is internal to kiln:actors: the resolver refuses a program's import of it, and
+// without kiln's extensions it refuses itself, naming its owner (a TypeError, like every kiln:
+// module). Everything it needs from the engine comes through the realm's engine-private object,
+// which is readable only while an engine module initializes, so it is captured here.
+const enginePrivate: any = ((): any => { const G = globalThis as any; return G.__kilnPrivate; })();
+if (enginePrivate?.extensions !== true) {
+  throw new TypeError("kiln:actors requires enabled Kiln extensions");
+}
+const nativeIsShared: ((value: any) => boolean) | undefined = enginePrivate.sharedIs;
+const messagePort: any = enginePrivate.messagePort;
 
+/** Base class of every actor: `spawnActor` constructs a subclass in its own realm. */
 export abstract class Actor {}
-// The module graph can evaluate this internal module in more than one dynamic-import plan.
-// A global symbol marks the prototype chain across those plans without sharing mutable state.
-Object.defineProperty(Actor.prototype, Symbol.for("kiln.actor.base"), { value: true });
 
+/** @internal */
 export type Ticket = {
   readonly value: any;
   readonly consumed: boolean;
@@ -20,12 +25,16 @@ export type Ticket = {
   restore(value: any): void;
 };
 const tickets = new WeakMap<object, Ticket>();
+// Marks, in a message walk's `seen` map, that the message already carries a graph ticket.
+const graphInMessage = {};
 // The interpreter snapshots into its own heap. Native prepared handles own an off-heap arena
 // instead and never enter this table.
 const preparedSnapshots = new WeakMap<object, any>();
 const hasOwn = Object.prototype.hasOwnProperty;
-const isolatedMark = Symbol.for("kiln.actor.isolated");
-const ticketMark = Symbol.for("kiln.actor.ticket");
+// Unregistered symbols: a program cannot forge a mark by spelling it, and nothing about them is
+// visible to `Symbol.for`.
+const isolatedMark = Symbol("isolated");
+const ticketMark = Symbol("ticket");
 const ISOLATE = 26;
 const ISOLATED_HAS = 27;
 const CANDIDATE_BEGIN = 28;
@@ -34,8 +43,7 @@ const PREPARE = 37;
 const PLAIN_MESSAGE = 38;
 
 function isolatedOp(operation: number, ...args: any[]): any {
-  const port = (globalThis as any).MessagePort;
-  const workerOp = port?.[Symbol.for("kiln.messagePort")]?.workerOp;
+  const workerOp = messagePort?.workerOp;
   if (typeof workerOp !== "function") throw new Error("kiln:actors requires enabled worker messaging");
   return workerOp(operation, ...args);
 }
@@ -50,10 +58,8 @@ declare const transferBrand: unique symbol;
 export type Isolated<T> = { readonly [isolatedBrand]: T };
 export type TransferTicket<T> = { readonly [transferBrand]: T };
 
-function dataCloneError(message: string): Error {
-  const error = new Error(message);
-  error.name = "DataCloneError";
-  return error;
+function dataCloneError(message: string): DOMException {
+  return new ((globalThis as any).DOMException)(message, "DataCloneError");
 }
 
 function checkPreparedData(value: any, seen = new Set<any>(), depth = 0): void {
@@ -90,13 +96,13 @@ function checkPreparedData(value: any, seen = new Set<any>(), depth = 0): void {
   }
 }
 
+/** Run `factory` and hold its graph so `transfer` can move it to an actor without a copy. */
 export function isolate<T>(factory: () => T): Isolated<T> {
   if (typeof factory !== "function") throw new TypeError("isolate requires a factory");
   const handle: any = { __uncloneable: () => {} };
   // Resolve the native operation before opening the candidate allocation stream. Looking
-  // up this symbol, and the rest/spread bridge in `isolatedOp`, allocate unrelated blocks.
-  const port = (globalThis as any).MessagePort;
-  const candidateWorkerOp = port?.[Symbol.for("kiln.messagePort")]?.workerOp;
+  // it up, and the rest/spread bridge in `isolatedOp`, allocate unrelated blocks.
+  const candidateWorkerOp = messagePort?.workerOp;
   if (typeof candidateWorkerOp !== "function") throw new Error("kiln:actors requires enabled worker messaging");
   // Native realms put this synchronous factory's nursery allocations into fresh, tagged
   // chunks. A nested factory or a realm without a nursery still works, but cannot claim an
@@ -130,6 +136,7 @@ export function isolate<T>(factory: () => T): Isolated<T> {
   return handle;
 }
 
+/** Snapshot a plain data graph for an actor call; `value` stays usable. */
 export function prepareTransfer<T>(value: T): Isolated<T> {
   if (value === null || typeof value !== "object") {
     throw dataCloneError("prepareTransfer requires an ordinary object or array graph");
@@ -148,6 +155,10 @@ export function prepareTransfer<T>(value: T): Isolated<T> {
   return handle;
 }
 
+/** A one-use ticket an actor call consumes when the actor accepts it: an isolated or prepared
+ *  graph moves to the actor, an `ArrayBuffer` is detached here and arrives without a copy. */
+export function transfer<T>(value: Isolated<T>): TransferTicket<T>;
+export function transfer(value: ArrayBuffer): TransferTicket<ArrayBuffer>;
 export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T> {
   const markedHandle = value !== null && typeof value === "object"
     && (value as any)[isolatedMark] === true;
@@ -189,6 +200,7 @@ export function transfer<T>(value: Isolated<T> | ArrayBuffer): TransferTicket<T>
   return ticket;
 }
 
+/** @internal */
 export function prepareActorMessage(
   value: any, buffers: ArrayBuffer[], consumed: Ticket[], seen = new Map<any, any>(),
   onGraphTicket?: (handle: any, ticket: Ticket) => any,
@@ -214,21 +226,26 @@ export function prepareActorMessage(
     if (ticket.consumed) throw dataCloneError("transfer ticket was already consumed");
     if (ticket.value === undefined) throw dataCloneError("transfer ticket is unavailable");
     if (ticket.graph) {
+      // One graph per message, alone: the same refusal whichever engine moves the graph.
+      if (seen.has(graphInMessage)) throw dataCloneError("an actor call accepts one graph ticket");
+      if (consumed.length !== 0 || buffers.length !== 0) {
+        throw dataCloneError("an actor call cannot mix graph and buffer tickets");
+      }
       if (localTicket === ticket && preparedSnapshots.has(ticket.value)) {
-        if (seen.has(ticket.value) || consumed.length !== 0 || buffers.length !== 0) {
-          throw dataCloneError("an actor call accepts one graph ticket");
-        }
-        seen.set(ticket.value, true);
+        seen.set(graphInMessage, true);
         consumed.push(ticket);
         return preparedSnapshots.get(ticket.value);
       }
       // A symbol property is only a cross-plan hint and can be forged. Moving a graph needs
       // the ticket issued by this module's private WeakMap until the engine authenticates
       // cross-plan tickets itself.
-      if (onGraphTicket && localTicket === ticket) return onGraphTicket(ticket.value, ticket);
+      if (onGraphTicket && localTicket === ticket) {
+        seen.set(graphInMessage, true);
+        return onGraphTicket(ticket.value, ticket);
+      }
       throw dataCloneError("graph transfer needs ownership proof");
     }
-    if (consumed.some((entry) => entry.graph)) {
+    if (seen.has(graphInMessage)) {
       throw dataCloneError("an actor call cannot mix graph and buffer tickets");
     }
     if (!(ticket.value instanceof ArrayBuffer)) throw dataCloneError("transfer ticket has no ArrayBuffer");
@@ -260,6 +277,7 @@ export function prepareActorMessage(
   return copy;
 }
 
+/** @internal */
 export function consumeActorTickets(consumed: Ticket[]): void {
   for (const ticket of consumed) ticket.consume();
 }

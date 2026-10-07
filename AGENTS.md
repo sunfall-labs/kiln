@@ -23,7 +23,7 @@ every core; several of them will thrash a machine that `mbx` would have kept bus
 
 `rust@1.97.1` and `mbx` are pinned in the global mise config. Do not install Rust tooling by hand,
 and do not stub a tool to test a fallback: put a stub in a directory and prepend it to `PATH` for
-one command. (NOTES.md records ninety minutes lost to a stubbed `rustup` that resolved back into
+one command. (The archived log, `docs/notes/2026-08-29-to-2026-10-02.md`, records ninety minutes lost to a stubbed `rustup` that resolved back into
 itself.)
 
 ## Measure in a worktree you own
@@ -32,7 +32,7 @@ itself.)
 the single highest-value habit in this repo.
 
 Several sessions write to the main checkout continuously, so a number taken there is a clock
-reading rather than a measurement. Every wrong result recorded in `NOTES.md` on 2026-08-31 — test
+reading rather than a measurement. Every wrong result recorded in the archived log (`docs/notes/`) on 2026-08-31 — test
 counts that changed three times in ten minutes, "main is red" versus "main is green", a
 regression that did not reproduce because the binary was three commits old — came from measuring a
 tree something else was writing. A commit name is not a description of your working tree; `git
@@ -68,11 +68,25 @@ that assembly, in the repository, and `mise tasks` lists it beside the rest.
 | `mise run wpt-update` | regenerate the WPT baseline; deliberate, and the diff is the record |
 | `mise run wpt-fetch` | fetch the pinned WPT directories into `~/.cache/kiln`, once per machine |
 | `mise run http-close` | the Node HTTP close contract, across all four seams |
+| `mise run gui-smoke` | kiln:gui against the real window system (macOS; needs a logged-in session) |
+| `mise run kiln-types` | `@kiln/types` matches the `kiln:` modules' sources; its usage test and the GUI examples type-check |
 | `mise run silent-undefined` | the expensive native-`undefined` class; several hundred compiles, not per-commit |
 | `mise run facts` | check the committed whole-program facts baseline for benchmarks and bundles |
 | `mise run facts-update` | regenerate the facts baseline; deliberate, and the diff is the record |
 
 `mise trust` once per checkout, or the tasks are invisible.
+
+### Before every push: `scripts/pre-push.sh`, as a hook
+
+GitHub CI no longer runs on push: with a commit landing on `main` every few minutes from several
+sessions and `cancel-in-progress` set, no run ever finished (twelve in a row cancelled on
+2026-10-02, the last completed one red), so it reported nothing and cost money doing it.
+`ci.yml` stays runnable by hand and on a release tag. The blocking loop is local.
+`scripts/pre-push.sh` runs the HTTP close contract, the native provider contract and the core
+crate tests, each only when the commits being pushed touch what it checks; `--all` runs everything.
+`mise run hooks` points the checkout's `core.hooksPath` at `.githooks`, after which it runs before
+every `git push`; `mise run pre-push` runs it by hand. `KILN_SKIP_PRE_PUSH=1` bypasses the hook
+for a deliberate exception, and the bypass, not the habit, is the record.
 
 `conformance/test262-baseline.json` holds a pass/fail count per chunk. A whole-corpus number is one
 figure and hides everything -- a change that wins forty rows in one chunk while losing forty in
@@ -115,8 +129,9 @@ for the corpus.
 The gate builds the CLI once, runs the artifact-cache suite before concurrent filesystem work,
 then overlaps the remaining crate tests, native/thirdparty parity and Test262
 within one budget (at most 32 CPUs, or `KILN_GATE_JOBS` / `KILN_JOBS` if smaller). Test262 keeps
-one worker per GiB of its hard memory cap; the gate sizes that cap to its assigned workers, at
-most half physical memory or 16 GiB. An explicit `KILN_TEST262_MEMORY_MB` is respected.
+one worker per GiB of its hard memory cap; the gate sizes that cap to its assigned workers with
+a 4 GiB floor for single-case allocations, at most half physical memory or 16 GiB. An explicit
+`KILN_TEST262_MEMORY_MB` is respected.
 `KILN_GATE_SERIAL=1` runs the same checks serially for diagnosis. In a parallel non-quick gate, native
 thirdparty benchmark binaries compile with one reserved worker alongside correctness lanes, then
 wait at a gate-owned release marker; warmup and timed execution begin only after those lanes finish.
@@ -359,6 +374,39 @@ The packager now verifies the archive's symbol table against `PROVIDER_EXPORTS` 
 missing symbols, so this fails at packaging time with the fix in the message. If you are chasing
 undefined symbols anyway, run `scripts/check-native-number-ffi.sh`.
 
+## The host GUI bridge is linked in, not found next to the program
+
+A compiled GUI program used to `dlopen` `target/release/libkiln_host_gui.dylib` from the current
+directory at run time, so it worked only inside a checkout that had built the cdylib and died
+elsewhere three frames from the cause. The bridge (`kiln-host-gui`, the `kiln_gui_*` operations)
+is now part of the provider archive of every variant that declares the `gui` capability -- `gui`
+and `full-gui` -- and the native `node:ffi` engine answers `dlopen("kiln:host-gui")` from a table
+the archive carries (`kiln_host_gui::ffi::exports`). The specifier is not a path; nothing is
+searched for.
+
+Three consequences worth knowing before you touch it:
+
+* **`full` does not include `gui`.** A headless program must never link AppKit, so `full` stops
+  short of the bridge and `full-gui` is the variant above it. `kiln build` picks `full-gui` only
+  when the live graph imports `kiln:gui`, including through the conservative CommonJS answer.
+  `provider has ... gui` in the build report is how you tell.
+* **The frameworks come from the contract, and the packager proves them.** `gui::link_arguments`
+  in `kiln-native-provider-contract` lists what a `gui` archive adds to the link line
+  (`-framework Cocoa ...` on macOS, nothing on Linux). rustc's `--print native-static-libs` is
+  the authoritative source but is printed only by a compiler that actually ran, which a cached or
+  fresh rebuild is not; so the packager diffs the note against the list when it appears and, always,
+  links a probe that takes the address of every bridge export against the archive. A new
+  framework dependency fails packaging with the symbol named, not some program's link.
+* **The table is what keeps the bridge alive.** An upstream `#[no_mangle]` that nothing references
+  is dropped from a staticlib by whole-archive LTO -- measured: zero `kiln_gui_*` symbols and no
+  frameworks in the note. `exports()` takes every function's address; the contract's `GUI_EXPORTS`
+  and the crate's own test hold the table to the source file, so a new operation that is not in
+  both does not land.
+
+`KILN_GUI_LIB=/path/to/libkiln_host_gui.dylib` still points a program at a shared library
+instead, for iterating on the Rust side without the provider's fat-LTO rebuild (about 110 s per
+edit to a listed provider source). It is a developer override, not a search path.
+
 ## When the disk fills
 
 The volume is shared with unrelated data and has hit 100% more than once; a link then fails with
@@ -374,6 +422,15 @@ Reclaim **in this order**:
 `mbx gc` is **last**, not first: run early it deletes *live* target directories belonging to other
 worktrees. **Never delete build outputs you do not own.** An agent did that and destroyed two other
 worktrees' builds.
+
+mbx also collects **on its own**. `gc.auto` is on, and its default `gc.min_free_size` is 10% of
+the disk -- 50 GiB on this machine -- so once free space falls below that, every build evicts
+other workspaces' managed targets to chase the floor, and nobody ran anything. On 2026-10-02 that
+deleted three worktrees' `target/` directories mid-gate within an hour (`mbx stats` showed
+57.7 GiB "automatically pruned"), which read as gates failing on vanished binaries. The floor is
+now set to 8 GiB (`mbx settings set gc.min_free_size 8GiB`; `mbx doctor` shows the budget). If a
+build directory disappears under you, check `df` and `mbx stats` before suspecting a colleague,
+and reclaim with `kiln cache gc` first: one worktree's `.kiln/cache` had reached 30 GiB.
 
 ## Profiling a native binary
 
@@ -398,9 +455,11 @@ directory is the same review refusal.
 
 ### Issue tracker
 
-Issues and PRDs are repository-local Markdown under `.scratch/<feature>/`. See
-`docs/agents/issue-tracker.md`. Scratch files there are runnable — `kiln run .scratch/probe.mjs`
-works even though the project walk skips dot-directories.
+Issues and PRDs are repository-local Markdown under `docs/issues/<feature>/`. See
+`docs/agents/issue-tracker.md`. Probes there are runnable -- `kiln run docs/issues/<feature>/probe.mjs`
+works like any other path. Deleting a filing is refused by the hooks and the gate unless
+`KILN_ALLOW_ISSUE_DELETION=1` is set for that one command; a closed issue keeps its file. `.scratch/`
+is scratch paper now: nothing in it is tracked, and anything an issue cites belongs beside the issue.
 
 ### Triage labels
 

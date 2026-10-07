@@ -20,7 +20,21 @@ class A extends Error { name = "A"; }
 console.log("A", new A("a").name, String(new A("a")));
 const t = new TypeError("t");
 console.log("TypeError", JSON.stringify(Object.getOwnPropertyNames(t)), t.name, String(t));
+console.log("TypeError-prototype", Object.getPrototypeOf(t) === TypeError.prototype,
+  Object.getPrototypeOf(TypeError.prototype) === Error.prototype);
 console.log("empty-message", JSON.stringify(e.message), e.name, String(e));
 class G extends Error { get name() { return "G"; } }
 console.log("G", new G("m").name, String(new G("m")));
-try { null.x; } catch (err) { console.log("thrown", err.name, err instanceof TypeError); }
+try { null.x; } catch (err) {
+  console.log("thrown", err.name, err.constructor.name, err instanceof TypeError,
+    Object.getPrototypeOf(err) === TypeError.prototype);
+}
+try { new Array(-1); } catch (err) {
+  console.log("range", err.name, err.constructor.name, err instanceof RangeError,
+    Object.getPrototypeOf(err) === RangeError.prototype);
+}
+
+const typeErrorName = TypeError.prototype.name;
+TypeError.prototype.name = "ChangedTypeError";
+try { null.x; } catch (err) { console.log("mutated-prototype", err.name); }
+TypeError.prototype.name = typeErrorName;

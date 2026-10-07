@@ -1,0 +1,16 @@
+const visible = Symbol("visible");
+const hidden = Symbol("hidden");
+const inherited = Symbol("inherited");
+const object = Object.create({ [inherited]: true });
+object[visible] = 1;
+Object.defineProperty(object, hidden, { value: 2, configurable: true });
+const enumerable = Object.prototype.propertyIsEnumerable;
+console.log(enumerable.call(object, visible), enumerable.call(object, hidden));
+console.log(enumerable.call(object, inherited), enumerable.call(object, "missing"));
+console.log(Object.getOwnPropertyDescriptor(object, visible).enumerable);
+console.log(Object.getOwnPropertySymbols(object).filter(key => enumerable.call(object, key)).length);
+Object.defineProperty(object, hidden, { enumerable: true });
+console.log(enumerable.call(object, hidden));
+Object.defineProperty(object, visible, { enumerable: false });
+console.log(enumerable.call(object, visible));
+console.log(Object.keys(object).length);

@@ -42,6 +42,50 @@ static uint64_t kiln_c99_error_kind(kiln_value value) {
     return 0;
 }
 
+/* A built-in error constructor's public `prototype` may be replaced during shared TypeScript
+ * bootstrap (errors.ts builds the ordinary per-kind objects). Internal throws must consult that
+ * same callable store so they use exactly the prototype the language exposes. Before bootstrap
+ * has installed one, the historical Error.prototype fallback is safe. */
+int kiln_c99_error_prototype(uint64_t kind, kiln_value *out) {
+    kiln_value store;
+    int status;
+    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_c99_error_name(kind) == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_callable_store(kiln_c99_builtin(kind), &store, 0);
+    if (status == KILN_C99_OK && store.tag == KILN_VALUE_OBJECT) {
+        kiln_value candidate;
+        status = kiln_c99_get(NULL, store, "prototype", 9, &candidate, 0, NULL);
+        if (status == KILN_C99_OK &&
+            (candidate.tag == KILN_VALUE_OBJECT || candidate.tag == KILN_VALUE_BUILTIN)) {
+            *out = candidate;
+            return KILN_C99_OK;
+        }
+    }
+    if (status != KILN_C99_OK && status != KILN_C99_THROWN) return status;
+    *out = kiln_c99_builtin(kind == KILN_C99_BUILTIN_AGGREGATE_ERROR
+                                ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
+                                : KILN_C99_BUILTIN_ERROR_PROTOTYPE);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_error_stack_accessors(kiln_value *getter, kiln_value *setter) {
+    void *getter_slot = NULL;
+    void *setter_slot = NULL;
+    if (getter == NULL || setter == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_GETTER, &getter_slot) !=
+            KILN_C99_OK ||
+        kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_SETTER, &setter_slot) !=
+            KILN_C99_OK ||
+        getter_slot == NULL || setter_slot == NULL) {
+        *getter = kiln_c99_undefined();
+        *setter = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    *getter = *(kiln_value *)getter_slot;
+    *setter = *(kiln_value *)setter_slot;
+    return KILN_C99_OK;
+}
+
 /* `Error.prototype.toString`: "name: message", and the one text form an object has that is not
  * "[object Object]".
  *
@@ -95,10 +139,15 @@ static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_va
  * beside the `toString` and `constructor` that already work that way. `message` has the same
  * shape: own only when one was passed, and "" from the kind otherwise. */
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message) {
+    return kiln_c99_new_error_limited(out, kind, message, 10, 1);
+}
+
+int kiln_c99_new_error_limited(kiln_value *out, uint64_t kind, kiln_value message,
+                                size_t frame_limit, int capture_enabled) {
     const char *name = kiln_c99_error_name(kind);
     kiln_value error;
-    kiln_value stack;
-    kiln_value prefix;
+    kiln_value frames;
+    kiln_value prototype;
     kiln_value text = message.tag == KILN_VALUE_UNDEFINED ? kiln_c99_from_units(NULL, 0)
                                                           : kiln_c99_text(message);
     int status;
@@ -109,21 +158,30 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
     if (status != KILN_C99_OK) {
         return status;
     }
+    /* The accessor pair is shared TypeScript policy registered once by errors.ts, held in
+     * realm-rooted slots, and copied onto each instance. Error.prototype remains untouched. */
+    {
+        kiln_value getter;
+        kiln_value setter;
+        status = kiln_c99_error_stack_accessors(&getter, &setter);
+        if (status == KILN_C99_OK && getter.tag == KILN_VALUE_FUNCTION &&
+            setter.tag == KILN_VALUE_FUNCTION) {
+            status = kiln_c99_define_accessor(error, "stack", 5, getter, setter, 0);
+        }
+        if (status != KILN_C99_OK) return status;
+    }
     /* The [[ErrorData]] slot, set at the one place an error is built so that nothing a program
      * does afterwards can add or remove it. */
     kiln_c99_object_of(error)->error_brand = 1;
-    prefix = kiln_c99_static_text(name, strlen(name));
-    if (text.len != 0) {
-        stack = kiln_c99_concat(kiln_c99_concat(prefix, kiln_c99_static_text(": ", 2)), text);
-    } else {
-        stack = prefix;
-    }
-    if (stack.tag != KILN_VALUE_STRING) {
-        return KILN_C99_OUT_OF_MEMORY;
-    }
-    /* `stack` first, because that is the order the own keys come out in: the header is attached
-     * by the constructor before the message is. */
-    status = kiln_c99_put(NULL, error, "stack", 5, stack, 0, NULL);
+    status = kiln_c99_error_prototype(kind, &prototype);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_heap_store_value(kiln_c99_object_of(error),
+                              &kiln_c99_object_of(error)->prototype, prototype);
+    status = capture_enabled ? kiln_c99_capture_error_frames(&frames, frame_limit)
+                             : (frames = kiln_c99_undefined(), KILN_C99_OK);
+    if (status == KILN_C99_OK)
+        kiln_c99_heap_store_value(kiln_c99_object_of(error),
+                                  &kiln_c99_object_of(error)->error_stack_frames, frames);
     if (status == KILN_C99_OK && message.tag != KILN_VALUE_UNDEFINED) {
         status = kiln_c99_put(NULL, error, "message", 7, text, 0, NULL);
     }
@@ -134,8 +192,8 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
         return status;
     }
     {
-        /* None of them is enumerated. The reserved one is hidden by its prefix anyway; the
-         * others have to be marked. */
+        /* None of them is enumerated. The reserved ones are hidden by their prefix anyway; the
+         * message has to be marked. */
         kiln_object *object = kiln_c99_object_of(error);
         size_t index;
         if (object->shape != NULL) {
@@ -219,6 +277,12 @@ static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len) {
     kiln_object *object;
     size_t index;
+    if (target.tag == KILN_VALUE_PROXY) {
+        kiln_value store;
+        if (kiln_c99_proxy_private_store(target, 0, &store) != KILN_C99_OK ||
+            store.tag != KILN_VALUE_OBJECT) return NULL;
+        target = store;
+    }
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_value store = kiln_c99_closure_store(kiln_c99_closure_of(target));
         if (store.tag != KILN_VALUE_OBJECT) {
@@ -228,7 +292,9 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
     } else if (target.tag == KILN_VALUE_OBJECT) {
         object = kiln_c99_object_of(target);
     } else {
-        return NULL;
+        kiln_value *store = kiln_c99_exotic_store(target);
+        if (store == NULL || store->tag != KILN_VALUE_OBJECT) return NULL;
+        object = kiln_c99_object_of(*store);
     }
     if (object->shape != NULL) {
         kiln_c99_ensure_dictionary(object);
@@ -246,6 +312,12 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
 static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_string *key) {
     kiln_object *object;
     size_t index;
+    if (target.tag == KILN_VALUE_PROXY) {
+        kiln_value store;
+        if (kiln_c99_proxy_private_store(target, 0, &store) != KILN_C99_OK ||
+            store.tag != KILN_VALUE_OBJECT) return NULL;
+        target = store;
+    }
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_value store = kiln_c99_closure_store(kiln_c99_closure_of(target));
         if (store.tag != KILN_VALUE_OBJECT) {
@@ -255,7 +327,9 @@ static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_str
     } else if (target.tag == KILN_VALUE_OBJECT) {
         object = kiln_c99_object_of(target);
     } else {
-        return NULL;
+        kiln_value *store = kiln_c99_exotic_store(target);
+        if (store == NULL || store->tag != KILN_VALUE_OBJECT) return NULL;
+        object = kiln_c99_object_of(*store);
     }
     if (object->shape != NULL) {
         kiln_c99_ensure_dictionary(object);
@@ -267,9 +341,39 @@ static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_str
     return index == object->count ? NULL : &object->properties[index];
 }
 
+/* `#name in target` is an own private-element query, never a public property operation. In
+ * particular, a Proxy's private elements live in its sidecar and neither `has` nor revocation is
+ * consulted. The member key proves initialization has happened; the brand value distinguishes
+ * separate evaluations of the declaring class. */
+int kiln_c99_private_has(kiln_value target, kiln_value brand,
+                         const kiln_string *member_key,
+                         const kiln_string *brand_key, int *out,
+                         kiln_value *thrown) {
+    kiln_property *member;
+    kiln_property *held_brand;
+    if (member_key == NULL || brand_key == NULL || out == NULL || thrown == NULL)
+        return KILN_C99_INVALID_ARGUMENT;
+    if (!kiln_c99_is_reference(target) && target.tag != KILN_VALUE_DATE)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "right-hand side of private in must be an object");
+    member = kiln_c99_own_private_key(target, member_key);
+    if (member == NULL) {
+        *out = 0;
+        return KILN_C99_OK;
+    }
+    if (brand.tag == KILN_VALUE_UNDEFINED) {
+        *out = 1;
+        return KILN_C99_OK;
+    }
+    held_brand = kiln_c99_own_private_key(target, brand_key);
+    *out = held_brand != NULL && !held_brand->accessor &&
+           kiln_c99_strict_equal(held_brand->value, brand);
+    return KILN_C99_OK;
+}
+
 /* A private element refusing what was asked of it: a TypeError naming the member.
  *
- * The stored key is `@@private:<scope>:<name>` -- reserved so nothing that enumerates own string
+ * The stored key is `@@private:<module-scope>:<name>` -- reserved so nothing that enumerates own string
  * properties can see it and no computed access can spell it -- and the message wants the `<name>`
  * half, spelled the way the program spells it.
  *

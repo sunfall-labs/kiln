@@ -763,7 +763,8 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                             }
                         }
                         GraphOp::SetProperty { object, name, .. }
-                        | GraphOp::SetPropertyStrict { object, name, .. } => {
+                        | GraphOp::SetPropertyStrict { object, name, .. }
+                        | GraphOp::DefineOwnProperty { object, name, .. } => {
                             let prop_name = program.constants.get(*name as usize).and_then(|c| {
                                 if let Constant::String(s) = c {
                                     s.to_scalar_string().ok()
@@ -836,7 +837,30 @@ pub fn extract_handlers_from_program(program: &Program) -> Vec<HandlerFacts> {
                     }
                     eval_stack.push(None);
                 }
-                Instruction::SetProperty(name) | Instruction::SetPropertyStrict { name, .. } => {
+                Instruction::CallMethodPrepared { name, argc } => {
+                    let argc = *argc as usize;
+                    let receiver = if eval_stack.len() >= argc + 2 {
+                        eval_stack[eval_stack.len() - argc - 2]
+                    } else {
+                        None
+                    };
+                    if let Some(Constant::String(prop)) = program.constants.get(*name as usize) {
+                        if receiver == Some(0) {
+                            req_members_read.insert(prop.to_scalar_string().unwrap_or_default());
+                        } else if receiver == Some(1) {
+                            res_members_read.insert(prop.to_scalar_string().unwrap_or_default());
+                        }
+                    }
+                    if eval_stack.len() >= argc + 2 {
+                        eval_stack.truncate(eval_stack.len() - argc - 2);
+                    } else {
+                        eval_stack.clear();
+                    }
+                    eval_stack.push(None);
+                }
+                Instruction::SetProperty(name)
+                | Instruction::SetPropertyStrict { name, .. }
+                | Instruction::DefineOwnProperty(name) => {
                     eval_stack.pop();
                     let obj = eval_stack.pop().flatten();
                     if obj == Some(1)
@@ -986,6 +1010,13 @@ fn extract_function_facts(graph: &FunctionGraph, program: &Program) -> FunctionF
                         detail: Some(format_constant_name(program, *name)),
                     });
                 }
+                GraphOp::DefineOwnProperty { name, site, .. } => {
+                    sites.push(SiteFact {
+                        id: site.0,
+                        kind: "DefineOwnProperty".to_string(),
+                        detail: Some(format_constant_name(program, *name)),
+                    });
+                }
                 GraphOp::GetComputed { site, .. } => {
                     sites.push(SiteFact {
                         id: site.0,
@@ -1004,6 +1035,13 @@ fn extract_function_facts(graph: &FunctionGraph, program: &Program) -> FunctionF
                     sites.push(SiteFact {
                         id: site.0,
                         kind: "SetComputedStrict".to_string(),
+                        detail: None,
+                    });
+                }
+                GraphOp::DefineOwnComputed { site, .. } => {
+                    sites.push(SiteFact {
+                        id: site.0,
+                        kind: "DefineOwnComputed".to_string(),
                         detail: None,
                     });
                 }
@@ -1309,11 +1347,15 @@ mod tests {
         let program = Program {
             source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants,
             code: vec![],
             local_count: 0,
             functions: vec![handler_proto],
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
         };
 
         let facts = analyze_program(&program, Some("server.mjs"));

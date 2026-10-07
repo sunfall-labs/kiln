@@ -16,6 +16,31 @@ fn node_bytes_value_adopts_owned_vec_and_keeps_buffer_mutable() {
 }
 
 #[test]
+fn node_response_end_recognizes_callback_overloads_without_serializing_callback() {
+    let callback = Value::Native(Native::NodeResponseEnd, RealmId::PRIMARY);
+
+    let (body, done) = crate::http::node_response_end_arguments(std::slice::from_ref(&callback))
+        .expect("end(callback) is a valid overload");
+    assert!(body.is_empty());
+    assert!(matches!(
+        done,
+        Some(Value::Native(Native::NodeResponseEnd, _))
+    ));
+
+    let (body, done) = crate::http::node_response_end_arguments(&[
+        Value::String("body".into()),
+        Value::String("utf8".into()),
+        callback,
+    ])
+    .expect("end(chunk, encoding, callback) keeps only the body as bytes");
+    assert_eq!(body, b"body");
+    assert!(matches!(
+        done,
+        Some(Value::Native(Native::NodeResponseEnd, _))
+    ));
+}
+
+#[test]
 fn commonjs_require_reads_replacements_through_the_shared_cache_cell() {
     let initial = ordinary_object([]);
     let initial_object = match &initial {
@@ -97,7 +122,11 @@ fn node_readable_is_a_transport_independent_buffered_event_source() {
         Rc::new(Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![Instruction::Return],
             local_count: 0,
@@ -211,7 +240,11 @@ fn node_writable_owns_lifecycle_without_owning_a_transport() {
         Rc::new(Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: Vec::new(),
             code: vec![Instruction::Return],
             local_count: 0,
@@ -251,7 +284,11 @@ fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -280,7 +317,7 @@ fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
 
     assert_eq!(
         vm.dispatch_native(Native::DateNow, &Value::Undefined, &[], 7),
-        Ok(Value::Number(1_725_000_123_456.25))
+        Ok(Value::Number(1_725_000_123_456.0))
     );
     // Compared by instant rather than by value: a date is an object, so two of them are
     // never equal, and what this asserts is which clock the constructor read.
@@ -307,11 +344,50 @@ fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
 }
 
 #[test]
+fn ordinary_node_execution_keeps_a_virtual_clock_without_reading_the_host() {
+    let program = Rc::new(Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
+        constants: Vec::new(),
+        code: vec![Instruction::Return],
+        local_count: 0,
+        functions: Vec::new(),
+    });
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+
+    execute_node_with_strictness(
+        program.clone(),
+        Rc::new(Strictness::sloppy(&program)),
+        &mut host,
+        ExecutionLimits::default(),
+        ExecutionCapabilities::default(),
+    )
+    .expect("Node APIs do not require a wall clock by default");
+
+    assert!(host.calls.is_empty());
+}
+
+#[test]
 fn virtual_clock_never_calls_the_host() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -338,7 +414,11 @@ fn named_timezone_and_locale_never_call_the_host() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -377,7 +457,11 @@ fn host_entropy_is_one_explicit_word_per_draw() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -435,7 +519,11 @@ fn seeded_entropy_reproduces_without_calling_the_host() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -481,7 +569,11 @@ fn process_private_native_modules_are_separate_from_public_ts_projection() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -505,6 +597,22 @@ fn process_private_native_modules_are_separate_from_public_ts_projection() {
             "missing private native capability: {name}"
         );
     }
+    let http = vm
+        .read_property(&modules, "http", 0)
+        .expect("private HTTP adapter");
+    // Reflection completes the public export store. It must not erase private serve hooks.
+    let public_http = Value::Native(Native::NodeHttp, RealmId::PRIMARY);
+    vm.intrinsics.materialize(&public_http);
+    for name in ["createFetchServer", "fetchRespond"] {
+        assert!(matches!(
+            vm.read_property(&http, name, 0),
+            Ok(Value::Native(..))
+        ));
+        assert!(matches!(
+            vm.read_property(&public_http, name, 0),
+            Ok(Value::Undefined)
+        ));
+    }
     assert!(matches!(
         vm.dispatch_native(
             Native::ProcessGetBuiltinModule,
@@ -522,7 +630,11 @@ fn node_events_builtin_exposes_event_emitter() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -572,7 +684,11 @@ fn node_console_exports_and_methods() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -621,7 +737,11 @@ fn node_http_exports_a_server_constructor_with_coded_option_errors() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -667,11 +787,75 @@ fn node_http_exports_a_server_constructor_with_coded_option_errors() {
 }
 
 #[test]
+fn node_response_write_head_reads_headers_after_optional_status_text() {
+    let program = Program {
+        source: "".into(),
+        template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
+        version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
+        constants: Vec::new(),
+        code: Vec::new(),
+        local_count: 0,
+        functions: Vec::new(),
+    };
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let state = Rc::new(RefCell::new(HttpResponseState {
+        stream: kiln_host_abi::ResourceId::new(1),
+        request_id: Some(7),
+        status: 200,
+        headers: Vec::new(),
+        streaming: false,
+        ended: false,
+        disconnected: false,
+        object: None,
+    }));
+    let response = Value::Object(tracked_object(ObjectData {
+        node_object: Some(NodeObject::HttpResponse(Rc::clone(&state))),
+        ..ObjectData::default()
+    }));
+    let headers = ordinary_object([(
+        "location".into(),
+        Value::String("/?value=a%23b#fragment".to_owned().into()),
+    )]);
+
+    vm.dispatch_node_response(
+        Native::NodeResponseWriteHead,
+        &response,
+        &[Value::Number(302.0), Value::Undefined, headers],
+        0,
+    )
+    .expect("three-argument writeHead is accepted");
+
+    assert_eq!(state.borrow().status, 302);
+    assert!(
+        state
+            .borrow()
+            .headers
+            .iter()
+            .any(|(name, value)| name == "location" && value == "/?value=a%23b#fragment")
+    );
+}
+
+#[test]
 fn node_event_emitter_stores_listeners_and_methods_are_chainable() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -726,7 +910,11 @@ fn node_event_once_is_removed_before_reentrant_emit() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -775,7 +963,11 @@ fn node_event_new_listener_runs_before_registration() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: Vec::new(),
         code: Vec::new(),
         local_count: 0,
@@ -883,7 +1075,11 @@ fn module_slots_are_shared_across_frames() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![number(7.0)],
         code: vec![
             Instruction::MakeFunction(0),
@@ -983,7 +1179,11 @@ fn module_execution_initializes_import_slots_and_publishes_exports() {
         program: Program {
             source: "".into(),
             template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
             version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
             constants: vec![number(2.0)],
             // An import slot holds a cell and an exported slot must too, which is what the
             // compiler emits for both -- so the fixture reads through one and writes into
@@ -1066,6 +1266,25 @@ fn empty_containers_and_nesting_read_the_way_node_writes_them() {
 }
 
 #[test]
+fn console_inspection_wraps_nested_objects_at_break_length() {
+    let value = object(&[(
+        "outer",
+        object(&[(
+            "value",
+            Value::String(
+                "a value long enough to make this nested object wrap when combined with its parent"
+                    .to_owned()
+                    .into(),
+            ),
+        )]),
+    )]);
+    assert_eq!(
+        inspect(&value),
+        "{\n  outer: {\n    value: 'a value long enough to make this nested object wrap when combined with its parent'\n  }\n}"
+    );
+}
+
+#[test]
 fn a_timers_delay_costs_nothing_to_wait_for() {
     // The property the differential harness cannot check, because node would sleep for it:
     // an hour-long delay is as cheap as a zero-length one, and the order is still by time.
@@ -1086,7 +1305,11 @@ fn node_next_tick_runs_before_promise_reactions() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String("nextTick".into()),
             Constant::String("resolve".into()),
@@ -1418,7 +1641,11 @@ fn dynamic_import_without_module_loader_rejects_with_type_error() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("dep.js".into())],
         code: vec![
             Instruction::Const(0),
@@ -1466,7 +1693,11 @@ fn dynamic_import_with_unsupported_loader_rejects_with_type_error() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![Constant::String("dep.js".into())],
         code: vec![
             Instruction::Const(0),
@@ -1514,7 +1745,11 @@ fn process_object_is_event_emitter() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
         version: kiln_ir::BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::String("on".to_owned().into()),
             Constant::String("exit".to_owned().into()),
@@ -1619,6 +1854,47 @@ fn text_decoder_and_buffer_support_whatwg_encodings() {
         )
         .expect("TextDecoder decode succeeds");
     assert_eq!(decoded_utf16le, Value::String("Hi".to_owned().into()));
+
+    // Streaming keeps both a split BOM and an incomplete UTF-8 scalar on this decoder only.
+    let decoder_streaming = vm
+        .dispatch_native(
+            Native::TextDecoderConstructor,
+            &Value::Undefined,
+            &[Value::String("utf-8".to_owned().into())],
+            0,
+        )
+        .expect("streaming TextDecoder succeeds");
+    let stream_options = ordinary_object([("stream".to_owned(), Value::Boolean(true))]);
+    let first_chunk = test_buffer(&[0xEF], None, false);
+    let first_result = vm
+        .dispatch_native(
+            Native::TextDecoderDecode,
+            &decoder_streaming,
+            &[first_chunk, stream_options.clone()],
+            0,
+        )
+        .expect("partial BOM is buffered");
+    assert_eq!(first_result, Value::String("".to_owned().into()));
+    let second_chunk = test_buffer(&[0xBB, 0xBF, 0xF0, 0x9F], None, false);
+    let second_result = vm
+        .dispatch_native(
+            Native::TextDecoderDecode,
+            &decoder_streaming,
+            &[second_chunk, stream_options],
+            0,
+        )
+        .expect("BOM and partial scalar are buffered");
+    assert_eq!(second_result, Value::String("".to_owned().into()));
+    let final_chunk = test_buffer(&[0x98, 0x80], None, false);
+    let final_result = vm
+        .dispatch_native(
+            Native::TextDecoderDecode,
+            &decoder_streaming,
+            &[final_chunk],
+            0,
+        )
+        .expect("final chunk completes the scalar");
+    assert_eq!(final_result, Value::String("😀".to_owned().into()));
 
     // 4. TextDecoder invalid label throws RangeError
     let invalid = vm.dispatch_native(

@@ -22,8 +22,13 @@ console.log(new Date(Date.UTC(1900, 1, 28)).getUTCDay(), new Date(Date.UTC(2100,
 // Out-of-range fields roll over rather than failing.
 console.log(new Date(Date.UTC(2026, 12, 1)).toISOString(), new Date(Date.UTC(2026, 0, 32)).toISOString());
 
-// Parsing accepts the ISO forms and rejects the rest, rather than guessing.
+// Parsing accepts the ISO forms and the human forms the Date formatters emit.
 console.log(Date.parse('2026-08-29T00:00:00.000Z'), Date.parse('2026-08-29'));
+console.log(Date.parse(at.toUTCString()) === at.getTime(), Date.parse(at.toString()) === at.getTime());
+const originalParse = Date.parse;
+Date.parse = () => NaN;
+console.log(new Date('2026-08-29T00:00:00.000Z').getTime());
+Date.parse = originalParse;
 console.log(Date.parse('not a date'), new Date('nonsense').getTime());
 
 // An invalid date propagates through every reader and has no ISO spelling.

@@ -1,6 +1,100 @@
 use super::*;
 
 #[test]
+fn candidate_pointer_store_memoizes_membership_lookups_without_losing_edges() {
+    let mut generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    generated
+        .source
+        .insert_str(
+            0,
+            "#include <stddef.h>\n\
+             static size_t kiln_c99_test_store_lookup_count;\n\
+             static size_t kiln_c99_test_store_interior_lookup_count;\n\
+             #define KILN_C99_STORE_LOOKUP_COUNT() (++kiln_c99_test_store_lookup_count)\n\
+             #define KILN_C99_STORE_INTERIOR_LOOKUP_COUNT() (++kiln_c99_test_store_interior_lookup_count)\n",
+        );
+    let wrapper = r#"
+static int store_lookup_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_val *old_owner, *interior_owner, *active_owner;
+    kiln_val *candidate;
+    kiln_c99_candidate_group *group;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    old_owner = (kiln_val *)kiln_c99_gc_alloc_tenured(KILN_GC_CELL, sizeof *old_owner);
+    if (old_owner == NULL) return 2;
+    *old_owner = KILN_VAL_UNDEFINED;
+    if (!kiln_c99_actor_candidate_begin(heap)) return 3;
+    candidate = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *candidate);
+    if (candidate == NULL) return 4;
+    *candidate = KILN_VAL_UNDEFINED;
+    group = heap->actor_candidate_group;
+
+    /* A tenured-to-young publication consults owner and target membership once each even
+     * though both the remembered set and active candidate ledger need the same provenance. */
+    kiln_c99_test_store_lookup_count = 0;
+    kiln_c99_test_store_interior_lookup_count = 0;
+    kiln_c99_candidate_record_pointer_store(heap, old_owner, candidate);
+    if (kiln_c99_test_store_lookup_count != 2 ||
+        kiln_c99_test_store_interior_lookup_count != 0 ||
+        !kiln_c99_gc_ptrset_contains(&heap->remembered_owners,
+                                     ((kiln_gc_block *)old_owner - 1) + 1) ||
+        group->incoming_owners.count != 1 ||
+        !kiln_c99_gc_ptrset_contains(&group->incoming_owners,
+                                     (kiln_gc_block *)old_owner - 1)) return 5;
+
+    /* Interior references take the same exact lookup once, then one interior lookup. The
+     * result feeds both ledgers; the candidate group still records the external owner. */
+    interior_owner = (kiln_val *)kiln_c99_gc_alloc_tenured(KILN_GC_CELL, sizeof *interior_owner);
+    if (interior_owner == NULL) return 6;
+    *interior_owner = KILN_VAL_UNDEFINED;
+    kiln_c99_test_store_lookup_count = 0;
+    kiln_c99_test_store_interior_lookup_count = 0;
+    kiln_c99_candidate_record_pointer_store(heap, interior_owner, (char *)candidate + 1);
+    if (kiln_c99_test_store_lookup_count != 2 ||
+        kiln_c99_test_store_interior_lookup_count != 1 ||
+        !kiln_c99_gc_ptrset_contains(&heap->remembered_owners,
+                                     ((kiln_gc_block *)interior_owner - 1) + 1) ||
+        group->incoming_owners.count != 2 ||
+        !kiln_c99_gc_ptrset_contains(&group->incoming_owners,
+                                     (kiln_gc_block *)interior_owner - 1)) return 7;
+
+    /* The ordinary active-nursery fast path remains lookup-free when no ledger is open. */
+    if (!kiln_c99_actor_candidate_end(heap, 0)) return 8;
+    active_owner = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *active_owner);
+    if (active_owner == NULL || heap->candidate_ledger_groups != 0 ||
+        !heap->nursery.active || (uintptr_t)active_owner < (uintptr_t)heap->nursery.base ||
+        (uintptr_t)active_owner >= (uintptr_t)heap->nursery.bump) return 9;
+    *active_owner = KILN_VAL_UNDEFINED;
+    kiln_c99_test_store_lookup_count = 0;
+    kiln_c99_test_store_interior_lookup_count = 0;
+    kiln_c99_candidate_record_pointer_store(heap, active_owner, old_owner);
+    if (kiln_c99_test_store_lookup_count != 0 ||
+        kiln_c99_test_store_interior_lookup_count != 0) return 10;
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int status;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 10;
+    status = kiln_realm_enter(realm, store_lookup_entry, NULL);
+    if (kiln_realm_destroy(realm) != KILN_C99_OK) return 11;
+    return status;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "candidate-store-lookup-memoization");
+    assert!(
+        run.status.success(),
+        "candidate pointer-store lookup memoization failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn final_builtin_layout_shares_descriptors_but_not_values_or_mutations() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
@@ -67,6 +161,104 @@ int main(void) {
 }
 
 #[test]
+fn large_dictionary_lookup_cache_is_private_and_gc_owned() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_value source = kiln_c99_undefined(), readonly = kiln_c99_undefined(), value, keys;
+    kiln_object *source_object, *readonly_object;
+    kiln_c99_no_write_frame frame;
+    kiln_c99_clone_arena arena = {0};
+    kiln_dictionary_index *index;
+    size_t slot;
+    kiln_c99_gc_heap_init(&heap);
+    heap.enabled = 0;
+    kiln_c99_gc_heap_register(&heap);
+    kiln_test_heap = &heap;
+    kiln_test_generation += 1;
+    if (kiln_c99_new_object(&source) != KILN_C99_OK ||
+        kiln_c99_new_object(&readonly) != KILN_C99_OK) return 1;
+    for (size_t i = 0; i < 40; ++i) {
+        char key[16];
+        int len = snprintf(key, sizeof key, "key%02zu", i);
+        if (len <= 0 || (size_t)len >= sizeof key ||
+            kiln_c99_put(NULL, source, key, (size_t)len,
+                         kiln_c99_number((double)i), 0, NULL) != KILN_C99_OK ||
+            kiln_c99_put(NULL, readonly, key, (size_t)len,
+                         kiln_c99_number((double)(i + 100)), 0, NULL) != KILN_C99_OK)
+            return 2;
+    }
+    source_object = kiln_c99_object_of(source);
+    readonly_object = kiln_c99_object_of(readonly);
+    if (kiln_c99_all_own_keys(NULL, source, &keys, 0, NULL) != KILN_C99_OK ||
+        kiln_c99_array_of(keys)->count != 40) return 21;
+    kiln_c99_dictionary_index_reset(source_object);
+    kiln_c99_dictionary_index_reset(readonly_object);
+    if (source_object->count != 40 || source_object->dictionary_index != NULL ||
+        readonly_object->dictionary_index != NULL) return 3;
+    slot = kiln_c99_own_index(source_object, NULL, "key39", 5);
+    if (slot != 39 || source_object->dictionary_index == NULL) return 4;
+    index = source_object->dictionary_index;
+    if (kiln_c99_own_index(source_object, NULL, "key17", 5) != 17 ||
+        source_object->dictionary_index != index) return 5;
+
+    /* Read-only workers get the same answer without publishing a mutable side index. */
+    kiln_c99_no_write_enter(&heap, &frame);
+    slot = kiln_c99_own_index(readonly_object, NULL, "key39", 5);
+    kiln_c99_no_write_leave(&frame);
+    if (slot != 39 || readonly_object->dictionary_index != NULL) return 6;
+
+    /* The object remains valid through collection, and its cache remains attached to the
+     * owning object rather than becoming an untraced pointer edge. */
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)source.bits);
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)readonly.bits);
+    heap.enabled = 1;
+    kiln_c99_gc_collect_mid_turn(&heap);
+    heap.enabled = 0;
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)source.bits);
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)readonly.bits);
+    source_object = kiln_c99_object_of(source);
+    readonly_object = kiln_c99_object_of(readonly);
+    if (source_object == NULL) return 71;
+    if (source_object->dictionary_index != index) return 72;
+    if (kiln_c99_get(NULL, source, "key39", 5, &value, 0, NULL) != KILN_C99_OK) return 73;
+    if (kiln_c99_as_number(value) != 39.0) return 74;
+
+    /* A prepared cross-region clone owns fresh object storage and never aliases the source
+     * cache; arena discard frees its own side storage without relying on object finalizers. */
+    {
+        int status = kiln_c99_clone_arena_prepare(&arena, &heap, source,
+                                                   2 * heap.nursery.capacity);
+        if (status != KILN_C99_OK) return 81;
+    }
+    if (!arena.certified) return 82;
+    if (arena.capsule.root.tag != KILN_VALUE_OBJECT) return 83;
+    {
+        kiln_object *copy = kiln_c99_object_of(arena.capsule.root);
+        if (copy == NULL || copy == source_object || copy->dictionary_index != NULL ||
+            copy->count != source_object->count) {
+            kiln_c99_clone_arena_dispose(&arena);
+            return 9;
+        }
+    }
+    kiln_c99_clone_arena_dispose(&arena);
+    if (source_object->dictionary_index != index ||
+        kiln_c99_own_index(readonly_object, NULL, "key17", 5) != 17) return 10;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "dictionary-index-ownership");
+    assert!(
+        run.status.success(),
+        "dictionary index ownership failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn compact_property_records_trace_the_live_data_or_accessor_arm() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("unit emits");
     let wrapper = r#"
@@ -121,7 +313,7 @@ fn weak_collections_mark_values_to_a_fixed_point_and_clear_dead_keys() {
 int main(void) {
     kiln_gc_heap heap;
     kiln_gc_heap other;
-    kiln_value map, first_key, second_key, bridge, final_value;
+    kiln_value map, first_key, second_key, bridge, final_value, registry, target;
     kiln_collection *collection;
     kiln_gc_block *final_block;
     kiln_c99_gc_heap_init(&heap);
@@ -146,19 +338,35 @@ int main(void) {
                                                  (void *)(uintptr_t)first_key.bits));
     if (kiln_c99_gc_lookup(&heap, (void *)(uintptr_t)first_key.bits)->mark != heap.epoch)
         return 12;
+    if (kiln_c99_new_object(&registry) != KILN_C99_OK ||
+        kiln_c99_new_object(&target) != KILN_C99_OK ||
+        kiln_c99_finalization_registry_create(registry,
+            kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK)) != KILN_C99_OK ||
+        kiln_c99_finalization_registry_register(registry, target, first_key,
+            kiln_c99_undefined()) != KILN_C99_OK) return 15;
+    kiln_c99_nursery_turn_chunk(&heap);
     kiln_c99_gc_begin(&heap);
     kiln_c99_gc_mark_value(&heap, &map);
-    kiln_c99_gc_mark_value(&heap, &first_key);
+    kiln_c99_gc_mark_value(&heap, &registry);
+    kiln_c99_gc_drain(&heap);
+    /* The first ephemeron scan precedes registry holdings. It must not destroy their
+     * still-unmarked keys; the subsequent strong-mark pass makes the chain reachable. */
+    kiln_c99_gc_weak_ephemerons(&heap);
+    if (collection->live != 2) return 16;
+    kiln_c99_gc_weak_resources_mark(&heap);
     kiln_c99_gc_drain(&heap);
     kiln_c99_gc_weak_ephemerons(&heap);
+    kiln_c99_gc_weak_ephemerons_prune(&heap);
     if (final_block->mark != heap.epoch || collection->live != 2) return 6;
     kiln_c99_gc_begin(&heap);
     kiln_c99_gc_mark_value(&heap, &map);
     kiln_c99_gc_drain(&heap);
     kiln_c99_gc_weak_ephemerons(&heap);
+    kiln_c99_gc_weak_ephemerons_prune(&heap);
     if (collection->live != 0 || !collection->entries[0].dead ||
         !collection->entries[1].dead || collection->entries[0].key.tag != KILN_VALUE_UNDEFINED)
         return 7;
+    kiln_c99_gc_weak_resources_sweep(&heap);
     kiln_c99_gc_release_cell(collection);
     if (heap.weak_collections != NULL) return 8;
     kiln_c99_gc_heap_init(&other);
@@ -190,6 +398,134 @@ int main(void) {
     assert!(
         run.status.success(),
         "weak ephemeron fixture failed ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn weak_collection_churn_compacts_history_and_preserves_ephemerons() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0)).expect("unit emits");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    kiln_value fast_set_value, dispatch_set_value, key, keeper, map_value, live_key, live_value;
+    kiln_collection *fast_set;
+    kiln_collection *dispatch_set;
+    kiln_collection *map;
+    kiln_value delete_args[1];
+    kiln_value result = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_gc_block *value_block;
+    const char *stress_setting = getenv("KILN_GC_STRESS");
+    int stress_mode = stress_setting != NULL && stress_setting[0] != '\0' &&
+                      stress_setting[0] != '0';
+    kiln_c99_gc_heap_init(&heap);
+    kiln_test_heap = &heap;
+    kiln_test_generation += 1;
+    heap.enabled = 0;
+    if (kiln_c99_new_collection(&fast_set_value, 0, 1) != KILN_C99_OK ||
+        kiln_c99_new_collection(&dispatch_set_value, 0, 1) != KILN_C99_OK ||
+        kiln_c99_new_array(&key) != KILN_C99_OK ||
+        kiln_c99_new_array(&keeper) != KILN_C99_OK) return 1;
+    fast_set = kiln_c99_collection_of(fast_set_value);
+    dispatch_set = kiln_c99_collection_of(dispatch_set_value);
+    if (kiln_c99_collection_put_unleased(fast_set_value, keeper, keeper) != KILN_C99_OK ||
+        kiln_c99_collection_put_unleased(dispatch_set_value, keeper, keeper) != KILN_C99_OK)
+        return 2;
+    /* This fixture normally disables automatic collection so it can inspect dead entries
+     * directly. Under the stress runner, keep these four live values explicit and collect
+     * periodically while exercising deletion/compaction. */
+    if (stress_mode) {
+        heap.enabled = 1;
+        heap.stress = 1;
+        heap.stress_every = 1;
+        heap.stress_countdown = 1;
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)fast_set_value.bits);
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)dispatch_set_value.bits);
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)key.bits);
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)keeper.bits);
+    }
+    delete_args[0] = key;
+    for (size_t index = 0; index < 10000; ++index) {
+        if (kiln_c99_collection_put_unleased(fast_set_value, key, key) != KILN_C99_OK ||
+            kiln_c99_collection_put_unleased(dispatch_set_value, key, key) != KILN_C99_OK)
+            return 2;
+        if (kiln_c99_collection_delete_val_fast(fast_set, kiln_val_from_boundary(key)) !=
+            KILN_VAL_TRUE) return 3;
+        if (kiln_c99_call(NULL, &result,
+                kiln_c99_method(KILN_C99_METHOD_COLLECTION_DELETE), dispatch_set_value,
+                delete_args, 1, 0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 4;
+        if (stress_mode && index % 31 == 0) {
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)fast_set_value.bits);
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)dispatch_set_value.bits);
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)key.bits);
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)keeper.bits);
+            kiln_c99_gc_collect_mid_turn(&heap);
+        }
+    }
+    if (fast_set->live != 1 || dispatch_set->live != 1 ||
+        fast_set->count >= 34 || dispatch_set->count >= 34 ||
+        fast_set->capacity > 128 || dispatch_set->capacity > 128) return 5;
+    if (kiln_c99_collection_has_val_fast(fast_set, kiln_val_from_boundary(keeper)) !=
+            KILN_VAL_TRUE ||
+        kiln_c99_call(NULL, &result, kiln_c99_method(KILN_C99_METHOD_COLLECTION_HAS),
+            dispatch_set_value, &keeper, 1, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(result)) return 10;
+
+    /* Keep the later dead-key/ephemeron assertions deterministic; their explicit collection
+     * below is the collection under test, while the churn loop above carries stress coverage. */
+    heap.enabled = 0;
+    heap.stress = 0;
+    heap.stress_every = 0;
+    if (kiln_c99_new_collection(&map_value, 1, 1) != KILN_C99_OK) return 6;
+    map = kiln_c99_collection_of(map_value);
+    for (size_t index = 0; index < 40; ++index) {
+        if (kiln_c99_new_array(&live_key) != KILN_C99_OK ||
+            kiln_c99_new_array(&live_value) != KILN_C99_OK ||
+            kiln_c99_collection_put_unleased(map_value, live_key, live_value) != KILN_C99_OK)
+            return 6;
+    }
+    kiln_c99_nursery_turn_chunk(&heap);
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_value(&heap, &map_value);
+    kiln_c99_gc_drain(&heap);
+    kiln_c99_gc_weak_ephemerons(&heap);
+    kiln_c99_gc_weak_ephemerons_prune(&heap);
+    if (map->live != 0 || map->count != 0 || map->capacity > 64 ||
+        map->hash_capacity > 16) return 7;
+
+    if (kiln_c99_new_array(&live_key) != KILN_C99_OK ||
+        kiln_c99_new_array(&live_value) != KILN_C99_OK ||
+        kiln_c99_collection_put_unleased(map_value, live_key, live_value) != KILN_C99_OK)
+        return 6;
+    value_block = kiln_c99_gc_lookup(&heap, (void *)(uintptr_t)live_value.bits);
+    if (value_block == NULL) return 8;
+    kiln_c99_nursery_turn_chunk(&heap);
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_value(&heap, &map_value);
+    kiln_c99_gc_mark_value(&heap, &live_key);
+    kiln_c99_gc_drain(&heap);
+    kiln_c99_gc_weak_ephemerons(&heap);
+    kiln_c99_gc_weak_ephemerons_prune(&heap);
+    if (value_block->mark != heap.epoch || map->live != 1 || map->count != 1 ||
+        map->entries[0].dead) return 9;
+
+    kiln_c99_gc_begin(&heap);
+    kiln_c99_gc_mark_value(&heap, &map_value);
+    kiln_c99_gc_drain(&heap);
+    kiln_c99_gc_weak_ephemerons(&heap);
+    kiln_c99_gc_weak_ephemerons_prune(&heap);
+    if (map->live != 0 || value_block->mark == heap.epoch || !map->entries[0].dead ||
+        map->entries[0].key.tag != KILN_VALUE_UNDEFINED ||
+        map->entries[0].value.tag != KILN_VALUE_UNDEFINED) return 10;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "weak-collection-churn-compaction");
+    assert!(
+        run.status.success(),
+        "weak collection churn fixture failed ({:?}): {}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
@@ -1499,6 +1835,9 @@ fn every_object_tag_converts_and_is_truthy_and_names_itself() {
 fn rejects_bad_versions_and_stack_shapes_explicitly() {
     let bad_version = Program {
         version: BYTECODE_VERSION + 1,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         ..program(Vec::new(), vec![Instruction::Return], 0)
     };
     assert!(matches!(
@@ -1531,7 +1870,8 @@ int main(void) {
         read.tag != KILN_VALUE_METHOD || read.bits != KILN_C99_METHOD_NODE_READABLE) return 4;
     if (kiln_c99_get(NULL, buffer, "constants", 9, &read, 0, &thrown) != KILN_C99_OK ||
         read.tag != KILN_VALUE_OBJECT || read.bits != constants.bits) return 5;
-    if (kiln_c99_get(NULL, stream, "constants", 9, &read, 0, &thrown) == KILN_C99_OK) return 6;
+    if (kiln_c99_get(NULL, stream, "constants", 9, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED) return 6;
     return 0;
 }
 "#;
@@ -1564,9 +1904,11 @@ int main(void) {
     if (kiln_c99_get(NULL, first, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
         read.tag != KILN_VALUE_STRING || !kiln_test_units_equal(read, "first", 5))
         return 3;
-    if (kiln_c99_get(NULL, second, "unwrappedName", 13, &read, 0, &thrown) == KILN_C99_OK)
+    if (kiln_c99_get(NULL, second, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED)
         return 4;
-    if (kiln_c99_get(NULL, target, "unwrappedName", 13, &read, 0, &thrown) == KILN_C99_OK)
+    if (kiln_c99_get(NULL, target, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_UNDEFINED)
         return 5;
     return 0;
 }
@@ -1603,6 +1945,9 @@ fn executable_closure_shares_a_cell_with_the_module_body() {
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants: vec![
             Constant::Number(0f64.to_bits()),
             Constant::Number(1f64.to_bits()),
@@ -1626,6 +1971,7 @@ fn executable_closure_shares_a_cell_with_the_module_body() {
         local_count: 2,
         functions: vec![bump],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("program emits");
     let wrapper = format!(
@@ -1653,6 +1999,9 @@ fn executable_for_in_follows_prototypes_and_keeps_constructor_hidden() {
     let generated = emit(&Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants,
         code: vec![
             Instruction::MakeFunction(0),
@@ -1689,6 +2038,7 @@ fn executable_for_in_follows_prototypes_and_keeps_constructor_hidden() {
         local_count: 3,
         functions: vec![function(vec![Instruction::Return])],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     })
     .expect("prototype enumeration probe emits");
     let wrapper = format!(
@@ -3048,7 +3398,7 @@ static int ledger_frame_entry(void *context) {
     (void)context;
     heap->fallback = 0;
     heap->enabled = 1;
-    kiln_val built_function = @ENTRY@_fn_0_t(0);
+    kiln_val built_function = @ENTRY@_fn_0_t(0, NULL, &thrown);
     if (built_function == KILN_VAL_TYPED_FAIL) return 1;
     function = kiln_val_to_boundary(built_function);
     if (function.tag != KILN_VALUE_FUNCTION) { fprintf(stderr, "function tag=%u bits=%llu\n", function.tag, (unsigned long long)function.bits); return 14; }
@@ -3083,7 +3433,9 @@ static int ledger_frame_entry(void *context) {
     kiln_c99_heap_store_val(frame, &frame->locals[0], KILN_VAL_UNDEFINED);
     if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, 1) !=
             KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS) return 10;
-    kiln_c99_heap_store_val(frame, &frame->stack[0], KILN_VAL_UNDEFINED);
+    /* A later suspension can use a shorter spill prefix. The old pointer remains in the
+     * allocation, but is no longer an edge owned by the suspended generator. */
+    frame->sp = 0;
     if (kiln_c99_graph_scan_candidate_owners(heap, group, batch, 1) !=
             KILN_C99_GRAPH_ROOTS_UNENUMERATED ||
         kiln_c99_graph_scan_outside_heap(heap, batch, 1) !=
@@ -4462,7 +4814,7 @@ int main(void) {
     kiln_c99_graph_capsule capsule;
     kiln_shape shape;
     kiln_object *object;
-    double *date;
+    kiln_date *date;
     kiln_value root;
     uint64_t reservation = 92;
     kiln_c99_gc_heap_init(&sender);
@@ -4471,7 +4823,7 @@ int main(void) {
                                         sender.nursery.capacity)) return 1;
     object = (kiln_object *)kiln_c99_par_alloc(&candidate, KILN_GC_OBJECT,
                                                sizeof *object);
-    date = (double *)kiln_c99_par_alloc(&candidate, KILN_GC_DATE, sizeof *date);
+    date = (kiln_date *)kiln_c99_par_alloc(&candidate, KILN_GC_DATE, sizeof *date);
     if (object == NULL || date == NULL) return 2;
     memset(&shape, 0, sizeof shape);
     shape.shared = 1;
@@ -4483,18 +4835,23 @@ int main(void) {
     object->slots = object->inline_slots;
     object->slot_capacity = KILN_C99_INLINE_SLOTS;
     object->slots[0] = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, date);
-    *date = 123456.0;
+    date->time = 123456.0;
+    date->properties = kiln_c99_value(KILN_VALUE_OBJECT,
+                                       (uint64_t)(uintptr_t)object, NULL, 0);
     kiln_c99_par_arena_seal(&candidate);
     kiln_c99_graph_candidate_close(&candidate);
     chunk = candidate.filled;
     if (chunk == NULL || !kiln_c99_heap_adopt_chunks(&sender, chunk)) return 3;
     root = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
+    if (kiln_c99_graph_capsule_root_payload(&sender,
+        kiln_c99_value(KILN_VALUE_DATE, (uint64_t)(uintptr_t)date, NULL, 0)) != date)
+        return 9;
     if (!kiln_c99_graph_capsule_prepare(&sender, chunk, root, &capsule)) return 4;
     if (!kiln_c99_graph_capsule_receiver_preflight(&receiver, &capsule.needs,
                                                     reservation)) return 5;
     if (!kiln_c99_graph_capsule_detach(&sender, &capsule)) return 6;
     kiln_c99_graph_capsule_adopt(&receiver, &capsule, reservation);
-    if (sender.count != 0 || receiver.count != 2 || *date != 123456.0 ||
+    if (sender.count != 0 || receiver.count != 2 || date->time != 123456.0 ||
         receiver.realm.graph_inbox_root.bits != root.bits ||
         kiln_c99_gc_lookup(&receiver, date) == NULL ||
         kiln_c99_gc_lookup(&sender, date) != NULL) return 7;
@@ -5458,13 +5815,14 @@ int main(void) {
 }
 
 #[test]
-fn executable_actor_candidate_stress_collects_and_discards_provenance() {
+fn executable_actor_candidate_stress_preserves_live_provenance_until_abort() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
 static int actor_candidate_stress_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
     kiln_nursery_chunk *chunk;
+    kiln_val *cell;
     uint32_t before;
     (void)context;
     if (heap == NULL) return 1;
@@ -5477,10 +5835,21 @@ static int actor_candidate_stress_entry(void *context) {
     heap->stress_countdown = 1;
     if (!kiln_c99_actor_candidate_begin(heap)) return 2;
     before = heap->epoch;
-    if (kiln_c99_gc_alloc(KILN_GC_CELL, sizeof(kiln_val)) == NULL) return 3;
-    if (heap->epoch <= before || !heap->actor_candidate_collected) return 4;
+    cell = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof(kiln_val));
+    if (cell == NULL) return 3;
+    *cell = KILN_VAL_UNDEFINED;
+    if (heap->epoch <= before || heap->actor_candidate_collected) return 4;
+    heap->realm.graph_inbox_root = kiln_c99_value(
+        KILN_VALUE_CELL, (uint64_t)(uintptr_t)cell, NULL, 0);
+    kiln_c99_gc_collect(heap, 1);
+    chunk = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)cell - 1);
+    if (chunk == NULL || chunk->candidate_id != heap->actor_candidate_id ||
+        chunk->candidate_epoch != heap->epoch || chunk->candidate_state != 3 ||
+        !kiln_c99_nursery_full_contains(&heap->nursery, chunk)) return 5;
     if (!kiln_c99_actor_candidate_end(heap, 1)) return 5;
-    if (heap->actor_candidate_id != 0) return 6;
+    if (heap->actor_candidate_id != 0 || heap->actor_candidate_pending_id == 0) return 6;
+    heap->realm.graph_inbox_root = kiln_c99_undefined();
+    kiln_c99_actor_candidate_finish(heap, 0);
     for (chunk = heap->nursery.full; chunk != NULL; chunk = chunk->next)
         if (chunk->candidate_id != 0) return 7;
     for (chunk = heap->nursery.promoted; chunk != NULL; chunk = chunk->next)
@@ -5628,6 +5997,12 @@ int main(void) {
     );
 }
 
+// Exit code 10 asserts that a consumer refusal of the validated manifest returns
+// KILN_C99_GRAPH_OUTGOING_UNPROVEN, that the accept hook ran, and that the sender escrow entry
+// and request id were restored. The runtime did that correctly; the fixture reached the scan
+// with the dead frame of make_closed_request still on the stack, whose stale slots the
+// conservative machine-stack proof read as a sender alias (MACHINE_ALIAS, 7) before the manifest
+// was ever offered. `scrub_dead_stack` gives the proof the clean stack a real safepoint has.
 #[test]
 fn executable_actor_graph_capsule_certificate_retains_only_escrow() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
@@ -5672,6 +6047,16 @@ __attribute__((noinline)) static uint64_t make_closed_request(kiln_gc_heap *heap
     return request;
 }
 
+/* make_closed_request's frame held the candidate string; once it returns, that dead stack is
+ * what the next call's frame inherits uninitialized. The incoming proof scans the live stack
+ * conservatively, so a stale slot in the scan's own frame reads as a sender alias (code 7).
+ * Overwrite the dead region the way a real safepoint arrives on a clean stack. */
+__attribute__((noinline)) static void scrub_dead_stack(void) {
+    volatile char pad[16384];
+    size_t i;
+    for (i = 0; i < sizeof pad; ++i) pad[i] = 0;
+}
+
 static int reject_validated_manifest(void *context, const kiln_gc_heap *heap,
     kiln_nursery_chunk **chunks, size_t count, kiln_value root,
     const kiln_c99_graph_side_set *proof) {
@@ -5700,6 +6085,7 @@ static int actor_certificate_entry(void *context) {
     heap->enabled = 1;
     request = make_closed_request(heap);
     if (request == 0) return 2;
+    scrub_dead_stack();
     /* A consumer refusal must return the manifest to the proof and restore sender escrow. */
     if (kiln_c99_graph_incoming_request_scan_with_manifest(heap, request, 1,
             reject_validated_manifest, &rejected) != KILN_C99_GRAPH_OUTGOING_UNPROVEN ||
@@ -5745,6 +6131,99 @@ fn executable_actor_request_machine_boundary_sees_older_frame_alias() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
+#include <setjmp.h>
+extern int kiln_c99_graph_drive_boundary_push(uintptr_t stack_low, const void *registers,
+                                               size_t registers_size, uint64_t *out_token);
+extern void kiln_c99_graph_drive_boundary_pop(uint64_t token);
+__attribute__((noinline)) static int actor_probe_managed_boundary(kiln_gc_heap *heap,
+                                                                   uint64_t request) {
+    jmp_buf registers;
+    uintptr_t *frame;
+    uint64_t token = 0;
+    int result;
+    memset(&registers, 0, sizeof registers);
+    __builtin_unwind_init();
+    if (setjmp(registers) != 0) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    frame = (uintptr_t *)__builtin_frame_address(0);
+    if (frame == NULL) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    (void)kiln_c99_graph_drive_boundary_push((uintptr_t)(frame + 2), &registers,
+                                               sizeof registers, &token);
+    /* A reentrant host callback while generated code is active cannot inherit this boundary. */
+    {
+        kiln_js_frame active_language_frame;
+        kiln_c99_js_frame_enter(&active_language_frame, NULL);
+        if (kiln_c99_graph_drive_boundary_current() != NULL) {
+            kiln_c99_js_frame_leave(&active_language_frame);
+            kiln_c99_graph_drive_boundary_pop(token);
+            return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+        }
+        kiln_c99_js_frame_leave(&active_language_frame);
+        if (kiln_c99_graph_drive_boundary_current() == NULL) {
+            kiln_c99_graph_drive_boundary_pop(token);
+            return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+        }
+    }
+    result = kiln_c99_graph_incoming_request_probe(heap, request);
+    kiln_c99_graph_drive_boundary_pop(token);
+    return result;
+}
+__attribute__((noinline)) static int actor_probe_boundary_scope(kiln_gc_heap *heap,
+                                                                  uint64_t request) {
+    jmp_buf registers;
+    uintptr_t *frame;
+    uint64_t token = 0;
+    int result;
+    memset(&registers, 0, sizeof registers);
+    __builtin_unwind_init();
+    if (setjmp(registers) != 0) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    frame = (uintptr_t *)__builtin_frame_address(0);
+    if (frame == NULL || !kiln_c99_graph_drive_boundary_push(
+            (uintptr_t)(frame + 2), &registers, sizeof registers, &token))
+        return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    result = kiln_c99_graph_incoming_request_probe(heap, request);
+    kiln_c99_graph_drive_boundary_pop(token);
+    return result;
+}
+__attribute__((noinline)) static int actor_probe_nested_boundary(kiln_gc_heap *heap,
+                                                                  uint64_t request) {
+    jmp_buf outer_registers;
+    uintptr_t *outer_frame;
+    uint64_t outer_token = 0;
+    int result;
+    memset(&outer_registers, 0, sizeof outer_registers);
+    __builtin_unwind_init();
+    if (setjmp(outer_registers) != 0) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    outer_frame = (uintptr_t *)__builtin_frame_address(0);
+    if (outer_frame == NULL || !kiln_c99_graph_drive_boundary_push(
+            (uintptr_t)(outer_frame + 2), &outer_registers, sizeof outer_registers,
+            &outer_token)) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    result = actor_probe_boundary_scope(heap, request);
+    kiln_c99_graph_drive_boundary_pop(outer_token);
+    return result;
+}
+__attribute__((noinline)) static int actor_probe_invalid_nested_boundary(kiln_gc_heap *heap,
+                                                                          uint64_t request) {
+    jmp_buf registers;
+    uintptr_t *frame;
+    uint64_t outer_token = 0, invalid_token = 99;
+    int result;
+    memset(&registers, 0, sizeof registers);
+    __builtin_unwind_init();
+    if (setjmp(registers) != 0) return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    frame = (uintptr_t *)__builtin_frame_address(0);
+    if (frame == NULL || !kiln_c99_graph_drive_boundary_push(
+            (uintptr_t)(frame + 2), &registers, sizeof registers, &outer_token))
+        return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    if (kiln_c99_graph_drive_boundary_push(0, NULL, 0, &invalid_token) ||
+        invalid_token != 0) {
+        kiln_c99_graph_drive_boundary_pop(outer_token);
+        return KILN_C99_GRAPH_MACHINE_BOUNDARY_UNAVAILABLE;
+    }
+    result = kiln_c99_graph_incoming_request_probe(heap, request);
+    kiln_c99_graph_drive_boundary_pop(invalid_token);
+    kiln_c99_graph_drive_boundary_pop(outer_token);
+    return result;
+}
 static int actor_boundary_entry(void *context) {
     kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
     kiln_value handle, graph, args[3], result, thrown;
@@ -5798,6 +6277,16 @@ static int actor_boundary_entry(void *context) {
         }
     }
     if (older_frame_alias != (uintptr_t)text) return 7;
+    /* Managed scans exclude only the helper/provider interval. The live caller frame above it
+     * still contains the candidate and must continue to refuse as an older machine alias. */
+    if (!kiln_c99_actor_isolated_request_begin(heap, handle, &id) ||
+        actor_probe_nested_boundary(heap, id) != KILN_C99_GRAPH_MACHINE_ALIAS) return 17;
+    /* Invalid nesting suppresses the outer scope and uses the complete conservative scan;
+     * popping the invalid token must restore the outer scope for the next request. */
+    if (!kiln_c99_actor_isolated_request_begin(heap, handle, &id) ||
+        actor_probe_invalid_nested_boundary(heap, id) != KILN_C99_GRAPH_MACHINE_ALIAS ||
+        !kiln_c99_actor_isolated_request_begin(heap, handle, &id) ||
+        actor_probe_managed_boundary(heap, id) != KILN_C99_GRAPH_MACHINE_ALIAS) return 18;
     registry = kiln_c99_collection_of(heap->realm.isolated_graphs);
     {
         double at = kiln_c99_collection_find(registry, handle);
@@ -6233,6 +6722,366 @@ int main(void) {
 }
 
 #[test]
+fn executable_gc_lookup_string_header_falls_back_at_region_start() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+int main(void) {
+    kiln_gc_heap heap;
+    char *base;
+    const char *edge;
+    char *located_base;
+    char *located_limit;
+    uint64_t *bitmap;
+    size_t words;
+    void *seed;
+    kiln_c99_gc_heap_init(&heap);
+    heap.enabled = 1;
+    seed = kiln_c99_gc_nursery_bump(&heap, KILN_GC_BYTES, 64);
+    if (seed == NULL || heap.nursery.base == NULL) return 1;
+
+    /* The first probe is inside this nursery region, while subtracting the string header
+     * crosses its payload boundary. Lookup must take the fallback membership path and reject
+     * this non-object address without reading a header outside the region. */
+    base = heap.nursery.base;
+    edge = base + sizeof(kiln_string) - 1;
+    if (!kiln_c99_nursery_locate(&heap, edge, &located_base, &located_limit, &bitmap, &words) ||
+        located_base != base || edge >= located_limit) return 2;
+    if (kiln_c99_gc_lookup_nursery(&heap, edge) != NULL) return 3;
+
+    kiln_c99_nursery_destroy(&heap.nursery);
+    free(heap.large_table.table);
+    free(heap.slab_table.table);
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-string-header-region-start");
+    assert!(
+        run.status.success(),
+        "string-header region fallback failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_minor_gc_traces_young_values_published_by_tenured_cells() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int minor_gc_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_gc_cell *volatile owner;
+    kiln_value first, dead, second, dead_again;
+    kiln_gc_block *first_block, *second_block;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    heap->minor_audit_enabled = 1;
+    heap->since_collection = 0;
+    heap->force_pending = 0;
+    owner = (kiln_gc_cell *)kiln_c99_gc_alloc_tenured(KILN_GC_CELL, sizeof *owner);
+    if (owner == NULL) return 2;
+    owner->value = KILN_VAL_UNDEFINED;
+
+    first = kiln_c99_copy_text("remembered-first", 16);
+    dead = kiln_c99_copy_text("dead-young", 10);
+    if (first.tag != KILN_VALUE_STRING || dead.tag != KILN_VALUE_STRING) return 3;
+    first_block = kiln_c99_gc_lookup(heap, (void *)(uintptr_t)first.ptr);
+    if (first_block == NULL || (first_block->kind & KILN_GC_KIND_MASK) != KILN_GC_STRING) return 21;
+    if (first_block == NULL || kiln_c99_gc_is_young(heap, first_block) == 0) return 4;
+    kiln_c99_heap_store_val((const void *)owner, &owner->value, kiln_val_from_boundary(first));
+    if (!kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 5;
+
+    /* A minor collection must reach the tenured cell's young string without scanning the
+     * whole old graph, while reclaiming an unrelated young allocation. */
+    heap->minor_requested = 1;
+    kiln_c99_gc_collect(heap, 0);
+    heap->minor_requested = 0;
+    if (heap->minor_collection || heap->minor_audit_failed ||
+        kiln_c99_gc_lookup(heap, (void *)(uintptr_t)first.ptr) != first_block)
+        return 6;
+    if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)dead.ptr) != NULL) return 7;
+    if (kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 18;
+
+    /* All ordinary nursery survivors were promoted together, so no old-to-young edge remains
+     * after the minor. A later publication re-registers the owner; this also checks that the
+     * barrier resolves an interior string-data pointer to its owning allocation. */
+    second = kiln_c99_copy_text("remembered-second", 17);
+    dead_again = kiln_c99_copy_text("dead-again", 10);
+    if (second.tag != KILN_VALUE_STRING || dead_again.tag != KILN_VALUE_STRING) return 8;
+    second_block = kiln_c99_gc_lookup(heap, (void *)(uintptr_t)second.ptr);
+    if (second_block == NULL || kiln_c99_gc_is_young(heap, second_block) == 0) return 9;
+    kiln_c99_heap_store_val((const void *)owner, &owner->value, kiln_val_from_boundary(second));
+    if (!kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 19;
+    heap->minor_requested = 1;
+    kiln_c99_gc_collect(heap, 0);
+    heap->minor_requested = 0;
+    if (heap->minor_audit_failed ||
+        kiln_c99_gc_lookup(heap, (void *)(uintptr_t)second.ptr) != second_block) return 10;
+    if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)dead_again.ptr) != NULL) return 11;
+    if (kiln_c99_gc_ptrset_contains(&heap->remembered_owners, (const void *)owner)) return 20;
+
+    /* The audit must still catch a missing barrier if another old owner has already marked the
+     * same young target. Allocate cells in audit order: the first cell uses the barrier, the
+     * second deliberately models an unclassified direct write. A failed audit must skip sweep. */
+    {
+        kiln_gc_cell *first_owner =
+            (kiln_gc_cell *)kiln_c99_gc_alloc_tenured(KILN_GC_CELL, sizeof(kiln_gc_cell));
+        kiln_gc_cell *bypass_owner =
+            (kiln_gc_cell *)kiln_c99_gc_alloc_tenured(KILN_GC_CELL, sizeof(kiln_gc_cell));
+        kiln_value shared_young = kiln_c99_copy_text("shared-young", 12);
+        kiln_value untouched = kiln_c99_copy_text("audit-untouched", 15);
+        if (first_owner == NULL || bypass_owner == NULL ||
+            shared_young.tag != KILN_VALUE_STRING || untouched.tag != KILN_VALUE_STRING) return 12;
+        first_owner->value = KILN_VAL_UNDEFINED;
+        bypass_owner->value = KILN_VAL_UNDEFINED;
+        kiln_c99_heap_store_val(first_owner, &first_owner->value,
+                                kiln_val_from_boundary(shared_young));
+        bypass_owner->value = kiln_val_from_boundary(shared_young);
+        if (!kiln_c99_gc_ptrset_contains(&heap->remembered_owners, first_owner) ||
+            kiln_c99_gc_ptrset_contains(&heap->remembered_owners, bypass_owner)) return 13;
+        heap->since_collection = 0;
+        heap->moved_external_baseline = heap->moved_external_current;
+        heap->force_pending = 0;
+        heap->stress = 0;
+        heap->remembered_failed = 0;
+        heap->minor_barrier_incomplete = 0;
+        heap->external_owner_inventory_failed = 0;
+        heap->candidate_ledger_groups = 0;
+        heap->candidate_ledger_head = NULL;
+        heap->candidate_ledger_publication_failed = 0;
+        heap->minor_requested = 1;
+        kiln_c99_gc_collect(heap, 0);
+        heap->minor_requested = 0;
+        if (!heap->minor_audit_failed) return 14;
+        if (!heap->minor_barrier_incomplete) return 16;
+        if (!heap->mark_failed) return 17;
+        if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)shared_young.ptr) == NULL ||
+            kiln_c99_gc_lookup_interior(heap, (uintptr_t)untouched.ptr) == NULL) return 15;
+    }
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 12;
+    result = kiln_realm_enter(realm, minor_gc_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 13;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-minor-tenured-cell");
+    assert!(
+        run.status.success(),
+        "minor GC did not retain/reclaim expected values ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_minor_gc_skips_barrier_lookup_for_active_young_owners() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int active_young_barrier_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_gc_cell *owner;
+    kiln_value child;
+    kiln_gc_block *owner_block;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    heap->candidate_ledger_groups = 0;
+    owner = (kiln_gc_cell *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *owner);
+    child = kiln_c99_copy_text("active-young-child", 18);
+    if (owner == NULL || child.tag != KILN_VALUE_STRING) return 2;
+    owner_block = ((kiln_gc_block *)owner) - 1;
+    if (!kiln_c99_gc_is_young(heap, owner_block) || heap->nursery.base == NULL ||
+        (uintptr_t)owner < (uintptr_t)heap->nursery.base ||
+        (uintptr_t)owner >= (uintptr_t)heap->nursery.bump) return 3;
+    if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)child.ptr) == NULL) return 5;
+    owner->value = KILN_VAL_UNDEFINED;
+    kiln_c99_heap_store_val(owner, &owner->value, kiln_val_from_boundary(child));
+    if (kiln_c99_gc_ptrset_contains(&heap->remembered_owners, owner_block + 1)) return 4;
+    return 0;
+}
+int main(void) {
+    return active_young_barrier_entry(NULL);
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-active-young-owner-barrier-test");
+    assert!(
+        run.status.success(),
+        "active young owner barrier fast path failed ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_minor_gc_promotes_open_chunk_edges_before_the_next_cycle() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static const uintptr_t cross_chunk_mask = UINTPTR_MAX / 3u;
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static int make_cross_chunk_edge(kiln_gc_heap *heap, uintptr_t *encoded_child) {
+    kiln_val *owner = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *owner);
+    kiln_value child;
+    kiln_nursery_chunk *owner_chunk;
+    if (owner == NULL) return 1;
+    *owner = KILN_VAL_UNDEFINED;
+    owner_chunk = kiln_c99_nursery_chunk_of(heap, (kiln_gc_block *)owner - 1);
+    if (owner_chunk == NULL) return 2;
+    heap->realm.graph_inbox_root = kiln_c99_value(
+        KILN_VALUE_CELL, (uint64_t)(uintptr_t)owner, NULL, 0);
+
+    /* Seal the parent's chunk, then allocate its child in the still-open chunk. Both values
+     * are young when published, so this edge correctly does not enter the old-to-young set. */
+    kiln_c99_nursery_turn_chunk(heap);
+    child = kiln_c99_copy_text("cross-chunk-young-child", 23);
+    if (child.tag != KILN_VALUE_STRING) return 3;
+    *owner = kiln_val_from_boundary(child);
+    if (kiln_c99_gc_is_young(heap, (kiln_gc_block *)owner - 1) == 0 ||
+        kiln_c99_gc_is_young(heap, kiln_c99_gc_lookup_interior(heap, (uintptr_t)child.ptr)) == 0)
+        return 4;
+
+    kiln_c99_gc_collect_minor_mid_turn(heap);
+    if (heap->minor_audit_failed || heap->minor_audit_collections == 0) return 5;
+    if (owner_chunk->tenured == 0) return 6;
+    if (kiln_c99_gc_is_young(heap,
+            kiln_c99_gc_lookup_interior(heap, (uintptr_t)child.ptr)) != 0) return 7;
+    *encoded_child = (uintptr_t)child.ptr ^ cross_chunk_mask;
+    return 0;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static int collect_again_without_child_root(kiln_gc_heap *heap, uintptr_t encoded_child) {
+    uintptr_t child_address;
+    /* Collect before decoding the address, so no C local is a conservative child root. */
+    kiln_c99_gc_collect_minor_mid_turn(heap);
+    child_address = encoded_child ^ cross_chunk_mask;
+    if (heap->minor_audit_failed || heap->minor_audit_collections < 2 ||
+        heap->minor_audit_total_misses != 0) return 1;
+    return kiln_c99_gc_lookup_interior(heap, child_address) != NULL ? 0 : 2;
+}
+
+static int cross_chunk_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    uintptr_t encoded_child = 0;
+    int status;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    heap->minor_audit_enabled = 1;
+    heap->force_pending = 0;
+    heap->since_collection = 0;
+    status = make_cross_chunk_edge(heap, &encoded_child);
+    if (status != 0) return 10 + status;
+    return collect_again_without_child_root(heap, encoded_child) == 0 ? 0 : 20;
+}
+
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 30;
+    result = kiln_realm_enter(realm, cross_chunk_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 31;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-minor-open-chunk-edge");
+    assert!(
+        run.status.success(),
+        "minor GC lost a young edge across nursery chunks ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn executable_gc_minor_cycles_preserve_the_last_full_collection_cadence() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits runtime prelude");
+    let wrapper = r#"
+static int major_cadence_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_gc_cell *owner;
+    kiln_value stale = kiln_c99_undefined();
+    size_t count_before_full = 0;
+    int saw_full = 0;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    heap->stress = 0;
+    heap->force_pending = 0;
+    owner = (kiln_gc_cell *)kiln_c99_gc_alloc_tenured(KILN_GC_CELL, sizeof *owner);
+    if (owner == NULL) return 2;
+    owner->value = KILN_VAL_UNDEFINED;
+    heap->realm.graph_inbox_root = kiln_c99_value(
+        KILN_VALUE_CELL, (uint64_t)(uintptr_t)owner, NULL, 0);
+    heap->floor = 128;
+    heap->survived = 128;
+    heap->since_collection = 0;
+    heap->moved_external_baseline = heap->moved_external_current;
+
+    for (size_t index = 0; index < 32; ++index) {
+        char text[24];
+        int len = snprintf(text, sizeof text, "promoted-%02zu", index);
+        kiln_value next;
+        if (len < 0 || (size_t)len >= sizeof text) return 3;
+        next = kiln_c99_copy_text(text, (size_t)len);
+        if (next.tag != KILN_VALUE_STRING) return 4;
+        if (index == 0) stale = next;
+        kiln_c99_heap_store_val(owner, &owner->value, kiln_val_from_boundary(next));
+        if (heap->since_collection >= heap->floor) count_before_full = heap->count;
+        heap->minor_requested = 1;
+        kiln_c99_gc_collect(heap, 0);
+        heap->minor_requested = 0;
+        if (heap->since_collection == 0) {
+            if (index == 0 || count_before_full == 0 || heap->count >= count_before_full) return 5;
+            if (kiln_c99_gc_lookup_interior(heap, (uintptr_t)stale.ptr) != NULL) return 6;
+            saw_full = 1;
+            break;
+        }
+        /* A minor collection must not move the full-collection threshold with its promotions. */
+        if (heap->survived != 128) return 7;
+        if (heap->since_collection >= heap->floor) count_before_full = heap->count;
+    }
+    if (!saw_full) return 8;
+    heap->realm.graph_inbox_root = kiln_c99_undefined();
+    return 0;
+}
+int main(void) {
+    uint64_t realm;
+    int result;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 9;
+    result = kiln_realm_enter(realm, major_cadence_entry, NULL);
+    if (result != KILN_C99_OK) return result;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "gc-minor-major-cadence");
+    assert!(
+        run.status.success(),
+        "minor collections postponed full collection or retained obsolete promotions ({:?}):\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn executable_gc_stack_scan_uses_the_current_lane_after_a_heap_moves() {
     let program = program(vec![], vec![Instruction::Return], 0);
     let generated = emit(&program).expect("program emits");
@@ -6364,11 +7213,15 @@ fn executable_cached_shape_object_literal_executes_correctly() {
     let program = Program {
         source: "".into(),
         version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
         constants,
         code,
         local_count: 3,
         functions: vec![maker],
         template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
     };
 
     let generated = emit(&program).expect("program emits");
@@ -6419,9 +7272,9 @@ fn two_realms_running_one_unit_keep_their_own_module_globals() {
     let generated = emit(&top).expect("a unit with a module global emits");
     let symbol = &generated.symbol;
     assert!(
-        generated
-            .source
-            .contains(&format!("#define {symbol}_globals ({symbol}_unit_vals())")),
+        generated.source.contains(&format!(
+            "#define {symbol}_globals ({symbol}_unit_vals(host))"
+        )),
         "module globals are reached through the realm's block"
     );
     assert!(
@@ -6443,6 +7296,7 @@ static void kiln_test_enter(kiln_gc_heap *heap) {{
     kiln_test_generation += 1;
 }}
 int main(void) {{
+    kiln_host *host = NULL;
     kiln_gc_heap *first;
     kiln_gc_heap *second;
     kiln_value closure_one, closure_two, read_one, read_two, thrown = kiln_c99_undefined();
@@ -6571,11 +7425,37 @@ int main(void) {
     if (!kiln_c99_realm_builtin_member_untouched(KILN_C99_BUILTIN_NUMBER, "isInteger", 9)) return 21;
     return 0;
 }
+
 "#;
     let run = run_with_main(&generated, wrapper, "narrow-builtin-guards");
     assert!(
         run.status.success(),
         "a speculation answering about built-ins it does not rely on ({:?}): {}{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn surface_method_names_keep_first_alias_and_miss_unknown_codes() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty module emits for a runtime method-name probe");
+    let wrapper = r#"
+int main(void) {
+    const char *buffer_alloc = kiln_c99_method_name(KILN_C99_METHOD_BUFFER_ALLOC);
+    const char *array_values = kiln_c99_method_name(KILN_C99_METHOD_ARRAY_VALUES);
+    if (buffer_alloc == NULL || strcmp(buffer_alloc, "alloc") != 0) return 1;
+    if (array_values == NULL || strcmp(array_values, "values") != 0) return 2;
+    if (kiln_c99_method_name(0) != NULL) return 3;
+    if (kiln_c99_method_name(UINT64_MAX) != NULL) return 4;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "surface-method-name-index");
+    assert!(
+        run.status.success(),
+        "method-name indexing changed canonical aliases or missing-code behavior ({:?}): {}{}",
         run.status.code(),
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)

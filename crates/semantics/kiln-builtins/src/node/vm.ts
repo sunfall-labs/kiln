@@ -1,5 +1,7 @@
 // kiln-builtins: node:vm implementation (Phase 5.2, ADR 0005)
 
+const kilnPrivate: any = (globalThis as any).__kilnPrivate ?? {};
+
 export class Script {
   private _code: string;
   private _options: any;
@@ -43,13 +45,20 @@ export function runInContext(code: string, contextifiedObject: any, _options?: a
 }
 
 export function runInNewContext(code: string, contextObject?: any, _options?: any): any {
-  if (contextObject && typeof contextObject === "object") {
-    const keys = Object.keys(contextObject);
-    const values = keys.map((k) => contextObject[k]);
-    const fn = new Function(...keys, `return (0, eval)(${JSON.stringify(code)})`);
-    return fn(...values);
+  const scope = contextObject && typeof contextObject === "object" ? contextObject : {};
+  const hasSyntheticGc = kilnPrivate.gcExposed === true &&
+    typeof kilnPrivate.gcRequest === "function" && !("gc" in scope);
+  // A with-environment gives direct eval an object environment: reads fall through to the
+  // realm, while writes to existing context properties update the caller's context object.
+  // Keep the optional gc binding in the outer function environment so the context object stays
+  // untouched and an own context property still takes precedence.
+  const body = `with (environment) { return eval(${JSON.stringify(code)}); }`;
+  if (hasSyntheticGc) {
+    const evaluate = new Function("environment", "gc", body);
+    return evaluate(scope, kilnPrivate.gcRequest);
   }
-  return (0, eval)(code);
+  const evaluate = new Function("environment", body);
+  return evaluate(scope);
 }
 
 export function createScript(code: string, options?: any): Script {

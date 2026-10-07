@@ -48,7 +48,10 @@ static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key
  *
  * Which members are extensions is not decided here: each is a surface row marked
  * `kiln_extension`, which the Rust build holds equal to `kiln_builtin_surface::KILN_EXTENSIONS`,
- * and the functions below are the only readers of that mark. Read once per process, like the
+ * and the functions below are the only readers of that mark. Today no row carries it: the whole
+ * parallel family is installed by the TypeScript bootstrap (`kiln-builtins/src/parallel.ts`),
+ * which asks `kilnExtensions` instead, and the mark stays for an extension this table answers.
+ * The switch itself is still read here, by the parallel lowerings. Read once per process, like the
  * interpreter's `kiln_extensions_installed`: a program's surface does not change while it runs. */
 static int kiln_c99_kiln_extensions_state;
 
@@ -129,6 +132,22 @@ static kiln_builtin_member_entry kiln_c99_builtin_member_index[KILN_C99_SURFACE_
 static size_t kiln_c99_builtin_member_index_len;
 static int kiln_c99_builtin_member_index_ready;
 
+/* `kiln_c99_method_name` is also used by the cached collection-method guard. Keep the canonical
+ * first surface row by method code, but do not walk every built-in member on each cached read. */
+typedef struct kiln_builtin_method_name_entry {
+    uint16_t code;
+    size_t row;
+} kiln_builtin_method_name_entry;
+
+static kiln_builtin_method_name_entry kiln_c99_builtin_method_name_index[KILN_C99_SURFACE_MEMBER_COUNT];
+static size_t kiln_c99_builtin_method_name_index_len;
+
+static int kiln_c99_builtin_method_name_entry_before(
+    const kiln_builtin_method_name_entry *left, const kiln_builtin_method_name_entry *right) {
+    if (left->code != right->code) return left->code < right->code;
+    return left->row < right->row;
+}
+
 static int kiln_c99_builtin_member_entry_before(const kiln_builtin_member_entry *left,
                                                 const kiln_builtin_member_entry *right) {
     size_t shortest;
@@ -144,8 +163,16 @@ static int kiln_c99_builtin_member_entry_before(const kiln_builtin_member_entry 
 static void kiln_c99_builtin_member_index_build(void) {
     size_t index;
     size_t len = 0;
+    size_t method_len = 0;
     for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
         const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
+        /* Preserve the previous first-row behavior, including rows hidden from this build's
+         * callable surface: the name is metadata for a method code, not a property lookup. */
+        if (member->kind == KILN_C99_MEMBER_METHOD) {
+            kiln_c99_builtin_method_name_index[method_len].code = member->code;
+            kiln_c99_builtin_method_name_index[method_len].row = index;
+            ++method_len;
+        }
         /* A withheld kiln extension (ADR 0068) never enters the index, so every lookup through it
          * -- read, call, `in`, `hasOwnProperty`, descriptors -- misses it exactly as on Node. */
         if (kiln_c99_builtin_row_withheld(index)) {
@@ -168,6 +195,22 @@ static void kiln_c99_builtin_member_index_build(void) {
         kiln_c99_builtin_member_index[behind] = pending;
     }
     kiln_c99_builtin_member_index_len = len;
+
+    /* This order is intentionally (code, row): aliases of one dispatch code keep the first
+     * source-table row as their canonical function name. */
+    for (index = 1; index < method_len; ++index) {
+        kiln_builtin_method_name_entry pending = kiln_c99_builtin_method_name_index[index];
+        size_t behind = index;
+        while (behind > 0 &&
+               kiln_c99_builtin_method_name_entry_before(
+                   &pending, &kiln_c99_builtin_method_name_index[behind - 1])) {
+            kiln_c99_builtin_method_name_index[behind] =
+                kiln_c99_builtin_method_name_index[behind - 1];
+            --behind;
+        }
+        kiln_c99_builtin_method_name_index[behind] = pending;
+    }
+    kiln_c99_builtin_method_name_index_len = method_len;
 }
 
 /* The first index entry at or after (builtin, key): the lower bound. */
@@ -245,18 +288,22 @@ static uint64_t kiln_c99_surface_method(uint64_t builtin, const char *key, size_
  * names; `kiln_builtin_surface::NAME_IS_SHARED` is where that debt is written down, and it is
  * what the guards in both engines read so an alias cannot be mistaken for a drift. */
 static const char *kiln_c99_surface_method_name(uint64_t code) {
-    size_t index;
+    size_t low = 0;
+    size_t high;
     /* Zero is "no method", which every miss in the lookup helpers returns; it names nothing. */
     if (code == 0) {
         return NULL;
     }
-    for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
-        const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
-        if (member->kind == KILN_C99_MEMBER_METHOD && (uint64_t)member->code == code) {
-            return member->name;
-        }
+    kiln_c99_once(&kiln_c99_builtin_member_index_ready, kiln_c99_builtin_member_index_build);
+    high = kiln_c99_builtin_method_name_index_len;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if ((uint64_t)kiln_c99_builtin_method_name_index[middle].code < code) low = middle + 1;
+        else high = middle;
     }
-    return NULL;
+    if (low >= kiln_c99_builtin_method_name_index_len ||
+        (uint64_t)kiln_c99_builtin_method_name_index[low].code != code) return NULL;
+    return kiln_c99_builtin_members[kiln_c99_builtin_method_name_index[low].row].name;
 }
 
 /* A member whose answer is a value rather than a call: `Math.PI`, `Number.MAX_VALUE`,

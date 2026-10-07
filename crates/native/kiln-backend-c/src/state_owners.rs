@@ -1,6 +1,6 @@
 //! Who owns each kind of mutable static the emitters write (ADR 0070, realms issue 04 step 5).
 //!
-//! The prelude's own statics are classified by `C99_MUTABLE_STATE_OWNERS` in `prelude.rs`. This is
+//! The prelude's own statics are classified by `C99_MUTABLE_STATE_OWNERS` in `tests/c99_state_owners.rs`. This is
 //! the same manifest for what the *emitters* write into a unit or a launcher: every mutable static
 //! must match a row here, and there is no row for realm state. Realm state is not a static: a
 //! unit's module globals and template sites are its realm block (`kiln_c99_unit`), a launcher's

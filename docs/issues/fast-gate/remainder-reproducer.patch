@@ -1,0 +1,17 @@
+diff --git a/crates/native/kiln-backend-c/src/parallel_tests.rs b/crates/native/kiln-backend-c/src/parallel_tests.rs
+index a270b5d3..f280bf6c 100644
+--- a/crates/native/kiln-backend-c/src/parallel_tests.rs
++++ b/crates/native/kiln-backend-c/src/parallel_tests.rs
+@@ -870,3 +870,12 @@ fn a_generic_only_module_puts_its_parallel_workers_in_their_own_unit() {
+     assert_eq!(flagged.source, plain.source);
+     assert_eq!(flagged.symbol, plain.symbol);
+ }
++
++#[test]
++fn slow_gate_remainder_probe() {
++    let e = Expr::Binary(BinaryOp::Remainder,
++        Box::new(Expr::Binary(BinaryOp::BitwiseXor, Box::new(Expr::Number(818662.575431119)), Box::new(Expr::Element))),
++        Box::new(Expr::Binary(BinaryOp::ShiftRight, Box::new(Expr::Number(1e-310)), Box::new(Expr::Index))));
++    let failure = compare(&[(e, 2)], &[4294967295.0, 0.0, 30.0], [1.0, 2.0]);
++    assert!(failure.is_none(), "{failure:?}");
++}

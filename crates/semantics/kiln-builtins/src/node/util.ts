@@ -6,13 +6,40 @@ const customPromisifySymbol = Symbol.for("nodejs.util.promisify.custom");
 export const TextDecoder = globalThis.TextDecoder;
 export const TextEncoder = globalThis.TextEncoder;
 
+function inspectString(value: string): string {
+  // Node prefers single quotes, switching only when that avoids escaping the only quote kind
+  // present in the string. Keep the escaping here independent of JSON's always-double quoting.
+  const quote = value.includes("'") && !value.includes('"') ? '"' : "'";
+  let out = quote;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    const ch = value[i];
+    if (ch === "\\") out += "\\\\";
+    else if (ch === quote) out += "\\" + ch;
+    else if (ch === "\n") out += "\\n";
+    else if (ch === "\r") out += "\\r";
+    else if (ch === "\t") out += "\\t";
+    else if (ch === "\b") out += "\\b";
+    else if (ch === "\f") out += "\\f";
+    else if (code < 0x20 || code === 0x7f) out += `\\x${code.toString(16).padStart(2, "0")}`;
+    else if (code >= 0xd800 && code <= 0xdfff &&
+             !(code <= 0xdbff && i + 1 < value.length &&
+               value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) &&
+             !(code >= 0xdc00 && i > 0 &&
+               value.charCodeAt(i - 1) >= 0xd800 && value.charCodeAt(i - 1) <= 0xdbff))
+      out += `\\u${code.toString(16).padStart(4, "0")}`;
+    else out += ch;
+  }
+  return out + quote;
+}
+
 export function inspect(value: any, options?: any): string {
   if (value === undefined) return "undefined";
   if (value === null) return "null";
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") return Object.is(value, -0) ? "-0" : String(value);
   if (typeof value === "bigint") return `${value}n`;
-  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "string") return inspectString(value);
   if (typeof value === "symbol") return value.toString();
   if (typeof value === "function") {
     return value.name ? `[Function: ${value.name}]` : "[Function (anonymous)]";
@@ -22,8 +49,13 @@ export function inspect(value: any, options?: any): string {
   }
 
   // Custom inspection method
-  if (typeof value[customInspectSymbol] === "function") {
-    return String(value[customInspectSymbol](2, options));
+  if (options?.customInspect !== false && typeof value[customInspectSymbol] === "function") {
+    const rendered = value[customInspectSymbol](options?.depth ?? 2, options || {}, inspect);
+    // Strings are already formatted. Other return values go through inspection;
+    // returning the receiver itself requests its ordinary representation.
+    if (rendered !== value) {
+      return typeof rendered === "string" ? rendered : inspect(rendered, options);
+    }
   }
 
   if (Array.isArray(value)) {
@@ -149,6 +181,109 @@ export function formatWithOptions(inspectOptions: any, ...args: any[]): string {
 
 export function format(...args: any[]): string {
   return formatWithOptions(undefined, ...args);
+}
+
+export function stripVTControlCharacters(value: string): string {
+  if (typeof value !== "string") {
+    throw new TypeError("The \"str\" argument must be of type string");
+  }
+  // CSI sequences and OSC sequences (terminated by BEL or ST) are the control forms used by
+  // terminal styling libraries and command line package help output.
+  return value.replace(/\u001B\[[0-?]*[ -/]*[@-~]|\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, "");
+}
+
+export function isDeepStrictEqual(actual: any, expected: any): boolean {
+  const leftSeen: any[] = [];
+  const rightSeen: any[] = [];
+  function unorderedMatch(left: any[], right: any[], matches: (a: any, b: any) => boolean): boolean {
+    if (left.length !== right.length) return false;
+    const used: boolean[] = [];
+    function search(index: number): boolean {
+      if (index === left.length) return true;
+      for (let candidate = 0; candidate < right.length; candidate++) {
+        if (used[candidate]) continue;
+        const leftMark = leftSeen.length;
+        const rightMark = rightSeen.length;
+        if (matches(left[index], right[candidate])) {
+          used[candidate] = true;
+          if (search(index + 1)) return true;
+          used[candidate] = false;
+        }
+        leftSeen.length = leftMark;
+        rightSeen.length = rightMark;
+      }
+      return false;
+    }
+    return search(0);
+  }
+  function equal(left: any, right: any): boolean {
+    if (Object.is(left, right)) return true;
+    if (left === null || right === null || typeof left !== "object" || typeof right !== "object") {
+      return false;
+    }
+    if (Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)) return false;
+    for (let i = 0; i < leftSeen.length; i++) {
+      if (leftSeen[i] === left) return rightSeen[i] === right;
+      if (rightSeen[i] === right) return false;
+    }
+    leftSeen.push(left);
+    rightSeen.push(right);
+    try {
+      return equalObject(left, right);
+    } finally {
+      // Only ancestors constrain cycle matching. A shared child and two equal
+      // independent children compare equally once their earlier branch ends.
+      leftSeen.pop();
+      rightSeen.pop();
+    }
+  }
+
+  function equalObject(left: any, right: any): boolean {
+
+    if (left instanceof Date || right instanceof Date) {
+      if (!(left instanceof Date) || !(right instanceof Date) || !Object.is(left.getTime(), right.getTime())) return false;
+    }
+    if (left instanceof URL || right instanceof URL) {
+      if (!(left instanceof URL) || !(right instanceof URL) || left.href !== right.href) return false;
+    }
+    if (left instanceof RegExp || right instanceof RegExp) {
+      if (!(left instanceof RegExp) || !(right instanceof RegExp) ||
+          left.source !== right.source || left.flags !== right.flags || left.lastIndex !== right.lastIndex) return false;
+    }
+    if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) {
+      if (!ArrayBuffer.isView(left) || !ArrayBuffer.isView(right) ||
+          left.constructor !== right.constructor || left.byteLength !== right.byteLength) return false;
+      const a = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
+      const b = new Uint8Array(right.buffer, right.byteOffset, right.byteLength);
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    }
+    if (left instanceof ArrayBuffer || right instanceof ArrayBuffer) {
+      if (!(left instanceof ArrayBuffer) || !(right instanceof ArrayBuffer) || left.byteLength !== right.byteLength) return false;
+      const a = new Uint8Array(left), b = new Uint8Array(right);
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    }
+    if (Array.isArray(left) !== Array.isArray(right)) return false;
+    if (Array.isArray(left) && left.length !== right.length) return false;
+    if (left instanceof Map || right instanceof Map) {
+      if (!(left instanceof Map) || !(right instanceof Map) || left.size !== right.size) return false;
+      const a = Array.from(left.entries()), b = Array.from(right.entries());
+      if (!unorderedMatch(a, b, (x, y) => equal(x[0], y[0]) && equal(x[1], y[1]))) return false;
+    }
+    if (left instanceof Set || right instanceof Set) {
+      if (!(left instanceof Set) || !(right instanceof Set) || left.size !== right.size) return false;
+      const a = Array.from(left.values()), b = Array.from(right.values());
+      if (!unorderedMatch(a, b, equal)) return false;
+    }
+    const aKeys = Reflect.ownKeys(left).filter((key: any) => Object.prototype.propertyIsEnumerable.call(left, key));
+    const bKeys = Reflect.ownKeys(right).filter((key: any) => Object.prototype.propertyIsEnumerable.call(right, key));
+    if (aKeys.length !== bKeys.length) return false;
+    for (let i = 0; i < aKeys.length; i++) {
+      const key = aKeys[i];
+      if (!Object.prototype.propertyIsEnumerable.call(right, key) || !equal(left[key], right[key])) return false;
+    }
+    return true;
+  }
+  return equal(actual, expected);
 }
 
 export function inherits(ctor: any, superCtor: any): void {
@@ -400,6 +535,7 @@ const util = {
   isString,
   isSymbol,
   isUndefined,
+  isDeepStrictEqual,
   promisify,
   styleText,
   types,

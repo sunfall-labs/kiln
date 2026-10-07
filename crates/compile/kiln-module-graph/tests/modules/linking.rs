@@ -1006,7 +1006,11 @@ fn deep_linear_graph_is_stack_safe() {
             program: Program {
                 source: "".into(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
                 version: BYTECODE_VERSION,
+                source_origin: None,
+                static_source_identity: None,
+                static_source_provenance: None,
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
                 local_count: 0,
@@ -1042,7 +1046,11 @@ fn step_limit_diagnostic_reports_total_graph_steps() {
             program: Program {
                 source: "".into(),
                 template_sites: Vec::new(),
+                debug_call_sites: Vec::new(),
                 version: BYTECODE_VERSION,
+                source_origin: None,
+                static_source_identity: None,
+                static_source_provenance: None,
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
                 local_count: 0,
@@ -1224,6 +1232,53 @@ fn reduce_to_live_keeps_link_only_reexport_imports_inert() {
 }
 
 #[test]
+fn reduce_to_live_drops_unrequested_reexports_with_dead_providers() {
+    let project = TempProject::new();
+    project.write("package.json", r#"{"type":"module","sideEffects":false}"#);
+    let used = project.write("used.mjs", "export const answer = 42;\n");
+    let dead = project.write("dead.mjs", "export const hidden = 7;\n");
+    let barrel = project.write(
+        "barrel.mjs",
+        "export { answer } from './used.mjs';\nexport { hidden } from './dead.mjs';\n",
+    );
+    let entry = project.write(
+        "main.mjs",
+        "import { answer } from './barrel.mjs'; console.log(answer);\n",
+    );
+    let graph = project.graph(&entry).expect("re-export graph");
+    let used_slot = match graph
+        .resolved_export(&barrel, "answer")
+        .expect("answer re-export")
+    {
+        ResolvedExport::Local { module, local_slot } => {
+            assert_eq!(module, &used);
+            *local_slot
+        }
+        resolution => panic!("expected a local re-export, got {resolution:?}"),
+    };
+    let demand = LiveDemand {
+        live: BTreeSet::from([entry.clone(), barrel.clone(), used.clone()]),
+        slots: BTreeMap::from([(used.clone(), BTreeSet::from([used_slot]))]),
+        live_imports: BTreeSet::from([(entry.clone(), 0), (barrel.clone(), 0)]),
+    };
+
+    let (reduced, _) = graph
+        .reduce_to_live(&demand)
+        .expect("dead unused re-export is removed without a dangling link");
+
+    assert!(reduced.module(&dead).is_none());
+    let reduced_barrel = reduced.module(&barrel).expect("barrel retained");
+    assert_eq!(reduced_barrel.program.imports.len(), 1);
+    assert_eq!(reduced_barrel.program.exports.len(), 1);
+    assert_eq!(reduced_barrel.program.exports[0].exported, "answer");
+    assert_eq!(
+        reduced.resolved_export(&barrel, "answer"),
+        graph.resolved_export(&barrel, "answer")
+    );
+    assert!(reduced.resolved_export(&barrel, "hidden").is_none());
+}
+
+#[test]
 fn reduce_to_live_retargets_an_import_around_a_dropped_barrel() {
     let project = TempProject::new();
     let origin = project.write("origin.mjs", "export const answer = 42;\n");
@@ -1257,6 +1312,11 @@ fn reduce_to_live_retargets_an_import_around_a_dropped_barrel() {
     assert_eq!(entry_node.program.imports[0].imported, "answer");
     assert_eq!(entry_node.dependencies.len(), 1);
     assert_eq!(entry_node.dependencies[0].target, origin);
+    assert_eq!(
+        entry_node.program.dependencies,
+        vec![entry_node.program.imports[0].source.clone()],
+        "rewritten synthetic import remains a static request in the reduced program"
+    );
     assert_eq!(remapped.live_imports, BTreeSet::from([(entry, 0)]));
 }
 
@@ -1287,4 +1347,47 @@ fn ambiguous_ts_with_static_imports_builds_as_esm() {
         "the builtin import survives as a linked binding: {:?}",
         node.program.imports
     );
+}
+
+#[test]
+fn reduce_to_live_retargets_commonjs_default_through_a_dropped_barrel() {
+    let project = TempProject::new();
+    let origin = project.write("origin.cjs", "module.exports = function FormData() {};\n");
+    let barrel = project.write("barrel.mjs", "export { default } from './origin.cjs';\n");
+    let entry = project.write(
+        "main.mjs",
+        "import FormData from './barrel.mjs'; console.log(typeof FormData);\n",
+    );
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&project.root).expect("resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("CommonJS barrel graph");
+    let demand = LiveDemand {
+        live: graph
+            .modules()
+            .filter(|node| node.path != barrel)
+            .map(|node| node.path.clone())
+            .collect(),
+        slots: BTreeMap::from([(origin.clone(), BTreeSet::from([0]))]),
+        live_imports: BTreeSet::from([(entry.clone(), 0)]),
+    };
+    let (reduced, _) = graph
+        .reduce_to_live(&demand)
+        .expect("retarget virtual default");
+    assert!(reduced.module(&barrel).is_none());
+    let node = reduced.module(&entry).unwrap();
+    assert_eq!(node.program.imports[0].imported, "default");
+    assert_eq!(node.dependencies[0].target, origin);
+    let mut host = kiln_runtime::CaptureHost::new();
+    reduced
+        .execute_node(
+            &mut host,
+            ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("execute retargeted CommonJS default");
+    assert_eq!(host.into_stdout(), "function\n");
 }

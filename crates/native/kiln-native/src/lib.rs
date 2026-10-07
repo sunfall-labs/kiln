@@ -27,26 +27,28 @@ use kiln_artifact_cache::{
 #[cfg(test)]
 use kiln_backend_c::emit_module_with_logical_path;
 use kiln_backend_c::{
-    C_ABI_VERSION, C_GENERATOR_VERSION, C99_HOST_MODULE_CREATE_REQUIRE, EmissionPolicy, EmitError,
-    RUNTIME_PRELUDE_HEADER_NAME, emit_commonjs_module_with_logical_path_and_policy,
-    emit_module_with_logical_path_and_policy, emit_runtime_module_with_logical_path_and_policy,
-    emit_with_policy, runtime_prelude_header,
+    C_ABI_VERSION, C_GENERATOR_VERSION, C99_HOST_MODULE_CREATE_REQUIRE, CModuleUnit,
+    EmissionPolicy, EmitError, RUNTIME_PRELUDE_HEADER_NAME,
+    emit_commonjs_module_with_logical_path_and_policy, emit_module_with_logical_path_and_policy,
+    emit_runtime_module_with_logical_path_and_policy, emit_with_policy, runtime_prelude_header,
 };
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
 use kiln_ir::Program;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
+use kiln_module_resolver::NodeBuiltin;
 pub use kiln_native_provider_contract::{
     ProviderCapabilities, ProviderCapability, ProviderVariant,
 };
+pub use kiln_native_runtime::{ChildStream, embedding_header, embedding_module_header};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
     NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION, decode_native_result,
     embedding_module_api_symbol, launcher_source, runtime_source,
 };
-pub use kiln_native_runtime::{embedding_header, embedding_module_header};
 use kiln_native_toolchain::{
     CompileOptions, CompilerKind, LinkOptions, ToolIdentity, Toolchain, ToolchainError,
+    native_release_keep_symbols,
 };
 use number_provider::{NumberProvider, PROVIDER_ABI_VERSION, PROVIDER_SCHEMA_VERSION};
 use rayon::prelude::*;
@@ -54,6 +56,25 @@ use url::Url;
 
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn append_instantiation_unit(
+    unit: &CModuleUnit,
+    generic_only: bool,
+    generated_c_hit: bool,
+    symbols: &mut Vec<String>,
+    sources: &mut Vec<(Vec<u8>, Digest, bool)>,
+    unit_generic_only: &mut Vec<bool>,
+    unit_generic_mixed: &mut Vec<bool>,
+) {
+    symbols.push(unit.symbol.clone());
+    sources.push((
+        unit.source.as_bytes().to_vec(),
+        Digest::hash(unit.source.as_bytes()),
+        generated_c_hit,
+    ));
+    unit_generic_only.push(generic_only);
+    unit_generic_mixed.push(unit.generic_mixed_optimization);
+}
 
 /// A release build (`release_bootstrap_specialized`) emits the builtin bootstrap
 /// specialized and compiles it at -O2 (issue 17), in translation units of about this many bytes
@@ -80,6 +101,39 @@ fn release_bootstrap_specialized() -> bool {
 const OBJECT_COMPILE_LOCK_BUCKETS: usize = 256;
 static OBJECT_COMPILE_LOCKS: [parking_lot::Mutex<()>; OBJECT_COMPILE_LOCK_BUCKETS] =
     [const { parking_lot::Mutex::new(()) }; OBJECT_COMPILE_LOCK_BUCKETS];
+
+fn needs_native_http_facade(members: &kiln_graph::DemandedMembers) -> bool {
+    if members
+        .globals
+        .iter()
+        .any(|name| matches!(name.as_str(), "fetch" | "Bun" | "Kiln"))
+        || members.has_open_world
+    {
+        return true;
+    }
+
+    let uses_global_object = members
+        .globals
+        .iter()
+        .any(|name| matches!(name.as_str(), "globalThis" | "global"));
+    if !uses_global_object {
+        return false;
+    }
+
+    members
+        .names
+        .iter()
+        .any(|name| matches!(name.as_str(), "fetch" | "Bun" | "Kiln"))
+        || members.has_computed_access
+        || members
+            .globals
+            .iter()
+            .any(|name| matches!(name.as_str(), "Reflect" | "Object"))
+        || members
+            .names
+            .iter()
+            .any(|name| matches!(name.as_str(), "get" | "getOwnPropertyDescriptor" | "has"))
+}
 
 const RELEASE_PRELUDE_COMPILE_IDENTITY: &[u8] = b"vectorize=off\0slp-vectorize=off";
 
@@ -357,6 +411,28 @@ fn reduced_graph(
     graph.reduce_to_live(demand).map_err(NativeError::Graph)
 }
 
+fn demanded_export_names(
+    exports: &[kiln_ir::ExportBinding],
+    slots: &BTreeSet<u32>,
+) -> BTreeSet<String> {
+    exports
+        .iter()
+        .filter(|export| slots.contains(&export.local_slot))
+        .map(|export| export.exported.clone())
+        .collect()
+}
+
+fn export_slots_for_names(
+    exports: &[kiln_ir::ExportBinding],
+    names: &BTreeSet<String>,
+) -> BTreeSet<u32> {
+    exports
+        .iter()
+        .filter(|export| names.contains(&export.exported))
+        .map(|export| export.local_slot)
+        .collect()
+}
+
 /// Specialize direct ESM exports to the closed-world demand, then let Oxc
 /// remove the newly unreferenced local declarations using its purity model.
 ///
@@ -379,23 +455,26 @@ fn dce_release_graph(
             continue;
         }
         let demanded_slots = demand.slots.get(&node.path).cloned().unwrap_or_default();
-        let demanded_names = node
-            .program
-            .exports
-            .iter()
-            .filter(|export| demanded_slots.contains(&export.local_slot))
-            .map(|export| export.exported.clone())
-            .collect::<BTreeSet<_>>();
+        let demanded_names = demanded_export_names(&node.program.exports, &demanded_slots);
         let Some(path) = node.path.to_str() else {
             continue;
         };
         let is_entry = node.path == graph.entry();
-        let hir = kiln_frontend_oxc::parse_dce_native(
-            path,
-            &node.program.program.source,
-            &demanded_names,
-            is_entry,
-        );
+        let hir = match &node.program.program.static_source_provenance {
+            Some(provenance) => kiln_frontend_oxc::parse_dce_native_prepared(
+                path,
+                &node.program.program.source,
+                &demanded_names,
+                is_entry,
+                Arc::clone(provenance),
+            ),
+            None => kiln_frontend_oxc::parse_dce_native(
+                path,
+                &node.program.program.source,
+                &demanded_names,
+                is_entry,
+            ),
+        };
         let Ok(mut program) = kiln_ir::compile_module(&hir) else {
             continue;
         };
@@ -417,12 +496,14 @@ fn dce_release_graph(
         program.imports = imports;
         program.dependencies.clone_from(&node.program.dependencies);
 
-        let replacement_slots = program
-            .exports
-            .iter()
-            .filter(|export| demanded_names.contains(&export.exported))
-            .map(|export| export.local_slot)
-            .collect::<BTreeSet<_>>();
+        // Source-level DCE can renumber the compiler-generated locals used to represent
+        // indirect exports. Reconcile those links by public export name, just as the later
+        // import.meta reparse does, rather than relying on a generated local name surviving
+        // the reparse. Otherwise a barrel can retain the export row while losing the import
+        // that supplies its value, which leaves the slot uninitialized in release builds.
+        let _ = restore_reexport_imports(&node.program, &mut program);
+
+        let replacement_slots = export_slots_for_names(&program.exports, &demanded_names);
         let replacement_names = program
             .exports
             .iter()
@@ -446,12 +527,66 @@ fn dce_release_graph(
     }
 }
 
-/// Re-parse modules with native `import.meta` (Node SEA semantics) without DCE.
-/// Used for non-release profiles where `dce_release_graph` doesn't run: the module
-/// graph is parsed once for both interpreter and native, so native dev builds need
-/// their own re-parse to get runtime `import.meta` values.
-fn native_import_meta_reparse(graph: &ModuleGraph) -> ModuleGraph {
+fn restore_reexport_imports(
+    previous: &kiln_ir::ModuleProgram,
+    reparsed: &mut kiln_ir::ModuleProgram,
+) -> BTreeSet<(usize, usize)> {
+    let mut mapped_imports = BTreeSet::new();
+    for export in &reparsed.exports {
+        let Some(previous_export) = previous
+            .exports
+            .iter()
+            .find(|previous| previous.exported == export.exported)
+        else {
+            continue;
+        };
+        let Some((previous_index, previous_import)) = previous
+            .imports
+            .iter()
+            .enumerate()
+            .find(|(_, import)| import.local_slot == previous_export.local_slot)
+        else {
+            continue;
+        };
+
+        let new_index = if let Some(index) = reparsed
+            .imports
+            .iter()
+            .position(|import| import.local_slot == export.local_slot)
+        {
+            let import = &mut reparsed.imports[index];
+            import.source.clone_from(&previous_import.source);
+            import.imported.clone_from(&previous_import.imported);
+            index
+        } else {
+            reparsed.imports.push(kiln_ir::ImportBinding {
+                source: previous_import.source.clone(),
+                imported: previous_import.imported.clone(),
+                local: format!(
+                    "{}reparsed-reexport-{}*",
+                    kiln_ir::REEXPORT_LOCAL_PREFIX,
+                    reparsed.imports.len()
+                ),
+                local_slot: export.local_slot,
+            });
+            reparsed.imports.len() - 1
+        };
+        mapped_imports.insert((previous_index, new_index));
+    }
+    mapped_imports
+}
+
+/// Re-parse modules with native `import.meta` (Node SEA semantics), preserving their
+/// public export surface and remapping demanded local slots by export name. Recompilation
+/// can remove unused locals and renumber the surviving export bindings, so carrying the
+/// original slot numbers into emission is unsound even when every export remains present.
+fn native_import_meta_reparse(
+    graph: &ModuleGraph,
+    demand: &kiln_module_graph::LiveDemand,
+) -> (ModuleGraph, kiln_module_graph::LiveDemand) {
     let mut replacements = BTreeMap::new();
+    let mut remapped = demand.clone();
+    let mut remapped_imports = demand.live_imports.clone();
 
     for node in graph.modules() {
         if node.source != ModuleSource::Source {
@@ -460,7 +595,8 @@ fn native_import_meta_reparse(graph: &ModuleGraph) -> ModuleGraph {
         if node.program.program.source.is_empty() {
             continue;
         }
-        // Demand all exports: no DCE, just the import.meta re-lowering.
+        // Demand all exports so reparsing can specialize dead code without changing the public
+        // interface. The pass may remove unused imports and declarations as well.
         let demanded_names = node
             .program
             .exports
@@ -471,39 +607,92 @@ fn native_import_meta_reparse(graph: &ModuleGraph) -> ModuleGraph {
             continue;
         };
         let is_entry = node.path == graph.entry();
-        let hir = kiln_frontend_oxc::parse_dce_native(
-            path,
-            &node.program.program.source,
-            &demanded_names,
-            is_entry,
-        );
+        let hir = match &node.program.program.static_source_provenance {
+            Some(provenance) => kiln_frontend_oxc::parse_dce_native_prepared(
+                path,
+                &node.program.program.source,
+                &demanded_names,
+                is_entry,
+                Arc::clone(provenance),
+            ),
+            None => kiln_frontend_oxc::parse_dce_native(
+                path,
+                &node.program.program.source,
+                &demanded_names,
+                is_entry,
+            ),
+        };
         let Ok(mut program) = kiln_ir::compile_module(&hir) else {
             continue;
         };
 
+        let reparsed_names = program
+            .exports
+            .iter()
+            .map(|export| export.exported.clone())
+            .collect::<BTreeSet<_>>();
+        if !demanded_names.is_subset(&reparsed_names) {
+            continue;
+        }
+
         let mut imports = Vec::new();
+        remapped_imports.retain(|(path, _)| path != &node.path);
         for mut import in program.imports {
-            let Some(linked) = node
+            let Some((old_index, linked)) = node
                 .program
                 .imports
                 .iter()
-                .find(|candidate| candidate.local == import.local)
+                .enumerate()
+                .find(|(_, candidate)| candidate.local == import.local)
             else {
                 continue;
             };
             import.source.clone_from(&linked.source);
             import.imported.clone_from(&linked.imported);
+            let new_index = imports.len();
+            if demand
+                .live_imports
+                .contains(&(node.path.clone(), old_index))
+            {
+                remapped_imports.insert((node.path.clone(), new_index));
+            }
             imports.push(import);
         }
         program.imports = imports;
-        program.dependencies.clone_from(&node.program.dependencies);
 
+        // DCE may lower an imported local export as a fresh local binding, while the previous
+        // graph represented it as an indirect export backed by a synthetic import slot. Preserve
+        // that link relation by public export name; matching only the generated local name is
+        // insufficient because the synthetic `*reexportN*` names are renumbered when exports are
+        // removed. Without this edge, relinking silently turns the export into an uninitialized
+        // local in the barrel and imports resolve to that slot instead of the original provider.
+        let reexport_imports = restore_reexport_imports(&node.program, &mut program);
+        for (previous_index, new_index) in reexport_imports {
+            if demand
+                .live_imports
+                .contains(&(node.path.clone(), previous_index))
+            {
+                remapped_imports.insert((node.path.clone(), new_index));
+            }
+        }
+        program.dependencies.clone_from(&node.program.dependencies);
+        let demanded_names = demand
+            .slots
+            .get(&node.path)
+            .map(|slots| demanded_export_names(&node.program.exports, slots))
+            .unwrap_or_default();
+        remapped.slots.insert(
+            node.path.clone(),
+            export_slots_for_names(&program.exports, &demanded_names),
+        );
         replacements.insert(node.path.clone(), program);
     }
 
+    remapped.live_imports = remapped_imports;
+
     match graph.replace_programs_and_relink(replacements) {
-        Ok(graph) => graph,
-        Err(_) => graph.clone(),
+        Ok(graph) => (graph, remapped),
+        Err(_) => (graph.clone(), demand.clone()),
     }
 }
 
@@ -526,6 +715,59 @@ fn demanded_interface(
             (node.path.clone(), names)
         })
         .collect()
+}
+
+/// Opt-in release-graph export-slot trace. Set `KILN_DEBUG_MODULE_DEMANDS` to a module path
+/// substring (for example, `acorn-typescript`) to compare export slots and demand at each graph
+/// transformation boundary. This is out-of-band and does not affect cache keys or emission.
+fn debug_module_demands(stage: &str, graph: &ModuleGraph, demand: &kiln_module_graph::LiveDemand) {
+    let Ok(filter) = std::env::var("KILN_DEBUG_MODULE_DEMANDS") else {
+        return;
+    };
+    if filter.is_empty() {
+        return;
+    }
+    for node in graph
+        .modules()
+        .filter(|node| node.path.to_string_lossy().contains(filter.as_str()))
+    {
+        let exports = node
+            .program
+            .exports
+            .iter()
+            .map(|export| format!("{}={}", export.exported, export.local_slot))
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "kiln: module-demand stage={stage} path={} live={} demanded={:?} exports=[{}]",
+            node.path.display(),
+            demand.live.contains(&node.path),
+            demand.slots.get(&node.path),
+            exports
+        );
+        for (index, import) in node.program.imports.iter().enumerate() {
+            let resolved = node
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == import.source)
+                .and_then(|dependency| {
+                    graph
+                        .resolved_export(&dependency.target, &import.imported)
+                        .map(|export| format!("{:?}", export))
+                })
+                .unwrap_or_else(|| "<unresolved-or-namespace>".to_owned());
+            eprintln!(
+                "kiln: module-demand-import stage={stage} path={} index={index} local={} local_slot={} source={} imported={} resolved={} live={}",
+                node.path.display(),
+                import.local,
+                import.local_slot,
+                import.source,
+                import.imported,
+                resolved,
+                demand.live_imports.contains(&(node.path.clone(), index)),
+            );
+        }
+    }
 }
 
 /// Alternate source-level DCE and graph selection until removing wrappers no longer narrows the
@@ -595,12 +837,18 @@ fn emit_graph_module_for_profile(
     logical_path: &str,
     policy: &EmissionPolicy,
     profile: NativeProfile,
+    instantiate: bool,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     let policy = graph_source_emitter::effective_policy(node, policy, profile);
     if matches!(node.source, ModuleSource::Source | ModuleSource::CommonJs) {
-        graph_source_emitter::emit(node, logical_path, &policy)
+        graph_source_emitter::emit(node, logical_path, &policy, instantiate)
     } else {
-        emit_native_graph_module_with_policy(node, logical_path, &policy)
+        graph::emit_native_graph_module_with_policy_and_instantiation(
+            node,
+            logical_path,
+            &policy,
+            instantiate,
+        )
     }
 }
 
@@ -613,13 +861,32 @@ fn configure_release_prelude_compile(options: &mut CompileOptions) {
         .extend(["-fno-vectorize".into(), "-fno-slp-vectorize".into()]);
 }
 
-fn configure_release_module_compile(options: &mut CompileOptions, generic_only: bool) {
+fn configure_release_module_compile(
+    options: &mut CompileOptions,
+    generic_only: bool,
+    generic_mixed_optimization: bool,
+) {
     if generic_only {
         // Generic bodies are deliberately used for the largest modules, where optimizing them
         // makes small real-world bundles materially slower despite reducing object size. Keep
         // this path at O0 by default, or respect KILN_GENERIC_OPT (e.g. 1, 2, 3, z).
-        let opt = std::env::var("KILN_GENERIC_OPT").unwrap_or_else(|_| "0".into());
+        let explicit_opt = std::env::var("KILN_GENERIC_OPT").ok();
+        let opt = explicit_opt
+            .clone()
+            .unwrap_or_else(|| if generic_mixed_optimization { "1" } else { "0" }.into());
         options.extra_args.push(format!("-O{opt}").into());
+        if generic_mixed_optimization && explicit_opt.is_none() {
+            options
+                .extra_args
+                .push("-DKILN_GENERIC_MIXED_TIER=1".into());
+        }
+        if explicit_opt.is_some() {
+            // The explicit global override preserves KILN_GENERIC_OPT's historical meaning:
+            // optimize every generic function at the requested level.
+            options
+                .extra_args
+                .push("-DKILN_GENERIC_OPT_OVERRIDE=1".into());
+        }
         // Clang treats an explicit O0 as its Debug configuration and otherwise injects UBSan
         // calls that the release link intentionally does not carry.
         options.extra_args.push("-fno-sanitize=undefined".into());
@@ -633,6 +900,10 @@ fn configure_release_module_compile(options: &mut CompileOptions, generic_only: 
     }
 }
 
+fn supports_function_optimization_attributes(kind: CompilerKind) -> bool {
+    matches!(kind, CompilerKind::Clang | CompilerKind::Gcc)
+}
+
 fn configure_release_size_module_compile(options: &mut CompileOptions) {
     options.extra_args.push("-fno-sanitize=undefined".into());
     options.extra_args.push("-fno-function-sections".into());
@@ -640,10 +911,12 @@ fn configure_release_size_module_compile(options: &mut CompileOptions) {
     options.extra_args.push("-fvisibility=hidden".into());
 }
 
-fn release_module_compile_identity(generic_only: bool) -> String {
+fn release_module_compile_identity(generic_only: bool, generic_mixed_optimization: bool) -> String {
     if generic_only {
         if let Ok(opt) = std::env::var("KILN_GENERIC_OPT") {
-            format!("generic-o{opt}-nosan-nosections")
+            format!("generic-override-o{opt}-nosan-nosections")
+        } else if generic_mixed_optimization {
+            "generic-mixed-o1-nosan-nosections".to_owned()
         } else {
             "generic-o0-nosan-nosections".into()
         }
@@ -696,13 +969,53 @@ fn pgo_options_fingerprint(options: &NativeBuildOptions) -> String {
     }
 }
 
-fn executable_link_options_digest(profile: NativeProfile, options: &NativeBuildOptions) -> Digest {
+fn provider_link_arguments_digest(arguments: &[String]) -> Digest {
+    // These are part of the actual linker command even though the provider archive's producer
+    // identity intentionally excludes them. Length framing preserves argument order and
+    // boundaries (`["-L", "a"]` is distinct from `["-La"]`).
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"kiln-provider-link-arguments-v1\0");
+    bytes.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
+    for argument in arguments {
+        let argument = argument.as_bytes();
+        bytes.extend_from_slice(&(argument.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(argument);
+    }
+    Digest::hash(&bytes)
+}
+
+fn executable_link_options_digest(
+    profile: NativeProfile,
+    options: &NativeBuildOptions,
+    provider_link_arguments: &[String],
+) -> Digest {
+    executable_link_options_digest_with_symbols(
+        profile,
+        options,
+        native_release_keep_symbols(),
+        provider_link_arguments,
+    )
+}
+
+fn executable_link_options_digest_with_symbols(
+    profile: NativeProfile,
+    options: &NativeBuildOptions,
+    keep_symbols: bool,
+    provider_link_arguments: &[String],
+) -> Digest {
     let static_opt = if options.static_link { "\0static" } else { "" };
     let pgo_opt = pgo_options_fingerprint(options);
+    let symbols_opt =
+        if keep_symbols && matches!(profile, NativeProfile::Release | NativeProfile::ReleaseSize) {
+            "\0keep-symbols"
+        } else {
+            ""
+        };
     Digest::hash(
         format!(
-            "{}\0system-math\0system-entropy-v1{static_opt}{pgo_opt}",
-            profile.as_str()
+            "{}\0system-math\0system-entropy-v1{static_opt}{pgo_opt}{symbols_opt}\0provider-link-args={}",
+            profile.as_str(),
+            provider_link_arguments_digest(provider_link_arguments),
         )
         .as_bytes(),
     )
@@ -731,7 +1044,7 @@ fn prelude_object_options_masked(base: Digest, profile: NativeProfile, mask: u32
 /// yields no flags, so fully retained builds compile exactly today's prelude.
 fn prelude_group_defines(mask: u32) -> Vec<std::ffi::OsString> {
     use kiln_graph::method_groups as groups;
-    const FLAGS: [(u32, &str); 18] = [
+    const FLAGS: [(u32, &str); 19] = [
         (groups::URL, "KILN_RETAIN_GROUP_URL"),
         (groups::TEMPORAL, "KILN_RETAIN_GROUP_TEMPORAL"),
         (groups::TEMPORAL_FROM, "KILN_RETAIN_GROUP_TEMPORAL_FROM"),
@@ -759,6 +1072,7 @@ fn prelude_group_defines(mask: u32) -> Vec<std::ffi::OsString> {
         ),
         (groups::NODE_STREAM, "KILN_RETAIN_GROUP_NODE_STREAM"),
         (groups::NODE_PATH, "KILN_RETAIN_GROUP_NODE_PATH"),
+        (groups::NODE_CRYPTO, "KILN_RETAIN_GROUP_NODE_CRYPTO"),
     ];
     FLAGS
         .iter()
@@ -796,7 +1110,7 @@ const ZIG_COMPILER_ENVIRONMENT: [&str; 1] = ["ZIG_LIB_DIR"];
 const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
-    assert!(PROVIDER_SCHEMA_VERSION == 4);
+    assert!(PROVIDER_SCHEMA_VERSION == 5);
 };
 
 mod options;
@@ -996,18 +1310,19 @@ impl NativeBuilder {
     fn cached_number_provider(
         &self,
         target: &str,
-    ) -> Result<(Arc<[u8]>, Digest, bool), NativeError> {
-        let (archive, digest, hit, _) =
+    ) -> Result<(Arc<[u8]>, Digest, bool, Vec<String>), NativeError> {
+        let (archive, digest, hit, _, link_arguments) =
             self.cached_number_provider_for(target, ProviderCapabilities::FULL)?;
-        Ok((archive, digest, hit))
+        Ok((archive, digest, hit, link_arguments))
     }
 
-    /// Resolve and cache the smallest provider variant covering `required`.
+    /// Resolve and cache the smallest provider variant covering `required`. The last element is
+    /// what the archive needs on the link line beyond the C runtime's own libraries.
     fn cached_number_provider_for(
         &self,
         target: &str,
         required: ProviderCapabilities,
-    ) -> Result<(Arc<[u8]>, Digest, bool, ProviderCapabilities), NativeError> {
+    ) -> Result<(Arc<[u8]>, Digest, bool, ProviderCapabilities, Vec<String>), NativeError> {
         let variant = ProviderVariant::smallest_covering(required).unwrap_or(ProviderVariant::Full);
         let provider = self.number_provider_variant(variant)?;
         let provider_key = NativeArtifactFamily::NumberProvider.key(
@@ -1026,10 +1341,17 @@ impl NativeBuilder {
             [provider.archive_digest],
         );
         let capabilities = provider.capabilities;
+        let link_arguments = provider.link_arguments.clone();
         match self.lookup_digest(&provider_key)? {
             Some((digest, _size)) => {
                 debug_assert_eq!(digest, provider.archive_digest);
-                Ok((Arc::clone(&provider.archive), digest, true, capabilities))
+                Ok((
+                    Arc::clone(&provider.archive),
+                    digest,
+                    true,
+                    capabilities,
+                    link_arguments,
+                ))
             }
             None => {
                 let stored = self.cache.put(&provider_key, &provider.archive)?;
@@ -1038,6 +1360,7 @@ impl NativeBuilder {
                     stored.digest,
                     false,
                     capabilities,
+                    link_arguments,
                 ))
             }
         }
@@ -1125,8 +1448,13 @@ impl NativeBuilder {
         // The single-module API sees only bytecode, not the import table, so a static
         // `node:http` use is invisible here: stay on the full archive.
         let required_provider_capabilities = ProviderCapabilities::FULL;
-        let (number_provider, number_provider_digest, _, provider_capabilities) =
-            self.cached_number_provider_for(&target, required_provider_capabilities)?;
+        let (
+            number_provider,
+            number_provider_digest,
+            _,
+            provider_capabilities,
+            provider_link_arguments,
+        ) = self.cached_number_provider_for(&target, required_provider_capabilities)?;
 
         let module_source_key = NativeArtifactFamily::ModuleSource.source_key(
             &target,
@@ -1164,7 +1492,11 @@ impl NativeBuilder {
         let march_opt = object_flag_identity(options);
         let pgo_opt = pgo_options_fingerprint(options);
         let module_opt = if profile == NativeProfile::Release {
-            release_module_compile_identity(emission.generic_only)
+            release_module_compile_identity(
+                module.generic_only,
+                module.generic_mixed_optimization
+                    && supports_function_optimization_attributes(identity.kind),
+            )
         } else if profile == NativeProfile::ReleaseSize {
             release_size_module_compile_identity().to_string()
         } else {
@@ -1207,7 +1539,8 @@ impl NativeBuilder {
             [launcher_source_digest],
         );
 
-        let link_options_digest = executable_link_options_digest(profile, options);
+        let link_options_digest =
+            executable_link_options_digest(profile, options, &provider_link_arguments);
         if let Some(app_info) = self.lookup_digest(&application_key)?
             && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
             && let Some(runtime_info) = self.lookup_digest(&runtime_key)?
@@ -1281,7 +1614,12 @@ impl NativeBuilder {
         };
         let mut app_compile_options = compile_options.clone();
         if profile == NativeProfile::Release {
-            configure_release_module_compile(&mut app_compile_options, emission.generic_only);
+            configure_release_module_compile(
+                &mut app_compile_options,
+                module.generic_only,
+                module.generic_mixed_optimization
+                    && supports_function_optimization_attributes(identity.kind),
+            );
         } else if profile == NativeProfile::ReleaseSize {
             configure_release_size_module_compile(&mut app_compile_options);
         }
@@ -1355,7 +1693,8 @@ impl NativeBuilder {
             compile_started.elapsed()
         };
 
-        let link_options_digest = executable_link_options_digest(profile, options);
+        let link_options_digest =
+            executable_link_options_digest(profile, options, &provider_link_arguments);
         let executable_key = NativeArtifactFamily::ExecutableLink.key(
             &compiler,
             &target,
@@ -1398,6 +1737,9 @@ impl NativeBuilder {
                     link_options
                         .runtime_libraries
                         .push(paths.number_provider_a.clone());
+                    link_options
+                        .extra_args
+                        .extend(provider_link_arguments.iter().map(std::ffi::OsString::from));
                     let report = self.toolchain.link_executable(
                         &[
                             paths.module_o.clone(),
@@ -1516,7 +1858,8 @@ impl NativeBuilder {
         let embedding_abi = shared_embedding_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
-        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
+        let (number_provider, number_provider_digest, _, provider_link_arguments) =
+            self.cached_number_provider(&target)?;
         // Keep the plain generated unit on the same cache identity as executable builds.  The
         // shared-only adapter is cached as a second generated-C artifact, so building a DSO does
         // not poison the reusable non-PIC module source cache.
@@ -1587,13 +1930,14 @@ impl NativeBuilder {
             )?;
             let link_options_digest = Digest::hash(
                 format!(
-                    "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                    "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}\0provider-link-args={}",
                     profile.as_str(),
                     shared_library_name(),
                     shared_library_link_identity(&loader),
                     shared_library_link_policy(),
                     EMBEDDING_MODULE_API_VERSION,
                     [module.symbol.as_str(), module_api_symbol.as_str()].join(","),
+                    provider_link_arguments_digest(&provider_link_arguments),
                 )
                 .as_bytes(),
             );
@@ -1693,13 +2037,14 @@ impl NativeBuilder {
         )?;
         let link_options_digest = Digest::hash(
             format!(
-                "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}\0provider-link-args={}",
                 profile.as_str(),
                 shared_library_name(),
                 shared_library_link_identity(&loader),
                 shared_library_link_policy(),
                 EMBEDDING_MODULE_API_VERSION,
                 [module.symbol.as_str(), module_api_symbol.as_str()].join(","),
+                provider_link_arguments_digest(&provider_link_arguments),
             )
             .as_bytes(),
         );
@@ -1731,6 +2076,9 @@ impl NativeBuilder {
                 link_options
                     .runtime_libraries
                     .push(paths.number_provider_a.clone());
+                link_options
+                    .extra_args
+                    .extend(provider_link_arguments.iter().map(std::ffi::OsString::from));
                 configure_shared_library_link(
                     &mut link_options,
                     &loader,
@@ -1798,11 +2146,12 @@ impl NativeBuilder {
         // Shared libraries embed for unknown hosts: development selection
         // keeps both arms of the production dispatcher and every live edge,
         // while dead modules are pruned like any other executable.
-        let demand = kiln_liveness::executable_demand(
+        let mut demand = kiln_liveness::executable_demand(
             graph,
             &selection_options_with_exclusions(&NativeProfile::Dev, &native_plan.excluded),
         )
         .map_err(NativeError::Graph)?;
+        include_runtime_aliases_in_demand(graph, &mut demand, &native_plan.runtime_alias_live);
         let (reduced, demand) = reduced_graph(graph, &demand)?;
         let (reduced, demand) = if matches!(
             options.profile,
@@ -1844,6 +2193,7 @@ impl NativeBuilder {
             .modules()
             .filter(|node| !native_plan.excluded.contains(&node.path))
             .collect::<Vec<_>>();
+        let cyclic_modules = graph::preinstantiated_module_paths(graph);
         let emitted_modules = emit_indexed(nodes.len(), "shared graph module emission", |index| {
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
@@ -1860,12 +2210,14 @@ impl NativeBuilder {
                 &logical_path,
                 &module_emission,
                 options.profile,
+                cyclic_modules.contains(&node.path),
                 || {
                     emit_graph_module_for_profile(
                         node,
                         &logical_path,
                         &module_emission,
                         options.profile,
+                        cyclic_modules.contains(&node.path),
                     )
                 },
             )
@@ -1903,6 +2255,7 @@ impl NativeBuilder {
             graph,
             &modules,
             &wrapper_symbol,
+            Some(&demand.live_imports),
             &native_plan.failures,
             &native_plan.runtime_failures,
         )?;
@@ -1929,6 +2282,7 @@ impl NativeBuilder {
         let mut symbol_list = Vec::new();
         let mut module_sources = Vec::new();
         let mut module_generic_only = Vec::new();
+        let mut module_generic_mixed = Vec::new();
         for ((_, module), &hit) in modules.iter().zip(&generated_c_hits) {
             if module.chunks.is_empty() {
                 symbol_list.push(module.symbol.clone());
@@ -1938,6 +2292,7 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(module.generic_only);
+                module_generic_mixed.push(module.generic_mixed_optimization);
             } else {
                 for (chunk_idx, chunk_source) in module.chunks.iter().enumerate() {
                     symbol_list.push(format!("{}_chunk_{chunk_idx}", module.symbol));
@@ -1947,6 +2302,7 @@ impl NativeBuilder {
                         hit,
                     ));
                     module_generic_only.push(module.generic_only);
+                    module_generic_mixed.push(module.chunk_generic_mixed_optimization[chunk_idx]);
                 }
             }
             if let Some(workers) = &module.parallel_workers {
@@ -1960,13 +2316,26 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(false);
+                module_generic_mixed.push(false);
+            }
+            if let Some(instantiation) = &module.instantiation {
+                append_instantiation_unit(
+                    instantiation,
+                    module.generic_only,
+                    hit,
+                    &mut symbol_list,
+                    &mut module_sources,
+                    &mut module_generic_only,
+                    &mut module_generic_mixed,
+                );
             }
         }
         let paths = SharedGraphLibraryPaths::new(workspace.path(), &symbol_list);
         let profile = options.profile;
         let embedding_abi = runtime_abi_identity();
         let compiler = compiler_identity(&identity);
-        let (number_provider, number_provider_digest, _) = self.cached_number_provider(&target)?;
+        let (number_provider, number_provider_digest, _, provider_link_arguments) =
+            self.cached_number_provider(&target)?;
         let wrapper_source_key = NativeArtifactFamily::SharedGraphWrapperSource.source_key(
             &target,
             Digest::hash(b"deterministic-c11-shared-graph-wrapper-owned-result-v2"),
@@ -1978,14 +2347,19 @@ impl NativeBuilder {
         let march_opt = object_flag_identity(options);
         let module_object_options = module_generic_only
             .iter()
-            .map(|&generic_only| {
+            .zip(&module_generic_mixed)
+            .map(|(&generic_only, &generic_mixed)| {
                 Digest::hash(
                     format!(
                         "shared-graph\0pic\0c11\0visibility-hidden\0{}\0{}{march_opt}\0module-opt={}",
                         identity.kind,
                         profile.as_str(),
                         if profile == NativeProfile::Release {
-                            release_module_compile_identity(generic_only)
+                            release_module_compile_identity(
+                                generic_only,
+                                generic_mixed
+                                    && supports_function_optimization_attributes(identity.kind),
+                            )
                         } else if profile == NativeProfile::ReleaseSize {
                             release_size_module_compile_identity().to_string()
                         } else {
@@ -2010,7 +2384,8 @@ impl NativeBuilder {
         // the six-argument entries externally linkable inside this DSO but hidden outside it.
         let module_compile_options = module_generic_only
             .iter()
-            .map(|&generic_only| {
+            .zip(&module_generic_mixed)
+            .map(|(&generic_only, &generic_mixed)| {
                 let mut compile = CompileOptions {
                     profile: profile.toolchain(),
                     position_independent: true,
@@ -2019,7 +2394,11 @@ impl NativeBuilder {
                 };
                 compile.extra_args.push("-fvisibility=hidden".into());
                 if profile == NativeProfile::Release {
-                    configure_release_module_compile(&mut compile, generic_only);
+                    configure_release_module_compile(
+                        &mut compile,
+                        generic_only,
+                        generic_mixed && supports_function_optimization_attributes(identity.kind),
+                    );
                 } else if profile == NativeProfile::ReleaseSize {
                     configure_release_size_module_compile(&mut compile);
                 }
@@ -2110,13 +2489,14 @@ impl NativeBuilder {
             )?;
             let link_options_digest = Digest::hash(
                 format!(
-                    "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                    "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}\0provider-link-args={}",
                     profile.as_str(),
                     shared_library_name(),
                     shared_library_link_identity(&loader),
                     shared_library_link_policy(),
                     EMBEDDING_MODULE_API_VERSION,
                     [wrapper_symbol.as_str(), module_api_symbol.as_str()].join(","),
+                    provider_link_arguments_digest(&provider_link_arguments),
                 )
                 .as_bytes(),
             );
@@ -2256,13 +2636,14 @@ impl NativeBuilder {
         )?;
         let link_options_digest = Digest::hash(
             format!(
-                "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}\0provider-link-args={}",
                 profile.as_str(),
                 shared_library_name(),
                 shared_library_link_identity(&loader),
                 shared_library_link_policy(),
                 EMBEDDING_MODULE_API_VERSION,
                 [wrapper_symbol.as_str(), module_api_symbol.as_str()].join(","),
+                provider_link_arguments_digest(&provider_link_arguments),
             )
             .as_bytes(),
         );
@@ -2301,6 +2682,9 @@ impl NativeBuilder {
                 link_options
                     .runtime_libraries
                     .push(paths.number_provider_a.clone());
+                link_options
+                    .extra_args
+                    .extend(provider_link_arguments.iter().map(std::ffi::OsString::from));
                 configure_shared_library_link(
                     &mut link_options,
                     &loader,
@@ -2399,6 +2783,7 @@ impl NativeBuilder {
         let native_plan = native_graph_plan(graph)?;
         let total_started = Instant::now();
         let emit_started = Instant::now();
+        let trace_emit = std::env::var_os("KILN_NATIVE_TRACE_EMIT").is_some();
         let mut emission = options.realm.emission_executable();
         emission.compact = options.profile != NativeProfile::Profile;
         if emission.compile_regex.is_none() {
@@ -2427,28 +2812,81 @@ impl NativeBuilder {
         let selection = selection_options_with_exclusions(&options.profile, &native_plan.excluded);
         let selected = kiln_liveness::select_executable_modules(graph, &selection)
             .map_err(NativeError::Graph)?;
+        let initial_demand = selected.demand();
+        let initial_members = kiln_graph::analyze_demanded_members(
+            graph,
+            &initial_demand.live,
+            &initial_demand.slots,
+        );
+        let needs_http_facade = needs_native_http_facade(&initial_members);
+        // Keep the optional augmented graph in this scope before borrowing it for selection.
+        // A SelectedModules value borrows its graph and must never travel beside a moved owner.
+        let augmented_graph = if needs_http_facade {
+            // The separately compiled web bootstrap's dependency is invisible to source graph
+            // discovery. Retain the public facade through a lazy runtime edge before selection.
+            Some(
+                graph
+                    .with_lazy_node_builtin(
+                        graph.entry(),
+                        "/kiln/runtime-bootstrap.ts",
+                        NodeBuiltin::Http,
+                    )
+                    .map_err(NativeError::Graph)?,
+            )
+        } else {
+            None
+        };
+        let graph = augmented_graph.as_ref().unwrap_or(graph);
+        let native_plan = if augmented_graph.is_some() {
+            native_graph_plan(graph)?
+        } else {
+            native_plan
+        };
+        let selection = selection_options_with_exclusions(&options.profile, &native_plan.excluded);
+        let selected = if augmented_graph.is_some() {
+            kiln_liveness::select_executable_modules(graph, &selection)
+                .map_err(NativeError::Graph)?
+        } else {
+            selected
+        };
         // One shaken graph feeds emission: reduce to the live subset first,
         // so the emitter and launcher below only ever see live modules and
         // live edges. With everything live this is the identity transform.
-        let demand = selected.demand();
+        let mut demand = selected.demand();
+        include_runtime_aliases_in_demand(graph, &mut demand, &native_plan.runtime_alias_live);
+        debug_module_demands("selected", graph, &demand);
         let (reduced, demand) = reduced_graph(graph, &demand)?;
+        debug_module_demands("reduced", &reduced, &demand);
         let (reduced, demand) = if matches!(
             options.profile,
             NativeProfile::Release | NativeProfile::ReleaseSize
         ) {
-            dce_release_graph_to_fixpoint(reduced, demand, &selection)?
+            let (reduced, demand) = dce_release_graph_to_fixpoint(reduced, demand, &selection)?;
+            debug_module_demands("release-dce", &reduced, &demand);
+            (reduced, demand)
         } else {
             // Non-release: re-parse for native import.meta without DCE.
-            (native_import_meta_reparse(&reduced), demand)
+            let (reduced, demand) = native_import_meta_reparse(&reduced, &demand);
+            debug_module_demands("import-meta", &reduced, &demand);
+            (reduced, demand)
         };
         let graph = &reduced;
         // Dispatch-group mask for the prelude: same closed-world selection,
         // so the `-D` flags below only ever remove what nothing retained can
         // reach. Computed once; the explain path recomputes it out-of-band.
         let members = kiln_graph::analyze_demanded_members(graph, &demand.live, &demand.slots);
-        let group_mask = kiln_liveness::retained_method_groups(graph, &demand, &members);
+        let group_mask = kiln_liveness::retained_method_groups(graph, &demand, &members)
+            | graph::NATIVE_WEB_BOOTSTRAP_METHOD_GROUPS;
+        if trace_emit {
+            eprintln!(
+                "kiln: graph selection and member analysis {}ms",
+                emit_started.elapsed().as_millis()
+            );
+        }
         let nodes: Vec<&kiln_module_graph::ModuleNode> = graph.modules().collect();
+        let cyclic_modules = graph::preinstantiated_module_paths(graph);
         let emitted_modules = emit_indexed(nodes.len(), "graph module emission", |index| {
+            let module_started = trace_emit.then(Instant::now);
             let node = nodes[index];
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
             let mut module_emission = emission.clone();
@@ -2464,15 +2902,25 @@ impl NativeBuilder {
                 &logical_path,
                 &module_emission,
                 options.profile,
+                cyclic_modules.contains(&node.path),
                 || {
                     emit_graph_module_for_profile(
                         node,
                         &logical_path,
                         &module_emission,
                         options.profile,
+                        cyclic_modules.contains(&node.path),
                     )
                 },
             )?;
+            if let Some(started) = module_started {
+                eprintln!(
+                    "kiln: module emission {}ms {} generated-C {}",
+                    started.elapsed().as_millis(),
+                    logical_path,
+                    if generated_c_hit { "hit" } else { "miss" }
+                );
+            }
             Ok((logical_path, emitted, generated_c_hit))
         })?;
         let mut modules = Vec::with_capacity(nodes.len());
@@ -2502,6 +2950,7 @@ impl NativeBuilder {
         if until == BuildUntil::Emitted {
             return Ok(Built::Emitted(parallel_sites));
         }
+        let bootstrap_started = trace_emit.then(Instant::now);
         let (bootstrap, _bootstrap_program, bootstrap_capabilities, bootstrap_generated_c_hit) =
             native_builtin_bootstrap_module(
                 &self.cache,
@@ -2513,11 +2962,23 @@ impl NativeBuilder {
                 (options.profile == NativeProfile::Release && release_bootstrap_specialized())
                     .then_some(RELEASE_BOOTSTRAP_UNIT_BYTES),
             )?;
+        if let Some(started) = bootstrap_started {
+            eprintln!(
+                "kiln: bootstrap emission {}ms generated-C {}",
+                started.elapsed().as_millis(),
+                if bootstrap_generated_c_hit {
+                    "hit"
+                } else {
+                    "miss"
+                }
+            );
+        }
         if !symbols.insert(bootstrap.symbol.clone()) {
             return Err(NativeError::SymbolCollision {
                 symbol: bootstrap.symbol,
             });
         }
+        let launcher_started = trace_emit.then(Instant::now);
         let launcher = graph_launcher_source_with_imports(
             graph,
             &modules,
@@ -2529,6 +2990,12 @@ impl NativeBuilder {
             Some(&native_plan.runtime_failures),
             Some(&bootstrap),
         )?;
+        if let Some(started) = launcher_started {
+            eprintln!(
+                "kiln: launcher emission {}ms",
+                started.elapsed().as_millis()
+            );
+        }
         let emit_elapsed = emit_started.elapsed();
         let runtime = runtime_source();
 
@@ -2536,6 +3003,7 @@ impl NativeBuilder {
         let mut symbol_list = Vec::new();
         let mut module_sources = Vec::new();
         let mut module_generic_only = Vec::new();
+        let mut module_generic_mixed = Vec::new();
         let mut module_chunk_ranges = Vec::with_capacity(modules.len());
         for ((_, module), &hit) in modules.iter().zip(&generated_c_hits) {
             let start = symbol_list.len();
@@ -2547,6 +3015,7 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(module.generic_only);
+                module_generic_mixed.push(module.generic_mixed_optimization);
             } else {
                 for (chunk_idx, chunk_source) in module.chunks.iter().enumerate() {
                     symbol_list.push(format!("{}_chunk_{chunk_idx}", module.symbol));
@@ -2556,6 +3025,7 @@ impl NativeBuilder {
                         hit,
                     ));
                     module_generic_only.push(module.generic_only);
+                    module_generic_mixed.push(module.chunk_generic_mixed_optimization[chunk_idx]);
                 }
             }
             if let Some(workers) = &module.parallel_workers {
@@ -2569,6 +3039,18 @@ impl NativeBuilder {
                     hit,
                 ));
                 module_generic_only.push(false);
+                module_generic_mixed.push(false);
+            }
+            if let Some(instantiation) = &module.instantiation {
+                append_instantiation_unit(
+                    instantiation,
+                    module.generic_only,
+                    hit,
+                    &mut symbol_list,
+                    &mut module_sources,
+                    &mut module_generic_only,
+                    &mut module_generic_mixed,
+                );
             }
             module_chunk_ranges.push(start..symbol_list.len());
         }
@@ -2596,8 +3078,13 @@ impl NativeBuilder {
         let required_provider_capabilities =
             kiln_liveness::retained_provider_capabilities(graph, &demand, &members)
                 .union(bootstrap_capabilities);
-        let (number_provider, number_provider_digest, _, provider_capabilities) =
-            self.cached_number_provider_for(&target, required_provider_capabilities)?;
+        let (
+            number_provider,
+            number_provider_digest,
+            _,
+            provider_capabilities,
+            provider_link_arguments,
+        ) = self.cached_number_provider_for(&target, required_provider_capabilities)?;
 
         for (_, unit) in &bootstrap_units {
             let bootstrap_source_key = NativeArtifactFamily::ModuleSource.source_key(
@@ -2609,6 +3096,7 @@ impl NativeBuilder {
                 self.cached_payload(&bootstrap_source_key, unit.as_bytes())?;
             module_sources.push((bootstrap_bytes, bootstrap_digest, bootstrap_generated_c_hit));
             module_generic_only.push(bootstrap.generic_only);
+            module_generic_mixed.push(bootstrap.generic_mixed_optimization);
         }
         let runtime_source_key = NativeArtifactFamily::RuntimeSource.source_key(
             &target,
@@ -2682,10 +3170,15 @@ impl NativeBuilder {
             .extend(prelude_group_defines(group_mask));
         let module_compile_options = module_generic_only
             .iter()
-            .map(|&generic_only| {
+            .zip(&module_generic_mixed)
+            .map(|(&generic_only, &generic_mixed)| {
                 let mut compile = compile_options.clone();
                 if profile == NativeProfile::Release {
-                    configure_release_module_compile(&mut compile, generic_only);
+                    configure_release_module_compile(
+                        &mut compile,
+                        generic_only,
+                        generic_mixed && supports_function_optimization_attributes(identity.kind),
+                    );
                 } else if profile == NativeProfile::ReleaseSize {
                     configure_release_size_module_compile(&mut compile);
                 }
@@ -2694,14 +3187,19 @@ impl NativeBuilder {
             .collect::<Vec<_>>();
         let module_object_options = module_generic_only
             .iter()
-            .map(|&generic_only| {
+            .zip(&module_generic_mixed)
+            .map(|(&generic_only, &generic_mixed)| {
                 Digest::hash(
                     format!(
                         "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}{march_opt}\0module-opt={}",
                         identity.kind,
                         profile.as_str(),
                         if profile == NativeProfile::Release {
-                            release_module_compile_identity(generic_only)
+                            release_module_compile_identity(
+                                generic_only,
+                                generic_mixed
+                                    && supports_function_optimization_attributes(identity.kind),
+                            )
                         } else if profile == NativeProfile::ReleaseSize {
                             release_size_module_compile_identity().to_string()
                         } else {
@@ -2746,7 +3244,8 @@ impl NativeBuilder {
             [launcher_source_digest],
         );
 
-        let link_options_digest = executable_link_options_digest(profile, options);
+        let link_options_digest =
+            executable_link_options_digest(profile, options, &provider_link_arguments);
 
         let mut module_object_infos = Vec::with_capacity(module_keys.len());
         let mut all_modules_cached = true;
@@ -2920,7 +3419,8 @@ impl NativeBuilder {
             compile_started.elapsed()
         };
 
-        let link_options_digest = executable_link_options_digest(profile, options);
+        let link_options_digest =
+            executable_link_options_digest(profile, options, &provider_link_arguments);
         let mut link_inputs = module_objects
             .iter()
             .map(|(_, digest, _)| *digest)
@@ -2974,6 +3474,9 @@ impl NativeBuilder {
                 link_options
                     .runtime_libraries
                     .push(paths.number_provider_a.clone());
+                link_options
+                    .extra_args
+                    .extend(provider_link_arguments.iter().map(std::ffi::OsString::from));
                 let report =
                     self.toolchain
                         .link_executable(&objects, &paths.executable, &link_options)?;
@@ -3066,6 +3569,37 @@ impl NativeBuilder {
         graph: &ModuleGraph,
         options: &NativeBuildOptions,
     ) -> Result<NativeRunReport, NativeError> {
+        self.run_graph_streaming(graph, options, None)
+    }
+
+    /// As [`Self::run_graph`], but with `on_output` the program's output is delivered as it is
+    /// written and the report's `stdout`/`stderr` are empty. A program that never exits, such as
+    /// a server, has no other way to say anything.
+    pub fn run_graph_streaming(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+        on_output: Option<&mut dyn FnMut(ChildStream, &[u8])>,
+    ) -> Result<NativeRunReport, NativeError> {
+        self.run_graph_with_output_mode(graph, options, on_output, false)
+    }
+
+    /// Build and execute with the caller's stdout and stderr descriptors inherited by the child.
+    pub fn run_graph_inheriting_output(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+    ) -> Result<NativeRunReport, NativeError> {
+        self.run_graph_with_output_mode(graph, options, None, true)
+    }
+
+    fn run_graph_with_output_mode(
+        &self,
+        graph: &ModuleGraph,
+        options: &NativeBuildOptions,
+        on_output: Option<&mut dyn FnMut(ChildStream, &[u8])>,
+        inherit_output: bool,
+    ) -> Result<NativeRunReport, NativeError> {
         let workspace = WorkDirectory::create()?;
         let private_output = workspace.path().join(if cfg!(windows) {
             "run-graph.exe"
@@ -3079,6 +3613,8 @@ impl NativeBuilder {
         let output = run_executable(
             Command::new(&private_output).env(NATIVE_RESULT_PATH_ENV, &result_path),
             &private_output,
+            on_output,
+            inherit_output,
         )?;
         let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;
@@ -3099,6 +3635,36 @@ impl NativeBuilder {
         program: &Program,
         options: &NativeBuildOptions,
     ) -> Result<NativeRunReport, NativeError> {
+        self.run_streaming(program, options, None)
+    }
+
+    /// As [`Self::run`], delivering output through `on_output` as in [`Self::run_graph_streaming`].
+    pub fn run_streaming(
+        &self,
+        program: &Program,
+        options: &NativeBuildOptions,
+        on_output: Option<&mut dyn FnMut(ChildStream, &[u8])>,
+    ) -> Result<NativeRunReport, NativeError> {
+        self.run_with_output_mode(program, options, on_output, false)
+    }
+
+    /// Build and execute with the caller's stdout and stderr descriptors inherited by the child.
+    /// This is for an in-process one-shot CLI; daemon clients must use [`Self::run_streaming`].
+    pub fn run_inheriting_output(
+        &self,
+        program: &Program,
+        options: &NativeBuildOptions,
+    ) -> Result<NativeRunReport, NativeError> {
+        self.run_with_output_mode(program, options, None, true)
+    }
+
+    fn run_with_output_mode(
+        &self,
+        program: &Program,
+        options: &NativeBuildOptions,
+        on_output: Option<&mut dyn FnMut(ChildStream, &[u8])>,
+        inherit_output: bool,
+    ) -> Result<NativeRunReport, NativeError> {
         // A public output path is stable and therefore shareable between requests. Launching it
         // directly would let another concurrent build replace the file between build and exec.
         // Build and launch a process-owned copy, then publish the same bytes afterward.
@@ -3115,6 +3681,8 @@ impl NativeBuilder {
         let output = run_executable(
             Command::new(&private_output).env(NATIVE_RESULT_PATH_ENV, &result_path),
             &private_output,
+            on_output,
+            inherit_output,
         )?;
         let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;

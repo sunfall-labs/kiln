@@ -25,7 +25,10 @@ impl super::Compiler {
         self.scopes.push(HashMap::new());
         let mut named = class.clone();
         named.name = Some(binding.clone());
-        self.class_declaration(&named);
+        // The class expression's private name is an immutable lexical binding. A class
+        // declaration gets its ordinary mutable outer binding from the surrounding statement
+        // instantiation instead; this scope exists only for an expression's self-reference.
+        self.class_declaration_with_name_kind(&named, VariableKind::Const);
         match self.resolve(&binding) {
             Resolution::Local(local) if local.celled => {
                 self.code.push(Instruction::LoadCell(local.slot))
@@ -46,12 +49,16 @@ impl super::Compiler {
     /// compiled into whatever code surrounds the class. So the flag is raised around the whole
     /// declaration and lowered again after it.
     pub(super) fn class_declaration(&mut self, class: &Class) {
+        self.class_declaration_with_name_kind(class, VariableKind::Let);
+    }
+
+    fn class_declaration_with_name_kind(&mut self, class: &Class, name_kind: VariableKind) {
         let outer_strict = std::mem::replace(&mut self.strict, true);
-        self.strict_class_declaration(class);
+        self.strict_class_declaration(class, name_kind);
         self.strict = outer_strict;
     }
 
-    pub(super) fn strict_class_declaration(&mut self, class: &Class) {
+    pub(super) fn strict_class_declaration(&mut self, class: &Class, name_kind: VariableKind) {
         let Some(name) = class.name.clone() else {
             self.error(Some(class.span), "a class declaration requires a name");
             return;
@@ -60,6 +67,8 @@ impl super::Compiler {
         // class nested inside one -- names its private fields in this class's own scope.
         self.private_scopes.push(self.next_private_scope);
         self.next_private_scope += 1;
+        self.private_scope_modules
+            .push(self.private_module_id.clone());
         // Declared here so every method compiled below captures it; what it holds is minted
         // once, where the class is evaluated.
         let brand = self.declare_home_binding(class.span);
@@ -101,7 +110,24 @@ impl super::Compiler {
         let static_home = self.declare_home_binding(class.span);
 
         // Bound before the body is compiled, so a method can refer to the class by name.
-        self.variable(VariableKind::Let, &name, None, class.span);
+        if name_kind == VariableKind::Const {
+            // The constructor is compiled below and stored directly into this self-binding once
+            // it exists. Start with `let` so declaration setup keeps the TDZ marker active for
+            // computed names; then make the captured binding immutable for assignments compiled
+            // in methods and field initializers.
+            self.variable(VariableKind::Let, &name, None, class.span);
+            let Some(local) = self
+                .scopes
+                .last_mut()
+                .and_then(|scope| scope.get_mut(&name))
+            else {
+                self.error(Some(class.span), format!("could not bind class `{name}`"));
+                return;
+            };
+            local.kind = VariableKind::Const;
+        } else {
+            self.variable(name_kind, &name, None, class.span);
+        }
 
         // A class expression with no written name still needs a binding to hold itself, and
         // `class_expression` invents one carrying a `%` that no identifier can contain. That
@@ -185,10 +211,16 @@ impl super::Compiler {
         // made a fresh function per instance, so `a.#m === b.#m` was false and a brand check
         // written as an identity comparison failed. It also closed over the constructor's
         // locals rather than the class, which is not the environment the specification gives it.
-        // The brand: one fresh object per *evaluation* of this class. An empty array is the
-        // cheapest thing with an identity, and nothing ever looks inside it -- only whether an
-        // instance's brand is this one.
-        if let Some(brand) = self.private_brands.last().cloned() {
+        // The brand is one fresh object per evaluation when this class actually declares
+        // private elements. Public-only classes have no brand observers; installing a synthetic
+        // property on every instance is observable when `this` is a Proxy returned by `super()`.
+        // An empty array is the cheapest identity, and nothing looks inside it.
+        if self
+            .private_declarations
+            .last()
+            .is_some_and(|declarations| !declarations.is_empty())
+            && let Some(brand) = self.private_brands.last().cloned()
+        {
             self.code.push(Instruction::NewArray { count: 0 });
             self.store_home_binding(&brand);
         }
@@ -247,7 +279,12 @@ impl super::Compiler {
 
         // The constructor carries the brand too: a static private member lives on it, and the
         // check that reads one has to tell this evaluation's constructor from another's.
-        if let Some(brand) = self.private_brands.last().cloned() {
+        if self
+            .private_declarations
+            .last()
+            .is_some_and(|declarations| !declarations.is_empty())
+            && let Some(brand) = self.private_brands.last().cloned()
+        {
             let key = self.constant_index(Constant::String(self.own_private_brand_key().into()));
             self.load_local_or_cell(local);
             self.load_captured_binding(&brand);
@@ -442,19 +479,18 @@ impl super::Compiler {
                 (ObjectKey::Static(key), _) => {
                     let name = self.constant_index(Constant::String(key.clone().into()));
                     self.emit_field_value(field, Some(&static_home));
-                    self.code.push(self.set_property_instruction(name));
+                    self.code.push(Instruction::DefineOwnProperty(name));
                 }
                 // The name was evaluated, converted and checked with the other element keys.
                 (ObjectKey::Computed(_), Some(binding)) => {
                     self.load_captured_binding(binding);
                     self.emit_field_value(field, Some(&static_home));
-                    self.code.push(self.set_computed_instruction());
+                    self.code.push(Instruction::DefineOwnComputed);
                 }
                 (ObjectKey::Computed(key), None) => {
                     self.expression(key);
-                    self.guard_static_prototype_key();
                     self.emit_field_value(field, Some(&static_home));
-                    self.code.push(self.set_computed_instruction());
+                    self.code.push(Instruction::DefineOwnComputed);
                 }
             }
             self.code.push(Instruction::Pop);
@@ -467,6 +503,9 @@ impl super::Compiler {
         self.private_scopes
             .pop()
             .expect("this class pushed its own private scope");
+        self.private_scope_modules
+            .pop()
+            .expect("this class pushed its module identity");
         self.private_brands
             .pop()
             .expect("this class pushed its own brand");
@@ -537,7 +576,8 @@ impl super::Compiler {
             self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
             valid.push(self.emit_jump(Instruction::JumpIfTruthy(0)));
         }
-        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.code
+            .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
         self.push_constant(Constant::String(
             "class heritage does not have a valid prototype property"
                 .to_owned()
@@ -611,6 +651,7 @@ impl super::Compiler {
                 // compile-time flag can say whether it ran.
                 initialized: true,
                 celled: true,
+                eval_declaration: None,
             },
         );
         self.code.push(Instruction::NewCell(slot));
@@ -752,17 +793,18 @@ impl super::Compiler {
 
     /// Compile a function body into its own proto and bind the name to a callable.
     ///
-    /// Declarations are not hoisted yet: the binding exists from this point on, so calling a
-    /// function textually above its declaration is an unresolved identifier rather than a call
-    /// to `undefined`. That is a smaller lie than hoisting half-way would be, and it is a
-    /// diagnostic rather than a wrong answer.
+    pub(super) fn emit_function_declaration(&mut self, function: &Function, span: Span) {
+        self.initialize_function_declaration(function, span);
+        self.emit_annexb_function_write(function);
+    }
+
     /// Compile a function declaration and store it in its already-created binding.
     ///
     /// The binding exists before the body is compiled, which is what makes a function able to
     /// call itself and to be called from above its own text: the body resolves its own name
     /// through the enclosing scope, and the slot it reads is filled by the `MakeFunction` here
     /// before any call can reach it.
-    pub(super) fn emit_function_declaration(&mut self, function: &Function, span: Span) {
+    pub(super) fn initialize_function_declaration(&mut self, function: &Function, span: Span) {
         let Some(name) = function.name.clone() else {
             self.error(Some(span), "a function declaration requires a name");
             return;
@@ -795,7 +837,6 @@ impl super::Compiler {
                 } else {
                     Instruction::StoreLocal(local.slot)
                 });
-                self.emit_annexb_var_write(&name, local);
             }
             // A function declaration at the top of global code: the binding is a property of the
             // global object, created by `DeclareGlobalBinding` when the scope was entered and
@@ -830,9 +871,14 @@ impl super::Compiler {
         fields: &[(&ClassField, Option<String>)],
         _span: Span,
     ) -> Option<()> {
-        // Every instance carries the brand of the evaluation that made it, stored beside its
-        // private members and read by each access to tell one evaluation from another.
-        if let Some(brand) = self.private_brands.last().cloned() {
+        // Only instances with private elements need the evaluation brand. Keeping this write off
+        // public-only instances is observable for a Proxy receiver, where ordinary properties
+        // must be defined through `[[DefineOwnProperty]]` without an extra synthetic key.
+        let has_private_instance_elements = !private_elements.is_empty()
+            || fields
+                .iter()
+                .any(|(field, _)| matches!(field.key, ObjectKey::Private(_)));
+        if has_private_instance_elements && let Some(brand) = self.private_brands.last().cloned() {
             let key = self.constant_index(Constant::String(self.own_private_brand_key().into()));
             self.code.push(Instruction::LoadThis);
             self.load_captured_binding(&brand);
@@ -856,7 +902,7 @@ impl super::Compiler {
                 // The name was computed and converted once, where the class is defined.
                 self.load_captured_binding(binding);
                 self.emit_field_value(field, None);
-                self.code.push(self.set_computed_instruction());
+                self.code.push(Instruction::DefineOwnComputed);
                 self.code.push(Instruction::Pop);
                 continue;
             }
@@ -869,12 +915,12 @@ impl super::Compiler {
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone().into()));
                     self.emit_field_value(field, None);
-                    self.code.push(self.set_property_instruction(name));
+                    self.code.push(Instruction::DefineOwnProperty(name));
                 }
                 ObjectKey::Computed(key) => {
                     self.expression(key);
                     self.emit_field_value(field, None);
-                    self.code.push(self.set_computed_instruction());
+                    self.code.push(Instruction::DefineOwnComputed);
                 }
             }
             self.code.push(Instruction::Pop);
@@ -941,6 +987,18 @@ impl super::Compiler {
         // A direct `eval` anywhere in this function -- including inside one nested in it -- means
         // the eval'd source may name any binding here, so every one of them has to be a cell.
         let cell_everything = function_contains_direct_eval(function);
+        let inherited_strict = self.strict || function.strict;
+
+        // Duplicate formal names are permitted only for a non-strict function with a simple
+        // parameter list. In particular, Function constructor source is parsed as a Script even
+        // when its caller is strict; the body decides whether its own formal list is strict.
+        let duplicate_parameters_allowed = !function.arrow
+            && !inherited_strict
+            && function.rest.is_none()
+            && function
+                .parameters
+                .iter()
+                .all(|parameter| matches!(parameter.pattern, Pattern::Identifier(_)));
 
         // Every parameter owns a positional slot, whether or not it binds a name there. A plain
         // identifier binds the slot itself, which keeps the common call free of any prologue; a
@@ -975,11 +1033,13 @@ impl super::Compiler {
                 continue;
             };
             if parameters.contains_key(name) {
-                self.error(
-                    Some(parameter.span),
-                    format!("duplicate parameter `{name}`"),
-                );
-                return None;
+                if !duplicate_parameters_allowed {
+                    self.error(
+                        Some(parameter.span),
+                        format!("duplicate parameter `{name}`"),
+                    );
+                    return None;
+                }
             }
             let celled = captured.contains(name) || cell_everything;
             if celled {
@@ -998,6 +1058,7 @@ impl super::Compiler {
                     // parameters to a default's right in a dead zone.
                     initialized: !parameters_have_defaults,
                     celled,
+                    eval_declaration: None,
                 },
             );
             binding_steps.push(
@@ -1045,7 +1106,6 @@ impl super::Compiler {
         // strict whether or not it says so, and a `"use strict"` of its own turns it on for
         // this body and everything nested in it. Restored on the way out, because a sibling
         // written after a strict function is not strict because of it.
-        let inherited_strict = self.strict || function.strict;
         let outer_strict = std::mem::replace(&mut self.strict, inherited_strict);
         // `IsSimpleParameterList`, and the strictness beside it: together they are the
         // specification's own test for which of the two `arguments` objects this function gets.
@@ -1105,8 +1165,10 @@ impl super::Compiler {
             upvalue_names: std::mem::take(&mut self.upvalue_names),
             captured: std::mem::replace(&mut self.captured, captured),
             cell_everything: std::mem::replace(&mut self.cell_everything, cell_everything),
+            active_function_span: self.active_function_span,
         };
         self.enclosing.push(outer);
+        self.active_function_span = Some(function.span);
 
         // A class constructor is not callable. `[[Call]]` on one throws before it looks at an
         // argument, which is why this is the first thing in the body rather than part of the
@@ -1121,7 +1183,8 @@ impl super::Compiler {
         if class.is_some() {
             self.code.push(Instruction::LoadNewTarget);
             let constructed = self.emit_jump(Instruction::JumpIfNotNullish(0));
-            self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+            self.code
+                .push(Instruction::LoadIntrinsicBuiltin(Builtin::TypeError));
             self.push_constant(Constant::String(
                 match &function.name {
                     Some(name) if !name.is_empty() => {
@@ -1319,6 +1382,7 @@ impl super::Compiler {
         self.upvalue_names = restored.upvalue_names;
         self.captured = restored.captured;
         self.cell_everything = restored.cell_everything;
+        self.active_function_span = restored.active_function_span;
         self.parameter_scope = outer_parameter_scope;
 
         let index = self.functions.len() as u32;

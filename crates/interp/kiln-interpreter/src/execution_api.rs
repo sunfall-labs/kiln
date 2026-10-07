@@ -7,6 +7,17 @@ pub(super) fn realm_runtime() -> Result<RealmRuntime, ExecutionError> {
     })
 }
 
+fn initialize_host_clock<H: HostOps + ?Sized>(
+    runtime: &mut RealmRuntime,
+    host: &mut H,
+) -> Result<(), ExecutionError> {
+    if runtime.capabilities().clock == ClockCapability::Host && !runtime.has_host_clock_origin() {
+        let epoch_ms = crate::vm_setup::host_clock_milliseconds(host, 0)?;
+        runtime.initialize_host_clock_origin(epoch_ms);
+    }
+    Ok(())
+}
+
 pub(super) fn realm_host_string<H: HostOps + ?Sized>(
     host: &mut H,
     operation: HostOp,
@@ -106,6 +117,7 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
     runtime: &mut RealmRuntime,
     capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
+    initialize_host_clock(runtime, host)?;
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
         program,
@@ -116,6 +128,15 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
         runtime.capabilities(),
         capabilities,
     )?;
+    vm.host_clock_origin_ms = (runtime.capabilities().clock == ClockCapability::Host)
+        .then(|| runtime.host_clock_anchor());
+    // The HTTP runtime is available for global fetch (a WHATWG web standard, not a Node API).
+    // The realm's HTTP transport (Hyper via Tokio) exists in both modes; only the Node.js
+    // API surface (require, process, etc.) remains gated behind the node adapter.
+    // The http_client_host allows the HTTP client to establish TCP connections without
+    // the full async_host (which would also enable node:fs, node:net, etc.).
+    vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
+    vm.http_client_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     // A Script's `this` is the global object, and in strict code too: strictness governs what a
     // *function* receives when called without a receiver, not what a script body's `this` is.
     // Only a module gets `undefined`, and `execute_module` builds its own machine -- the comment
@@ -132,6 +153,7 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
     vm.run_event_loop(runtime)?;
     Ok(ExecutionResult {
         steps: vm.steps,
+        process_exit_code: vm.process_exit_code(None),
         ..execution
     })
 }
@@ -159,8 +181,28 @@ pub fn execute_node_with_strictness<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
     capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
+    execute_node_with_clock_and_strictness(
+        program,
+        strictness,
+        host,
+        limits,
+        capabilities,
+        ClockCapability::Virtual,
+    )
+}
+
+/// Execute Node code under an explicit clock policy. Deterministic callers use the ordinary
+/// `execute_node_with_strictness` entry point; wall-clock workloads opt in here.
+pub fn execute_node_with_clock_and_strictness<H: HostOps + ?Sized>(
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    host: &mut H,
+    limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
+    clock: ClockCapability,
+) -> Result<ExecutionResult, ExecutionError> {
     let mut runtime = RealmRuntime::with_capabilities(RealmCapabilities {
-        clock: ClockCapability::Host,
+        clock,
         ..RealmCapabilities::default()
     })
     .map_err(|error| ExecutionError::Host {
@@ -189,6 +231,7 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
     if let Some(fs) = host.clone_fs() {
         runtime.set_fs(fs);
     }
+    initialize_host_clock(runtime, host)?;
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
         program,
@@ -199,6 +242,8 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
         runtime.capabilities(),
         capabilities,
     )?;
+    vm.host_clock_origin_ms = (runtime.capabilities().clock == ClockCapability::Host)
+        .then(|| runtime.host_clock_anchor());
     vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
     let execution = runtime.enter(|| {
@@ -208,6 +253,7 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
     vm.run_node_event_loop(runtime)?;
     Ok(ExecutionResult {
         steps: vm.steps,
+        process_exit_code: vm.process_exit_code(None),
         ..execution
     })
 }
@@ -317,15 +363,16 @@ pub(super) fn refuses_every_write(target: &Value) -> bool {
 /// TypeError in the specification and silently ignored here, as every frozen object's writes are.
 pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> Value {
     let mut data = ObjectData::default();
+    let mut namespace_cells = Vec::new();
     for (name, value) in exports {
-        // A namespace object holds values, so an exported cell is read through here. Node's
-        // namespace objects are live; this one is a snapshot taken when the provider finished.
+        // Keep the ordinary slot shape separate from the exporting cell. Program-visible own
+        // property resolution reads the cell for this slot, so descriptors and reads stay live
+        // without storing `Value::Cell` in the reflected property itself.
         //
         // Writable and non-configurable, which is the one combination no ordinary object is
         // built with and the one the specification gives every export: the binding cannot be
         // removed or redefined, and its *value* is expected to change, because the module it
         // came from may still assign to it.
-        data.track_namespace_cell(&name, value.clone());
         data.define_value(
             &name,
             read_through_cell(&value),
@@ -335,6 +382,9 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
                 configurable: false,
             },
         );
+        if matches!(value, Value::Cell(_)) {
+            namespace_cells.push((name, value));
+        }
     }
     // The tag is what `Object.prototype.toString` reads, and it is the only own property a
     // namespace has that is not an export -- so `String(ns)` is "[object Module]" rather than
@@ -354,7 +404,12 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
     // furniture through a module it imported.
     data.set_prototype(Value::Null);
     data.close_as_module_namespace();
-    Value::Object(Rc::new(RefCell::new(data)))
+    // Finish defining the whole shape before recording indices: array-index export names can
+    // be inserted ahead of earlier string exports while the property store maintains its order.
+    for (name, cell) in namespace_cells {
+        data.track_namespace_cell(&name, cell);
+    }
+    Value::Object(tracked_object(data))
 }
 
 /// Reading an export whose declaration has not run yet.
@@ -368,7 +423,7 @@ pub(super) fn uninitialized_export_error(name: &str) -> ExecutionError {
 }
 
 /// Whether this generator object came from an `async function*`.
-pub(super) fn is_async_generator(state: &Rc<RefCell<GeneratorState>>) -> bool {
+pub(super) fn is_async_generator(state: &Rc<GeneratorData>) -> bool {
     let state = state.borrow();
     state
         .closure
@@ -383,10 +438,28 @@ pub(super) fn is_async_generator(state: &Rc<RefCell<GeneratorState>>) -> bool {
 /// An export is a cell so that a named import is a live view of it. Everywhere a *value* is
 /// wanted instead -- a namespace object, a star expansion -- goes through this.
 pub fn read_through_cell(value: &Value) -> Value {
-    match value {
-        Value::Cell(cell) => cell.borrow().clone(),
-        other => other.clone(),
+    let mut current = value.clone();
+    // Brent's cycle detector keeps the ordinary one-cell import read allocation-free. A
+    // pathological alias cycle retains its TDZ answer rather than spinning forever.
+    let mut checkpoint = None;
+    let mut window = 1usize;
+    let mut distance = 0usize;
+    while let Value::Cell(cell) = current {
+        let address = Rc::as_ptr(&cell);
+        if checkpoint == Some(address) {
+            return Value::Native(Native::Uninitialized, RealmId::PRIMARY);
+        }
+        if checkpoint.is_none() {
+            checkpoint = Some(address);
+        } else if distance == window {
+            checkpoint = Some(address);
+            window = window.saturating_mul(2);
+            distance = 0;
+        }
+        current = cell.borrow().clone();
+        distance = distance.saturating_add(1);
     }
+    current
 }
 
 /// The own properties of a namespace object, in the order it holds them.
@@ -397,15 +470,18 @@ pub fn namespace_entries(value: &Value) -> Vec<(String, Value)> {
     let Value::Object(object) = value else {
         return Vec::new();
     };
+    let object = object.borrow();
     object
-        .borrow()
-        .entries()
-        .filter_map(|(name, property)| match property {
+        .properties
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| match object.property_at_slot(index, slot) {
             // The tag is the namespace's own furniture, not one of the module's exports. A star
             // re-export expanded through here would otherwise hand `@@toStringTag` on to the
             // importer as a name the provider had exported.
-            _ if name == WellKnown::ToStringTag.property_key() => None,
-            Property::Value(value) => Some((name.to_lossy_string(), value.clone())),
+            _ if slot.key == WellKnown::ToStringTag.property_key() => None,
+            Property::Value(value) if !slot.internal => Some((slot.key.to_lossy_string(), value)),
+            Property::Value(_) => None,
             Property::Accessor { .. } => None,
         })
         .collect()
@@ -417,53 +493,7 @@ pub fn ordinary_object(entries: impl IntoIterator<Item = (String, Value)>) -> Va
     for (name, value) in entries {
         data.set(&name, value);
     }
-    Value::Object(Rc::new(RefCell::new(data)))
-}
-
-pub(super) fn call_site_object(name: String) -> Value {
-    ordinary_object([
-        (CALL_SITE_NAME.to_owned(), Value::String(name.into())),
-        (
-            "getFileName".to_owned(),
-            Value::Native(Native::CallSiteGetFileName, RealmId::PRIMARY),
-        ),
-        (
-            "getLineNumber".to_owned(),
-            Value::Native(Native::CallSiteGetLineNumber, RealmId::PRIMARY),
-        ),
-        (
-            "getColumnNumber".to_owned(),
-            Value::Native(Native::CallSiteGetColumnNumber, RealmId::PRIMARY),
-        ),
-        (
-            "getFunctionName".to_owned(),
-            Value::Native(Native::CallSiteGetFunctionName, RealmId::PRIMARY),
-        ),
-        (
-            "getMethodName".to_owned(),
-            Value::Native(Native::CallSiteGetMethodName, RealmId::PRIMARY),
-        ),
-        (
-            "getTypeName".to_owned(),
-            Value::Native(Native::CallSiteGetTypeName, RealmId::PRIMARY),
-        ),
-        (
-            "getThis".to_owned(),
-            Value::Native(Native::CallSiteGetThis, RealmId::PRIMARY),
-        ),
-        (
-            "getEvalOrigin".to_owned(),
-            Value::Native(Native::CallSiteGetEvalOrigin, RealmId::PRIMARY),
-        ),
-        (
-            "isEval".to_owned(),
-            Value::Native(Native::CallSiteIsEval, RealmId::PRIMARY),
-        ),
-        (
-            "toString".to_owned(),
-            Value::Native(Native::CallSiteToString, RealmId::PRIMARY),
-        ),
-    ])
+    Value::Object(tracked_object(data))
 }
 
 /// Read one own data property from an interpreter object without invoking program code.
@@ -471,7 +501,7 @@ pub fn own_data_property(value: &Value, name: &str) -> Option<Value> {
     let Value::Object(object) = value else {
         return None;
     };
-    object.borrow().get_own(name).cloned()
+    object.borrow().get_own_value(name)
 }
 
 /// What `node:worker_threads` reads about the exception that ended a worker (realms issue 06):
@@ -783,6 +813,8 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         });
     }
 
+    initialize_host_clock(runtime, host)?;
+
     let commonjs_module = import_values.get(2).cloned();
     let mut locals = vec![Value::Undefined; module.program.local_count as usize];
     for (binding, value) in module.imports.iter().zip(import_values) {
@@ -917,24 +949,34 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         runtime.capabilities(),
         capabilities,
     )?;
+    vm.host_clock_origin_ms = (runtime.capabilities().clock == ClockCapability::Host)
+        .then(|| runtime.host_clock_anchor());
     vm.self_bindings = self_bindings;
     vm.module_path = module_path.map(Rc::from);
     vm.self_namespaces = self_namespaces;
     if session.as_ref().is_some_and(|(session, _)| session.adapter) {
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
-        vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
     }
+    // The HTTP runtime is available for global fetch (a WHATWG web standard, not a Node API).
+    // The realm's HTTP transport (Hyper via Tokio) exists in both modes; only the Node.js
+    // API surface (require, process, etc.) remains gated behind the adapter.
+    // The http_client_host allows the HTTP client to establish TCP connections without
+    // the full async_host (which would also enable node:fs, node:net, etc.).
+    vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
+    vm.http_client_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     if let Some(loader) = commonjs_loader.as_deref_mut() {
         vm.commonjs_loader = Some(loader as *mut dyn CommonJsModuleLoader);
     }
     let drain = session.as_ref().is_some_and(|(_, drain)| *drain);
     if let Some((session, _)) = session.as_ref() {
         vm.module_realm = Some(Rc::clone(&session.shared));
+        vm.readonly_cells = Rc::clone(&session.shared.borrow().readonly_cells);
         vm.intrinsics = Rc::clone(&session.shared.borrow().intrinsics);
         vm.isolated_graphs = Rc::clone(&session.shared.borrow().isolated_graphs);
         vm.actor_realm_id = session.shared.borrow().actor_realm_id;
         vm.actor_graph_requests = Rc::clone(&session.shared.borrow().actor_graph_requests);
         vm.global_objects = session.shared.borrow().global_objects.clone();
+        vm.module_map = Rc::clone(&session.shared.borrow().module_map);
     }
     // The realm is built and bootstrapped before the body's first instruction: by this machine
     // if it is the first of its session to run, and found already built otherwise.
@@ -963,7 +1005,27 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     // owns the VM, program and locals needed by `Sink::ModuleAwait`; keep that VM alive and drain
     // it now, rather than letting the entry VM try to resume a continuation whose owner is gone.
     let suspended_module = vm.module_suspension.is_some();
+    let static_module_completion = if suspended_module && vm.commonjs_loader.is_some() {
+        vm.module_path.as_deref().and_then(|path| {
+            vm.module_map.borrow().completion_in_generation(
+                vm.current_realm,
+                vm.module_generation,
+                path,
+            )
+        })
+    } else {
+        None
+    };
     vm.esm_body_pending_checkpoint = commonjs_module.is_none();
+    // A body that ran to its end has been evaluated: its bindings are final, and the realm's
+    // module map learns them now, before the event loop runs the jobs the body queued -- one of
+    // which may be an `import()` of this very module. A module suspended at a top-level `await`
+    // is reported when it settles, below.
+    if !suspended_module
+        && let (Some(loader), Some(path)) = (commonjs_loader.as_deref_mut(), module_path)
+    {
+        loader.module_evaluated(path, &own_exports(module, &vm.locals)?);
+    }
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
     if enter_runtime {
@@ -991,9 +1053,9 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
             // exits, terminating workers with the process; the rejection check below is what
             // reports it here.
             if drain
-                && vm.module_outcome().is_none_or(|outcome| {
-                    !matches!(outcome, Settled::Rejected(_))
-                })
+                && vm
+                    .module_outcome()
+                    .is_none_or(|outcome| !matches!(outcome, Settled::Rejected(_)))
             {
                 vm.run_node_event_loop(runtime)
                     .map_err(|error| record(&mut vm, error))?;
@@ -1012,6 +1074,22 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     // module body without any `await` in it already is: the module failed, and saying so as a
     // rejection nobody handled would describe the same failure less plainly.
     if let Some(Settled::Rejected(reason)) = vm.module_outcome() {
+        if static_module_completion.is_some()
+            && let Some(path) = vm.module_path.as_deref()
+        {
+            vm.module_map.borrow_mut().fail_in_generation(
+                vm.current_realm,
+                vm.module_generation,
+                path,
+                reason.clone(),
+            );
+            vm.settle(
+                static_module_completion
+                    .as_ref()
+                    .expect("checked completion"),
+                &Settled::Rejected(reason.clone()),
+            );
+        }
         let trace = captured_trace(&reason);
         let instruction = vm.instruction;
         let message = vm.describe_uncaught(&reason, instruction);
@@ -1028,7 +1106,7 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     // The entry awaited something that never settled and the loop has nothing left that could
     // settle it: a forgotten `resolve`, a server closed before the await. Node warns and exits
     // 13; exiting 0 here read as success to every shell and CI until 2026-09-19 (issue 09 of
-    // `.scratch/full-runtime`). A dependency in that state is its importer's to report.
+    // `docs/issues/full-runtime`). A dependency in that state is its importer's to report.
     if suspended_module
         && enter_runtime
         && (drain || vm.async_host.is_none())
@@ -1052,22 +1130,32 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
     }
     let execution = ExecutionResult {
         steps: vm.steps,
+        process_exit_code: vm.process_exit_code(None),
         ..execution
     };
-    let mut exports = Vec::with_capacity(module.exports.len());
-    for binding in &module.exports {
-        let Some(value) = vm.locals.get(binding.local_slot as usize) else {
-            return Err(ExecutionError::LocalOutOfBounds {
-                index: binding.local_slot as usize,
-            });
-        };
-        // The cell itself, not what is in it: the importer holds this module's binding rather
-        // than a copy of the value it had when the module finished. `namespace_object` and the
-        // star expansion read through it, because those *are* snapshots.
-        exports.push(ModuleExportValue {
-            name: binding.exported.clone(),
-            value: value.clone(),
-        });
+    let exports = own_exports(module, &vm.locals)?;
+    if suspended_module
+        && let (Some(loader), Some(path)) = (commonjs_loader.as_deref_mut(), module_path)
+    {
+        loader.module_evaluated(path, &exports);
+    }
+    if let Some(completion) = static_module_completion
+        && let Some(path) = vm.module_path.as_deref()
+        && matches!(
+            vm.module_map.borrow().status_in_generation(
+                vm.current_realm,
+                vm.module_generation,
+                path,
+            ),
+            Some(ModuleStatus::Evaluated)
+        )
+    {
+        let namespace = vm.module_map.borrow_mut().namespace_in_generation(
+            vm.current_realm,
+            vm.module_generation,
+            path,
+        );
+        vm.resolve_promise(&completion, namespace);
     }
     let commonjs_exports = commonjs_module
         .as_ref()
@@ -1081,6 +1169,29 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         exports,
         commonjs_exports,
     })
+}
+
+/// The values a module's own export slots hold.
+fn own_exports(
+    module: &ModuleProgram,
+    locals: &[Value],
+) -> Result<Vec<ModuleExportValue>, ExecutionError> {
+    let mut exports = Vec::with_capacity(module.exports.len());
+    for binding in &module.exports {
+        let Some(value) = locals.get(binding.local_slot as usize) else {
+            return Err(ExecutionError::LocalOutOfBounds {
+                index: binding.local_slot as usize,
+            });
+        };
+        // The cell itself, not what is in it: the importer holds this module's binding rather
+        // than a copy of the value it had when the module finished. `namespace_object` and the
+        // star expansion read through it, because those *are* snapshots.
+        exports.push(ModuleExportValue {
+            name: binding.exported.clone(),
+            value: value.clone(),
+        });
+    }
+    Ok(exports)
 }
 
 /// Slots a module body reads as cells -- captured by a function it makes, or loaded and stored

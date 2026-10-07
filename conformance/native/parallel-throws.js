@@ -1,4 +1,4 @@
-// The parallel/sequential differential harness (.scratch/parallel-builtins issue 02): exceptions.
+// The parallel/sequential differential harness (docs/issues/parallel-builtins issue 02): exceptions.
 // When several elements throw, `map` throws the first one it reaches -- the lowest index -- and
 // never calls the callback again; `parallelMap` must throw the same exception after the same
 // calls. A callback that can throw does not qualify for the pool today, so these all take the

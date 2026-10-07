@@ -22,19 +22,10 @@
 //!
 //! # The realm has one timezone, and it is not the host's
 //!
-//! ADR 0015 fixed the realm's zone at UTC and its clock at the epoch. `Intl.DateTimeFormat` is the
-//! place the specification lets a program name a zone *explicitly*, which is the form ADR 0015
-//! called honest, so a named zone is accepted, validated and reported. Rendering one is a
-//! different question: ICU4X ships the IANA identifier table and metazone offset *periods*, not a
-//! transition database, so for a zone that observes daylight saving there is no way to say which
-//! of its two offsets applies at a given instant. Formatting in such a zone is refused with a
-//! `RangeError` rather than answered with the standard offset -- the difference between the two is
-//! an hour, twice a year, silently.
-
-// `VariantOffsetsCalculator` is deprecated upstream as "a bad approximation of a time zone
-// database", which is exactly what this module uses it to establish: it asks whether a zone has a
-// second offset so that a zone it cannot choose an offset for is refused rather than guessed at.
-#![allow(deprecated)]
+//! ADR 0015 fixes the realm's implicit zone at UTC and its clock at the epoch. An explicit
+//! `timeZone` uses the compiled IANA TZif database, shared with Temporal, to resolve the offset at
+//! each instant. This keeps the answer independent of the machine's local zone while correctly
+//! handling daylight-saving transitions, aliases, and historical offsets.
 
 use std::cell::RefCell;
 
@@ -45,12 +36,20 @@ use icu_datetime::fieldsets::enums::CompositeFieldSet;
 use icu_datetime::options::{Alignment, Length, SubsecondDigits, TimePrecision, YearStyle};
 use icu_datetime::provider::fields::components;
 use icu_datetime::range::DateRangeFormatter;
+use icu_decimal::DecimalFormatter;
+use icu_decimal::options::DecimalFormatterOptions;
 use icu_locale_core::preferences::extensions::unicode::keywords::{
     CalendarAlgorithm, HourCycle, NumberingSystem,
 };
+use icu_time::zone::UtcOffset;
 use icu_time::zone::iana::IanaParserExtended;
-use icu_time::zone::{UtcOffset, VariantOffsetsCalculator};
 use icu_time::{DateTime, TimeZone, ZonedDateTime};
+#[cfg(feature = "timezone_database")]
+use std::sync::OnceLock;
+#[cfg(feature = "timezone_database")]
+use timezone_provider::provider::TimeZoneProvider;
+#[cfg(feature = "timezone_database")]
+use timezone_provider::tzif::CompiledTzdbProvider;
 
 use crate::locale::{RelevantKey, Resolution};
 use crate::{Error, Setting};
@@ -343,9 +342,11 @@ pub struct DateTimeFormat {
     resolution: Resolution,
     calendar: String,
     numbering_system: String,
+    /// The zero glyph used by the resolved numbering system. ICU's column alignment is global
+    /// across date and time fields; keeping this lets the language-level widths be restored per
+    /// field when that global option padded a field requested as `numeric`.
+    zero_digit: String,
     zone: TimeZoneChoice,
-    /// The offset formatting uses, or `None` for a zone whose offset this build cannot pin down.
-    offset: Option<UtcOffset>,
     date_style: Option<String>,
     time_style: Option<String>,
     /// The components read back out of the resolved pattern, in `resolvedOptions()` order.
@@ -450,12 +451,19 @@ impl DateTimeFormat {
             None => resolution.value("hc").and_then(spelled_hour_cycle),
         };
         preferences.hour_cycle = hour_cycle;
+        let zero_digit =
+            DecimalFormatter::try_new((&preferences).into(), DecimalFormatterOptions::default())
+                .map(|formatter| {
+                    formatter
+                        .format(&fixed_decimal::Decimal::from(0))
+                        .to_string()
+                })
+                .unwrap_or_else(|_| "0".to_owned());
 
         let zone = options
             .time_zone
             .clone()
             .unwrap_or(TimeZoneChoice::Offset(0));
-        let offset = resolve_offset(&zone);
 
         let field_set = build_field_set(&options)?;
         let formatter = DateTimeFormatter::try_new(preferences, field_set)
@@ -479,8 +487,8 @@ impl DateTimeFormat {
             resolution,
             calendar,
             numbering_system,
+            zero_digit,
             zone,
-            offset,
             date_style: options.date_style.clone(),
             time_style: options.time_style.clone(),
             components: Vec::new(),
@@ -489,36 +497,41 @@ impl DateTimeFormat {
         // The pattern is what the formatter actually resolved to, so the components come out of
         // it rather than out of the request: a build that could not honour `month: "narrow"` says
         // so here instead of claiming it did.
-        let (components, cycle) = built.resolved_components();
+        let (mut components, cycle) = built.resolved_components();
+        built.restore_requested_numeric_widths(&mut components);
         built.components = components;
         built.hour_cycle = cycle;
         Ok(built)
     }
 
-    /// The instant, as ICU4X's zoned input, or a refusal for a zone this build cannot render in.
+    /// The instant, as ICU4X's zoned input using the exact offset at that instant.
     ///
     /// `naming` is the instant the zone's *name* is resolved at, which is the instant itself for a
     /// single date and the start of the range for both ends of a range: ICU4X treats two inputs
     /// whose zone-name timestamps differ as being in incomparable zones and falls straight back to
     /// `{start} - {end}`, and the two ends of a range are by construction in one zone.
     fn at(&self, epoch_milliseconds: f64, naming: f64) -> Result<ZonedInstant, Error> {
-        let Some(offset) = self.offset else {
-            return Err(Error::range(format!(
-                "no time zone transition data for {}: the realm can render a fixed-offset zone \
-                 and refuses a daylight-saving one rather than guess which offset applies",
+        let offset = resolve_offset(&self.zone, epoch_milliseconds).ok_or_else(|| {
+            Error::range(format!(
+                "time zone {} has no transition data",
                 self.time_zone()
-            )));
-        };
+            ))
+        })?;
+        let naming_offset = resolve_offset(&self.zone, naming).ok_or_else(|| {
+            Error::range(format!(
+                "time zone {} has no transition data",
+                self.time_zone()
+            ))
+        })?;
         let milliseconds = epoch_milliseconds as i64;
         let zoned = ZonedDateTime::from_epoch_milliseconds_and_utc_offset(milliseconds, offset);
         let id = match &self.zone {
             TimeZoneChoice::Named(_, id) => *id,
             TimeZoneChoice::Offset(_) => TimeZone::UNKNOWN,
         };
-        // A zone that has a daylight variant never reaches here, so the variant is Standard by
-        // construction rather than by assumption.
-        let naming = ZonedDateTime::from_epoch_milliseconds_and_utc_offset(naming as i64, offset);
-        let info = id.with_offset(Some(offset)).at_date_time(DateTime {
+        let naming =
+            ZonedDateTime::from_epoch_milliseconds_and_utc_offset(naming as i64, naming_offset);
+        let info = id.with_offset(Some(naming_offset)).at_date_time(DateTime {
             date: naming.date,
             time: naming.time,
         });
@@ -581,6 +594,7 @@ impl DateTimeFormat {
         let built = std::rc::Rc::new(Shaped {
             formatter,
             ranges,
+            options: restricted,
             shows_time,
         });
         self.shaped.borrow_mut().push((shape, built.clone()));
@@ -604,7 +618,19 @@ impl DateTimeFormat {
     pub fn format_shape(&self, shape: Shape, epoch_milliseconds: f64) -> Result<String, Error> {
         let shaped = self.shaped(shape)?;
         let at = self.shaped_at(shape, epoch_milliseconds, epoch_milliseconds)?;
-        Ok(shaped.formatter.format(&at.0).to_string())
+        if !needs_numeric_width_adjustment(&shaped.options) {
+            return Ok(normalize_datetime_spaces(
+                shaped.formatter.format(&at.0).to_string(),
+            ));
+        }
+        use writeable::Writeable;
+        let mut sink = PartCollector::default();
+        let _ = shaped.formatter.format(&at.0).write_to_parts(&mut sink);
+        Ok(join_parts(
+            adjust_numeric_widths(sink.finish(), &shaped.options, &self.zero_digit)
+                .into_iter()
+                .map(|(_, text)| text),
+        ))
     }
 
     /// `formatToParts(temporalValue)`.
@@ -618,7 +644,11 @@ impl DateTimeFormat {
         let at = self.shaped_at(shape, epoch_milliseconds, epoch_milliseconds)?;
         let mut sink = PartCollector::default();
         let _ = shaped.formatter.format(&at.0).write_to_parts(&mut sink);
-        Ok(sink.finish())
+        Ok(adjust_numeric_widths(
+            sink.finish(),
+            &shaped.options,
+            &self.zero_digit,
+        ))
     }
 
     /// Both ends of a shaped range, with the time of day dropped when the pattern has no time in
@@ -646,7 +676,22 @@ impl DateTimeFormat {
     pub fn format_shape_range(&self, shape: Shape, start: f64, end: f64) -> Result<String, Error> {
         let shaped = self.shaped(shape)?;
         let (first, second) = self.shaped_range_ends(shape, &shaped, start, end)?;
-        Ok(shaped.ranges.format(&first.0, &second.0).to_string())
+        if !needs_numeric_width_adjustment(&shaped.options) {
+            return Ok(normalize_datetime_spaces(
+                shaped.ranges.format(&first.0, &second.0).to_string(),
+            ));
+        }
+        use writeable::Writeable;
+        let mut sink = PartCollector::default();
+        let _ = shaped
+            .ranges
+            .format(&first.0, &second.0)
+            .write_to_parts(&mut sink);
+        Ok(join_parts(
+            adjust_numeric_widths(sink.finish(), &shaped.options, &self.zero_digit)
+                .into_iter()
+                .map(|(_, text)| text),
+        ))
     }
 
     /// `formatRangeToParts(temporalValue, temporalValue)`.
@@ -664,13 +709,20 @@ impl DateTimeFormat {
             .ranges
             .format(&first.0, &second.0)
             .write_to_parts(&mut sink);
-        Ok(attribute_sources(sink.finish()))
+        let parts = adjust_numeric_widths(sink.finish(), &shaped.options, &self.zero_digit);
+        Ok(attribute_sources(parts))
     }
 
     /// `format(date)`.
     pub fn format(&self, epoch_milliseconds: f64) -> Result<String, Error> {
-        let at = self.at(epoch_milliseconds, epoch_milliseconds)?;
-        Ok(self.formatter.format(&at.0).to_string())
+        if !needs_numeric_width_adjustment(&self.options) {
+            let at = self.at(epoch_milliseconds, epoch_milliseconds)?;
+            return Ok(normalize_datetime_spaces(
+                self.formatter.format(&at.0).to_string(),
+            ));
+        }
+        self.format_to_parts(epoch_milliseconds)
+            .map(|parts| join_parts(parts.into_iter().map(|(_, text)| text)))
     }
 
     /// `formatToParts(date)`.
@@ -682,7 +734,11 @@ impl DateTimeFormat {
         let at = self.at(epoch_milliseconds, epoch_milliseconds)?;
         let mut sink = PartCollector::default();
         let _ = self.formatter.format(&at.0).write_to_parts(&mut sink);
-        Ok(sink.finish())
+        Ok(adjust_numeric_widths(
+            sink.finish(),
+            &self.options,
+            &self.zero_digit,
+        ))
     }
 
     /// Whether the resolved pattern shows a time at all.
@@ -710,8 +766,14 @@ impl DateTimeFormat {
 
     /// `formatRange(start, end)`.
     pub fn format_range(&self, start: f64, end: f64) -> Result<String, Error> {
-        let (from, to) = self.range_ends(start, end)?;
-        Ok(self.ranges.format(&from.0, &to.0).to_string())
+        if !needs_numeric_width_adjustment(&self.options) {
+            let (from, to) = self.range_ends(start, end)?;
+            return Ok(normalize_datetime_spaces(
+                self.ranges.format(&from.0, &to.0).to_string(),
+            ));
+        }
+        self.format_range_to_parts(start, end)
+            .map(|parts| join_parts(parts.into_iter().map(|(_, _, text)| text)))
     }
 
     /// `formatRangeToParts(start, end)`: each run, with the side of the range it came from.
@@ -735,7 +797,7 @@ impl DateTimeFormat {
             .ranges
             .format(&start_at.0, &end_at.0)
             .write_to_parts(&mut sink);
-        let parts = sink.finish();
+        let parts = adjust_numeric_widths(sink.finish(), &self.options, &self.zero_digit);
         Ok(attribute_sources(parts))
     }
 
@@ -873,6 +935,26 @@ impl DateTimeFormat {
         });
         (out, cycle)
     }
+
+    /// ICU's `Alignment::Column` changes every one-digit month, day and hour in a composite
+    /// pattern, even when only one of them was requested as `2-digit`. ECMA-402 resolves those
+    /// widths independently, so restore the explicit request for fields present in the pattern.
+    fn restore_requested_numeric_widths(&self, components: &mut [(&'static str, Setting)]) {
+        if !needs_numeric_width_adjustment(&self.options) {
+            return;
+        }
+        for (name, setting) in components {
+            let requested = match *name {
+                "month" => self.options.month.as_deref(),
+                "day" => self.options.day.as_deref(),
+                "hour" => self.options.hour.as_deref(),
+                _ => None,
+            };
+            if let Some(width @ ("numeric" | "2-digit")) = requested {
+                *setting = Setting::string(width);
+            }
+        }
+    }
 }
 
 fn text_width(width: components::Text) -> &'static str {
@@ -954,26 +1036,33 @@ fn numbering_system_for_zero(zero: char) -> &'static str {
     }
 }
 
-/// The offset a zone choice formats with, or `None` when this build cannot say.
-fn resolve_offset(zone: &TimeZoneChoice) -> Option<UtcOffset> {
+/// Resolve the exact offset at an instant, or `None` when timezone data was not linked.
+fn resolve_offset(zone: &TimeZoneChoice, epoch_milliseconds: f64) -> Option<UtcOffset> {
     match zone {
         TimeZoneChoice::Offset(seconds) => UtcOffset::try_from_seconds(*seconds).ok(),
-        TimeZoneChoice::Named(_, id) => {
-            use icu_time::zone::ZoneNameTimestamp;
-            #[allow(deprecated)]
-            let calculator = VariantOffsetsCalculator::new();
-            #[allow(deprecated)]
-            let offsets = calculator.compute_offsets_from_time_zone_and_name_timestamp(
-                *id,
-                ZoneNameTimestamp::far_in_future(),
-            )?;
-            // A zone with a daylight variant has two offsets and no transition data to choose
-            // between them. Refusing is the whole point: the alternative is an hour wrong for
-            // half the year, which reads as correct.
-            if offsets.daylight.is_some() {
+        TimeZoneChoice::Named(name, icu_zone) => {
+            // ICU marks UTC/GMT and Etc/GMT fixed-offset identifiers directly on the zone value.
+            // They need no transition table, so keep these offsets available in builds that omit
+            // the optional timezone database. `name` remains intact for resolvedOptions.
+            if let Some(offset) = icu_zone.with_offset(None).offset() {
+                return Some(offset);
+            }
+            #[cfg(feature = "timezone_database")]
+            {
+                static TZDB: OnceLock<CompiledTzdbProvider> = OnceLock::new();
+                let provider = TZDB.get_or_init(CompiledTzdbProvider::default);
+                let zone = provider.get(name.as_bytes()).ok()?;
+                let timestamp_ns = (epoch_milliseconds as i128).checked_mul(1_000_000)?;
+                let seconds = provider
+                    .transition_nanoseconds_for_utc_epoch_nanoseconds(zone, timestamp_ns)
+                    .ok()?
+                    .0;
+                UtcOffset::try_from_seconds(i32::try_from(seconds).ok()?).ok()
+            }
+            #[cfg(not(feature = "timezone_database"))]
+            {
+                let _ = (name, epoch_milliseconds, icu_zone);
                 None
-            } else {
-                Some(offsets.standard)
             }
         }
     }
@@ -1027,6 +1116,7 @@ fn with_defaults(options: &Options) -> Options {
 struct Shaped {
     formatter: DateTimeFormatter<CompositeFieldSet>,
     ranges: DateRangeFormatter<CompositeFieldSet>,
+    options: Options,
     /// Whether the resolved pattern shows a time, which decides whether a range compares two
     /// instants or two days.
     shows_time: bool,
@@ -1390,6 +1480,13 @@ impl PartCollector {
     }
 
     fn push(&mut self, text: &str) {
+        let normalized;
+        let text = if text.contains('\u{202f}') {
+            normalized = text.replace('\u{202f}', " ");
+            normalized.as_str()
+        } else {
+            text
+        };
         if text.is_empty() {
             return;
         }
@@ -1398,6 +1495,17 @@ impl PartCollector {
             Some((last, buffer)) if *last == name => buffer.push_str(text),
             _ => self.parts.push((name, text.to_owned())),
         }
+    }
+}
+
+// Match Node/V8's ICU compatibility policy for DateTimeFormat only: ICU 72 changed
+// AM/PM spacing to U+202F. Preserve CLDR range separator spacing, as Node 26 does.
+// https://chromium.googlesource.com/v8/v8/+/b9c9b3154770309f1464a441d99921913a643a5d/src/objects/js-date-time-format.cc
+fn normalize_datetime_spaces(text: String) -> String {
+    if text.contains('\u{202f}') {
+        text.replace('\u{202f}', " ")
+    } else {
+        text
     }
 }
 
@@ -1421,6 +1529,57 @@ impl writeable::PartsWrite for PartCollector {
         self.stack.pop();
         result
     }
+}
+
+/// Undo padding that ICU's whole-pattern column alignment applied to a field whose
+/// `Intl.DateTimeFormat` width is independently `numeric`.
+fn adjust_numeric_widths(
+    mut parts: Vec<(&'static str, String)>,
+    options: &Options,
+    zero_digit: &str,
+) -> Vec<(&'static str, String)> {
+    // Keep the ordinary formatter and parts formatter byte-for-byte aligned. ICU's resolved
+    // pattern can legitimately use a two-digit field for a plain `numeric` request (for example,
+    // the German short date pattern); only undo that padding when a competing explicit 2-digit
+    // field caused ICU's global alignment behavior.
+    if !needs_numeric_width_adjustment(options) {
+        return parts;
+    }
+    for (kind, text) in &mut parts {
+        let requested = match *kind {
+            "month" => options.month.as_deref(),
+            "day" => options.day.as_deref(),
+            "hour" => options.hour.as_deref(),
+            _ => None,
+        };
+        if requested != Some("numeric") {
+            continue;
+        }
+        if let Some(unpadded) = text.strip_prefix(zero_digit)
+            && unpadded.chars().count() == 1
+        {
+            *text = unpadded.to_owned();
+        }
+    }
+    parts
+}
+
+/// Whether ICU's global column alignment can pad an explicitly numeric month, day or hour.
+fn needs_numeric_width_adjustment(options: &Options) -> bool {
+    let widths = [
+        options.month.as_deref(),
+        options.day.as_deref(),
+        options.hour.as_deref(),
+    ];
+    widths.contains(&Some("2-digit")) && widths.contains(&Some("numeric"))
+}
+
+fn join_parts(parts: impl IntoIterator<Item = String>) -> String {
+    let mut joined = String::new();
+    for part in parts {
+        joined.push_str(&part);
+    }
+    joined
 }
 
 /// Give each run of a formatted range the side of the range it came from.
@@ -1493,6 +1652,44 @@ mod tests {
             time_style: time.map(str::to_owned),
             time_zone: utc(),
             ..Options::default()
+        }
+    }
+
+    #[test]
+    fn datetime_spaces_match_node_in_strings_parts_and_ranges() {
+        assert_eq!(
+            normalize_datetime_spaces("a\u{202f}b\u{2009}c".into()),
+            "a b\u{2009}c"
+        );
+        for locale in ["en-US", "zh-CN"] {
+            let formatter =
+                DateTimeFormat::new(&[locale.to_owned()], styled(None, Some("long"))).unwrap();
+            let at = 1_704_067_200_000.0;
+            let text = formatter.format(at).unwrap();
+            assert!(!text.contains('\u{202f}'));
+            assert_eq!(
+                text,
+                join_parts(
+                    formatter
+                        .format_to_parts(at)
+                        .unwrap()
+                        .into_iter()
+                        .map(|(_, text)| text)
+                )
+            );
+            let end = at + 3_600_000.0;
+            let range = formatter.format_range(at, end).unwrap();
+            assert!(!range.contains('\u{202f}'));
+            assert_eq!(
+                range,
+                join_parts(
+                    formatter
+                        .format_range_to_parts(at, end)
+                        .unwrap()
+                        .into_iter()
+                        .map(|(_, _, text)| text)
+                )
+            );
         }
     }
 
@@ -1603,7 +1800,8 @@ mod tests {
     }
 
     #[test]
-    fn a_fixed_offset_zone_renders_and_a_daylight_one_is_refused() {
+    #[cfg(feature = "timezone_database")]
+    fn named_daylight_zone_uses_the_transition_at_each_instant() {
         let india = DateTimeFormat::new(
             &["en-US".to_owned()],
             Options {
@@ -1620,16 +1818,16 @@ mod tests {
         let vancouver = DateTimeFormat::new(
             &["en-US".to_owned()],
             Options {
+                hour: Some("2-digit".to_owned()),
+                minute: Some("2-digit".to_owned()),
+                hour_cycle: Some("h23".to_owned()),
                 time_zone: canonical_time_zone("America/Vancouver"),
                 ..Options::default()
             },
         )
         .unwrap();
-        // Refused rather than answered with the standard offset, which would be an hour wrong for
-        // half of every year and look entirely plausible.
-        let refusal = vancouver.format(0.0).expect_err("a DST zone is refused");
-        assert_eq!(refusal.kind, crate::ErrorKind::Range);
-        // The identifier is still reported: recognising a zone and rendering in it are separate.
+        assert_eq!(vancouver.format(1_705_320_000_000.0).unwrap(), "04:00");
+        assert_eq!(vancouver.format(1_719_835_200_000.0).unwrap(), "05:00");
         assert_eq!(vancouver.time_zone(), "America/Vancouver");
     }
 
@@ -1656,6 +1854,26 @@ mod tests {
                 ("year", "1970".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn ordinary_numeric_patterns_keep_format_and_parts_consistent() {
+        let formatter = DateTimeFormat::new(
+            &["de".to_owned()],
+            Options {
+                time_zone: utc(),
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let formatted = formatter.format(0.0).unwrap();
+        let parts = formatter
+            .format_to_parts(0.0)
+            .unwrap()
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<String>();
+        assert_eq!(formatted, parts);
     }
 
     #[test]

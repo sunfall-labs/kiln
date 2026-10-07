@@ -59,6 +59,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use kiln_host_abi::HostOps;
 use kiln_runtime::{CaptureHost, RealmRuntime};
+use kiln_string::StringUnits;
 
 use crate::{
     BufferData, EvalSource, ExecutionCapabilities, ExecutionError, ExecutionLimits, ObjectData,
@@ -812,7 +813,7 @@ impl AgentGroup {
     /// The source is the host's prelude and the program's text together, because a `$262` is the
     /// host's statement about what it can do and the new realm has not heard it yet. The prelude
     /// arrives as a capability rather than being spelled here, for ADR 0031's reason.
-    pub(crate) fn start(self: &Arc<Self>, source: String) -> Result<(), ExecutionError> {
+    pub(crate) fn start(self: &Arc<Self>, source: StringUnits) -> Result<(), ExecutionError> {
         let id = {
             let mut guard = lock(&self.sched);
             if guard.states.len() >= MAX_AGENTS {
@@ -886,7 +887,7 @@ fn microseconds(milliseconds: f64) -> u64 {
 }
 
 /// One agent's whole life: wait for the baton, build a realm, run the source, leave.
-fn run_agent(group: &Arc<AgentGroup>, id: usize, source: &str) {
+fn run_agent(group: &Arc<AgentGroup>, id: usize, source: &StringUnits) {
     if group.park(lock(&group.sched), id).is_err() {
         return;
     }
@@ -898,13 +899,31 @@ fn run_agent(group: &Arc<AgentGroup>, id: usize, source: &str) {
     group.finish(id);
 }
 
-fn run_agent_realm(group: &Arc<AgentGroup>, id: usize, source: &str) -> Result<(), ExecutionError> {
+fn run_agent_realm(
+    group: &Arc<AgentGroup>,
+    id: usize,
+    source_units: &StringUnits,
+) -> Result<(), ExecutionError> {
     let Some(compile) = group.execution.source_compiler() else {
         return Err(ExecutionError::NoSourceCompiler);
     };
+    let transport;
+    let (source, exact_units) = match source_units.to_scalar_cow() {
+        Ok(source) => (source, None),
+        Err(_) => {
+            transport = source_units.to_lossy_string();
+            (
+                std::borrow::Cow::Borrowed(transport.as_str()),
+                Some(source_units),
+            )
+        }
+    };
     let (program, strictness) = compile(&EvalSource {
-        source,
+        source: source.as_ref(),
+        source_units: exact_units,
+        module_id: "<agent-eval>",
         outer: &[],
+        with_objects: &[],
         strict: false,
         global_var_scope: true,
         script: true,
@@ -1101,7 +1120,7 @@ mod tests {
                 guard.mailboxes.push(None);
             }
         }
-        let refused = group.start("$262.agent.leaving();".to_owned());
+        let refused = group.start("$262.agent.leaving();".into());
         let Err(ExecutionError::TypeErrorMessage { message }) = refused else {
             panic!("the cap must refuse rather than start a ninth agent");
         };

@@ -37,6 +37,125 @@ delete (globalThis as any).__kilnPortWait;
 
 (function installWebEventsAndStreams() {
   const G = globalThis as any;
+  const compressionPrimitive = G.__kilnCompressionPrimitive;
+  delete G.__kilnCompressionPrimitive;
+  const compressionStreamSlots = new WeakMap<object, any>();
+  const weakSet = WeakMap.prototype.set;
+  const weakGet = WeakMap.prototype.get;
+  const apply = Reflect.apply;
+  const ByteArray = Uint8Array;
+  const byteLengthGetter = (prototype: any, name: string): any => {
+    if (prototype === undefined) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    return descriptor === undefined ? undefined : descriptor.get;
+  };
+  const TypedArrayPrototype = Object.getPrototypeOf(ByteArray.prototype);
+  const typedArrayBuffer = byteLengthGetter(TypedArrayPrototype, "buffer");
+  const typedArrayByteOffset = byteLengthGetter(TypedArrayPrototype, "byteOffset");
+  const typedArrayByteLength = byteLengthGetter(TypedArrayPrototype, "byteLength");
+  const dataViewPrototype = typeof DataView === "function" ? DataView.prototype : undefined;
+  const dataViewBuffer = byteLengthGetter(dataViewPrototype, "buffer");
+  const dataViewByteOffset = byteLengthGetter(dataViewPrototype, "byteOffset");
+  const dataViewByteLength = byteLengthGetter(dataViewPrototype, "byteLength");
+  const arrayBufferByteLength = byteLengthGetter(ArrayBuffer.prototype, "byteLength");
+  const arrayBufferSlice = ArrayBuffer.prototype.slice;
+  const isArrayBufferView = ArrayBuffer.isView;
+  const sharedArrayBufferByteLength = typeof SharedArrayBuffer === "function"
+    ? byteLengthGetter(SharedArrayBuffer.prototype, "byteLength")
+    : undefined;
+
+  // BufferSource extraction uses captured intrinsic getters, so subclasses, cross-realm views,
+  // and own properties named `buffer`/`byteOffset` cannot spoof the byte window.
+  function bufferSourceBytes(value: any): Uint8Array {
+    if (typedArrayBuffer !== undefined && typedArrayByteOffset !== undefined &&
+        typedArrayByteLength !== undefined) {
+      try {
+        const buffer = apply(typedArrayBuffer, value, []);
+        const offset = apply(typedArrayByteOffset, value, []);
+        const length = apply(typedArrayByteLength, value, []);
+        return new ByteArray(buffer, offset, length);
+      } catch (_) {}
+    }
+    if (dataViewBuffer !== undefined && dataViewByteOffset !== undefined &&
+        dataViewByteLength !== undefined) {
+      try {
+        const buffer = apply(dataViewBuffer, value, []);
+        const offset = apply(dataViewByteOffset, value, []);
+        const length = apply(dataViewByteLength, value, []);
+        return new ByteArray(buffer, offset, length);
+      } catch (_) {}
+    }
+    // The native backend exposes some view fields through branded synthetic reads before it
+    // materializes getter descriptors. Use the engine's internal view predicate before those
+    // fallback reads; JavaScript engines with accessors use the intrinsic path above.
+    if (apply(isArrayBufferView, ArrayBuffer, [value])) {
+      try {
+        return new ByteArray(value.buffer, value.byteOffset, value.byteLength);
+      } catch (_) {}
+    }
+    if (arrayBufferByteLength !== undefined) {
+      try {
+        const length = apply(arrayBufferByteLength, value, []);
+        return new ByteArray(value, 0, length);
+      } catch (_) {}
+    } else {
+      try {
+        apply(arrayBufferSlice, value, [0, 0]);
+        return new ByteArray(value);
+      } catch (_) {}
+    }
+    if (sharedArrayBufferByteLength !== undefined) {
+      try {
+        const length = apply(sharedArrayBufferByteLength, value, []);
+        return new ByteArray(value, 0, length);
+      } catch (_) {}
+    }
+    if (typeof SharedArrayBuffer === "function") {
+      try {
+        apply(SharedArrayBuffer.prototype.slice, value, [0, 0]);
+        return new ByteArray(value);
+      } catch (_) {}
+    }
+    throw new TypeError("CompressionStream chunks must be BufferSource values");
+  }
+
+  // The host primitive owns cancellation transport. Public controller identity, WebIDL
+  // descriptors and brand checks belong to this ordinary class in both engines.
+  const PrimitiveAbortController = G.AbortController;
+  if (typeof PrimitiveAbortController === "function") {
+    const records = new WeakMap<object, any>();
+    const weakGet = WeakMap.prototype.get;
+    const weakSet = WeakMap.prototype.set;
+    const apply = Reflect.apply;
+    function controllerRecord(receiver: any): any {
+      const record = apply(weakGet, records, [receiver]);
+      if (record === undefined) throw new TypeError("Illegal invocation");
+      return record;
+    }
+    class AbortController {
+      constructor() {
+        apply(weakSet, records, [this, new PrimitiveAbortController()]);
+      }
+      get signal(): AbortSignal {
+        return controllerRecord(this).signal;
+      }
+      abort(reason: any = undefined): void {
+        const record = controllerRecord(this);
+        record.abort(reason);
+      }
+    }
+    for (const name of ["signal", "abort"]) {
+      const descriptor = Object.getOwnPropertyDescriptor(AbortController.prototype, name)!;
+      descriptor.enumerable = true;
+      Object.defineProperty(AbortController.prototype, name, descriptor);
+    }
+    Object.defineProperty(AbortController.prototype, Symbol.toStringTag, {
+      value: "AbortController", configurable: true,
+    });
+    Object.defineProperty(G, "AbortController", {
+      value: AbortController, writable: true, configurable: true,
+    });
+  }
 
   function invalidState(message: string): Error {
     const DOMExc = G.DOMException;
@@ -453,6 +572,9 @@ delete (globalThis as any).__kilnPortWait;
   const OP_BROADCAST_JOIN = 7, OP_BROADCAST_POST = 8, OP_SPAWN = 9, OP_TERMINATE = 10, OP_SELF = 11;
   const OP_CANCEL_WAIT = 12, OP_REAP = 13, OP_STDIO = 14;
   const OP_POST_PLAIN = 21;
+  // Which realm holds an endpoint: the one that made or received it. A worker that ends closes
+  // what it holds, so a port that went to it in a message closes with it, as in node.
+  const OP_PORT_HOLD = 39, OP_PORT_RELEASE = 40;
   // `kiln_runtime::workers::kind` and `STATE_*`.
   const KIND_USER = 0, KIND_TERMINATE = 7;
   const STATE_PEER_CLOSED = 2, STATE_GONE = 4;
@@ -1071,21 +1193,18 @@ delete (globalThis as any).__kilnPortWait;
         }
         return { message: data };
       };
-      Object.defineProperty(MessagePort, Symbol.for("kiln.messagePort"), {
-        value: {
-          receive,
-          workerOp: __kilnWorkerOp,
-          encodeMessage,
-          decodeMessage,
-          internalPort: (endpoint: number, kinds: any, target: any, broadcast: boolean) =>
-            internalPort(endpoint, kinds, target, broadcast),
-          portEndpoint: (port: MessagePort) => portEndpoint(port),
-          worker: () => workerState,
-        },
-        writable: false,
-        enumerable: false,
-        configurable: false,
-      });
+      // The engine's own modules (node:worker_threads, kiln:actors, kiln:gui) reach the ports'
+      // internals through the engine-private object, never through a property of `MessagePort`.
+      kilnPrivate.messagePort = {
+        receive,
+        workerOp: __kilnWorkerOp,
+        encodeMessage,
+        decodeMessage,
+        internalPort: (endpoint: number, kinds: any, target: any, broadcast: boolean) =>
+          internalPort(endpoint, kinds, target, broadcast),
+        portEndpoint: (port: MessagePort) => portEndpoint(port),
+        worker: () => workerState,
+      };
       deliverNext = (port: MessagePort) => {
         port.#scheduled = false;
         port.#hops = 0;
@@ -1310,11 +1429,16 @@ delete (globalThis as any).__kilnPortWait;
         port.#other = null;
         port.#remote = 0;
         stopWaiting(port);
+        __kilnWorkerOp(OP_PORT_RELEASE, endpoint);
         return endpoint;
       };
+      // Only a port that arrived in a message is adopted here: `internalPort` also wraps
+      // endpoints this realm merely borrows (an actor's shared mailbox), which must not close
+      // with it.
       remotePort = (endpoint: number): MessagePort => {
         const port = new MessagePort();
         port.#remote = endpoint;
+        __kilnWorkerOp(OP_PORT_HOLD, endpoint);
         return port;
       };
       internalPort = (endpoint: number, kinds: any, target: any, broadcast: boolean): MessagePort => {
@@ -1668,6 +1792,7 @@ delete (globalThis as any).__kilnPortWait;
     read(): Promise<{ value: any; done: boolean }> {
       const stream = this._stream;
       if (!stream) return Promise.reject(new TypeError("Invalid state: The reader is not attached to a stream"));
+      stream._disturbed = true;
       if (stream._state === "closed") return Promise.resolve({ value: undefined, done: true });
       if (stream._state === "errored") return Promise.reject(stream._storedError);
       const controller = stream._controller!;
@@ -2236,15 +2361,39 @@ delete (globalThis as any).__kilnPortWait;
         {
           start: () => startResult.promise,
           write: (chunk: any) => {
-            const method = t.transform;
-            if (typeof method === "function") return method.call(t, chunk, controller);
-            controller.enqueue(chunk);
-            return undefined;
+            // Transform rejection errors both sides, including a pending read.
+            // WritableStream's sink rejection alone cannot settle the readable side.
+            let transformed: Promise<any>;
+            try {
+              const method = t.transform;
+              if (typeof method === "function") transformed = Promise.resolve(method.call(t, chunk, controller));
+              else {
+                controller.enqueue(chunk);
+                transformed = Promise.resolve();
+              }
+            } catch (error) {
+              controller.error(error);
+              throw error;
+            }
+            return transformed.then(undefined, (error) => {
+              controller.error(error);
+              throw error;
+            });
           },
           close: () => {
-            return Promise.resolve(typeof t.flush === "function" ? t.flush.call(t, controller) : undefined).then(() => {
+            let flushed: Promise<any>;
+            try {
+              flushed = Promise.resolve(typeof t.flush === "function" ? t.flush.call(t, controller) : undefined);
+            } catch (error) {
+              controller.error(error);
+              throw error;
+            }
+            return flushed.then(() => {
               const readableController = this._readableController!;
               if (!readableController._closeRequested && this.readable._state === "readable") readableController.close();
+            }, (error) => {
+              controller.error(error);
+              throw error;
             });
           },
           abort: (reason: any) => {
@@ -2267,6 +2416,70 @@ delete (globalThis as any).__kilnPortWait;
     get [Symbol.toStringTag](): string { return "TransformStream"; }
   }
 
+  // The byte transform algorithms are shared Rust codecs. Queueing, validation, writer
+  // backpressure, and error propagation stay in this TransformStream implementation.
+  class CompressionStream {
+    constructor(format: string) {
+      const normalized = compressionFormat(format, "CompressionStream");
+      compressionPrimitive(this, 0, normalized === "gzip" ? 1 : normalized === "deflate" ? 2 : 3, 1);
+      const transform = new TransformStream({
+        transform: (chunk: any, controller: TransformStreamDefaultController) => {
+          const bytes = bufferSourceBytes(chunk);
+          const result = compressionPrimitive(this, 1, bytes, false) as Uint8Array;
+          if (result.length) controller.enqueue(result);
+        },
+        flush: (controller: TransformStreamDefaultController) => {
+          const result = compressionPrimitive(this, 1, new Uint8Array(0), true) as Uint8Array;
+          if (result.length) controller.enqueue(result);
+        },
+      });
+      apply(weakSet, compressionStreamSlots, [this, { readable: transform.readable, writable: transform.writable }]);
+      hideSlots(this);
+    }
+    get readable(): ReadableStream { return compressionStreamSlot(this).readable; }
+    get writable(): WritableStream { return compressionStreamSlot(this).writable; }
+    get [Symbol.toStringTag](): string { return "CompressionStream"; }
+  }
+
+  class DecompressionStream {
+    constructor(format: string) {
+      const normalized = compressionFormat(format, "DecompressionStream");
+      compressionPrimitive(this, 0, normalized === "gzip" ? 1 : normalized === "deflate" ? 2 : 3, 2);
+      const transform = new TransformStream({
+        transform: (chunk: any, controller: TransformStreamDefaultController) => {
+          const bytes = bufferSourceBytes(chunk);
+          const result = compressionPrimitive(this, 1, bytes, false) as Uint8Array;
+          if (result.length) controller.enqueue(result);
+        },
+        flush: (controller: TransformStreamDefaultController) => {
+          const result = compressionPrimitive(this, 1, new Uint8Array(0), true) as Uint8Array;
+          if (result.length) controller.enqueue(result);
+        },
+      });
+      apply(weakSet, compressionStreamSlots, [this, { readable: transform.readable, writable: transform.writable }]);
+      hideSlots(this);
+    }
+    get readable(): ReadableStream { return compressionStreamSlot(this).readable; }
+    get writable(): WritableStream { return compressionStreamSlot(this).writable; }
+    get [Symbol.toStringTag](): string { return "DecompressionStream"; }
+  }
+
+  function compressionFormat(input: any, constructorName: string): string {
+    let format: string;
+    if (typeof input === "symbol")
+      throw new TypeError(`Failed to construct '${constructorName}': 1st argument is a Symbol and cannot be converted to a string.`);
+    format = `${input}`;
+    if (format !== "gzip" && format !== "deflate" && format !== "deflate-raw")
+      throw new TypeError(`Failed to construct '${constructorName}': 1st argument '${format}' is not a valid enum value of type CompressionFormat.`);
+    return format;
+  }
+
+  function compressionStreamSlot(receiver: any): any {
+    const slot = apply(weakGet, compressionStreamSlots, [receiver]);
+    if (slot === undefined) throw new TypeError("Illegal invocation");
+    return slot;
+  }
+
   // ---- Install -------------------------------------------------------------------------------
 
   const classes: [string, any][] = [
@@ -2287,6 +2500,8 @@ delete (globalThis as any).__kilnPortWait;
     ["WritableStreamDefaultWriter", WritableStreamDefaultWriter],
     ["TransformStream", TransformStream],
     ["TransformStreamDefaultController", TransformStreamDefaultController],
+    ["CompressionStream", CompressionStream],
+    ["DecompressionStream", DecompressionStream],
   ];
   // An index loop without destructuring: `for (const [name, value] of classes)` made an iterator,
   // its results and one more iterator per pair in every realm's bootstrap (realms issue 08).
@@ -2302,5 +2517,9 @@ delete (globalThis as any).__kilnPortWait;
       classDescriptor.value = value;
       Object.defineProperty(G, name, classDescriptor);
     }
+  }
+  for (const Ctor of [CompressionStream, DecompressionStream]) {
+    Object.defineProperty(Ctor.prototype, "readable", { enumerable: true });
+    Object.defineProperty(Ctor.prototype, "writable", { enumerable: true });
   }
 })();

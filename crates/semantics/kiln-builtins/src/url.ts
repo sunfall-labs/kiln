@@ -73,12 +73,16 @@ function serializeQuery(list: [string, string][]): string {
   return out;
 }
 
-// Instance state lives under one registry symbol rather than in named fields, so `Object.keys`
-// and enumeration see nothing, as node's do. The request fast path's object is built in C with
-// own `_input`/`_base` (and `_query` on its `searchParams`) instead -- the C side spells this
-// symbol as `@@symbol-for:kiln.url` and could carry the state itself, but then every request
-// would allocate it; `state()` builds it on the first read that needs it.
-const STATE = Symbol.for("kiln.url");
+// Instance state lives under one non-enumerable unregistered symbol rather than in named fields,
+// so copying and deep comparison do not expose lazy caches. The request
+// fast path's object is built in C with own `_input`/`_base` (and `_query` on its
+// `searchParams`) instead; `state()` builds this on the first read that needs it. It is not a
+// `Symbol.for` key: no program can name it, and nothing about it says "kiln".
+const STATE = Symbol("state");
+
+function setState(self: any, value: ParamsState | UrlState): void {
+  Object.defineProperty(self, STATE, { value, writable: true, configurable: true });
+}
 
 type ParamsState = { list: [string, string][] | undefined; url: any; query: any };
 type UrlState = { c: string[] | undefined; sp: any; input: any; base: any };
@@ -91,7 +95,7 @@ function paramsState(self: any): ParamsState {
   const raw = self._query;
   if (st === undefined || (raw !== undefined && st.query !== raw)) {
     st = { list: undefined, url: undefined, query: raw };
-    self[STATE] = st;
+    setState(self, st);
   }
   return st;
 }
@@ -115,7 +119,7 @@ function paramsMutated(self: any): void {
 class URLSearchParams {
   constructor(init?: any) {
     const st: ParamsState = { list: [], url: undefined, query: undefined };
-    this[STATE] = st;
+    setState(this, st);
     if (init === undefined || init === null) return;
     if (typeof init === "string") {
       st.list = parseQuery(init.startsWith("?") ? init.slice(1) : init);
@@ -242,7 +246,7 @@ function urlState(self: any): UrlState {
   const input = self._input;
   if (st === undefined || (input !== undefined && st.input !== input)) {
     st = { c: undefined, sp: undefined, input, base: self._base };
-    self[STATE] = st;
+    setState(self, st);
   }
   return st;
 }
@@ -278,12 +282,7 @@ class URL {
   constructor(input: any, base?: any) {
     const fast = __urlFast(input, base);
     if (fast !== undefined) return fast;
-    // Hoisted on purpose: written as `{ c: parseRecord(input, base), sp: undefined, ... }` this
-    // literal's `c` read back `undefined` when the bootstrap is emitted generic-only, while the
-    // same class as a user program under `native-release-size` is fine. Filed as an emitter
-    // question (.scratch/full-runtime/issues/05); do not fold it back until that is answered.
-    const rec = parseRecord(input, base);
-    this[STATE] = { c: rec, sp: undefined, input: undefined, base: undefined };
+    setState(this, { c: parseRecord(input, base), sp: undefined, input: undefined, base: undefined });
   }
 
   static canParse(input: any, base?: any): boolean {
