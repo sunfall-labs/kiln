@@ -10,7 +10,7 @@ use crate::graph::{
     proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
 use crate::prelude::lookup_speculation_invariant;
-use kiln_graph::{ArgumentsAnalysis, suspended_local_liveness};
+use kiln_graph::{ArgumentsAnalysis, suspended_local_clear_slots};
 use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Instruction, Program, UnaryOp};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -1144,9 +1144,9 @@ fn emit_block_sequence(
             _ => None,
         })
         .collect();
-    let suspended_locals =
+    let suspended_clear_slots =
         if matches!(site, Site::Function { .. }) && (proto.generator || proto.asynchronous) {
-            suspended_local_liveness(graph, proto, program)
+            suspended_local_clear_slots(graph, proto, program)
         } else {
             HashMap::new()
         };
@@ -1567,7 +1567,7 @@ fn emit_block_sequence(
             plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
             &used,
             boxed.as_ref(),
-            &suspended_locals,
+            &suspended_clear_slots,
             proto.local_count,
         );
     }
@@ -3490,7 +3490,7 @@ fn emit_terminator(
     indexed_values: bool,
     used: &HashSet<ValueId>,
     boxed: Option<&HashSet<ValueId>>,
-    suspended_locals: &HashMap<BlockId, HashSet<u32>>,
+    suspended_clear_slots: &HashMap<BlockId, HashSet<u32>>,
     local_count: u32,
 ) {
     match terminator {
@@ -3786,9 +3786,9 @@ fn emit_terminator(
             output.push_str(
                 "    kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_undefined());\n",
             );
-            if let Some(live) = suspended_locals.get(&current_block.id) {
+            if let Some(clear) = suspended_clear_slots.get(&current_block.id) {
                 for slot in 0..local_count {
-                    if !live.contains(&slot) {
+                    if clear.contains(&slot) {
                         writeln!(
                             output,
                             "    kiln_c99_heap_store_val(frame, &frame->locals[{slot}], KILN_VAL_UNDEFINED);"
@@ -4091,9 +4091,10 @@ fn typed_receiver_row_safe(
 
 #[cfg(test)]
 mod tests {
-    use super::{index_large_ssa_values, retain_used_context, suspended_local_liveness};
+    use super::{index_large_ssa_values, retain_used_context, suspended_local_clear_slots};
     use crate::BYTECODE_VERSION;
-    use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, Terminator, ValueId};
+    use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, SiteId, Terminator, ValueId};
+    use kiln_graph::suspended_local_liveness;
     use kiln_ir::{FunctionProto, Program};
     use std::collections::HashSet;
 
@@ -4181,6 +4182,77 @@ mod tests {
         ];
         let live = suspended_local_liveness(&graph, &generator_proto(3), &empty_program());
         assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([0])));
+        let clear = suspended_local_clear_slots(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([1, 2])));
+    }
+
+    #[test]
+    fn retained_local_is_cleared_after_it_becomes_dead_without_a_new_write() {
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(
+                0,
+                vec![(
+                    1,
+                    GraphOp::StoreLocal {
+                        slot: 0,
+                        value: ValueId(2),
+                    },
+                )],
+                suspend(1),
+                vec![1],
+                None,
+            ),
+            block(
+                1,
+                vec![(3, GraphOp::LoadLocal(0))],
+                suspend(2),
+                vec![2],
+                None,
+            ),
+            block(2, Vec::new(), Terminator::Return(None), vec![], None),
+        ];
+        let clear = suspended_local_clear_slots(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([1, 2])));
+        // Slots 1 and 2 were cleared at the first suspension and never written again.
+        assert_eq!(clear.get(&BlockId(1)), Some(&HashSet::from([0])));
+    }
+
+    #[test]
+    fn suspension_clear_dataflow_unions_branch_writes_and_tracks_resume_loops() {
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(
+                1,
+                Vec::new(),
+                Terminator::Branch {
+                    condition: ValueId(0),
+                    true_block: BlockId(2),
+                    false_block: BlockId(3),
+                },
+                vec![2, 3],
+                None,
+            ),
+            block(
+                2,
+                vec![(
+                    1,
+                    GraphOp::StoreLocal {
+                        slot: 1,
+                        value: ValueId(2),
+                    },
+                )],
+                Terminator::Jump(BlockId(4)),
+                vec![4],
+                None,
+            ),
+            block(3, Vec::new(), Terminator::Jump(BlockId(4)), vec![4], None),
+            block(4, Vec::new(), suspend(1), vec![1], None),
+        ];
+        let clear = suspended_local_clear_slots(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([0, 1, 2])));
+        assert_eq!(clear.get(&BlockId(4)), Some(&HashSet::from([1])));
     }
 
     #[test]
@@ -4199,6 +4271,111 @@ mod tests {
         ];
         let live = suspended_local_liveness(&graph, &generator_proto(3), &empty_program());
         assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([1])));
+        let clear = suspended_local_clear_slots(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([0, 2])));
+    }
+
+    #[test]
+    fn cells_and_mapped_argument_frames_use_conservative_clear_sets() {
+        let mut cell_graph = FunctionGraph::new(None, 0, 3);
+        cell_graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(
+                1,
+                vec![(1, GraphOp::MakeCell(0))],
+                suspend(2),
+                vec![2],
+                None,
+            ),
+            block(2, Vec::new(), Terminator::Return(None), vec![], None),
+        ];
+        let cell_clear =
+            suspended_local_clear_slots(&cell_graph, &generator_proto(3), &empty_program());
+        assert_eq!(cell_clear.get(&BlockId(0)), Some(&HashSet::from([1, 2])));
+        // The cell remains live; the other slots were already cleared at the first suspend.
+        assert_eq!(cell_clear.get(&BlockId(1)), Some(&HashSet::new()));
+
+        let mut mapped_proto = generator_proto(3);
+        mapped_proto.mapped_arguments = true;
+        let mut mapped_graph = FunctionGraph::new(None, 0, 3);
+        mapped_graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(1, Vec::new(), suspend(2), vec![2], None),
+            block(2, Vec::new(), Terminator::Return(None), vec![], None),
+        ];
+        let mapped_clear =
+            suspended_local_clear_slots(&mapped_graph, &mapped_proto, &empty_program());
+        assert_eq!(
+            mapped_clear.get(&BlockId(0)),
+            Some(&HashSet::from([0, 1, 2]))
+        );
+        assert_eq!(
+            mapped_clear.get(&BlockId(1)),
+            Some(&HashSet::from([0, 1, 2]))
+        );
+    }
+
+    #[test]
+    fn exception_handler_metadata_edge_preserves_prethrow_dirty_locals() {
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(
+                1,
+                vec![
+                    (
+                        1,
+                        GraphOp::StoreLocal {
+                            slot: 0,
+                            value: ValueId(2),
+                        },
+                    ),
+                    (
+                        3,
+                        GraphOp::Call {
+                            callee: ValueId(4),
+                            args: Vec::new(),
+                            site: SiteId(0),
+                            line: 0,
+                            column: 0,
+                        },
+                    ),
+                ],
+                Terminator::Jump(BlockId(3)),
+                vec![3],
+                Some(2),
+            ),
+            block(2, Vec::new(), suspend(4), vec![4], None),
+            block(3, Vec::new(), Terminator::Return(None), vec![], None),
+            block(4, Vec::new(), Terminator::Return(None), vec![], None),
+        ];
+        let clear = suspended_local_clear_slots(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([0, 1, 2])));
+        assert_eq!(clear.get(&BlockId(2)), Some(&HashSet::from([0])));
+    }
+
+    #[test]
+    fn excess_arguments_and_tdz_initialization_are_may_populated() {
+        let mut proto = generator_proto(3);
+        proto.parameter_count = 1;
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(
+                1,
+                vec![(1, GraphOp::MarkUninitialized(2))],
+                suspend(2),
+                vec![2],
+                None,
+            ),
+            block(2, Vec::new(), Terminator::Return(None), vec![], None),
+        ];
+        let clear = suspended_local_clear_slots(&graph, &proto, &empty_program());
+        // The frame constructor copies extra actual arguments into any local slot, so the first
+        // suspension must retain the old all-slot cleanup. The second proves slots 0 and 1 were
+        // cleared, while MarkUninitialized makes slot 2 dirty again.
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([0, 1, 2])));
+        assert_eq!(clear.get(&BlockId(1)), Some(&HashSet::from([2])));
     }
 
     #[test]

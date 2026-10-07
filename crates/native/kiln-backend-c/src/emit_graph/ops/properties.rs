@@ -747,7 +747,7 @@ pub(super) fn emit_get_computed(
     if ctx.plan.generic_only {
         writeln!(
             output,
-            "    {{ static kiln_c99_symbol_cell kiln_sym_site; int status; if (KILN_VAL_IS_SYMBOL(v{k})) {{ status = kiln_c99_val_read_symbol(host, v{o}, v{k}, depth, thrown, &kiln_sym_site, &v{v}); }} else {{ status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); }} if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); {check} }}{typed_sync}",
+            "    {{ static kiln_c99_symbol_cell kiln_key_site; int status; if (KILN_VAL_IS_SYMBOL(v{k})) {{ status = kiln_c99_val_read_symbol(host, v{o}, v{k}, depth, thrown, &kiln_key_site, &v{v}); }} else if (KILN_VAL_IS_STRING(v{k})) {{ status = kiln_c99_val_read_string_key(host, v{o}, v{k}, depth, thrown, &kiln_key_site, &v{v}); }} else {{ status = kiln_c99_val_read_element(host, v{o}, v{k}, depth, thrown, &v{v}); }} if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(v{o}), kiln_val_to_boundary(v{k})); {check} }}{typed_sync}",
             o = object.0,
             k = key.0,
             typed_sync = if typed {

@@ -43,6 +43,36 @@ fn emitted_proto_flags(source: &str, symbol: &str, index: usize) -> u8 {
 }
 
 #[test]
+fn generic_computed_reads_dispatch_string_keys_to_the_keyed_site() {
+    let hir = kiln_frontend_oxc::parse(
+        "fixture/computed-string-site.ts",
+        "export function read(receiver: object, key: PropertyKey) { return receiver[key]; }",
+    );
+    let program = kiln_ir::compile_module(&hir)
+        .expect("computed property fixture compiles")
+        .program;
+    let emitted = emit_with_policy(
+        &program,
+        EmissionPolicy {
+            generic_only: true,
+            compact: true,
+            ..Default::default()
+        },
+    )
+    .expect("computed property fixture emits");
+
+    assert!(
+        emitted.source.contains("kiln_c99_val_read_string_key"),
+        "generic computed string keys should take the keyed read helper"
+    );
+    assert!(
+        emitted.source.contains("kiln_c99_val_read_symbol")
+            && emitted.source.contains("kiln_c99_val_read_element"),
+        "symbols and other computed-key types keep their existing paths"
+    );
+}
+
+#[test]
 fn argc_only_arguments_length_emits_without_publishing_an_arguments_frame() {
     let hir = kiln_frontend_oxc::parse(
         "fixture/arguments-length-emission.ts",

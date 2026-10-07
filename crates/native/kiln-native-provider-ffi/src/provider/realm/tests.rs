@@ -3,6 +3,8 @@ use std::sync::PoisonError;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 static CALLABLE_STORE_DROPS: AtomicUsize = AtomicUsize::new(0);
+static CALLABLE_STORE_DROPPED_POINTERS: std::sync::Mutex<Vec<usize>> =
+    std::sync::Mutex::new(Vec::new());
 
 fn opaque_test_pointer(identity: usize) -> *mut c_void {
     ptr::without_provenance_mut(identity)
@@ -10,6 +12,13 @@ fn opaque_test_pointer(identity: usize) -> *mut c_void {
 
 unsafe extern "C" fn record_callable_store_drop(_pointer: *mut c_void) {
     CALLABLE_STORE_DROPS.fetch_add(1, AtomicOrdering::SeqCst);
+}
+
+unsafe extern "C" fn record_callable_store_pointer_drop(pointer: *mut c_void) {
+    CALLABLE_STORE_DROPPED_POINTERS
+        .lock()
+        .unwrap()
+        .push(pointer as usize);
 }
 
 use super::*;
@@ -1259,8 +1268,13 @@ unsafe extern "C" fn exercises_callable_store_registry(context: *mut c_void) -> 
     let first_candidate = opaque_test_pointer(1);
     let duplicate_candidate = opaque_test_pointer(2);
     let other_candidate = opaque_test_pointer(3);
+    let mut repeated_miss = ptr::null_mut();
     if unsafe { kiln_realm_callable_store(8, 27, ptr::null_mut(), None, &raw mut output[0]) } != 0
         || !output[0].is_null()
+        || unsafe {
+            kiln_realm_callable_store(8, 27, ptr::null_mut(), None, &raw mut repeated_miss)
+        } != 0
+        || !repeated_miss.is_null()
         || unsafe {
             kiln_realm_callable_store(
                 8,
@@ -1340,6 +1354,21 @@ fn runtime_callable_stores_are_stable_distinct_and_realm_owned() {
     assert_eq!(first[1], first[0]);
     assert_eq!(first[2], opaque_test_pointer(3));
     assert_eq!(second, opaque_test_pointer(4));
+    struct CallableRoots(std::sync::Mutex<Vec<usize>>);
+    impl GcRootSink for CallableRoots {
+        fn block(&self, pointer: *mut c_void) {
+            self.0.lock().unwrap().push(pointer as usize);
+        }
+        fn value(&self, _value: *const c_void) {}
+    }
+    {
+        let roots = CallableRoots(std::sync::Mutex::new(Vec::new()));
+        let first_owner = realm(first_realm).expect("first realm is live");
+        for_each_provider_root(&first_owner, &roots);
+        let mut visited = roots.0.lock().unwrap().clone();
+        visited.sort_unstable();
+        assert_eq!(visited, vec![first[0] as usize, first[2] as usize]);
+    }
     assert_eq!(
         unsafe { kiln_realm_callable_store(8, 27, ptr::null_mut(), None, ptr::null_mut()) },
         INVALID_ARGUMENT
@@ -1347,6 +1376,82 @@ fn runtime_callable_stores_are_stable_distinct_and_realm_owned() {
     assert_eq!(kiln_realm_destroy(first_realm), 0);
     assert_eq!(kiln_realm_destroy(second_realm), 0);
     assert_eq!(CALLABLE_STORE_DROPS.load(AtomicOrdering::SeqCst), 3);
+}
+
+#[test]
+fn callable_store_front_cache_handles_negative_keys_collisions_and_clear() {
+    let dropped = CALLABLE_STORE_DROPPED_POINTERS.lock().unwrap();
+    let initial_len = dropped.len();
+    drop(dropped);
+
+    let mut registry = CallableStoreRegistry::default();
+    let first_key = (u32::MAX, u64::MAX);
+    assert_eq!(registry.lookup(first_key), None);
+    let negative = registry.cache[CallableStoreRegistry::cache_index(first_key)]
+        .expect("miss should be cached");
+    assert_eq!(negative.key, first_key);
+    assert!(negative.pointer.is_null());
+
+    let first_pointer = opaque_test_pointer(0x7101);
+    assert_eq!(
+        registry.publish(first_key, first_pointer, record_callable_store_pointer_drop),
+        first_pointer
+    );
+    assert_eq!(registry.lookup(first_key), Some(first_pointer));
+
+    // Find a different full key with the same direct-mapped slot. The full key check must
+    // keep the colliding key from returning the first pointer, while the canonical map lets
+    // both survive subsequent replacements of that one cache slot.
+    let first_slot = CallableStoreRegistry::cache_index(first_key);
+    let collision = (0..u64::MAX)
+        .map(|code| (17_u32, code))
+        .find(|key| *key != first_key && CallableStoreRegistry::cache_index(*key) == first_slot)
+        .expect("a 64-slot cache must have colliding keys");
+    assert_eq!(registry.lookup(collision), None);
+    let collision_pointer = opaque_test_pointer(0x7102);
+    assert_eq!(
+        registry.publish(
+            collision,
+            collision_pointer,
+            record_callable_store_pointer_drop
+        ),
+        collision_pointer
+    );
+    assert_eq!(registry.lookup(first_key), Some(first_pointer));
+    assert_eq!(registry.lookup(collision), Some(collision_pointer));
+
+    let arbitrary_key = (0, u64::MAX - 1);
+    let arbitrary_pointer = opaque_test_pointer(0x7103);
+    assert_eq!(registry.lookup(arbitrary_key), None);
+    assert_eq!(
+        registry.publish(
+            arbitrary_key,
+            arbitrary_pointer,
+            record_callable_store_pointer_drop
+        ),
+        arbitrary_pointer
+    );
+    assert_eq!(registry.lookup(arbitrary_key), Some(arbitrary_pointer));
+
+    registry.clear();
+    assert!(registry.stores.is_empty());
+    assert!(registry.cache.iter().all(Option::is_none));
+    assert_eq!(registry.lookup(first_key), None);
+    let dropped = CALLABLE_STORE_DROPPED_POINTERS.lock().unwrap().clone();
+    let mut newly_dropped = dropped[initial_len..].to_vec();
+    newly_dropped.sort_unstable();
+    let mut expected = vec![
+        first_pointer as usize,
+        collision_pointer as usize,
+        arbitrary_pointer as usize,
+    ];
+    expected.sort_unstable();
+    assert_eq!(newly_dropped, expected);
+    assert_eq!(
+        newly_dropped.len(),
+        3,
+        "canonical owners drop once each"
+    );
 }
 
 #[test]

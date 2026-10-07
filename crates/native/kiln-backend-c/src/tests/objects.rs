@@ -790,7 +790,7 @@ int main(void) {
     entry.key = ka;
     kiln_c99_site_remember(&plain, &entry);
     if (plain.pic_count != 0) return 6;
-    kiln_c99_symbol_site_remember(&kiln_test_cell, &entry, ka);
+    kiln_c99_key_site_remember(&kiln_test_cell, &entry, ka);
     site = kiln_test_cell;
     if (site == NULL || kiln_c99_site_entry_keyed(site, root, ka) == NULL) return 7;
     if (site->registered != first->serial) return 8;
@@ -799,11 +799,11 @@ int main(void) {
     memset(&entry, 0, sizeof entry);
     entry.shape = sab;
     entry.slot = 0;
-    kiln_c99_symbol_site_remember(&kiln_test_cell, &entry, ka);
+    kiln_c99_key_site_remember(&kiln_test_cell, &entry, ka);
     memset(&entry, 0, sizeof entry);
     entry.shape = sab;
     entry.slot = 1;
-    kiln_c99_symbol_site_remember(&kiln_test_cell, &entry, kb);
+    kiln_c99_key_site_remember(&kiln_test_cell, &entry, kb);
     found = kiln_c99_site_entry_keyed(site, sab, ka);
     if (found == NULL || found->slot != 0) return 9;
     found = kiln_c99_site_entry_keyed(site, sab, kb);
@@ -813,14 +813,14 @@ int main(void) {
     memset(&entry, 0, sizeof entry);
     entry.shape = sab;
     entry.slot = 0;
-    kiln_c99_symbol_site_remember(&kiln_test_cell, &entry, ka);
+    kiln_c99_key_site_remember(&kiln_test_cell, &entry, ka);
     if (site->pic_count != 3) return 12;
 
     /* A shared shape read under a shared symbol key: kept across realms. */
     memset(&entry, 0, sizeof entry);
     entry.shape = siter;
     entry.slot = 1;
-    kiln_c99_symbol_site_remember(&kiln_test_cell, &entry, iter);
+    kiln_c99_key_site_remember(&kiln_test_cell, &entry, iter);
     if (site->pic_count != 4) return 13;
 
     /* A private site learns a realm-local shape, registering with the realm first. */
@@ -860,6 +860,95 @@ int main(void) {
     assert!(
         run.status.success(),
         "a symbol-keyed or private site and a torn-down realm's keys and shapes ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn computed_string_read_uses_keyed_site_and_observes_mutated_slot() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits the shared runtime");
+    let wrapper = r#"
+static kiln_c99_symbol_cell kiln_test_computed_string_cell;
+static kiln_gc_heap *kiln_test_new_heap(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    if (heap == NULL) return NULL;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    return heap;
+}
+static void kiln_test_enter(kiln_gc_heap *heap) {
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+}
+static int computed_string_entry(void *context) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap_uncached();
+    kiln_value object_boundary, key_boundary, thrown = {0};
+    kiln_string *key_string;
+    kiln_val object, key, out;
+    kiln_object *payload;
+    const kiln_string *canonical;
+    const kiln_c99_pic_entry *entry;
+    int status;
+    (void)context;
+    if (heap == NULL) return 1;
+    heap->fallback = 0;
+    heap->enabled = 1;
+    if (kiln_c99_new_object(&object_boundary) != KILN_C99_OK) return 2;
+    key_string = kiln_c99_string_from_utf8("runtime/computed-key", 20);
+    if (key_string == NULL) return 3;
+    key_boundary = kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)key_string,
+                                  key_string->unit_len);
+    object = kiln_val_from_boundary(object_boundary);
+    key = kiln_val_from_boundary(key_boundary);
+    if (kiln_c99_val_write_element(NULL, object, key,
+                                   kiln_val_from_boundary(kiln_c99_number(41.0)), 1, 0,
+                                   &thrown) != KILN_C99_OK) return 4;
+    payload = (kiln_object *)KILN_VAL_PTR(object);
+    canonical = kiln_c99_intern_key(key_string);
+    if (canonical == NULL) return 5;
+
+    status = kiln_c99_val_read_string_key(NULL, object, key, 0, &thrown,
+                                          &kiln_test_computed_string_cell, &out);
+    if (status != KILN_C99_OK || !KILN_VAL_IS_NUMBER(out) ||
+        out != kiln_val_from_boundary(kiln_c99_number(41.0))) return 6;
+    if (kiln_test_computed_string_cell == NULL ||
+        kiln_test_computed_string_cell->registered != heap->serial) return 7;
+    entry = kiln_c99_site_entry_keyed(kiln_test_computed_string_cell, payload->shape, canonical);
+    if (entry == NULL || entry->slot >= payload->slot_capacity) return 8;
+
+    /* The entry caches a slot, never the value: an in-place store is visible on the next hit. */
+    kiln_c99_heap_store_val(payload, &payload->slots[entry->slot],
+                            kiln_val_from_boundary(kiln_c99_number(73.0)));
+    status = kiln_c99_val_read_string_key(NULL, object, key, 0, &thrown,
+                                          &kiln_test_computed_string_cell, &out);
+    if (status != KILN_C99_OK || !KILN_VAL_IS_NUMBER(out) ||
+        out != kiln_val_from_boundary(kiln_c99_number(73.0))) return 9;
+    return 0;
+}
+int main(void) {
+    kiln_gc_heap *heap;
+    int status;
+    heap = kiln_test_new_heap();
+    if (heap == NULL) return 10;
+    kiln_test_enter(heap);
+    status = computed_string_entry(NULL);
+    kiln_c99_gc_teardown_begin(heap);
+    kiln_c99_gc_teardown_end(heap);
+    if (status != 0) return status;
+    if (kiln_test_computed_string_cell == NULL) return 12;
+    if (kiln_test_computed_string_cell->registered != 0) return 13;
+    if (!KILN_C99_SLOT_IS_RETIRED(
+            kiln_c99_slot_key(&kiln_test_computed_string_cell->entries[0].shape))) return 14;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "computed-string-keyed-site");
+    assert!(
+        run.status.success(),
+        "a computed string read learns a realm-local keyed slot ({:?}): {}",
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
@@ -3349,6 +3438,48 @@ int main(void) {
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
+}
+
+#[test]
+fn emitted_generator_skips_repeat_clear_for_slots_cleaned_at_the_previous_yield() {
+    let mut source = program(
+        vec![
+            Constant::Number(1.0_f64.to_bits()),
+            Constant::Number(2.0_f64.to_bits()),
+        ],
+        vec![
+            Instruction::MakeFunction(0),
+            Instruction::Call { argc: 0 },
+            Instruction::Return,
+        ],
+        0,
+    );
+    source.functions.push(FunctionProto {
+        generator: true,
+        local_count: 3,
+        ..function(vec![
+            Instruction::Const(0),
+            Instruction::StoreLocal(0),
+            Instruction::Const(1),
+            Instruction::Yield,
+            Instruction::Pop,
+            Instruction::Const(1),
+            Instruction::Yield,
+            Instruction::Pop,
+            Instruction::Return,
+        ])
+    });
+
+    let generated = emit(&source).expect("two-yield generator emits");
+    for slot in 0..3 {
+        let clear =
+            format!("kiln_c99_heap_store_val(frame, &frame->locals[{slot}], KILN_VAL_UNDEFINED);");
+        assert_eq!(
+            generated.source.matches(&clear).count(),
+            1,
+            "slot {slot} should be cleared at the first yield only"
+        );
+    }
 }
 
 #[test]
