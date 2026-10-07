@@ -1830,6 +1830,7 @@ mod tests {
         fn contract_frontend(path: &str, text: &str) -> Module {
             let mut module = fixture_frontend(path, text);
             module.source = text.into();
+            module.source_kind = SourceKind::TypeScript;
             if path.ends_with("main.ts") {
                 let param_span = Span::new(32, 37);
                 let function_span = Span::new(0, 65);
