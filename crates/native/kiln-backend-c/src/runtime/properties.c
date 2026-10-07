@@ -85,6 +85,10 @@ static int kiln_c99_is_node_hidden_key_key(const kiln_string *key) {
         "@@kiln:node:is-file", "@@kiln:node:is-directory",
     };
     size_t index;
+    /* These runtime-only names are all reserved keys. Ordinary strings are never hidden, even
+     * when their code units spell one of the names; avoid checking each candidate for that
+     * common case. Keep the exact comparisons below for symbol/private domains. */
+    if (!kiln_c99_key_is_reserved(key)) return 0;
     for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
         if (kiln_c99_same_name_key(key, names[index])) return 1;
     }

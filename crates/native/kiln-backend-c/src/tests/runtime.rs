@@ -97,6 +97,67 @@ int main(void) {
 }
 
 #[test]
+fn hidden_runtime_key_check_skips_only_ordinary_string_domain() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits the shared runtime");
+    let wrapper = r#"
+int main(void) {
+    static const char *const names[] = {
+        "@@node:socket", "@@node:server", "@@node:client", "@@node:response",
+        "@@kiln:node:is-file", "@@kiln:node:is-directory",
+    };
+    if (kiln_c99_is_node_hidden_key_key(NULL)) return 1;
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; ++i) {
+        size_t len = strlen(names[i]);
+        kiln_string ordinary = {(uint32_t)len, KILN_STRING_LATIN1, names[i]};
+        kiln_string private_key = {
+            (uint32_t)len, KILN_STRING_LATIN1 | KILN_STRING_PRIVATE_KEY, names[i]
+        };
+        kiln_string symbol_key = {
+            (uint32_t)len, KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY, names[i]
+        };
+        if (kiln_c99_is_node_hidden_key_key(&ordinary)) return 2;
+        if (!kiln_c99_is_node_hidden_key_key(&private_key) ||
+            !kiln_c99_is_node_hidden_key_key(&symbol_key)) return 3;
+    }
+
+    /* The ordinary program string domain remains observable, including the exact spelling. */
+    static const char *const ordinary_names[] = {
+        "@@node:socket", "@@node:socketx", "@@node:socke", "@@kiln:node:is-filex",
+        "@@", "@node:socket", "ordinary",
+    };
+    for (size_t i = 0; i < sizeof ordinary_names / sizeof ordinary_names[0]; ++i) {
+        size_t len = strlen(ordinary_names[i]);
+        kiln_string ordinary = {(uint32_t)len, KILN_STRING_LATIN1, ordinary_names[i]};
+        if (kiln_c99_is_node_hidden_key_key(&ordinary)) return 4;
+    }
+
+    /* UTF-16 and the interned compiler-key route keep the same exact-domain decision. */
+    uint16_t wide_units[32];
+    size_t wide_len = strlen(names[3]);
+    for (size_t i = 0; i < wide_len; ++i) wide_units[i] = (uint8_t)names[3][i];
+    kiln_string wide = {
+        (uint32_t)wide_len, KILN_STRING_UTF16 | KILN_STRING_PRIVATE_KEY, wide_units
+    };
+    if (!kiln_c99_is_node_hidden_key_key(&wide)) return 5;
+    kiln_string intern_view = {
+        (uint32_t)strlen(names[0]), KILN_STRING_LATIN1 | KILN_STRING_PRIVATE_KEY, names[0]
+    };
+    const kiln_string *interned = kiln_c99_intern_static_key(&intern_view);
+    if (interned == NULL || !kiln_c99_is_node_hidden_key_key(interned)) return 6;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "hidden-runtime-key-domain-fast-reject");
+    assert!(
+        run.status.success(),
+        "hidden key check changed reserved/ordinary domain behavior ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn generic_only_direct_call_keeps_boxed_dynamic_fallback() {
     let mut add = function(vec![
         Instruction::LoadLocal(0),
