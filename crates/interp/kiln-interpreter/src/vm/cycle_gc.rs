@@ -286,7 +286,41 @@ impl Owner {
 #[derive(Default)]
 struct Node {
     owner: Option<Owner>,
-    edges: Vec<Key>,
+    edges: Vec<usize>,
+}
+
+#[derive(Default)]
+struct OwnerGraph {
+    nodes: Vec<Node>,
+    indices: HashMap<Key, usize>,
+    work: Vec<usize>,
+}
+
+impl OwnerGraph {
+    /// Return the node index for this owner, adding it to the discovery queue when new.
+    fn ensure(&mut self, owner: Owner) -> usize {
+        let key = owner.key();
+        match self.indices.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let index = self.nodes.len();
+                self.nodes.push(Node {
+                    owner: Some(owner),
+                    edges: Vec::new(),
+                });
+                entry.insert(index);
+                self.work.push(index);
+                index
+            }
+        }
+    }
+
+    /// Preserve every physical owner edge, including duplicates, while deduplicating graph nodes.
+    fn add_edge(&mut self, parent: usize, owner: Owner) -> usize {
+        let child = self.ensure(owner);
+        self.nodes[parent].edges.push(child);
+        child
+    }
 }
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
@@ -301,11 +335,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// Collect unreachable cycles reachable from this VM's realm-wide weak census.
     pub(super) fn collect_closure_cycles(&mut self) {
-        let mut nodes: HashMap<Key, Node> = HashMap::new();
-        let mut work = Vec::new();
+        let mut graph = OwnerGraph::default();
         // WeakMap values own their Rc payloads, but only conditionally keep them reachable.
         // Store identities here; the value itself remains owned only by its weak-map entry.
-        let mut ephemerons = Vec::<(Key, Key, Key)>::new();
+        let mut ephemerons = Vec::<(usize, usize, usize)>::new();
 
         let module_map = self.gc_module_map();
         // These thread-local registries are weak-only. Rc interpreter values cannot cross
@@ -332,29 +365,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         for weak in &shared_closures {
             if let Some(closure) = weak.upgrade() {
-                let owner = Owner::Closure(closure);
-                let key = owner.key();
-                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
-                    entry.insert(Node {
-                        owner: Some(owner),
-                        edges: Vec::new(),
-                    });
-                    work.push(key);
-                }
+                graph.ensure(Owner::Closure(closure));
             }
         }
 
         for weak in &shared_generators {
             if let Some(generator) = weak.upgrade() {
-                let owner = Owner::Generator(generator);
-                let key = owner.key();
-                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
-                    entry.insert(Node {
-                        owner: Some(owner),
-                        edges: Vec::new(),
-                    });
-                    work.push(key);
-                }
+                graph.ensure(Owner::Generator(generator));
             }
         }
 
@@ -362,94 +379,47 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // This catches object-only cycles that have no function edge at all.
         for weak in &shared_weak_objects {
             if let Some(object) = weak.upgrade() {
-                let owner = Owner::Object(object);
-                let key = owner.key();
-                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
-                    entry.insert(Node {
-                        owner: Some(owner),
-                        edges: Vec::new(),
-                    });
-                    work.push(key);
-                }
+                graph.ensure(Owner::Object(object));
             }
         }
 
         for weak in &allocated_objects {
             if let Some(object) = weak.upgrade() {
-                let owner = Owner::Object(object);
-                let key = owner.key();
-                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
-                    entry.insert(Node {
-                        owner: Some(owner),
-                        edges: Vec::new(),
-                    });
-                    work.push(key);
-                }
+                graph.ensure(Owner::Object(object));
             }
         }
         for weak in &allocated_arrays {
             if let Some(array) = weak.upgrade() {
-                let owner = Owner::Array(array);
-                let key = owner.key();
-                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
-                    entry.insert(Node {
-                        owner: Some(owner),
-                        edges: Vec::new(),
-                    });
-                    work.push(key);
-                }
+                graph.ensure(Owner::Array(array));
             }
         }
         for weak in &allocated_proxies {
             if let Some(proxy) = weak.upgrade() {
-                let owner = Owner::Proxy(proxy);
-                let key = owner.key();
-                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
-                    entry.insert(Node {
-                        owner: Some(owner),
-                        edges: Vec::new(),
-                    });
-                    work.push(key);
-                }
+                graph.ensure(Owner::Proxy(proxy));
             }
         }
         for weak in &shared_weak_collections {
             if let Some(object) = weak.upgrade() {
-                let owner = Owner::Object(object);
-                let key = owner.key();
-                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
-                    entry.insert(Node {
-                        owner: Some(owner),
-                        edges: Vec::new(),
-                    });
-                    work.push(key);
-                }
+                graph.ensure(Owner::Object(object));
             }
         }
         for weak in &shared_generations {
             if let Some(generation) = weak.upgrade() {
-                let owner = Owner::ModuleGeneration(generation);
-                let key = owner.key();
-                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
-                    entry.insert(Node {
-                        owner: Some(owner),
-                        edges: Vec::new(),
-                    });
-                    work.push(key);
-                }
+                graph.ensure(Owner::ModuleGeneration(generation));
             }
         }
 
-        while let Some(parent) = work.pop() {
+        while let Some(parent) = graph.work.pop() {
             if let Some(Node {
                 owner: Some(Owner::Generator(generator)),
                 ..
-            }) = nodes.get(&parent)
+            }) = graph.nodes.get(parent)
             {
                 self.prune_suspended_generator_locals(generator);
             }
-            let weak_entries = nodes
-                .get(&parent)
+            let weak_entries = graph
+                .nodes
+                .get(parent)
                 .and_then(|node| match node.owner.as_ref() {
                     Some(Owner::Object(object)) => {
                         object.borrow().weak_collection_entries.as_deref().cloned()
@@ -465,97 +435,59 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // representation has an owner-graph node of its own.
                     continue;
                 };
-                let key = key_owner.key();
-                if let std::collections::hash_map::Entry::Vacant(slot) = nodes.entry(key) {
-                    slot.insert(Node {
-                        owner: Some(key_owner),
-                        edges: Vec::new(),
-                    });
-                    work.push(key);
-                }
+                let key = graph.ensure(key_owner);
                 if let Some(value_owner) = owner_for_value(&entry_value) {
-                    let value = value_owner.key();
-                    if let std::collections::hash_map::Entry::Vacant(slot) = nodes.entry(value) {
-                        slot.insert(Node {
-                            owner: Some(value_owner),
-                            edges: Vec::new(),
-                        });
-                        work.push(value);
-                    }
+                    let value = graph.ensure(value_owner);
                     ephemerons.push((parent, key, value));
                 }
             }
-            let owner = nodes
-                .get(&parent)
+            let owner = graph
+                .nodes
+                .get(parent)
                 .and_then(|node| node.owner.as_ref())
                 .expect("work node exists");
             let children = owner_children(owner);
             for child_owner in owner_sidecar_children(owner) {
-                let key = child_owner.key();
-                nodes
-                    .get_mut(&parent)
-                    .expect("parent exists")
-                    .edges
-                    .push(key);
-                if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
-                    entry.insert(Node {
-                        owner: Some(child_owner),
-                        edges: Vec::new(),
-                    });
-                    work.push(key);
-                }
+                graph.add_edge(parent, child_owner);
             }
             for child in children {
                 if let Some(owner) = owner_for_value(&child) {
-                    let key = owner.key();
-                    nodes
-                        .get_mut(&parent)
-                        .expect("parent exists")
-                        .edges
-                        .push(key);
-                    if let std::collections::hash_map::Entry::Vacant(entry) = nodes.entry(key) {
-                        entry.insert(Node {
-                            owner: Some(owner),
-                            edges: Vec::new(),
-                        });
-                        work.push(key);
-                    }
+                    graph.add_edge(parent, owner);
                 }
             }
         }
 
-        let mut incoming: HashMap<Key, usize> = HashMap::new();
-        for node in nodes.values() {
+        let mut incoming = vec![0usize; graph.nodes.len()];
+        for node in &graph.nodes {
             for edge in &node.edges {
-                *incoming.entry(*edge).or_default() += 1;
+                incoming[*edge] += 1;
             }
         }
         // Count the real Rc owner in every weak-map value even before its ephemeron activates.
         // This is ownership accounting only; it does not make the value reachable.
         for (_, _, value) in &ephemerons {
-            *incoming.entry(*value).or_default() += 1;
+            incoming[*value] += 1;
         }
 
         // Nodes whose counts exceed the collector's one owner plus all incoming edges have an
         // owner outside this discovered graph. Unknown or unaccounted owners are always live.
-        let mut live = HashSet::new();
+        let mut live = vec![false; graph.nodes.len()];
         let mut mark = Vec::new();
-        for (key, node) in &nodes {
+        for (index, node) in graph.nodes.iter().enumerate() {
             let Some(owner) = node.owner.as_ref() else {
                 continue;
             };
-            let accounted = incoming.get(key).copied().unwrap_or(0).saturating_add(1);
+            let accounted = incoming[index].saturating_add(1);
             if owner.strong_count() > accounted {
-                live.insert(*key);
-                mark.push(*key);
+                live[index] = true;
+                mark.push(index);
             }
         }
-        while let Some(key) = mark.pop() {
-            if let Some(node) = nodes.get(&key) {
-                for edge in &node.edges {
-                    if live.insert(*edge) {
-                        mark.push(*edge);
-                    }
+        while let Some(index) = mark.pop() {
+            for edge in &graph.nodes[index].edges {
+                if !live[*edge] {
+                    live[*edge] = true;
+                    mark.push(*edge);
                 }
             }
         }
@@ -564,17 +496,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         loop {
             let mut activated = false;
             for (map, key, value) in &ephemerons {
-                if live.contains(map) && live.contains(key) && live.insert(*value) {
+                if live[*map] && live[*key] && !live[*value] {
+                    live[*value] = true;
                     mark.push(*value);
                     activated = true;
                 }
             }
-            while let Some(key) = mark.pop() {
-                if let Some(node) = nodes.get(&key) {
-                    for edge in &node.edges {
-                        if live.insert(*edge) {
-                            mark.push(*edge);
-                        }
+            while let Some(index) = mark.pop() {
+                for edge in &graph.nodes[index].edges {
+                    if !live[*edge] {
+                        live[*edge] = true;
+                        mark.push(*edge);
                     }
                 }
             }
@@ -582,12 +514,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 break;
             }
         }
-        let live_candidate_count = live.len();
+        let live_candidate_count = live.iter().filter(|is_live| **is_live).count();
 
         // Break only proven-unreachable nodes. WeakRef target upgrades happen after this method
         // returns, so a reclaimed target is absent on the same explicit collection request.
-        for (key, node) in &nodes {
-            if !live.contains(key)
+        for (index, node) in graph.nodes.iter().enumerate() {
+            if !live[index]
                 && let Some(owner) = node.owner.as_ref()
             {
                 owner.clear_mutable_edges();
@@ -595,15 +527,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         // Drop entries whose weak key is dead. This releases their conditional values without
         // affecting entries in a map that is itself unreachable (which is cleared above).
-        for (key, node) in &nodes {
-            if live.contains(key)
+        for (index, node) in graph.nodes.iter().enumerate() {
+            if live[index]
                 && let Some(Owner::Object(object)) = node.owner.as_ref()
             {
                 let mut data = object.borrow_mut();
                 if let Some(entries) = data.weak_collection_entries.as_mut() {
                     entries.retain(|weak_key, _entry_value| {
                         weak_key.upgrade().is_some_and(|value| {
-                            owner_for_value(&value).is_none_or(|owner| live.contains(&owner.key()))
+                            owner_for_value(&value).is_none_or(|owner| {
+                                graph
+                                    .indices
+                                    .get(&owner.key())
+                                    .is_some_and(|index| live[*index])
+                            })
                         })
                     });
                 }
@@ -611,7 +548,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         // Drop the collector's temporary strong owners before checking which weak census entries
         // expired during the edge-clearing pass.
-        drop(nodes);
+        drop(graph);
         crate::gc_census::prune_dead_candidates();
         self.closures.retain(|closure| closure.strong_count() > 0);
         self.closures_prune_at = self
@@ -1339,6 +1276,30 @@ mod tests {
             "cycle dies once its VM root is released"
         );
         let _ = (rooted_ref, job_ref);
+    }
+
+    #[test]
+    fn duplicate_owner_edges_are_counted_when_clearing_unreachable_objects() {
+        let mut host = TestHost;
+        let (mut vm, _) = test_vm(&mut host);
+        let parent = Rc::new(RefCell::new(ObjectData::default()));
+        let target = Rc::new(RefCell::new(ObjectData::default()));
+        parent
+            .borrow_mut()
+            .set("first", Value::Object(Rc::clone(&target)));
+        parent
+            .borrow_mut()
+            .set("second", Value::Object(Rc::clone(&target)));
+        let weak_target = vm
+            .construct_weak_ref(&[Value::Object(Rc::clone(&target))], 0)
+            .unwrap();
+        vm.module_map.borrow_mut().weak_ref_keepalive.clear();
+        drop(parent);
+        drop(target);
+
+        vm.collect_closure_cycles();
+
+        assert_eq!(vm.weak_ref_deref(&weak_target, 0), Ok(Value::Undefined));
     }
 
     fn generator_program() -> Rc<Program> {
