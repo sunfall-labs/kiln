@@ -272,7 +272,13 @@ impl Default for StringUnits {
 }
 impl PartialEq for StringUnits {
     fn eq(&self, other: &Self) -> bool {
-        self.as_view() == other.as_view()
+        match (&self.0, &other.0) {
+            (Repr::Latin1(left), Repr::Latin1(right)) if Arc::ptr_eq(left, right) => true,
+            (Repr::Utf16(left), Repr::Utf16(right)) if Arc::ptr_eq(left, right) => true,
+            // Equal code units do not require the same storage width. Keep the existing view
+            // comparison for distinct allocations and mixed Latin1/UTF-16 representations.
+            _ => self.as_view() == other.as_view(),
+        }
     }
 }
 impl Eq for StringUnits {}
@@ -386,6 +392,24 @@ mod tests {
         assert_eq!(StringUnits::from("property"), "property");
         assert_eq!(StringUnits::from("caf\u{e9}"), "caf\u{e9}");
         assert_ne!(lone_surrogate, "\u{fffd}");
+    }
+
+    #[test]
+    fn cloned_and_distinct_string_units_keep_value_equality() {
+        let latin = StringUnits::from("same");
+        assert_eq!(latin, latin.clone());
+        assert_eq!(latin, StringUnits::from("same"));
+
+        let wide = StringUnits::from_view(StringView::Utf16(&[0x61, 0xd800]));
+        assert_eq!(wide, wide.clone());
+        assert_eq!(
+            wide,
+            StringUnits::from_view(StringView::Utf16(&[0x61, 0xd800]))
+        );
+        assert_ne!(
+            wide,
+            StringUnits::from_view(StringView::Utf16(&[0x61, 0xd801]))
+        );
     }
 
     #[test]

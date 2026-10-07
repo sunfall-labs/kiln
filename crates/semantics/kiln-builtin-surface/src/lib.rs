@@ -754,6 +754,12 @@ impl WellKnownSymbol {
     }
 
     pub const fn from_property_key(key: &str) -> Option<Self> {
+        // Every well-known symbol spelling is reserved under `@@`. Ordinary property names
+        // cannot match this table, so reject them before comparing all sixteen spellings.
+        let bytes = key.as_bytes();
+        if bytes.len() < 2 || bytes[0] != b'@' || bytes[1] != b'@' {
+            return None;
+        }
         let mut i = 0;
         while i < Self::ALL.len() {
             if same(Self::ALL[i].property_key(), key) {
@@ -810,6 +816,18 @@ impl WellKnownSymbol {
         }
     }
 }
+
+const _: () = {
+    let mut index = 0;
+    while index < WellKnownSymbol::ALL.len() {
+        let bytes = WellKnownSymbol::ALL[index].property_key().as_bytes();
+        assert!(
+            bytes.len() >= 2 && bytes[0] == b'@' && bytes[1] == b'@',
+            "well-known symbol property keys must retain the reserved @@ prefix"
+        );
+        index += 1;
+    }
+};
 
 /// The key a built-in member is published under.
 ///
@@ -2734,6 +2752,9 @@ mod tests {
                 WellKnownSymbol::from_property_key(sym.property_key()),
                 Some(sym)
             );
+        }
+        for ordinary in ["", "iterator", "map", "@@unknown"] {
+            assert_eq!(WellKnownSymbol::from_property_key(ordinary), None);
         }
     }
 
