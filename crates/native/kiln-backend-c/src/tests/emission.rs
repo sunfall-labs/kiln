@@ -49,7 +49,7 @@ fn argc_only_arguments_length_emits_without_publishing_an_arguments_frame() {
         "function argcOnly() { return arguments.length; }\n\
          function capturesArguments() { return () => arguments.length; }\n\
          function capturesObjectAfterLength() { const before = arguments.length; return () => arguments[0]; }\n\
-         argcOnly(1, 2, 3);",
+         argcOnly(1, 2, 3); capturesArguments(); capturesObjectAfterLength();",
     );
     let program = kiln_ir::compile_module(&hir)
         .expect("arguments-length fixture compiles")
@@ -58,6 +58,7 @@ fn argc_only_arguments_length_emits_without_publishing_an_arguments_frame() {
         &program,
         EmissionPolicy {
             generic_only: true,
+            compact: true,
             ..Default::default()
         },
     )

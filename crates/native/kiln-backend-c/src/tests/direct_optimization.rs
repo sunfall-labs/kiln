@@ -27,7 +27,8 @@ function capturesObjectAfterLength() {
   return () => arguments[0];
 }
 function evaluatedArguments() {
-  const beforeEval = arguments.length;
+  const args = arguments;
+  const beforeEval = args.length;
   return [beforeEval, eval('arguments.length')];
 }
 function* generatorArguments() { yield arguments.length; }
