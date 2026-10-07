@@ -2001,9 +2001,39 @@ int kiln_c99_val_read_string_key(kiln_host *host, kiln_val target, kiln_val key,
      * stable shape slot. Keep both on the authoritative computed-property path. */
     if (object == NULL || object->properties != NULL || object->module_namespace)
         return kiln_c99_val_read_element(host, target, key, depth, thrown, out);
+    site = KILN_C99_LOAD_ACQUIRE(cell);
+    if (site != NULL) {
+        uint32_t p;
+        uint32_t count = kiln_c99_site_count(site);
+        for (p = 0; p < count; ++p) {
+            const kiln_c99_pic_entry *entry = &site->entries[p];
+            const kiln_shape *published_shape = kiln_c99_slot_key(&entry->shape);
+            uint32_t slot;
+            const kiln_string *shape_key;
+
+            /* Compare the receiver shape before reading any other entry word. A keyed entry may
+             * name a realm-local key and is retired before that realm frees it. Restrict this
+             * allocation-free content check to an own data slot, and prove its key pointer is
+             * owned by the live receiver shape before looking at its spelling. Inherited,
+             * absent, and transition entries continue through the canonical pointer lookup below. */
+            if (published_shape != object->shape || !entry->keyed || entry->key == NULL ||
+                entry->transition_to != NULL)
+                continue;
+            slot = entry->slot;
+            if (slot >= object->shape->property_count || slot >= object->slot_capacity ||
+                (object->shape->accessor_mask & (1u << slot)) != 0)
+                continue;
+            shape_key = object->shape->keys[slot];
+            if (shape_key == NULL || entry->key != shape_key ||
+                kiln_c99_key_domain(shape_key) != kiln_c99_key_domain(keystr) ||
+                !kiln_string_equal(shape_key, keystr))
+                continue;
+            *out = object->slots[slot];
+            return KILN_C99_OK;
+        }
+    }
     ikey = kiln_c99_intern_key(keystr);
     if (ikey == NULL) return kiln_c99_val_read_element(host, target, key, depth, thrown, out);
-    site = KILN_C99_LOAD_ACQUIRE(cell);
     if (site != NULL) {
         const kiln_c99_pic_entry *entry = kiln_c99_site_entry_keyed(site, object->shape, ikey);
         if (entry != NULL) {

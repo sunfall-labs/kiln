@@ -954,6 +954,130 @@ int main(void) {
     );
 }
 
+#[test]
+fn computed_string_pic_matches_owned_spelling_and_preserves_fallbacks() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+        .expect("empty program emits the shared runtime");
+    let wrapper = r#"
+static kiln_c99_symbol_cell kiln_test_content_pic;
+static kiln_val test_ascii(const char *bytes, size_t len) {
+    kiln_string *string = kiln_c99_gc_alloc_units(len, KILN_STRING_LATIN1);
+    if (string == NULL) return KILN_VAL_UNDEFINED;
+    memcpy((void *)string->data, bytes, len);
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, string);
+}
+static kiln_val test_utf16_ascii(const char *bytes, size_t len) {
+    kiln_string *string = kiln_c99_gc_alloc_units(len, KILN_STRING_UTF16);
+    uint16_t *units;
+    if (string == NULL) return KILN_VAL_UNDEFINED;
+    units = (uint16_t *)(uintptr_t)string->data;
+    for (size_t i = 0; i < len; ++i) units[i] = (uint8_t)bytes[i];
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, string);
+}
+static int test_entry(void *unused) {
+    kiln_value objv, protov, recv, privv, thrown = {0};
+    kiln_val obj, receiver, privobj, latin, wide, out;
+    kiln_object *recv_obj, *priv_obj;
+    const kiln_string *canonical, *private_key, *symbol_key;
+    kiln_c99_pic_entry entry;
+    (void)unused;
+    if (kiln_c99_new_object(&objv) != KILN_C99_OK ||
+        kiln_c99_new_object(&protov) != KILN_C99_OK ||
+        kiln_c99_new_object(&recv) != KILN_C99_OK ||
+        kiln_c99_new_object(&privv) != KILN_C99_OK) return 1;
+    obj = kiln_val_from_boundary(objv);
+    receiver = kiln_val_from_boundary(recv);
+    privobj = kiln_val_from_boundary(privv);
+    recv_obj = (kiln_object *)KILN_VAL_PTR(receiver);
+    priv_obj = (kiln_object *)KILN_VAL_PTR(privobj);
+    canonical = kiln_c99_intern_static("field", 5);
+    if (canonical == NULL ||
+        kiln_c99_put(NULL, objv, "field", 5, kiln_c99_number(41.0), 1, &thrown) !=
+            KILN_C99_OK) return 2;
+
+    /* Distinct allocations and encodings with identical UTF-16 units share the own-slot answer. */
+    latin = test_ascii("field", 5);
+    wide = test_utf16_ascii("field", 5);
+    if (!KILN_VAL_IS_STRING(latin) || !KILN_VAL_IS_STRING(wide) ||
+        KILN_VAL_PTR(latin) == KILN_VAL_PTR(wide) || KILN_VAL_PTR(latin) == canonical)
+        return 3;
+    if (kiln_c99_val_read_string_key(NULL, obj, latin, 0, &thrown,
+                                     &kiln_test_content_pic, &out) != KILN_C99_OK ||
+        out != kiln_val_from_boundary(kiln_c99_number(41.0))) return 4;
+    if (kiln_c99_val_read_string_key(NULL, obj, wide, 0, &thrown,
+                                     &kiln_test_content_pic, &out) != KILN_C99_OK ||
+        out != kiln_val_from_boundary(kiln_c99_number(41.0))) return 5;
+
+    /* Changed shape and absent key retain their established fallback behavior. */
+    if (kiln_c99_put(NULL, objv, "other", 5, kiln_c99_number(7.0), 1, &thrown) != KILN_C99_OK)
+        return 6;
+    if (kiln_c99_val_read_string_key(NULL, obj, wide, 0, &thrown,
+                                     &kiln_test_content_pic, &out) != KILN_C99_OK ||
+        out != kiln_val_from_boundary(kiln_c99_number(41.0))) return 7;
+    if (kiln_c99_val_read_string_key(NULL, obj, test_ascii("missing", 7), 0, &thrown,
+                                     &kiln_test_content_pic, &out) != KILN_C99_OK ||
+        out != KILN_VAL_UNDEFINED) return 8;
+
+    /* An inherited path is deliberately not an own-slot content hit. */
+    if (kiln_c99_put(NULL, protov, "field", 5, kiln_c99_number(88.0), 1, &thrown) !=
+        KILN_C99_OK) return 9;
+    recv_obj->prototype = protov;
+    if (kiln_c99_val_read_string_key(NULL, receiver, wide, 0, &thrown,
+                                     &kiln_test_content_pic, &out) != KILN_C99_OK ||
+        out != kiln_val_from_boundary(kiln_c99_number(88.0))) return 10;
+
+    /* Same spelling in private and symbol domains cannot answer an ordinary string read. */
+    private_key = kiln_c99_intern_pinned_key(
+        &(kiln_string){5, KILN_STRING_LATIN1 | KILN_STRING_PRIVATE_KEY, "field"});
+    symbol_key = kiln_c99_intern_pinned_key(
+        &(kiln_string){5, KILN_STRING_LATIN1 | KILN_STRING_SYMBOL_KEY, "field"});
+    if (private_key == NULL || symbol_key == NULL) return 11;
+    if (kiln_c99_put_mode_key(NULL, privv, private_key, private_key,
+                              kiln_c99_number(99.0), 1, 0, &thrown) != KILN_C99_OK) return 12;
+    memset(&entry, 0, sizeof entry);
+    entry.shape = priv_obj->shape;
+    entry.slot = priv_obj->shape->slot_index;
+    kiln_c99_key_site_remember(&kiln_test_content_pic, &entry, private_key);
+    if (kiln_c99_val_read_string_key(NULL, privobj, wide, 0, &thrown,
+                                     &kiln_test_content_pic, &out) != KILN_C99_OK ||
+        out != KILN_VAL_UNDEFINED) return 13;
+    if (kiln_c99_put_mode_key(NULL, privv, symbol_key, symbol_key,
+                              kiln_c99_number(101.0), 1, 0, &thrown) != KILN_C99_OK) return 14;
+    memset(&entry, 0, sizeof entry);
+    entry.shape = priv_obj->shape;
+    entry.slot = priv_obj->shape->slot_index;
+    kiln_c99_key_site_remember(&kiln_test_content_pic, &entry, symbol_key);
+    if (kiln_c99_val_read_string_key(NULL, privobj, latin, 0, &thrown,
+                                     &kiln_test_content_pic, &out) != KILN_C99_OK ||
+        out != KILN_VAL_UNDEFINED) return 15;
+    return 0;
+}
+int main(void) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)malloc(sizeof *heap);
+    int status;
+    if (heap == NULL) return 20;
+    kiln_c99_gc_heap_init(heap);
+    heap->enabled = 0;
+    kiln_c99_gc_heap_register(heap);
+    kiln_test_heap = heap;
+    kiln_test_generation += 1;
+    status = test_entry(NULL);
+    kiln_c99_gc_teardown_begin(heap);
+    kiln_c99_gc_teardown_end(heap);
+    if (status != 0) return status;
+    if (kiln_test_content_pic == NULL || kiln_test_content_pic->registered != 0) return 21;
+    return 0;
+}
+"#;
+    let run = run_with_main(&generated, wrapper, "computed-string-own-slot-content-pic");
+    assert!(
+        run.status.success(),
+        "computed string PIC changed key-domain or fallback behavior ({:?}): {}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 /// Issue 04 step 3b: definitions keep an object shaped, with the attributes the list-mode record
 /// would carry recorded in its shape; a transition is keyed by (key, attributes); dictionary mode
 /// materializes the same records; a method cache names a shaped prototype one step up.
