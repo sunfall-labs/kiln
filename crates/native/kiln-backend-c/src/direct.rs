@@ -47,9 +47,12 @@ use crate::graph::{
 /// runtime fallback for anything that publishes a frame or can suspend.
 const MAX_GENERIC_DIRECT_ANALYSIS_FUNCTIONS: usize = 128;
 const MAX_GENERIC_DIRECT_ANALYSIS_INSTRUCTIONS: usize = 8_192;
-pub(crate) const MAX_GENERIC_LOOP_CALL_FUNCTIONS: usize = 512;
+// Proto count is bounded independently from total IR: real dependency modules may contain many
+// tiny closures, while graph work remains capped by the instruction, caller, and edge limits.
+pub(crate) const MAX_GENERIC_LOOP_CALL_FUNCTIONS: usize = 1_024;
 pub(crate) const MAX_GENERIC_LOOP_CALL_INSTRUCTIONS: usize = 32_768;
 pub(crate) const MAX_GENERIC_LOOP_CALLERS: usize = 256;
+const MAX_GENERIC_LOOP_OPTIMIZED_FUNCTIONS: usize = 512;
 const MAX_GENERIC_LOOP_CALL_EDGES: usize = 4_096;
 const MAX_GENERIC_LOOP_CALL_DEPTH: usize = 4;
 const MAX_GENERIC_LOOP_PROFILE_CALLER_INSTRUCTIONS: usize = 1_536;
@@ -1483,7 +1486,7 @@ fn select_generic_optimization_functions_internal(
     const MAX_TOTAL_INSTRUCTIONS: usize = 4096;
     const MAX_LOOP_FUNCTIONS: usize = 2;
     const MAX_LOOP_GROUPS: usize = MAX_GENERIC_LOOP_CALLERS;
-    const MAX_LOOP_PROFILE_FUNCTIONS: usize = MAX_GENERIC_LOOP_CALL_FUNCTIONS;
+    const MAX_LOOP_PROFILE_FUNCTIONS: usize = MAX_GENERIC_LOOP_OPTIMIZED_FUNCTIONS;
     const MAX_LOOP_FUNCTION_INSTRUCTIONS: usize = MAX_GENERIC_LOOP_PROFILE_CALLER_INSTRUCTIONS;
     const MAX_LOOP_TOTAL_INSTRUCTIONS: usize = 2048;
     const MAX_LOOP_PROFILE_TOTAL_INSTRUCTIONS: usize = MAX_GENERIC_LOOP_CALL_INSTRUCTIONS;
@@ -2471,7 +2474,17 @@ mod loop_call_profile_tests {
             ],
             &[],
         );
-        let graphs = vec![target, definition, caller];
+        let mut graphs = vec![target, definition, caller];
+        // The actual Effect module has 739 proto indices and 20,004 instructions in its
+        // generated metadata. Its instruction and edge budgets fit this analysis; a 512-proto
+        // admission ceiling alone was preventing the computed-key profile from running.
+        for _ in 3..739 {
+            program
+                .functions
+                .push(proto(vec![Instruction::Return], false));
+            graphs.push(FunctionGraph::new(None, 0, 0));
+        }
+        assert_eq!(program.functions.len(), 739);
         let known = super::known_callees(&program, &graphs, &entry);
         let profile = LoopCallProfile::from_known(&program, &graphs, &entry, &known).unwrap();
         assert!(
@@ -2532,6 +2545,19 @@ mod loop_call_profile_tests {
                 .iter()
                 .any(|edge| edge.0 == Some(2) && edge.1 == 0),
             "ambiguous closure creation must not lend one capture's key identity to another"
+        );
+
+        for _ in program.functions.len()..=super::MAX_GENERIC_LOOP_CALL_FUNCTIONS {
+            program
+                .functions
+                .push(proto(vec![Instruction::Return], false));
+            graphs.push(FunctionGraph::new(None, 0, 0));
+        }
+        assert_eq!(program.functions.len(), 1_025);
+        let known = super::known_callees(&program, &graphs, &ambiguous_entry);
+        assert!(
+            LoopCallProfile::from_known(&program, &graphs, &ambiguous_entry, &known).is_none(),
+            "the profile must continue to reject modules beyond the bounded proto cap"
         );
     }
 
