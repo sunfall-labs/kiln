@@ -27,10 +27,10 @@ case/mode mapped to the official Node/Vitest inventory. This candidate still
 needs performance work; it is not a stable improvement claim over older runs.
 The stage and original-case replay receipts and raw log are included.
 
-These checks do not prove the whole Effect or native corpus. Fresh native
-Sharding (66 cases), both complete 322-file
-Effect suites (11,019 official cases), the routine gate, and Bun comparisons
-remain required. Original 5-second case and 10-second hook deadlines remain.
+These checks do not prove the whole Effect or native corpus. The fresh quiet native Sharding replay completed all 66 original cases:
+62 passed, four reached the original timeout, and none skipped. Its evidence
+is in `sharding-replay/`. Both complete 322-file Effect suites (11,019 official
+cases), the routine gate, and Bun comparisons remain required. Original 5-second case and 10-second hook deadlines remain.
 The earlier landing gate failed with disk-full/linker errors, provider capability
 configuration errors, and one worker-output ordering mismatch; it is not a green
 gate for this candidate. This commit is a review candidate pending that work.
