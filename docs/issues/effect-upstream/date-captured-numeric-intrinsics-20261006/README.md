@@ -14,6 +14,12 @@ The source-import controls load the exact old `date.ts` from `b08688e7` and the 
 
 This is host/source-import validation only. No kiln CLI/native corpus run has been performed yet; it awaits the parent-owned Date CLI build lane. The source commits are committed locally and have not been integrated or pushed.
 
+The parent-owned frozen scalar CLI built from clean `b08688e7` was also run in interpreter mode
+against the fixture. It exited 1 with `uncaught TypeError: function.isFinite is not a function`,
+confirming the failure in kiln's installed Date bootstrap. The exact command, output, and binary
+SHA-256 are in `evidence/old-kiln-cli-receipt.txt`, `evidence/old-kiln-interpreter.log`, and
+`evidence/old-kiln-cli.sha256`. This is not a native-backend result.
+
 ## Provenance
 
 - Old source: `git show b08688e7:crates/semantics/kiln-builtins/src/date.ts`.
