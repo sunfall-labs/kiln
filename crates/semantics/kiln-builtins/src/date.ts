@@ -7,10 +7,8 @@
 
 (function installDatePrototype() {
   // Date's abstract arithmetic must not dispatch through properties that user code can replace
-  // on the global Math/Number objects after bootstrap. The Number constructor is also captured
-  // for the setter argument conversions below; those conversions still run at each setter call,
-  // in the specified argument order.
-  const numberConstructor = Number;
+  // on the global Math/Number objects after bootstrap. Setter arguments use unary plus below,
+  // which performs the specification's ToNumber operation (including rejecting BigInt).
   const numberIsFinite = Number.isFinite;
   const numberIsNaN = Number.isNaN;
   const mathAbs = Math.abs;
@@ -209,7 +207,7 @@
   // --- Setters ---
   const setTime = { setTime(this: Date, time: any): number {
     rawGetTime.call(this);
-    const t = numberConstructor(time);
+    const t = +time;
     const clipped = timeClip(t);
     return rawSetTime.call(this, clipped);
   } }.setTime;
@@ -219,19 +217,19 @@
   // the time value; a setter on an invalid date still runs every `valueOf` it was handed.
   const setUTCFullYear = { setUTCFullYear(this: Date, year: any, month?: any, date?: any): number {
     const t = rawGetTime.call(this);
-    const y = numberConstructor(year);
+    const y = +year;
     const base = numberIsNaN(t) ? 0 : t;
     const p = dateParts(base)!;
-    const m = arguments.length > 1 ? numberConstructor(month) : p.month;
-    const d = arguments.length > 2 ? numberConstructor(date) : p.date;
+    const m = arguments.length > 1 ? +month : p.month;
+    const d = arguments.length > 2 ? +date : p.date;
     const newTime = partsToInstant(y, m, d, p.hour, p.minute, p.second, p.millisecond);
     return rawSetTime.call(this, newTime);
   } }.setUTCFullYear;
 
   const setUTCMonth = { setUTCMonth(this: Date, month: any, date?: any): number {
     const t = rawGetTime.call(this);
-    const m = numberConstructor(month);
-    const dt = arguments.length > 1 ? numberConstructor(date) : undefined;
+    const m = +month;
+    const dt = arguments.length > 1 ? +date : undefined;
     if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const d = dt !== undefined ? dt : p.date;
@@ -241,7 +239,7 @@
 
   const setUTCDate = { setUTCDate(this: Date, date: any): number {
     const t = rawGetTime.call(this);
-    const d = numberConstructor(date);
+    const d = +date;
     if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newTime = partsToInstant(p.year, p.month, d, p.hour, p.minute, p.second, p.millisecond);
@@ -250,10 +248,10 @@
 
   const setUTCHours = { setUTCHours(this: Date, hours: any, min?: any, sec?: any, ms?: any): number {
     const t = rawGetTime.call(this);
-    const h = numberConstructor(hours);
-    const mi = arguments.length > 1 ? numberConstructor(min) : undefined;
-    const se = arguments.length > 2 ? numberConstructor(sec) : undefined;
-    const mil = arguments.length > 3 ? numberConstructor(ms) : undefined;
+    const h = +hours;
+    const mi = arguments.length > 1 ? +min : undefined;
+    const se = arguments.length > 2 ? +sec : undefined;
+    const mil = arguments.length > 3 ? +ms : undefined;
     if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newMin = mi !== undefined ? mi : p.minute;
@@ -265,9 +263,9 @@
 
   const setUTCMinutes = { setUTCMinutes(this: Date, min: any, sec?: any, ms?: any): number {
     const t = rawGetTime.call(this);
-    const m = numberConstructor(min);
-    const se = arguments.length > 1 ? numberConstructor(sec) : undefined;
-    const mil = arguments.length > 2 ? numberConstructor(ms) : undefined;
+    const m = +min;
+    const se = arguments.length > 1 ? +sec : undefined;
+    const mil = arguments.length > 2 ? +ms : undefined;
     if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newSec = se !== undefined ? se : p.second;
@@ -278,8 +276,8 @@
 
   const setUTCSeconds = { setUTCSeconds(this: Date, sec: any, ms?: any): number {
     const t = rawGetTime.call(this);
-    const s = numberConstructor(sec);
-    const mil = arguments.length > 1 ? numberConstructor(ms) : undefined;
+    const s = +sec;
+    const mil = arguments.length > 1 ? +ms : undefined;
     if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newMs = mil !== undefined ? mil : p.millisecond;
@@ -289,7 +287,7 @@
 
   const setUTCMilliseconds = { setUTCMilliseconds(this: Date, ms: any): number {
     const t = rawGetTime.call(this);
-    const m = numberConstructor(ms);
+    const m = +ms;
     if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newTime = partsToInstant(p.year, p.month, p.date, p.hour, p.minute, p.second, m);
@@ -298,7 +296,7 @@
 
   const setYear = { setYear(this: Date, year: any): number {
     const t = rawGetTime.call(this);
-    let y = numberConstructor(year);
+    let y = +year;
     if (numberIsNaN(y)) {
       rawSetTime.call(this, NaN);
       return NaN;
