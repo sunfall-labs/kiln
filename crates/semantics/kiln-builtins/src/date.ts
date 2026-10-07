@@ -6,6 +6,16 @@
 // defined here in TypeScript to guarantee zero semantic drift.
 
 (function installDatePrototype() {
+  // Date's abstract arithmetic must not dispatch through properties that user code can replace
+  // on the global Math/Number objects after bootstrap. The Number constructor is also captured
+  // for the setter argument conversions below; those conversions still run at each setter call,
+  // in the specified argument order.
+  const numberConstructor = Number;
+  const numberIsFinite = Number.isFinite;
+  const numberIsNaN = Number.isNaN;
+  const mathAbs = Math.abs;
+  const mathFloor = Math.floor;
+  const mathTrunc = Math.trunc;
   const rawGetTime: (this: Date) => number = Date.prototype.getTime;
   const rawSetTime: (this: Date, time: number) => number = (new Date(0) as any).setTime;
   const rawParse: (dateString: any) => number = Date.parse;
@@ -24,15 +34,15 @@
     // `Math.floor` already rounds toward negative infinity; the `- 146096` of Hinnant's C
     // original corrects a *truncating* division, and applied here it moved every exact era
     // boundary back an era (`new Date(-8.64e15)` printed a day late).
-    const era = Math.floor(shifted / 146097);
+    const era = mathFloor(shifted / 146097);
     const dayOfEra = shifted - era * 146097;
-    const yearOfEra = Math.floor(
-      (dayOfEra - Math.floor(dayOfEra / 1460) + Math.floor(dayOfEra / 36524) - Math.floor(dayOfEra / 146096)) / 365
+    const yearOfEra = mathFloor(
+      (dayOfEra - mathFloor(dayOfEra / 1460) + mathFloor(dayOfEra / 36524) - mathFloor(dayOfEra / 146096)) / 365
     );
     const computedYear = yearOfEra + era * 400;
-    const dayOfYear = dayOfEra - (365 * yearOfEra + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100));
-    const shiftedMonth = Math.floor((5 * dayOfYear + 2) / 153);
-    const computedDay = dayOfYear - Math.floor((153 * shiftedMonth + 2) / 5) + 1;
+    const dayOfYear = dayOfEra - (365 * yearOfEra + mathFloor(yearOfEra / 4) - mathFloor(yearOfEra / 100));
+    const shiftedMonth = mathFloor((5 * dayOfYear + 2) / 153);
+    const computedDay = dayOfYear - mathFloor((153 * shiftedMonth + 2) / 5) + 1;
     const computedMonth = shiftedMonth < 10 ? shiftedMonth + 3 : shiftedMonth - 9;
     const year = computedYear + (computedMonth <= 2 ? 1 : 0);
     return [year, computedMonth, computedDay];
@@ -40,19 +50,19 @@
 
   function daysFromCivil(year: number, month: number, day: number): number {
     const y = year - (month <= 2 ? 1 : 0);
-    const era = Math.floor(y / 400);
+    const era = mathFloor(y / 400);
     const yearOfEra = y - era * 400;
     const shiftedMonth = month > 2 ? month - 3 : month + 9;
-    const dayOfYear = Math.floor((153 * shiftedMonth + 2) / 5) + day - 1;
-    const dayOfEra = yearOfEra * 365 + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100) + dayOfYear;
+    const dayOfYear = mathFloor((153 * shiftedMonth + 2) / 5) + day - 1;
+    const dayOfEra = yearOfEra * 365 + mathFloor(yearOfEra / 4) - mathFloor(yearOfEra / 100) + dayOfYear;
     return era * 146097 + dayOfEra - 719468;
   }
 
   function timeClip(time: number): number {
-    if (!Number.isFinite(time) || Math.abs(time) > 8.64e15) {
+    if (!numberIsFinite(time) || mathAbs(time) > 8.64e15) {
       return NaN;
     }
-    return Math.trunc(time) + 0;
+    return mathTrunc(time) + 0;
   }
 
   interface DateParts {
@@ -67,15 +77,15 @@
   }
 
   function dateParts(time: number): DateParts | null {
-    if (!Number.isFinite(time)) return null;
-    const millis = Math.trunc(time);
-    const days = Math.floor(millis / 86400000);
+    if (!numberIsFinite(time)) return null;
+    const millis = mathTrunc(time);
+    const days = mathFloor(millis / 86400000);
     const within = floorMod(millis, 86400000);
     const [year, month1, date] = civilFromDays(days);
     const day = floorMod(days + 4, 7);
-    const hour = Math.floor(within / 3600000);
-    const minute = Math.floor(within / 60000) % 60;
-    const second = Math.floor(within / 1000) % 60;
+    const hour = mathFloor(within / 3600000);
+    const minute = mathFloor(within / 60000) % 60;
+    const second = mathFloor(within / 1000) % 60;
     const millisecond = within % 1000;
     return {
       year,
@@ -99,27 +109,27 @@
     millisecond: number
   ): number {
     if (
-      !Number.isFinite(year) ||
-      !Number.isFinite(months) ||
-      !Number.isFinite(day) ||
-      !Number.isFinite(hour) ||
-      !Number.isFinite(minute) ||
-      !Number.isFinite(second) ||
-      !Number.isFinite(millisecond)
+      !numberIsFinite(year) ||
+      !numberIsFinite(months) ||
+      !numberIsFinite(day) ||
+      !numberIsFinite(hour) ||
+      !numberIsFinite(minute) ||
+      !numberIsFinite(second) ||
+      !numberIsFinite(millisecond)
     ) {
       return NaN;
     }
-    const y = Math.trunc(year);
-    const m = Math.trunc(months);
-    const d = Math.trunc(day);
-    const h = Math.trunc(hour);
-    const min = Math.trunc(minute);
-    const s = Math.trunc(second);
-    const ms = Math.trunc(millisecond);
+    const y = mathTrunc(year);
+    const m = mathTrunc(months);
+    const d = mathTrunc(day);
+    const h = mathTrunc(hour);
+    const min = mathTrunc(minute);
+    const s = mathTrunc(second);
+    const ms = mathTrunc(millisecond);
 
-    const normYear = y + Math.floor(m / 12);
+    const normYear = y + mathFloor(m / 12);
     const normMonth = floorMod(m, 12);
-    if (Math.abs(normYear) > 400000) return NaN;
+    if (mathAbs(normYear) > 400000) return NaN;
 
     const days = daysFromCivil(normYear, normMonth + 1, 1) + (d - 1);
     const clock = ((h * 3600000 + min * 60000) + s * 1000) + ms;
@@ -138,53 +148,53 @@
 
   const getUTCFullYear = { getUTCFullYear(this: Date): number {
     const t = rawGetTime.call(this);
-    return Number.isFinite(t) ? civilFromDays(Math.floor(Math.trunc(t) / 86400000))[0] : NaN;
+    return numberIsFinite(t) ? civilFromDays(mathFloor(mathTrunc(t) / 86400000))[0] : NaN;
   } }.getUTCFullYear;
 
   const getUTCMonth = { getUTCMonth(this: Date): number {
     const t = rawGetTime.call(this);
-    return Number.isFinite(t) ? civilFromDays(Math.floor(Math.trunc(t) / 86400000))[1] - 1 : NaN;
+    return numberIsFinite(t) ? civilFromDays(mathFloor(mathTrunc(t) / 86400000))[1] - 1 : NaN;
   } }.getUTCMonth;
 
   const getUTCDate = { getUTCDate(this: Date): number {
     const t = rawGetTime.call(this);
-    return Number.isFinite(t) ? civilFromDays(Math.floor(Math.trunc(t) / 86400000))[2] : NaN;
+    return numberIsFinite(t) ? civilFromDays(mathFloor(mathTrunc(t) / 86400000))[2] : NaN;
   } }.getUTCDate;
 
   const getUTCDay = { getUTCDay(this: Date): number {
     const t = rawGetTime.call(this);
-    return Number.isFinite(t) ? floorMod(Math.floor(Math.trunc(t) / 86400000) + 4, 7) : NaN;
+    return numberIsFinite(t) ? floorMod(mathFloor(mathTrunc(t) / 86400000) + 4, 7) : NaN;
   } }.getUTCDay;
 
   const getUTCHours = { getUTCHours(this: Date): number {
     const t = rawGetTime.call(this);
-    return Number.isFinite(t) ? Math.floor(floorMod(Math.trunc(t), 86400000) / 3600000) : NaN;
+    return numberIsFinite(t) ? mathFloor(floorMod(mathTrunc(t), 86400000) / 3600000) : NaN;
   } }.getUTCHours;
 
   const getUTCMinutes = { getUTCMinutes(this: Date): number {
     const t = rawGetTime.call(this);
-    return Number.isFinite(t) ? Math.floor(floorMod(Math.trunc(t), 86400000) / 60000) % 60 : NaN;
+    return numberIsFinite(t) ? mathFloor(floorMod(mathTrunc(t), 86400000) / 60000) % 60 : NaN;
   } }.getUTCMinutes;
 
   const getUTCSeconds = { getUTCSeconds(this: Date): number {
     const t = rawGetTime.call(this);
-    return Number.isFinite(t) ? Math.floor(floorMod(Math.trunc(t), 86400000) / 1000) % 60 : NaN;
+    return numberIsFinite(t) ? mathFloor(floorMod(mathTrunc(t), 86400000) / 1000) % 60 : NaN;
   } }.getUTCSeconds;
 
   const getUTCMilliseconds = { getUTCMilliseconds(this: Date): number {
     const t = rawGetTime.call(this);
-    return Number.isFinite(t) ? floorMod(Math.trunc(t), 86400000) % 1000 : NaN;
+    return numberIsFinite(t) ? floorMod(mathTrunc(t), 86400000) % 1000 : NaN;
   } }.getUTCMilliseconds;
 
   const getTimezoneOffset = { getTimezoneOffset(this: Date): number {
     // The realm's zone is UTC (ADR 0015), so the offset is 0 -- of a valid time. An invalid
     // date has no offset at all.
-    return Number.isNaN(rawGetTime.call(this)) ? NaN : 0;
+    return numberIsNaN(rawGetTime.call(this)) ? NaN : 0;
   } }.getTimezoneOffset;
 
   const getYear = { getYear(this: Date): number {
     const t = rawGetTime.call(this);
-    return Number.isFinite(t) ? civilFromDays(Math.floor(Math.trunc(t) / 86400000))[0] - 1900 : NaN;
+    return numberIsFinite(t) ? civilFromDays(mathFloor(mathTrunc(t) / 86400000))[0] - 1900 : NaN;
   } }.getYear;
 
   const getFullYear = { getFullYear(this: Date): number { return getUTCFullYear.call(this); } }.getFullYear;
@@ -199,7 +209,7 @@
   // --- Setters ---
   const setTime = { setTime(this: Date, time: any): number {
     rawGetTime.call(this);
-    const t = Number(time);
+    const t = numberConstructor(time);
     const clipped = timeClip(t);
     return rawSetTime.call(this, clipped);
   } }.setTime;
@@ -209,20 +219,20 @@
   // the time value; a setter on an invalid date still runs every `valueOf` it was handed.
   const setUTCFullYear = { setUTCFullYear(this: Date, year: any, month?: any, date?: any): number {
     const t = rawGetTime.call(this);
-    const y = Number(year);
-    const base = Number.isNaN(t) ? 0 : t;
+    const y = numberConstructor(year);
+    const base = numberIsNaN(t) ? 0 : t;
     const p = dateParts(base)!;
-    const m = arguments.length > 1 ? Number(month) : p.month;
-    const d = arguments.length > 2 ? Number(date) : p.date;
+    const m = arguments.length > 1 ? numberConstructor(month) : p.month;
+    const d = arguments.length > 2 ? numberConstructor(date) : p.date;
     const newTime = partsToInstant(y, m, d, p.hour, p.minute, p.second, p.millisecond);
     return rawSetTime.call(this, newTime);
   } }.setUTCFullYear;
 
   const setUTCMonth = { setUTCMonth(this: Date, month: any, date?: any): number {
     const t = rawGetTime.call(this);
-    const m = Number(month);
-    const dt = arguments.length > 1 ? Number(date) : undefined;
-    if (Number.isNaN(t)) return NaN;
+    const m = numberConstructor(month);
+    const dt = arguments.length > 1 ? numberConstructor(date) : undefined;
+    if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const d = dt !== undefined ? dt : p.date;
     const newTime = partsToInstant(p.year, m, d, p.hour, p.minute, p.second, p.millisecond);
@@ -231,8 +241,8 @@
 
   const setUTCDate = { setUTCDate(this: Date, date: any): number {
     const t = rawGetTime.call(this);
-    const d = Number(date);
-    if (Number.isNaN(t)) return NaN;
+    const d = numberConstructor(date);
+    if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newTime = partsToInstant(p.year, p.month, d, p.hour, p.minute, p.second, p.millisecond);
     return rawSetTime.call(this, newTime);
@@ -240,11 +250,11 @@
 
   const setUTCHours = { setUTCHours(this: Date, hours: any, min?: any, sec?: any, ms?: any): number {
     const t = rawGetTime.call(this);
-    const h = Number(hours);
-    const mi = arguments.length > 1 ? Number(min) : undefined;
-    const se = arguments.length > 2 ? Number(sec) : undefined;
-    const mil = arguments.length > 3 ? Number(ms) : undefined;
-    if (Number.isNaN(t)) return NaN;
+    const h = numberConstructor(hours);
+    const mi = arguments.length > 1 ? numberConstructor(min) : undefined;
+    const se = arguments.length > 2 ? numberConstructor(sec) : undefined;
+    const mil = arguments.length > 3 ? numberConstructor(ms) : undefined;
+    if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newMin = mi !== undefined ? mi : p.minute;
     const newSec = se !== undefined ? se : p.second;
@@ -255,10 +265,10 @@
 
   const setUTCMinutes = { setUTCMinutes(this: Date, min: any, sec?: any, ms?: any): number {
     const t = rawGetTime.call(this);
-    const m = Number(min);
-    const se = arguments.length > 1 ? Number(sec) : undefined;
-    const mil = arguments.length > 2 ? Number(ms) : undefined;
-    if (Number.isNaN(t)) return NaN;
+    const m = numberConstructor(min);
+    const se = arguments.length > 1 ? numberConstructor(sec) : undefined;
+    const mil = arguments.length > 2 ? numberConstructor(ms) : undefined;
+    if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newSec = se !== undefined ? se : p.second;
     const newMs = mil !== undefined ? mil : p.millisecond;
@@ -268,9 +278,9 @@
 
   const setUTCSeconds = { setUTCSeconds(this: Date, sec: any, ms?: any): number {
     const t = rawGetTime.call(this);
-    const s = Number(sec);
-    const mil = arguments.length > 1 ? Number(ms) : undefined;
-    if (Number.isNaN(t)) return NaN;
+    const s = numberConstructor(sec);
+    const mil = arguments.length > 1 ? numberConstructor(ms) : undefined;
+    if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newMs = mil !== undefined ? mil : p.millisecond;
     const newTime = partsToInstant(p.year, p.month, p.date, p.hour, p.minute, s, newMs);
@@ -279,8 +289,8 @@
 
   const setUTCMilliseconds = { setUTCMilliseconds(this: Date, ms: any): number {
     const t = rawGetTime.call(this);
-    const m = Number(ms);
-    if (Number.isNaN(t)) return NaN;
+    const m = numberConstructor(ms);
+    if (numberIsNaN(t)) return NaN;
     const p = dateParts(t)!;
     const newTime = partsToInstant(p.year, p.month, p.date, p.hour, p.minute, p.second, m);
     return rawSetTime.call(this, newTime);
@@ -288,15 +298,15 @@
 
   const setYear = { setYear(this: Date, year: any): number {
     const t = rawGetTime.call(this);
-    let y = Number(year);
-    if (Number.isNaN(y)) {
+    let y = numberConstructor(year);
+    if (numberIsNaN(y)) {
       rawSetTime.call(this, NaN);
       return NaN;
     }
     if (y >= 0 && y <= 99) {
-      y = Math.trunc(y) + 1900;
+      y = mathTrunc(y) + 1900;
     }
-    const base = Number.isNaN(t) ? 0 : t;
+    const base = numberIsNaN(t) ? 0 : t;
     const p = dateParts(base)!;
     const newTime = partsToInstant(y, p.month, p.date, p.hour, p.minute, p.second, p.millisecond);
     return rawSetTime.call(this, newTime);
@@ -378,7 +388,7 @@
     }
     const O = Object(this);
     const tv = toPrimitiveNumber(O);
-    if (typeof tv === "number" && !Number.isFinite(tv)) return null;
+    if (typeof tv === "number" && !numberIsFinite(tv)) return null;
     const toISO = O.toISOString;
     if (typeof toISO !== "function") {
       throw new TypeError("toISOString is not a function");
@@ -450,7 +460,7 @@
   // invalid date is "Invalid Date" whatever the locale.
   function toLocaleWith(date: Date, locales: any, options: any, required: string, defaults: string, fallback: (this: Date) => string): string {
     const t = rawGetTime.call(date);
-    if (Number.isNaN(t)) return "Invalid Date";
+    if (numberIsNaN(t)) return "Invalid Date";
     if (typeof Intl !== "undefined" && typeof (Intl as any).DateTimeFormat === "function") {
       return new (Intl as any).DateTimeFormat(locales, localeOptions(options, required, defaults)).format(t);
     }
