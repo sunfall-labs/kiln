@@ -68,6 +68,19 @@ struct Binding {
     slot: u32,
 }
 
+fn binding_for_global(slot: u32) -> Binding {
+    match crate::module_cells::published_origin(slot) {
+        Some((function, local)) => Binding {
+            owner: Owner::Function(function),
+            slot: local,
+        },
+        None => Binding {
+            owner: Owner::Entry,
+            slot,
+        },
+    }
+}
+
 /// What a typed entry's body reaches for beyond its parameters. Each is a parameter of the
 /// entry only when needed, so a body that needs none carries nothing across its calls but the
 /// depth and its numbers. Found by emitting the body and reading it: what the C names is what
@@ -1679,14 +1692,147 @@ fn select_generic_optimization_functions_internal(
     selected
 }
 
-/// A compact graph-proven call profile for the supplemental O1 tier. `seed_weights` records
-/// known callees called from a bytecode loop; known calls inside those callees propagate the
-/// repeated-work weight for a few edges. The graph facts come from the existing conservative
-/// `known_callees` analysis, so unknown/reassigned callables never contribute.
+/// A compact ranking profile for the supplemental O1 tier. `seed_edges` includes known direct
+/// callees and conservative computed-method candidates whose key provenance matches a definition
+/// in this graph; known direct calls inside those bodies propagate weight for a few edges. A
+/// computed-key match is only a ranking hint: it does not prove the receiver, property value, or
+/// eventual call target, and never changes dispatch. Phase availability is still applied by the
+/// selector before a body can be selected.
 #[derive(Debug)]
 pub(crate) struct LoopCallProfile {
     seed_edges: Vec<(Option<usize>, u32, usize)>,
     edges: Vec<Vec<u32>>,
+}
+
+/// A ranking-only identity for a property key whose source is statically traceable within one
+/// graph. This is deliberately not used for direct-call or typed-entry decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum MethodKeySource {
+    String(kiln_ir::StringUnits),
+    Binding(Binding),
+}
+
+/// Recover only direct string constants, same-module global reads, and values passed through
+/// ToPropertyKey. The latter preserves provenance, not a value guarantee: this analysis only
+/// ranks which existing boxed bodies receive O1 and never changes runtime key conversion.
+fn method_key_sources(
+    graph: &FunctionGraph,
+    owner: Owner,
+    known: &Known,
+) -> HashMap<ValueId, MethodKeySource> {
+    let mut sources: HashMap<ValueId, MethodKeySource> = HashMap::new();
+    for block in &graph.blocks {
+        for (value, op) in &block.operations {
+            let source = match op {
+                GraphOp::Const {
+                    constant: Constant::String(value),
+                    ..
+                } => Some(MethodKeySource::String(value.clone())),
+                GraphOp::LoadGlobal(slot) => {
+                    Some(MethodKeySource::Binding(binding_for_global(*slot)))
+                }
+                GraphOp::LoadCell(slot) => {
+                    Some(MethodKeySource::Binding(Binding { owner, slot: *slot }))
+                }
+                GraphOp::LoadUpvalue(index) => match owner {
+                    Owner::Function(function) => known
+                        .capture_bindings
+                        .get(function as usize)
+                        .and_then(|bindings| bindings.get(index))
+                        .copied()
+                        .map(MethodKeySource::Binding),
+                    Owner::Entry => None,
+                },
+                GraphOp::Bridge {
+                    instruction: Instruction::ToPropertyKey,
+                    operands,
+                    ..
+                } => operands.get(1).and_then(|key| sources.get(key)).cloned(),
+                _ => None,
+            };
+            if let Some(source) = source {
+                sources.insert(*value, source);
+            }
+        }
+    }
+    sources
+}
+
+/// Methods defined in this module, indexed by the provenance of their key. Multiple definitions
+/// remain candidates because O1 selection must never decide which implementation a dynamic
+/// receiver dispatches to.
+fn computed_method_candidates(
+    graphs: &[FunctionGraph],
+    entry: &FunctionGraph,
+    known: &Known,
+) -> Option<HashMap<MethodKeySource, Vec<u32>>> {
+    // This pass is part of the same bounded analysis as loop-call propagation. Do not let
+    // candidate indexing scan an oversized graph or retain an unbounded number of target edges.
+    if graphs.len() > MAX_GENERIC_LOOP_CALL_FUNCTIONS {
+        return None;
+    }
+    std::iter::once(entry)
+        .chain(graphs.iter())
+        .flat_map(|graph| graph.blocks.iter())
+        .try_fold(0usize, |count, block| {
+            let count = count.checked_add(block.operations.len())?;
+            (count <= MAX_GENERIC_LOOP_CALL_INSTRUCTIONS).then_some(count)
+        })?;
+    let mut candidate_edges = 0usize;
+    let mut candidates: HashMap<MethodKeySource, HashSet<u32>> = HashMap::new();
+    for (owner, graph) in std::iter::once((Owner::Entry, entry)).chain(
+        graphs
+            .iter()
+            .enumerate()
+            .map(|(index, graph)| (Owner::Function(index as u32), graph)),
+    ) {
+        let sources = method_key_sources(graph, owner, known);
+        let functions: HashMap<ValueId, u32> = graph
+            .blocks
+            .iter()
+            .flat_map(|block| &block.operations)
+            .filter_map(|(value, op)| match op {
+                GraphOp::MakeFunction { index, .. } => Some((*value, *index)),
+                _ => None,
+            })
+            .collect();
+        for block in &graph.blocks {
+            for (_, op) in &block.operations {
+                let GraphOp::Bridge {
+                    instruction: Instruction::DefineMethod | Instruction::DefineNamedProperty { .. },
+                    operands,
+                    ..
+                } = op
+                else {
+                    continue;
+                };
+                let (Some(key), Some(function)) = (operands.get(1), operands.get(2)) else {
+                    continue;
+                };
+                let (Some(source), Some(&target)) = (sources.get(key), functions.get(function))
+                else {
+                    continue;
+                };
+                let targets = candidates.entry(source.clone()).or_default();
+                if targets.insert(target) {
+                    candidate_edges = candidate_edges.saturating_add(1);
+                    if candidate_edges > MAX_GENERIC_LOOP_CALL_EDGES {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+    Some(
+        candidates
+            .into_iter()
+            .map(|(key, targets)| {
+                let mut targets: Vec<_> = targets.into_iter().collect();
+                targets.sort_unstable();
+                (key, targets)
+            })
+            .collect(),
+    )
 }
 
 /// Build the bounded loop-callee ranking facts from an unmodified module program. Cycle-module
@@ -1862,31 +2008,64 @@ impl LoopCallProfile {
         let mut seed_edges = Vec::new();
         let mut edges = vec![Vec::new(); graphs.len()];
         let mut edge_count = 0usize;
+        let method_candidates = computed_method_candidates(graphs, entry, known)?;
         let mut add_owner = |graph: &FunctionGraph,
                              code: &[Instruction],
                              known_values: &KnownValues,
                              caller: Option<usize>| {
             let contexts = loop_context_weights(code);
+            let owner = caller.map_or(Owner::Entry, |index| Owner::Function(index as u32));
+            let key_sources = method_key_sources(graph, owner, known);
             for block in &graph.blocks {
                 for (result, op) in &block.operations {
-                    let GraphOp::Call { callee, .. } = op else {
-                        continue;
+                    // Each candidate here is only evidence that its existing boxed body might
+                    // serve a dynamic site. No call target is changed, and key provenance is
+                    // allowed to be conservative because it controls ranking only.
+                    let mut direct_target = None;
+                    let mut method_key = None;
+                    match op {
+                        GraphOp::Call { callee, .. } => {
+                            direct_target = known_values.known.get(callee).copied();
+                        }
+                        GraphOp::CallMethod { name, .. } => {
+                            if let Some(Constant::String(key)) =
+                                program.constants.get(*name as usize)
+                            {
+                                method_key = Some(MethodKeySource::String(key.clone()));
+                            }
+                        }
+                        GraphOp::Bridge {
+                            instruction: Instruction::CallComputed { .. },
+                            operands,
+                            ..
+                        } => {
+                            method_key = operands
+                                .get(1)
+                                .and_then(|key| key_sources.get(key))
+                                .cloned();
+                        }
+                        _ => {}
                     };
-                    let Some(&target) = known_values.known.get(callee) else {
-                        continue;
-                    };
-                    edge_count = edge_count.saturating_add(1);
-                    if edge_count > MAX_GENERIC_LOOP_CALL_EDGES {
-                        return false;
-                    }
-                    if let Some(caller) = caller {
-                        edges[caller].push(target);
-                    }
-                    if let Some(pc) = graph.origins.get(result).map(|origin| origin.pc as usize)
-                        && let Some(weight) = contexts.get(pc)
-                        && *weight > 0
+                    let method_targets = method_key
+                        .as_ref()
+                        .and_then(|key| method_candidates.get(key));
+                    for target in direct_target
+                        .into_iter()
+                        .chain(method_targets.into_iter().flatten().copied())
                     {
-                        seed_edges.push((caller, target, *weight));
+                        edge_count = edge_count.saturating_add(1);
+                        if edge_count > MAX_GENERIC_LOOP_CALL_EDGES {
+                            return false;
+                        }
+                        if let Some(caller) = caller {
+                            edges[caller].push(target);
+                        }
+                        if let Some(pc) = graph.origins.get(result).map(|origin| origin.pc as usize)
+                            && let Some(weight) = contexts.get(pc)
+                            && *weight > 0
+                        {
+                            seed_edges.push((caller, target, *weight));
+                        }
                     }
                 }
             }
@@ -1956,9 +2135,349 @@ impl LoopCallProfile {
     }
 }
 
+/// Whether the bounded supplemental profile can run on these inputs. This lets `known_callees`
+/// avoid building ranking-only capture identities for modules that the profile will reject.
+fn loop_profile_inputs_within_limits(
+    program: &Program,
+    graphs: &[FunctionGraph],
+    entry: &FunctionGraph,
+) -> bool {
+    if graphs.len() > MAX_GENERIC_LOOP_CALL_FUNCTIONS
+        || loop_caller_count(program) > MAX_GENERIC_LOOP_CALLERS
+    {
+        return false;
+    }
+    std::iter::once(entry)
+        .chain(graphs.iter())
+        .flat_map(|graph| graph.blocks.iter())
+        .try_fold(0usize, |count, block| {
+            let count = count.checked_add(block.operations.len())?;
+            (count <= MAX_GENERIC_LOOP_CALL_INSTRUCTIONS).then_some(count)
+        })
+        .is_some()
+}
+
 #[cfg(test)]
 mod loop_call_profile_tests {
-    use super::LoopCallProfile;
+    use super::{Known, KnownValues, LoopCallProfile};
+    use crate::graph::{
+        BasicBlock, BlockId, FunctionGraph, GraphOp, Origin, SiteId, Terminator, ValueId,
+    };
+    use std::collections::HashMap;
+
+    fn proto(code: Vec<kiln_ir::Instruction>, is_method: bool) -> kiln_ir::FunctionProto {
+        kiln_ir::FunctionProto {
+            inferred_name: None,
+            span: kiln_ir::Span::default(),
+            prologue_end: 0,
+            asynchronous: false,
+            name: None,
+            arrow: false,
+            generator: false,
+            async_generator: false,
+            is_method,
+            is_class: false,
+            parameter_count: 0,
+            declared_length: 0,
+            mapped_arguments: false,
+            local_count: 0,
+            code,
+            upvalues: Vec::new(),
+            type_annotations: None,
+        }
+    }
+
+    fn graph(operations: Vec<(ValueId, GraphOp)>, origins: &[(u32, u32)]) -> FunctionGraph {
+        let mut graph = FunctionGraph::new(None, 0, 0);
+        graph.next_value_id = operations
+            .iter()
+            .map(|(value, _)| value.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        graph.blocks.push(BasicBlock {
+            id: BlockId(0),
+            operations,
+            terminator: Terminator::Return(None),
+            predecessors: Vec::new(),
+            successors: Vec::new(),
+            exception_handler: None,
+        });
+        for &(value, pc) in origins {
+            graph.origins.insert(
+                ValueId(value),
+                Origin {
+                    pc,
+                    label: "fixture".into(),
+                },
+            );
+        }
+        graph
+    }
+
+    #[test]
+    fn looped_computed_call_ranks_same_import_binding_method_without_devirtualizing() {
+        use kiln_ir::Instruction;
+
+        // Both the computed method definition and computed call use the same module-global slot
+        // and pass its value through ToPropertyKey.
+        let program = kiln_ir::Program {
+            functions: vec![
+                proto(vec![Instruction::Return], true),
+                proto(vec![Instruction::Nop, Instruction::Jump(0)], false),
+            ],
+            ..Default::default()
+        };
+        let target_graph = FunctionGraph::new(None, 0, 0);
+        let caller_graph = graph(
+            vec![
+                (ValueId(0), GraphOp::LoadGlobal(7)),
+                (
+                    ValueId(1),
+                    GraphOp::Bridge {
+                        instruction: Instruction::ToPropertyKey,
+                        operands: vec![ValueId(8), ValueId(0)],
+                        pushes: 2,
+                    },
+                ),
+                (
+                    ValueId(2),
+                    GraphOp::Bridge {
+                        instruction: Instruction::CallComputed { argc: 0 },
+                        operands: vec![ValueId(9), ValueId(1), ValueId(10)],
+                        pushes: 1,
+                    },
+                ),
+            ],
+            &[(2, 0)],
+        );
+        let entry = graph(
+            vec![
+                (ValueId(0), GraphOp::LoadGlobal(7)),
+                (
+                    ValueId(1),
+                    GraphOp::MakeFunction {
+                        index: 0,
+                        site: SiteId(0),
+                    },
+                ),
+                (
+                    ValueId(2),
+                    GraphOp::Bridge {
+                        instruction: Instruction::DefineMethod,
+                        operands: vec![ValueId(8), ValueId(0), ValueId(1)],
+                        pushes: 1,
+                    },
+                ),
+            ],
+            &[],
+        );
+        let graphs = vec![target_graph, caller_graph];
+        let known = Known {
+            functions: vec![KnownValues::default(); 2],
+            entry: KnownValues::default(),
+            captures: vec![Vec::new(); 2],
+            capture_bindings: vec![HashMap::new(); 2],
+            captured_closures: vec![Default::default(); 2],
+        };
+        let profile = LoopCallProfile::from_known(&program, &graphs, &entry, &known).unwrap();
+        assert!(
+            profile
+                .seed_edges
+                .iter()
+                .any(|edge| edge.0 == Some(1) && edge.1 == 0)
+        );
+
+        // The target publishes a frame, so it is excluded from the old direct-callable bucket.
+        // The ranking-only group can still optimize its existing boxed body when both caller and
+        // target are in the phase's emitted set; it never makes the computed call direct.
+        let selected = super::select_generic_optimization_functions_with_profile(
+            &program,
+            &[true, false],
+            Some(&[true, true]),
+            &profile,
+        );
+        assert!(
+            selected[0],
+            "frame-publishing boxed method should enter O1 tier"
+        );
+        assert!(
+            selected[1],
+            "the loop driver remains selected under existing caps"
+        );
+
+        let unavailable = super::select_generic_optimization_functions_with_profile(
+            &program,
+            &[true, false],
+            Some(&[false, true]),
+            &profile,
+        );
+        assert!(
+            !unavailable[0],
+            "phase-unavailable method cannot be selected"
+        );
+    }
+
+    #[test]
+    fn captured_computed_key_uses_resolved_cell_identity_across_upvalue_indices() {
+        use kiln_ir::{Instruction, Upvalue};
+
+        let program = kiln_ir::Program {
+            functions: vec![
+                proto(vec![Instruction::Return], true),
+                proto(vec![Instruction::Return], false),
+                proto(vec![Instruction::Nop, Instruction::Jump(0)], true),
+            ],
+            ..Default::default()
+        };
+        // fn 1 defines fn 0 under its upvalue 1; fn 2 calls a computed member through
+        // upvalue 4. Both descriptors resolve to the same entry binding slot 40, matching the
+        // cached Effect module's different-index capture chain. The runtime remains dynamic.
+        let mut program = program;
+        program.functions[1].upvalues = vec![Upvalue::ParentLocal(24), Upvalue::ParentLocal(40)];
+        program.functions[2].upvalues = vec![
+            Upvalue::ParentLocal(10),
+            Upvalue::ParentLocal(11),
+            Upvalue::ParentLocal(12),
+            Upvalue::ParentLocal(13),
+            Upvalue::ParentLocal(40),
+        ];
+        let target = FunctionGraph::new(None, 0, 0);
+        let definition = graph(
+            vec![
+                (ValueId(0), GraphOp::LoadUpvalue(1)),
+                (
+                    ValueId(1),
+                    GraphOp::Bridge {
+                        instruction: Instruction::ToPropertyKey,
+                        operands: vec![ValueId(8), ValueId(0)],
+                        pushes: 2,
+                    },
+                ),
+                (
+                    ValueId(2),
+                    GraphOp::MakeFunction {
+                        index: 0,
+                        site: SiteId(0),
+                    },
+                ),
+                (
+                    ValueId(3),
+                    GraphOp::Bridge {
+                        instruction: Instruction::DefineNamedProperty {
+                            name_function: true,
+                        },
+                        operands: vec![ValueId(9), ValueId(1), ValueId(2)],
+                        pushes: 1,
+                    },
+                ),
+            ],
+            &[],
+        );
+        let caller = graph(
+            vec![
+                (ValueId(0), GraphOp::LoadUpvalue(4)),
+                (
+                    ValueId(1),
+                    GraphOp::Bridge {
+                        instruction: Instruction::ToPropertyKey,
+                        operands: vec![ValueId(8), ValueId(0)],
+                        pushes: 2,
+                    },
+                ),
+                (
+                    ValueId(2),
+                    GraphOp::Bridge {
+                        instruction: Instruction::CallComputed { argc: 0 },
+                        operands: vec![ValueId(9), ValueId(1), ValueId(10)],
+                        pushes: 1,
+                    },
+                ),
+            ],
+            &[(2, 0)],
+        );
+        let entry = graph(
+            vec![
+                (
+                    ValueId(0),
+                    GraphOp::MakeFunction {
+                        index: 1,
+                        site: SiteId(1),
+                    },
+                ),
+                (
+                    ValueId(1),
+                    GraphOp::MakeFunction {
+                        index: 2,
+                        site: SiteId(2),
+                    },
+                ),
+            ],
+            &[],
+        );
+        let graphs = vec![target, definition, caller];
+        let known = super::known_callees(&program, &graphs, &entry);
+        let profile = LoopCallProfile::from_known(&program, &graphs, &entry, &known).unwrap();
+        assert!(
+            profile
+                .seed_edges
+                .iter()
+                .any(|edge| edge.0 == Some(2) && edge.1 == 0),
+            "captured key slots must join by resolved lexical cell, not upvalue index"
+        );
+
+        // Different lexical cells cannot be linked even when the call and definition have the
+        // same shape and both happen to use imported/captured keys.
+        program.functions[2].upvalues[4] = Upvalue::ParentLocal(24);
+        let known = super::known_callees(&program, &graphs, &entry);
+        let profile = LoopCallProfile::from_known(&program, &graphs, &entry, &known).unwrap();
+        assert!(
+            !profile
+                .seed_edges
+                .iter()
+                .any(|edge| edge.0 == Some(2) && edge.1 == 0),
+            "distinct lexical cells must not share a computed-key candidate"
+        );
+
+        // If the defining proto can be created from multiple parents, its upvalue index no
+        // longer identifies one lexical binding. The new ranking hint must decline the match.
+        let ambiguous_entry = graph(
+            vec![
+                (
+                    ValueId(0),
+                    GraphOp::MakeFunction {
+                        index: 1,
+                        site: SiteId(1),
+                    },
+                ),
+                (
+                    ValueId(1),
+                    GraphOp::MakeFunction {
+                        index: 1,
+                        site: SiteId(3),
+                    },
+                ),
+                (
+                    ValueId(2),
+                    GraphOp::MakeFunction {
+                        index: 2,
+                        site: SiteId(2),
+                    },
+                ),
+            ],
+            &[],
+        );
+        let known = super::known_callees(&program, &graphs, &ambiguous_entry);
+        let profile =
+            LoopCallProfile::from_known(&program, &graphs, &ambiguous_entry, &known).unwrap();
+        assert!(
+            !profile
+                .seed_edges
+                .iter()
+                .any(|edge| edge.0 == Some(2) && edge.1 == 0),
+            "ambiguous closure creation must not lend one capture's key identity to another"
+        );
+    }
 
     #[test]
     fn unavailable_loop_callers_cannot_select_live_callee_groups() {
@@ -2373,6 +2892,9 @@ struct Known {
     entry: KnownValues,
     /// Per proto, per upvalue index: what the unit knows about the binding it captures.
     captures: Vec<Vec<crate::parallel::Capture>>,
+    /// Per proto, per upvalue index: the lexical binding cell captured by that slot, when the
+    /// closure's creation site is unique enough to resolve conservatively.
+    capture_bindings: Vec<HashMap<u32, Binding>>,
     /// Per proto: the upvalues whose binding's one real store is a closure of a proto made at
     /// one site (tier 4's calls through a captured `const f = x => ...`, body-checked per call).
     captured_closures: Vec<HashMap<u32, u32>>,
@@ -2475,6 +2997,41 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
             }
         }
     }
+    // A ranking identity may cross nested captures only when every proto on that lexical chain
+    // has one creation site. The existing call analyses keep their broader resolver behavior;
+    // this extra restriction applies only to the new ranking hint.
+    fn resolve_unique(
+        program: &Program,
+        parent: &[Option<Owner>],
+        made: &[u32],
+        function: u32,
+        index: u32,
+        remaining: usize,
+    ) -> Option<Binding> {
+        if remaining == 0 {
+            return None;
+        }
+        if made.get(function as usize).copied() != Some(1) {
+            return None;
+        }
+        let owner = parent[function as usize]?;
+        match program.functions[function as usize]
+            .upvalues
+            .get(index as usize)?
+        {
+            Upvalue::ParentLocal(slot) | Upvalue::NamedParentLocal { slot, .. } => {
+                Some(Binding { owner, slot: *slot })
+            }
+            Upvalue::ParentUpvalue(next) | Upvalue::NamedParentUpvalue { index: next, .. } => {
+                match owner {
+                    Owner::Function(p) => {
+                        resolve_unique(program, parent, made, p, *next, remaining - 1)
+                    }
+                    Owner::Entry => None,
+                }
+            }
+        }
+    }
     let cell_slots = |owner: Owner| -> HashSet<u32> {
         graph_of(owner)
             .blocks
@@ -2490,16 +3047,7 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
     // A block slot is the top level's binding, unless a function the runtime bootstrap calls once
     // published its own cell there (`module_cells`): then it is that function's binding, as the
     // upvalue it replaced resolved to.
-    let global_binding = |slot: u32| match crate::module_cells::published_origin(slot) {
-        Some((function, local)) => Binding {
-            owner: Owner::Function(function),
-            slot: local,
-        },
-        None => Binding {
-            owner: Owner::Entry,
-            slot,
-        },
-    };
+    let global_binding = binding_for_global;
     let defines = |owner: Owner, value: ValueId| -> Stored {
         for block in &graph_of(owner).blocks {
             for (vid, op) in &block.operations {
@@ -2749,6 +3297,19 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
     // `undefined` (a store of `undefined` in the owner's entry block ahead of every other
     // store) is not a write; any other store is. A poisoned unit -- a write this walk cannot
     // place -- resolves nothing.
+    let mut capture_bindings = vec![HashMap::new(); graphs.len()];
+    if loop_profile_inputs_within_limits(program, graphs, entry) {
+        for (f, graph) in graphs.iter().enumerate() {
+            for (_, op) in graph.blocks.iter().flat_map(|block| &block.operations) {
+                if let GraphOp::LoadUpvalue(index) = op
+                    && let Some(binding) =
+                        resolve_unique(program, &parent, &made, f as u32, *index, graphs.len())
+                {
+                    capture_bindings[f].insert(*index, binding);
+                }
+            }
+        }
+    }
     let captures: Vec<Vec<crate::parallel::Capture>> = (0..graphs.len() as u32)
         .map(|f| {
             (0..program.functions[f as usize].upvalues.len() as u32)
@@ -2820,6 +3381,7 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
         functions: vec![KnownValues::default(); graphs.len()],
         entry: KnownValues::default(),
         captures,
+        capture_bindings,
         captured_closures,
     };
     fn values_of(known: &mut Known, owner: Owner) -> &mut KnownValues {
