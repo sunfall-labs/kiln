@@ -2977,6 +2977,7 @@ static size_t kiln_c99_uint64_digits(uint64_t value, char *out) {
 static const void *kiln_c99_bigint_uint64_mask(void) {
 static int kiln_c99_typed_order(double left, double right) {
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size) {
+static double kiln_c99_key_index_digits(const unsigned char *digits, size_t key_len) {
 static double kiln_c99_key_index(const char *key, size_t key_len) {
 static double kiln_c99_key_index_key(const kiln_string *key) {
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name) {
