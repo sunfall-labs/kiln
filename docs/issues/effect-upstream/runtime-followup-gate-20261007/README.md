@@ -7,4 +7,6 @@ All ten routine gate lanes passed. Workspace: 2,754 passed, zero failed, 12 igno
 
 The original gate process exited 1 because two documentation-only commits were added during execution. The raw failure and original aggregate are preserved here. The owned worktree was restored to the exact starting tracked snapshot, then the unchanged standard `gate_results.py aggregate` command was rerun successfully against all ten existing lane envelopes and the exact tested binary. No lane verdict was rewritten and no production change was made. `snapshot-restoration-aggregate-status.json` records this recovery separately from the original process status.
 
-Raw lane evidence remains under the absolute evidence paths in the aggregate; a complete archive will follow after the quiet full Effect run. Effect completion is not claimed: fresh all-322-file execution and remaining native timeouts still require work.
+`complete-lane-evidence.tar.gz` contains every raw lane file, envelope and retained Test262 inventory, batch log and result document. The adjacent manifest records each member’s size and SHA-256; every archived member was read back and verified. Original absolute paths remain in the aggregate for provenance.
+
+The subsequent fresh full Effect interpreter run completed all 322 files and exactly mapped all 11,019 cases: 10,949 passed, 25 failed on original deadlines and 45 skipped. Its separate archive is `../full-interpreter-cap1024-20261007/`. Effect completion is not claimed; remaining interpreter and native failures still require work.
