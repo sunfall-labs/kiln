@@ -15,7 +15,7 @@
 
   function floorMod(a: number, b: number): number {
     const m = a % b;
-    return m < 0 ? m + b : m;
+    return m < 0 ? m + b : m + 0;
   }
 
   // Howard Hinnant's proleptic Gregorian calendar algorithm
@@ -138,50 +138,42 @@
 
   const getUTCFullYear = { getUTCFullYear(this: Date): number {
     const t = rawGetTime.call(this);
-    const p = dateParts(t);
-    return p ? p.year : NaN;
+    return Number.isFinite(t) ? civilFromDays(Math.floor(Math.trunc(t) / 86400000))[0] : NaN;
   } }.getUTCFullYear;
 
   const getUTCMonth = { getUTCMonth(this: Date): number {
     const t = rawGetTime.call(this);
-    const p = dateParts(t);
-    return p ? p.month : NaN;
+    return Number.isFinite(t) ? civilFromDays(Math.floor(Math.trunc(t) / 86400000))[1] - 1 : NaN;
   } }.getUTCMonth;
 
   const getUTCDate = { getUTCDate(this: Date): number {
     const t = rawGetTime.call(this);
-    const p = dateParts(t);
-    return p ? p.date : NaN;
+    return Number.isFinite(t) ? civilFromDays(Math.floor(Math.trunc(t) / 86400000))[2] : NaN;
   } }.getUTCDate;
 
   const getUTCDay = { getUTCDay(this: Date): number {
     const t = rawGetTime.call(this);
-    const p = dateParts(t);
-    return p ? p.day : NaN;
+    return Number.isFinite(t) ? floorMod(Math.floor(Math.trunc(t) / 86400000) + 4, 7) : NaN;
   } }.getUTCDay;
 
   const getUTCHours = { getUTCHours(this: Date): number {
     const t = rawGetTime.call(this);
-    const p = dateParts(t);
-    return p ? p.hour : NaN;
+    return Number.isFinite(t) ? Math.floor(floorMod(Math.trunc(t), 86400000) / 3600000) : NaN;
   } }.getUTCHours;
 
   const getUTCMinutes = { getUTCMinutes(this: Date): number {
     const t = rawGetTime.call(this);
-    const p = dateParts(t);
-    return p ? p.minute : NaN;
+    return Number.isFinite(t) ? Math.floor(floorMod(Math.trunc(t), 86400000) / 60000) % 60 : NaN;
   } }.getUTCMinutes;
 
   const getUTCSeconds = { getUTCSeconds(this: Date): number {
     const t = rawGetTime.call(this);
-    const p = dateParts(t);
-    return p ? p.second : NaN;
+    return Number.isFinite(t) ? Math.floor(floorMod(Math.trunc(t), 86400000) / 1000) % 60 : NaN;
   } }.getUTCSeconds;
 
   const getUTCMilliseconds = { getUTCMilliseconds(this: Date): number {
     const t = rawGetTime.call(this);
-    const p = dateParts(t);
-    return p ? p.millisecond : NaN;
+    return Number.isFinite(t) ? floorMod(Math.trunc(t), 86400000) % 1000 : NaN;
   } }.getUTCMilliseconds;
 
   const getTimezoneOffset = { getTimezoneOffset(this: Date): number {
@@ -192,8 +184,7 @@
 
   const getYear = { getYear(this: Date): number {
     const t = rawGetTime.call(this);
-    const p = dateParts(t);
-    return p ? p.year - 1900 : NaN;
+    return Number.isFinite(t) ? civilFromDays(Math.floor(Math.trunc(t) / 86400000))[0] - 1900 : NaN;
   } }.getYear;
 
   const getFullYear = { getFullYear(this: Date): number { return getUTCFullYear.call(this); } }.getFullYear;
