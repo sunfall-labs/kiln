@@ -950,14 +950,39 @@ fn pgo_options_fingerprint(options: &NativeBuildOptions) -> String {
     }
 }
 
-fn executable_link_options_digest(profile: NativeProfile, options: &NativeBuildOptions) -> Digest {
-    executable_link_options_digest_with_symbols(profile, options, native_release_keep_symbols())
+fn provider_link_arguments_digest(arguments: &[String]) -> Digest {
+    // These are part of the actual linker command even though the provider archive's producer
+    // identity intentionally excludes them. Length framing preserves argument order and
+    // boundaries (`["-L", "a"]` is distinct from `["-La"]`).
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"kiln-provider-link-arguments-v1\0");
+    bytes.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
+    for argument in arguments {
+        let argument = argument.as_bytes();
+        bytes.extend_from_slice(&(argument.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(argument);
+    }
+    Digest::hash(&bytes)
+}
+
+fn executable_link_options_digest(
+    profile: NativeProfile,
+    options: &NativeBuildOptions,
+    provider_link_arguments: &[String],
+) -> Digest {
+    executable_link_options_digest_with_symbols(
+        profile,
+        options,
+        native_release_keep_symbols(),
+        provider_link_arguments,
+    )
 }
 
 fn executable_link_options_digest_with_symbols(
     profile: NativeProfile,
     options: &NativeBuildOptions,
     keep_symbols: bool,
+    provider_link_arguments: &[String],
 ) -> Digest {
     let static_opt = if options.static_link { "\0static" } else { "" };
     let pgo_opt = pgo_options_fingerprint(options);
@@ -969,8 +994,9 @@ fn executable_link_options_digest_with_symbols(
         };
     Digest::hash(
         format!(
-            "{}\0system-math\0system-entropy-v1{static_opt}{pgo_opt}{symbols_opt}",
-            profile.as_str()
+            "{}\0system-math\0system-entropy-v1{static_opt}{pgo_opt}{symbols_opt}\0provider-link-args={}",
+            profile.as_str(),
+            provider_link_arguments_digest(provider_link_arguments),
         )
         .as_bytes(),
     )
@@ -1494,7 +1520,8 @@ impl NativeBuilder {
             [launcher_source_digest],
         );
 
-        let link_options_digest = executable_link_options_digest(profile, options);
+        let link_options_digest =
+            executable_link_options_digest(profile, options, &provider_link_arguments);
         if let Some(app_info) = self.lookup_digest(&application_key)?
             && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
             && let Some(runtime_info) = self.lookup_digest(&runtime_key)?
@@ -1647,7 +1674,8 @@ impl NativeBuilder {
             compile_started.elapsed()
         };
 
-        let link_options_digest = executable_link_options_digest(profile, options);
+        let link_options_digest =
+            executable_link_options_digest(profile, options, &provider_link_arguments);
         let executable_key = NativeArtifactFamily::ExecutableLink.key(
             &compiler,
             &target,
@@ -1883,13 +1911,14 @@ impl NativeBuilder {
             )?;
             let link_options_digest = Digest::hash(
                 format!(
-                    "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                    "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}\0provider-link-args={}",
                     profile.as_str(),
                     shared_library_name(),
                     shared_library_link_identity(&loader),
                     shared_library_link_policy(),
                     EMBEDDING_MODULE_API_VERSION,
                     [module.symbol.as_str(), module_api_symbol.as_str()].join(","),
+                    provider_link_arguments_digest(&provider_link_arguments),
                 )
                 .as_bytes(),
             );
@@ -1989,13 +2018,14 @@ impl NativeBuilder {
         )?;
         let link_options_digest = Digest::hash(
             format!(
-                "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}\0provider-link-args={}",
                 profile.as_str(),
                 shared_library_name(),
                 shared_library_link_identity(&loader),
                 shared_library_link_policy(),
                 EMBEDDING_MODULE_API_VERSION,
                 [module.symbol.as_str(), module_api_symbol.as_str()].join(","),
+                provider_link_arguments_digest(&provider_link_arguments),
             )
             .as_bytes(),
         );
@@ -2439,13 +2469,14 @@ impl NativeBuilder {
             )?;
             let link_options_digest = Digest::hash(
                 format!(
-                    "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                    "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}\0provider-link-args={}",
                     profile.as_str(),
                     shared_library_name(),
                     shared_library_link_identity(&loader),
                     shared_library_link_policy(),
                     EMBEDDING_MODULE_API_VERSION,
                     [wrapper_symbol.as_str(), module_api_symbol.as_str()].join(","),
+                    provider_link_arguments_digest(&provider_link_arguments),
                 )
                 .as_bytes(),
             );
@@ -2585,13 +2616,14 @@ impl NativeBuilder {
         )?;
         let link_options_digest = Digest::hash(
             format!(
-                "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}\0provider-link-args={}",
                 profile.as_str(),
                 shared_library_name(),
                 shared_library_link_identity(&loader),
                 shared_library_link_policy(),
                 EMBEDDING_MODULE_API_VERSION,
                 [wrapper_symbol.as_str(), module_api_symbol.as_str()].join(","),
+                provider_link_arguments_digest(&provider_link_arguments),
             )
             .as_bytes(),
         );
@@ -3191,7 +3223,8 @@ impl NativeBuilder {
             [launcher_source_digest],
         );
 
-        let link_options_digest = executable_link_options_digest(profile, options);
+        let link_options_digest =
+            executable_link_options_digest(profile, options, &provider_link_arguments);
 
         let mut module_object_infos = Vec::with_capacity(module_keys.len());
         let mut all_modules_cached = true;
@@ -3365,7 +3398,8 @@ impl NativeBuilder {
             compile_started.elapsed()
         };
 
-        let link_options_digest = executable_link_options_digest(profile, options);
+        let link_options_digest =
+            executable_link_options_digest(profile, options, &provider_link_arguments);
         let mut link_inputs = module_objects
             .iter()
             .map(|(_, digest, _)| *digest)

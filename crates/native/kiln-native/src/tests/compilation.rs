@@ -4,24 +4,65 @@ use super::*;
 fn diagnostic_symbol_retention_changes_only_the_release_link_identity() {
     let options = NativeBuildOptions::default();
     assert_ne!(
-        executable_link_options_digest_with_symbols(NativeProfile::Release, &options, false),
-        executable_link_options_digest_with_symbols(NativeProfile::Release, &options, true),
+        executable_link_options_digest_with_symbols(NativeProfile::Release, &options, false, &[]),
+        executable_link_options_digest_with_symbols(NativeProfile::Release, &options, true, &[]),
         "release links with and without local symbols must never share a cache artifact"
     );
     assert_ne!(
-        executable_link_options_digest_with_symbols(NativeProfile::ReleaseSize, &options, false),
-        executable_link_options_digest_with_symbols(NativeProfile::ReleaseSize, &options, true),
+        executable_link_options_digest_with_symbols(
+            NativeProfile::ReleaseSize,
+            &options,
+            false,
+            &[]
+        ),
+        executable_link_options_digest_with_symbols(
+            NativeProfile::ReleaseSize,
+            &options,
+            true,
+            &[]
+        ),
         "size-release links also omit stripping only when explicitly requested"
     );
     assert_eq!(
-        executable_link_options_digest_with_symbols(NativeProfile::Dev, &options, false),
-        executable_link_options_digest_with_symbols(NativeProfile::Dev, &options, true),
+        executable_link_options_digest_with_symbols(NativeProfile::Dev, &options, false, &[]),
+        executable_link_options_digest_with_symbols(NativeProfile::Dev, &options, true, &[]),
         "non-release profiles never strip this symbol table"
     );
     assert_eq!(
-        executable_link_options_digest_with_symbols(NativeProfile::Profile, &options, false),
-        executable_link_options_digest_with_symbols(NativeProfile::Profile, &options, true),
+        executable_link_options_digest_with_symbols(NativeProfile::Profile, &options, false, &[]),
+        executable_link_options_digest_with_symbols(NativeProfile::Profile, &options, true, &[]),
         "the gprof profile already retains symbols"
+    );
+}
+
+#[test]
+fn provider_link_arguments_change_executable_cache_identity() {
+    let options = NativeBuildOptions::default();
+    let app_object = Digest::hash(b"same retained application object");
+    let provider_archive = Digest::hash(b"same provider archive");
+    let key = |arguments: &[String]| {
+        NativeArtifactFamily::ExecutableLink.key(
+            "clang-22",
+            "x86_64-unknown-linux-gnu",
+            NativeProfile::Release.cache(),
+            executable_link_options_digest_with_symbols(
+                NativeProfile::Release,
+                &options,
+                false,
+                arguments,
+            ),
+            [app_object, provider_archive],
+        )
+    };
+
+    let first = vec!["-lgtk-4".to_owned(), "-lwayland-client".to_owned()];
+    let reordered = vec!["-lwayland-client".to_owned(), "-lgtk-4".to_owned()];
+    let concatenated = vec!["-lgtk-4-lwayland-client".to_owned()];
+    assert_ne!(key(&first), key(&reordered), "argument order is observable");
+    assert_ne!(
+        key(&first),
+        key(&concatenated),
+        "argument boundaries matter"
     );
 }
 
