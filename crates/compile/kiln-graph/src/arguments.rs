@@ -328,7 +328,10 @@ mod tests {
         let program = program(vec![proto(
             true,
             vec![Instruction::DirectEval(Box::new(EvalSite {
+                module_id: "arguments-proof".into(),
+                source_offset: 0,
                 bindings: Vec::new(),
+                with_objects: Vec::new(),
                 strict: false,
                 argc: Some(0),
                 global_var_scope: false,
