@@ -252,6 +252,15 @@ export { run };
     );
 }
 
+#[test]
+fn older_instantiation_metadata_defaults_to_the_generic_o0_tier() {
+    let older =
+        r#"{"symbol":"fixture_instantiate","prepare_symbol":"fixture_prepare","source":""}"#;
+    let unit: crate::CModuleUnit =
+        serde_json::from_str(older).expect("older cached unit metadata remains readable");
+    assert!(!unit.generic_mixed_optimization);
+}
+
 fn diagnostic_loop_work(proto: &kiln_ir::FunctionProto) -> Option<(usize, usize)> {
     let mut span = 0usize;
     let mut count = 0usize;
@@ -623,6 +632,10 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
     let instantiation = emitted
         .instantiation
         .expect("the cycle module has a separate instantiation unit");
+    assert!(
+        instantiation.generic_mixed_optimization,
+        "the instantiation unit carries its own mixed-tier compile requirement"
+    );
     let marker = "/* frontend function 165:";
     let marker_at = instantiation
         .source
@@ -656,6 +669,20 @@ fn diagnose_pinned_schema_binary_generic_optimization_selection() {
             "actual SchemaBinary instantiation emits hot decode proto {index} in O1: {function_header}"
         );
     }
+    let driver_marker = "/* frontend function 193:";
+    let driver_marker_at = instantiation
+        .source
+        .find(driver_marker)
+        .expect("the repeated decodeArray loop driver is retained");
+    let driver_header_end = instantiation.source[driver_marker_at..]
+        .find("static inline int")
+        .map(|offset| driver_marker_at + offset)
+        .expect("decodeArray has an emitted C function");
+    let driver_header = &instantiation.source[driver_marker_at..driver_header_end];
+    assert!(
+        driver_header.contains("optnone") || driver_header.contains("optimize(\"O0\")"),
+        "unselected decodeArray remains explicitly O0 inside the mixed-tier unit: {driver_header}"
+    );
 }
 
 #[test]

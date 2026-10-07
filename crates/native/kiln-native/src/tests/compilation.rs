@@ -350,6 +350,59 @@ fn release_generic_mixed_tier_uses_a_distinct_optimization_identity() {
 }
 
 #[test]
+fn instantiation_units_keep_their_mixed_tier_in_executable_and_shared_unit_metadata() {
+    let unit = CModuleUnit {
+        symbol: "fixture_instantiate".into(),
+        prepare_symbol: "fixture_prepare".into(),
+        source: "/* selected generic body */".into(),
+        generic_mixed_optimization: true,
+    };
+    let mut symbols = Vec::new();
+    let mut sources = Vec::new();
+    let mut generic_only = Vec::new();
+    let mut generic_mixed = Vec::new();
+    append_instantiation_unit(
+        &unit,
+        true,
+        false,
+        &mut symbols,
+        &mut sources,
+        &mut generic_only,
+        &mut generic_mixed,
+    );
+
+    assert_eq!(symbols, ["fixture_instantiate"]);
+    assert_eq!(sources[0].0, b"/* selected generic body */");
+    assert!(!sources[0].2, "this fixture starts with a generated-C miss");
+    assert_eq!(generic_only, [true]);
+    assert_eq!(generic_mixed, [true]);
+    let mut mixed_options = CompileOptions::default();
+    configure_release_module_compile(&mut mixed_options, generic_only[0], generic_mixed[0]);
+    let mixed_arguments = mixed_options
+        .extra_args
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(mixed_arguments.contains(&"-O1".to_owned()));
+    assert!(mixed_arguments.contains(&"-DKILN_GENERIC_MIXED_TIER=1".to_owned()));
+    assert_eq!(
+        release_module_compile_identity(generic_only[0], generic_mixed[0]),
+        "generic-mixed-o1-nosan-nosections"
+    );
+
+    let mut cold_options = CompileOptions::default();
+    configure_release_module_compile(&mut cold_options, true, false);
+    let cold_arguments = cold_options
+        .extra_args
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(cold_arguments.contains(&"-O0".to_owned()));
+    assert!(!cold_arguments.contains(&"-DKILN_GENERIC_MIXED_TIER=1".to_owned()));
+    assert_eq!(release_module_compile_identity(true, false), "generic-o0-nosan-nosections");
+}
+
+#[test]
 fn release_module_specialization_budget_counts_all_instructions() {
     let mut program = Program {
         source: String::new().into(),

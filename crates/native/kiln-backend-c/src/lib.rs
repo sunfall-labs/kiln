@@ -513,6 +513,10 @@ pub struct CModuleUnit {
     /// Helper that allocates and publishes this module's export cells before instantiation.
     pub prepare_symbol: String,
     pub source: String,
+    /// Whether the instantiation unit contains selected generic boxed bodies that need O1
+    /// compilation while its other generic bodies retain the O0 attribute.
+    #[serde(default)]
+    pub generic_mixed_optimization: bool,
 }
 
 fn generic_mixed_for_program(program: &Program, policy: &EmissionPolicy) -> bool {
@@ -905,6 +909,7 @@ pub fn emit_module_with_logical_path_and_policy_and_instantiation(
                 symbol: instantiation_symbol.clone(),
                 prepare_symbol: format!("{instantiation_symbol}_prepare_cells"),
                 source: source.source,
+                generic_mixed_optimization: source.generic_mixed_optimization,
             }),
         )
     } else {

@@ -27,10 +27,10 @@ use kiln_artifact_cache::{
 #[cfg(test)]
 use kiln_backend_c::emit_module_with_logical_path;
 use kiln_backend_c::{
-    C_ABI_VERSION, C_GENERATOR_VERSION, C99_HOST_MODULE_CREATE_REQUIRE, EmissionPolicy, EmitError,
-    RUNTIME_PRELUDE_HEADER_NAME, emit_commonjs_module_with_logical_path_and_policy,
-    emit_module_with_logical_path_and_policy, emit_runtime_module_with_logical_path_and_policy,
-    emit_with_policy, runtime_prelude_header,
+    C_ABI_VERSION, C_GENERATOR_VERSION, C99_HOST_MODULE_CREATE_REQUIRE, CModuleUnit,
+    EmissionPolicy, EmitError, RUNTIME_PRELUDE_HEADER_NAME,
+    emit_commonjs_module_with_logical_path_and_policy, emit_module_with_logical_path_and_policy,
+    emit_runtime_module_with_logical_path_and_policy, emit_with_policy, runtime_prelude_header,
 };
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
@@ -56,6 +56,25 @@ use url::Url;
 
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn append_instantiation_unit(
+    unit: &CModuleUnit,
+    generic_only: bool,
+    generated_c_hit: bool,
+    symbols: &mut Vec<String>,
+    sources: &mut Vec<(Vec<u8>, Digest, bool)>,
+    unit_generic_only: &mut Vec<bool>,
+    unit_generic_mixed: &mut Vec<bool>,
+) {
+    symbols.push(unit.symbol.clone());
+    sources.push((
+        unit.source.as_bytes().to_vec(),
+        Digest::hash(unit.source.as_bytes()),
+        generated_c_hit,
+    ));
+    unit_generic_only.push(generic_only);
+    unit_generic_mixed.push(unit.generic_mixed_optimization);
+}
 
 /// A release build (`release_bootstrap_specialized`) emits the builtin bootstrap
 /// specialized and compiles it at -O2 (issue 17), in translation units of about this many bytes
@@ -2300,14 +2319,15 @@ impl NativeBuilder {
                 module_generic_mixed.push(false);
             }
             if let Some(instantiation) = &module.instantiation {
-                symbol_list.push(instantiation.symbol.clone());
-                module_sources.push((
-                    instantiation.source.as_bytes().to_vec(),
-                    Digest::hash(instantiation.source.as_bytes()),
+                append_instantiation_unit(
+                    instantiation,
+                    module.generic_only,
                     hit,
-                ));
-                module_generic_only.push(module.generic_only);
-                module_generic_mixed.push(false);
+                    &mut symbol_list,
+                    &mut module_sources,
+                    &mut module_generic_only,
+                    &mut module_generic_mixed,
+                );
             }
         }
         let paths = SharedGraphLibraryPaths::new(workspace.path(), &symbol_list);
@@ -3022,14 +3042,15 @@ impl NativeBuilder {
                 module_generic_mixed.push(false);
             }
             if let Some(instantiation) = &module.instantiation {
-                symbol_list.push(instantiation.symbol.clone());
-                module_sources.push((
-                    instantiation.source.as_bytes().to_vec(),
-                    Digest::hash(instantiation.source.as_bytes()),
+                append_instantiation_unit(
+                    instantiation,
+                    module.generic_only,
                     hit,
-                ));
-                module_generic_only.push(module.generic_only);
-                module_generic_mixed.push(false);
+                    &mut symbol_list,
+                    &mut module_sources,
+                    &mut module_generic_only,
+                    &mut module_generic_mixed,
+                );
             }
             module_chunk_ranges.push(start..symbol_list.len());
         }
