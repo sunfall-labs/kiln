@@ -2450,6 +2450,12 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
         proved_by: "Array.prototype has an explicit null parent, so no inherited property exists",
     },
     AbsentAnswer {
+        function: "kiln_c99_builtin_replacement_parent_get_after_own_absence",
+        sites: 1,
+        proved_by: "the caller proved the builtin has no own member and its replacement \
+                    prototype is explicitly null",
+    },
+    AbsentAnswer {
         function: "kiln_c99_prototype_store_read_with_receiver",
         sites: 1,
         proved_by: "an accessor with no getter returns undefined by the language rule",
@@ -2466,12 +2472,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     list to be short of",
     },
     AbsentAnswer {
-        function: "kiln_c99_get_with_receiver",
-        sites: 2,
-        proved_by: "an accessor with no getter: the language defines that read as undefined",
-    },
-    AbsentAnswer {
-        function: "kiln_c99_store_get_key",
+        function: "kiln_c99_store_get_key_with_receiver",
         sites: 1,
         proved_by: "an accessor with no getter: the language defines that read as undefined. \
                     The site moved here with the headed store walk; kiln_c99_store_get in keys.c \
@@ -2510,7 +2511,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     prototype chain, which kiln_c99_store_get_key has just walked in full",
     },
     AbsentAnswer {
-        function: "kiln_c99_get_key",
+        function: "kiln_c99_get_key_with_receiver",
         sites: 2,
         proved_by: "a hidden runtime slot no program can name, and a symbol the program made \
                     (`@@symbol:` and `@@symbol-for:` keys, kiln_c99_key_is_program_symbol) that \
@@ -2533,7 +2534,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     the seven probe sites are the only callers of this function",
     },
     AbsentAnswer {
-        function: "kiln_c99_get_computed",
+        function: "kiln_c99_get_computed_with_receiver",
         sites: 4,
         proved_by: "an index past the end and reserved slots nobody set: absence by position \
                     rather than by name, so no list decides it",

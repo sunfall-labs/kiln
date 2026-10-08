@@ -145,8 +145,9 @@ static int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value ke
     return kiln_c99_to_primitive(host, key, 1, out, depth, thrown);
 }
 
-static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
-                                 kiln_value *out, int depth, kiln_value *thrown) {
+static int kiln_c99_get_computed_with_receiver(kiln_host *host, kiln_value target, kiln_value key,
+                                               kiln_value receiver, kiln_value *out, int depth,
+                                               kiln_value *thrown) {
     double index;
     {
         int reduced = kiln_c99_reduce_key(host, target, key, &key, depth, thrown);
@@ -156,7 +157,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
     }
     /* Before the key is reduced to a name: a Symbol reaches the trap as itself. */
     if (target.tag == KILN_VALUE_PROXY) {
-        return kiln_c99_proxy_get(host, target, key, target, out, depth, thrown);
+        return kiln_c99_proxy_get(host, target, key, receiver, out, depth, thrown);
     }
     index = kiln_c99_array_index(key);
     if (target.tag == KILN_VALUE_ARRAY) {
@@ -183,8 +184,9 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                     }
                     for (slot = 0; slot < store->count; ++slot) {
                         if (kiln_c99_same_key_view(&store->properties[slot], name_key)) {
-                            *out = store->properties[slot].value;
-                            return KILN_C99_OK;
+                            return kiln_c99_get_key_with_receiver(
+                                host, target, name_key, kiln_c99_property_ikey(key), receiver,
+                                out, depth, thrown);
                         }
                     }
                 }
@@ -196,7 +198,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                     !kiln_c99_same_name_key(name_key, "@@unscopables")) {
                     KILN_C99_ABSENT("a reserved slot nobody set on this object", out);
                 }
-                return kiln_c99_get_key(host, target, name_key, kiln_c99_property_ikey(key), out,
+                return kiln_c99_get_key_with_receiver(host, target, name_key, kiln_c99_property_ikey(key), receiver, out,
                                         depth, thrown);
             }
             /* Reserved protocol slots are reached through Symbols. An ordinary string that only
@@ -212,8 +214,9 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                     for (slot = 0; slot < store->count; ++slot) {
                         if (kiln_c99_same_key_view(&store->properties[slot],
                                                    (const kiln_string *)key.ptr)) {
-                            *out = store->properties[slot].value;
-                            return KILN_C99_OK;
+                            return kiln_c99_get_key_with_receiver(
+                                host, target, (const kiln_string *)key.ptr,
+                                kiln_c99_property_ikey(key), receiver, out, depth, thrown);
                         }
                     }
                 }
@@ -228,7 +231,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                     KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                                     "slot");
                 }
-                return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr, NULL,
+                return kiln_c99_get_key_with_receiver(host, target, (const kiln_string *)text.ptr, NULL, receiver,
                                         out, depth, thrown);
             }
             /* Arrays still have ordinary named properties. A computed key such as `undefined`,
@@ -240,8 +243,8 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                 if (text.tag != KILN_VALUE_STRING) {
                     return KILN_C99_OUT_OF_MEMORY;
                 }
-                return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr,
-                                        kiln_c99_property_ikey(key), out, depth, thrown);
+                return kiln_c99_get_key_with_receiver(host, target, (const kiln_string *)text.ptr,
+                                        kiln_c99_property_ikey(key), receiver, out, depth, thrown);
             }
         }
         if ((size_t)index < array->count && array->elements[(size_t)index] != KILN_VAL_HOLE) {
@@ -251,7 +254,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
         /* Missing elements must still observe subclass and Array.prototype indices. */
         kiln_value name = kiln_c99_property_key(key);
         if (name.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-        return kiln_c99_get_key(host, target, (const kiln_string *)name.ptr, NULL,
+        return kiln_c99_get_key_with_receiver(host, target, (const kiln_string *)name.ptr, NULL, receiver,
                                 out, depth, thrown);
     }
     if (target.tag == KILN_VALUE_STRING && index >= 0.0) {
@@ -306,9 +309,15 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
             KILN_C99_REFUSE("a computed property key that is neither a string nor a named symbol "
                             "slot");
         }
-        return kiln_c99_get_key(host, target, (const kiln_string *)text.ptr,
-                                kiln_c99_property_ikey(key), out, depth, thrown);
+        return kiln_c99_get_key_with_receiver(host, target, (const kiln_string *)text.ptr,
+                                kiln_c99_property_ikey(key), receiver, out, depth, thrown);
     }
+}
+
+
+static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
+                                 kiln_value *out, int depth, kiln_value *thrown) {
+    return kiln_c99_get_computed_with_receiver(host, target, key, target, out, depth, thrown);
 }
 
 static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_value key,
