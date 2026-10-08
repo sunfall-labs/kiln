@@ -23,6 +23,34 @@ pub struct TypeDecoratorSite {
     pub expression: crate::Expression,
 }
 
+/// An `import.defer(specifier, options)`, for the type checker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredImportSite {
+    pub span: Span,
+    /// The call as an ordinary `import(..)` of the same span.
+    pub call: crate::Expression,
+}
+
+/// A `@ts-ignore` or `@ts-expect-error` comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeCommentDirective {
+    /// For a `/* */` comment, the start of its last line.
+    pub start: u32,
+    pub end: u32,
+    /// `@ts-expect-error` rather than `@ts-ignore`.
+    pub expect_error: bool,
+}
+
+/// The JSX pragmas of a file's leading comments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypeJsxPragmas {
+    /// `@jsxRuntime`: `Some(true)` is `classic`, `Some(false)` is `automatic`.
+    pub classic: Option<bool>,
+    pub factory: Option<String>,
+    pub fragment_factory: Option<String>,
+    pub import_source: Option<String>,
+}
+
 /// Rich, parser-independent type syntax belonging to one module.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeSyntax {
@@ -88,6 +116,20 @@ pub struct TypeSyntax {
     /// Triple-slash references retained from the parser's comment table.
     pub references: Vec<TypeReferenceDirective>,
     pub no_default_lib: bool,
+    /// Where `import.meta` is written, by span. Executable HIR spells it as the object or call that
+    /// stands for it at run time.
+    pub import_metas: Vec<Span>,
+    /// The `import.defer(..)` expressions, which executable HIR refuses as unsupported.
+    pub deferred_imports: Vec<DeferredImportSite>,
+    /// `/* @jsx h */`, `@jsxFrag`, `@jsxImportSource` and `@jsxRuntime` in the block comments
+    /// before the first token (`multiLinePragmas`). The last of two identical pragmas wins.
+    pub jsx_pragmas: TypeJsxPragmas,
+    /// `// @ts-ignore` and `// @ts-expect-error` comments, in source order
+    /// (`processCommentDirective`).
+    pub comment_directives: Vec<TypeCommentDirective>,
+    /// `// @ts-check` (`Some(true)`) or `// @ts-nocheck` (`Some(false)`) before the first token;
+    /// the last one wins.
+    pub check_directive: Option<bool>,
     /// TypeScript executable HIR lowered before TS erasure, JSX lowering, or DCE.
     /// JavaScript uses Module::body without duplicating its executable tree.
     pub body: Vec<crate::Statement>,

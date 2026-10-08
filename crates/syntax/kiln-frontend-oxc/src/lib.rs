@@ -4847,6 +4847,34 @@ fn capture_type_syntax(
             });
             walk::walk_ts_as_expression(self, node);
         }
+        fn visit_import_meta(&mut self, node: &oxc_ast::ast::ImportMeta) {
+            self.result
+                .import_metas
+                .push(HirSpan::new(node.span.start, node.span.end));
+        }
+        fn visit_import_expression(&mut self, node: &oxc_ast::ast::ImportExpression<'a>) {
+            if node.phase == Some(oxc_ast::ast::ImportPhase::Defer) {
+                let span = HirSpan::new(node.span.start, node.span.end);
+                let mut lowerer =
+                    Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
+                self.result
+                    .deferred_imports
+                    .push(kiln_hir::DeferredImportSite {
+                        span,
+                        call: HirExpression {
+                            kind: HirExpressionKind::ImportCall {
+                                specifier: Box::new(lowerer.expression(&node.source)),
+                                options: node
+                                    .options
+                                    .as_ref()
+                                    .map(|options| Box::new(lowerer.expression(options))),
+                            },
+                            span,
+                        },
+                    });
+            }
+            walk::walk_import_expression(self, node);
+        }
         fn visit_ts_satisfies_expression(
             &mut self,
             node: &oxc_ast::ast::TSSatisfiesExpression<'a>,
@@ -4884,6 +4912,43 @@ fn capture_type_syntax(
                     kind: kiln_hir::TypeExpressionWrapperKind::Parenthesized,
                 });
             walk::walk_parenthesized_expression(self, node);
+        }
+        /// Oxc's cover grammar drops the parentheses of a simple assignment target: `(x) = 1`,
+        /// `for ((x) of xs)`. They are written around the target and nothing else could be, so
+        /// the source says how many.
+        fn visit_simple_assignment_target(
+            &mut self,
+            node: &oxc_ast::ast::SimpleAssignmentTarget<'a>,
+        ) {
+            let span = node.span();
+            let source = self.source.as_bytes();
+            let (mut start, mut end) = (span.start as usize, span.end as usize);
+            loop {
+                let before = source[..start].trim_ascii_end();
+                let after = source[end..].trim_ascii_start();
+                if !before.ends_with(b"(") || !after.starts_with(b")") {
+                    break;
+                }
+                start = before.len() - 1;
+                end = source.len() - after.len() + 1;
+                let owner_span = HirSpan::new(start as u32, end as u32);
+                if self
+                    .result
+                    .expression_wrappers
+                    .iter()
+                    .any(|site| site.owner_span == owner_span)
+                {
+                    break;
+                }
+                self.result
+                    .expression_wrappers
+                    .push(kiln_hir::TypeExpressionWrapperSite {
+                        owner_span,
+                        operand_span: HirSpan::new(span.start, span.end),
+                        kind: kiln_hir::TypeExpressionWrapperKind::Parenthesized,
+                    });
+            }
+            walk::walk_simple_assignment_target(self, node);
         }
         fn visit_ts_non_null_expression(&mut self, node: &oxc_ast::ast::TSNonNullExpression<'a>) {
             self.result
@@ -5101,6 +5166,11 @@ fn capture_type_syntax(
         }
         fn visit_ts_global_declaration(&mut self, node: &oxc_ast::ast::TSGlobalDeclaration<'a>) {
             let span = node.span;
+            self.result.names.push(kiln_hir::NameSite {
+                owner_end: span.end,
+                name: "global".to_owned(),
+                start: node.global_span.start,
+            });
             let mut lowerer =
                 Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
             let body = lowerer.statements(&node.body.body);
@@ -5134,8 +5204,27 @@ fn capture_type_syntax(
         classified: HashSet::new(),
         dotted: HashSet::new(),
     };
+    let first_token = program
+        .directives
+        .first()
+        .map(|directive| directive.span.start)
+        .into_iter()
+        .chain(program.body.first().map(|statement| statement.span().start))
+        .min()
+        .unwrap_or(u32::MAX);
     for comment in &program.comments {
-        if comment.kind != oxc_ast::ast::CommentKind::Line {
+        let text = collector.raw(comment.span);
+        let block = comment.kind != oxc_ast::ast::CommentKind::Line;
+        if let Some(directive) = comment_directive(&text, comment.span.start, block) {
+            collector.result.comment_directives.push(directive);
+        }
+        if !block && comment.span.end <= first_token {
+            check_directive(&text, &mut collector.result.check_directive);
+        }
+        if block {
+            if comment.span.end <= first_token {
+                jsx_pragmas(&text, &mut collector.result.jsx_pragmas);
+            }
             continue;
         }
         let raw = collector.raw(comment.span);
@@ -7341,8 +7430,9 @@ impl Lowerer<'_, '_> {
                         kind: HirExpressionKind::Identifier(hidden.clone()),
                         span: statement_span,
                     };
+                    let target_span = HirSpan::new(target.span().start, target.span().end);
                     let assignment =
-                        self.assign_to(target, HirAssignmentOperator::Assign, step, statement_span);
+                        self.assign_to(target, HirAssignmentOperator::Assign, step, target_span);
                     return Some(HirStatement {
                         kind: HirStatementKind::ForOf {
                             kind: HirVariableKind::Let,
@@ -7396,11 +7486,12 @@ impl Lowerer<'_, '_> {
                             kind: HirExpressionKind::Identifier(hidden.clone()),
                             span: statement_span,
                         };
+                        let target_span = HirSpan::new(target.span().start, target.span().end);
                         let assignment = self.assign_to(
                             target,
                             HirAssignmentOperator::Assign,
                             step,
-                            statement_span,
+                            target_span,
                         );
                         return Some(HirStatement {
                             kind: HirStatementKind::ForIn {
@@ -8833,7 +8924,8 @@ impl Lowerer<'_, '_> {
                 Some(kiln_hir::Pattern::Computed {
                     object: Box::new(HirExpression {
                         kind: HirExpressionKind::This,
-                        span: span(member.span),
+                        // The `super` itself, which is how the checker knows it was one.
+                        span: span(member.object.span()),
                     }),
                     property: Box::new(self.expression(&member.expression)),
                 })
@@ -8852,7 +8944,8 @@ impl Lowerer<'_, '_> {
                 Some(kiln_hir::Pattern::Member {
                     object: Box::new(HirExpression {
                         kind: HirExpressionKind::This,
-                        span: span(member.span),
+                        // The `super` itself, which is how the checker knows it was one.
+                        span: span(member.object.span()),
                     }),
                     property: member.property.name.to_string().into(),
                 })
@@ -9743,6 +9836,111 @@ fn lower_import_name(name: &ImportImportName<'_>) -> ImportName {
 }
 
 /// Every `@d` of `program` with the class, member or parameter it decorates, in source order.
+/// `processCommentDirective` for the comment `text` at `at`: `// @ts-ignore` and
+/// `// @ts-expect-error`, of a `/* */` comment its last line only.
+fn comment_directive(text: &str, at: u32, block: bool) -> Option<kiln_hir::TypeCommentDirective> {
+    let bytes = text.as_bytes();
+    let skip = |mut pos: usize, set: &[u8]| {
+        while pos < bytes.len() && set.contains(&bytes[pos]) {
+            pos += 1;
+        }
+        pos
+    };
+    let (start, pos) = if block {
+        // The last line of the comment, from after its last line break.
+        let line = text
+            .char_indices()
+            .filter(|(_, c)| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+            .last()
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        (line, skip(skip(line, b" \t"), b"/*"))
+    } else {
+        (0, skip(2, b"/"))
+    };
+    let pos = skip(pos, b" \t");
+    if bytes.get(pos) != Some(&b'@') {
+        return None;
+    }
+    let expect_error = if bytes[pos + 1..].starts_with(b"ts-expect-error") {
+        true
+    } else if bytes[pos + 1..].starts_with(b"ts-ignore") {
+        false
+    } else {
+        return None;
+    };
+    Some(kiln_hir::TypeCommentDirective {
+        start: at + start as u32,
+        end: at + text.len() as u32,
+        expect_error,
+    })
+}
+
+/// `// @ts-check` and `// @ts-nocheck`: the last of either wins.
+fn check_directive(text: &str, directive: &mut Option<bool>) {
+    let bytes = text.as_bytes();
+    let mut pos = 2;
+    if bytes.get(pos) == Some(&b'/') {
+        pos += 1;
+    }
+    while matches!(bytes.get(pos), Some(b' ' | b'\t')) {
+        pos += 1;
+    }
+    if bytes.get(pos) != Some(&b'@') {
+        return;
+    }
+    let rest = &bytes[pos + 1..];
+    let len = rest
+        .iter()
+        .take_while(|c| c.is_ascii_alphabetic() || **c == b'-')
+        .count();
+    if rest[..len].eq_ignore_ascii_case(b"ts-check") {
+        *directive = Some(true);
+    } else if rest[..len].eq_ignore_ascii_case(b"ts-nocheck") {
+        *directive = Some(false);
+    }
+}
+
+/// `extractPragmas` for the `/* */` comment `text`: the JSX pragmas. A pragma name is the
+/// non-blank text after `@` and its argument the next blank-delimited word; the rest of the line
+/// is skipped. The last of two identical pragmas wins (`GetPragmaFromSourceFile`).
+fn jsx_pragmas(text: &str, pragmas: &mut kiln_hir::TypeJsxPragmas) {
+    let text = text.strip_suffix("*/").unwrap_or(text);
+    let blank = |c: char| matches!(c, ' ' | '\t');
+    let non_blank = |c: char| !matches!(c, ' ' | '\t' | '\r' | '\n');
+    let mut pos = 2.min(text.len());
+    while let Some(found) = text[pos..].find('@') {
+        pos += found;
+        let after = &text[pos + 1..];
+        let name_len = after.find(|c| !non_blank(c)).unwrap_or(after.len());
+        if name_len == 0 {
+            pos += 1;
+            continue;
+        }
+        let name = &after[..name_len];
+        let rest = after[name_len..].trim_start_matches(blank);
+        let argument = &rest[..rest.find(|c| !non_blank(c)).unwrap_or(rest.len())];
+        if !argument.is_empty() {
+            let argument_owned = || Some(argument.to_owned());
+            if name.eq_ignore_ascii_case("jsx") {
+                pragmas.factory = argument_owned();
+            } else if name.eq_ignore_ascii_case("jsxFrag") {
+                pragmas.fragment_factory = argument_owned();
+            } else if name.eq_ignore_ascii_case("jsxImportSource") {
+                pragmas.import_source = argument_owned();
+            } else if name.eq_ignore_ascii_case("jsxRuntime") {
+                pragmas.classic = match argument {
+                    "classic" => Some(true),
+                    "automatic" => Some(false),
+                    _ => None,
+                };
+            }
+        }
+        pos = text[pos..]
+            .find(|c| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+            .map_or(text.len(), |at| pos + at);
+    }
+}
+
 fn decorator_sites(
     source: &str,
     path: Option<&str>,

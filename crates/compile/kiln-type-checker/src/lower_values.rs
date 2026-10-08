@@ -311,8 +311,25 @@ impl<'a, 's> Lower<'a, 's> {
     pub(super) fn key(&mut self, key: &k::ObjectKey) -> b::PropKey {
         match key {
             k::ObjectKey::Static(text) => b::PropKey::Name(self.atom_units(text)),
-            k::ObjectKey::Computed(expr) => b::PropKey::Computed(self.expr(expr)),
+            k::ObjectKey::Computed(expr) => {
+                let id = self.expr(expr);
+                self.computed_key(id)
+            }
             k::ObjectKey::Private(name) => b::PropKey::Private(self.private_atom(name)),
+        }
+    }
+
+    /// `["a"]` is `a`, and `[0]` is `0`; `["a" as T]` and `[("a")]` are evaluated
+    /// (`IsDynamicName`).
+    fn computed_key(&mut self, id: b::ExprId) -> b::PropKey {
+        let parenthesized = self.file.parens.iter().any(|paren| paren.0 == id);
+        match self.file[id].kind {
+            b::ExprKind::String(name) if !parenthesized => b::PropKey::Name(name),
+            b::ExprKind::Number(n) if !parenthesized => {
+                let text = crate::engine::atom::number_to_string(self.file.numbers[n as usize]);
+                b::PropKey::Name(self.atoms.intern(&text))
+            }
+            _ => b::PropKey::Computed(id),
         }
     }
 
@@ -349,7 +366,10 @@ impl<'a, 's> Lower<'a, 's> {
     pub(super) fn expr(&mut self, expr: &k::Expression) -> b::ExprId {
         use k::ExpressionKind as E;
         let span = expr.span;
+        // Executable HIR spells `import.meta` as what stands for it at run time.
+        let import_meta = self.module.type_syntax.import_metas.contains(&span);
         let kind = match &expr.kind {
+            _ if import_meta => b::ExprKind::ImportMeta,
             E::Identifier(name) => b::ExprKind::Ident(self.atom(name)),
             E::Literal(literal) => match literal {
                 k::Literal::Undefined => b::ExprKind::Ident(self.atom("undefined")),
@@ -362,6 +382,16 @@ impl<'a, 's> Lower<'a, 's> {
                 k::Literal::String(text) => b::ExprKind::String(self.atom_units(text)),
                 k::Literal::BigInt(digits) => b::ExprKind::BigInt(self.atom(digits)),
             },
+            // The frontend stores through `super.x` in a destructuring target as `this.x`.
+            E::This
+                if self
+                    .module
+                    .source
+                    .get(span.start as usize..span.end as usize)
+                    .is_some_and(|text| text == "super") =>
+            {
+                b::ExprKind::Super
+            }
             E::This => b::ExprKind::This,
             E::InlineLiteralEval {
                 callee, argument, ..
@@ -1058,7 +1088,8 @@ impl<'a, 's> Lower<'a, 's> {
                             span.end,
                         );
                     }
-                    return value;
+                    // Not past `wrapped`: `[(a, b)]` is parenthesized.
+                    return self.wrapped(value, span);
                 }
             }
             E::Object { members } => {
@@ -1170,6 +1201,24 @@ impl<'a, 's> Lower<'a, 's> {
                 self.template(&quasis, &[], span)
             }
             E::RegExp { .. } => b::ExprKind::Regex,
+            // `import.defer(..)`: an `import(..)` and the position of its `)`.
+            E::Unsupported { feature }
+                if feature == "phased dynamic import expression"
+                    && let Some(site) = self
+                        .module
+                        .type_syntax
+                        .deferred_imports
+                        .iter()
+                        .find(|site| site.span == span) =>
+            {
+                let call = self.expr(&site.call);
+                if let b::ExprKind::ImportCall { args } = self.file[call].kind {
+                    let specifier = self.file.id_at(args, 0);
+                    let close = self.file[call].end.saturating_sub(1);
+                    self.file.deferred_import_calls.push((specifier, close));
+                }
+                return call;
+            }
             E::Unsupported { feature } if feature == "JSX expression" => {
                 match self.jsx_site(span) {
                     Some(site) => self.jsx(site),
@@ -1179,6 +1228,9 @@ impl<'a, 's> Lower<'a, 's> {
                     }
                 }
             }
+            // The `super` of a destructuring target, `[super.a] = xs`: executable HIR has no
+            // expression for a lone `super`.
+            E::Unsupported { feature } if feature == "super expression" => b::ExprKind::Super,
             // `a={}`: an attribute without an expression, which the checker reports itself.
             E::Unsupported { feature } if feature == "empty JSX expression" => b::ExprKind::Missing,
             E::Unsupported { feature } => {
@@ -1644,6 +1696,40 @@ impl<'a, 's> Lower<'a, 's> {
         self.file.stmt(b::StmtKind::Block(list), pos)
     }
 
+    /// The head of `for (x in o)` and `for (x of o)`, which the frontend desugars to a hidden
+    /// binding and, as the first statement of the body, the assignment of it to `x`. Bun's HIR has
+    /// the target itself as the head, which is where the checker reports about it: `body` is that
+    /// block, and the result is the target as an expression statement and the loop's own body.
+    fn assigning_head<'b>(&mut self, body: &'b k::Statement) -> (b::StmtId, &'b k::Statement) {
+        let k::StatementKind::Block(statements) = &body.kind else {
+            unreachable!("an assigning loop body is a block");
+        };
+        let [assignment, body] = statements.as_slice() else {
+            unreachable!("an assigning loop body has the assignment and the body");
+        };
+        let k::StatementKind::Expression(assignment) = &assignment.kind else {
+            unreachable!("the first statement assigns");
+        };
+        let span = assignment.span;
+        let mut assigned = self.expr(assignment);
+        // The assignment has the span of its target, and so the target's assertions.
+        while let b::ExprKind::NonNull(inner)
+        | b::ExprKind::AsConst(inner)
+        | b::ExprKind::As { expr: inner, .. }
+        | b::ExprKind::Satisfies { expr: inner, .. } = self.file[assigned].kind
+        {
+            assigned = inner;
+        }
+        let b::ExprKind::Assign { target, .. } = self.file[assigned].kind else {
+            unreachable!("the head assigns to its target");
+        };
+        // The assignment has the span of its target, so what is written around the one is
+        // written around the other: `for ((x) of xs)`.
+        let target = self.wrapped(target, span);
+        let pos = self.file[target].pos;
+        (self.file.stmt(b::StmtKind::Expr(target), pos), body)
+    }
+
     pub(super) fn statement(&mut self, statement: &k::Statement) -> b::StmtId {
         if let Some(lowered) = self.import_equals_at(statement.span) {
             return lowered;
@@ -1743,6 +1829,31 @@ impl<'a, 's> Lower<'a, 's> {
                     test,
                     update,
                     body,
+                }
+            }
+            S::ForIn {
+                name, object, body, ..
+            } if name.starts_with("%forin") => {
+                let (left, body) = self.assigning_head(body);
+                let expr = self.expr(object);
+                let body = self.statement(body);
+                b::StmtKind::ForIn { left, expr, body }
+            }
+            S::ForOf {
+                pattern: k::Pattern::Identifier(name),
+                iterable,
+                body,
+                awaiting,
+                ..
+            } if name.starts_with("%forof") => {
+                let (left, body) = self.assigning_head(body);
+                let expr = self.expr(iterable);
+                let body = self.statement(body);
+                b::StmtKind::ForOf {
+                    left,
+                    expr,
+                    body,
+                    is_await: *awaiting,
                 }
             }
             S::ForIn {

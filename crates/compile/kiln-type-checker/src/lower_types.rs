@@ -379,7 +379,13 @@ impl<'a, 's> Lower<'a, 's> {
                 };
                 let module = self.file.add_module(b::Module {
                     name: module_name,
-                    name_pos: self.name_pos(declaration.span, declaration.name.as_deref()),
+                    name_pos: self.name_pos(
+                        declaration.span,
+                        match declaration.global {
+                            true => Some("global"),
+                            false => declaration.name.as_deref(),
+                        },
+                    ),
                     flags,
                     body,
                     has_body,
@@ -1139,6 +1145,38 @@ impl<'a, 's> Lower<'a, 's> {
                     Some(k::TypeResolutionMode::Require) => b::ResolutionMode::Require,
                 },
             ));
+        }
+        self.file.check_directive = self.module.type_syntax.check_directive;
+        self.file.comment_directives = self
+            .module
+            .type_syntax
+            .comment_directives
+            .iter()
+            .map(|it| b::CommentDirective {
+                start: it.start,
+                end: it.end,
+                kind: match it.expect_error {
+                    true => b::CommentDirectiveKind::ExpectError,
+                    false => b::CommentDirectiveKind::Ignore,
+                },
+            })
+            .collect();
+        // Only read for files that can contain JSX.
+        if matches!(
+            self.module.source_kind,
+            k::SourceKind::Tsx | k::SourceKind::Jsx
+        ) {
+            let pragmas = &self.module.type_syntax.jsx_pragmas;
+            let intern = |this: &Self, text: &Option<String>| match text {
+                Some(text) => this.atom(text),
+                None => Atom::NONE,
+            };
+            self.file.jsx_pragmas = b::JsxPragmas {
+                classic: pragmas.classic,
+                factory: intern(&self, &pragmas.factory),
+                fragment_factory: intern(&self, &pragmas.fragment_factory),
+                import_source: intern(&self, &pragmas.import_source),
+            };
         }
         self.parameter_modifiers();
         self.keyword_identifier_positions();
