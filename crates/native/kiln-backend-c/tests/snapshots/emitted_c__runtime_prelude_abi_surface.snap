@@ -3901,6 +3901,7 @@ static int kiln_c99_collection_iterator_prototype(int is_map, kiln_value *out) {
 static int kiln_c99_builtin_iterator_prototype(int kind, kiln_value *out) {
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_generator_step(kiln_host *host, kiln_value produced, int done, kiln_value *result,
+static int kiln_c99_generator_resolve_return(kiln_generator *frame, int status,
 static int kiln_c99_is_object(kiln_value val) {
 static int kiln_c99_create_argument_list(kiln_host *host, kiln_value list, kiln_value *out,
 static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln_value error,
