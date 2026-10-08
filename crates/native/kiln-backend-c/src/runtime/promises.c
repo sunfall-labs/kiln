@@ -953,6 +953,25 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
         if (frame->awaiting) {
             return kiln_c99_await_suspend(host, generator, produced, 1, depth);
         }
+        if (frame->delegate.tag != KILN_VALUE_UNDEFINED) {
+            /* YieldStar suspends with its iterator-result object. Async-generator yield* exposes
+             * only that result's value, then awaits it just like an ordinary async-generator
+             * yield. Read the value once here; the generated body already consumed `done`. */
+            kiln_value delegated_value = kiln_c99_undefined();
+            kiln_value get_thrown = kiln_c99_undefined();
+            int get_status = kiln_c99_get(host, produced, "value", 5, &delegated_value, depth,
+                                          &get_thrown);
+            if (get_status == KILN_C99_THROWN) {
+                /* This is an abrupt completion at the suspended yield*. Resume through the
+                 * generator body so its catch/finally executes, rather than throwing out of
+                 * next() synchronously or treating the error as a delegate.next() failure. */
+                kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
+                frame->delegate_exit = 0;
+                return kiln_c99_enqueue(generator, get_thrown, kiln_c99_undefined(), 1, 1);
+            }
+            if (get_status != KILN_C99_OK) return get_status;
+            produced = delegated_value;
+        }
         return kiln_c99_await_suspend(host, generator, produced, 2, depth);
     }
     if (status == KILN_C99_THROWN) {
