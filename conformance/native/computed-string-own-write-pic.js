@@ -11,6 +11,11 @@ function keyFrom(parts) {
 }
 
 function writeAt(target, key, value) {
+  "use strict";
+  return target[key] = value;
+}
+
+function sloppyWriteAt(target, key, value) {
   return target[key] = value;
 }
 
@@ -60,6 +65,10 @@ let rejected = false;
 try { writeAt(reconfigured, keyFrom(["sl", "ot"]), 72); }
 catch (error) { rejected = error instanceof TypeError; }
 check(rejected && reconfigured.slot === 2, "non-writable reconfiguration keeps strict assignment semantics");
+const sloppyNonWritable = {};
+Object.defineProperty(sloppyNonWritable, "slot", { value: 5, writable: false });
+check(sloppyWriteAt(sloppyNonWritable, "slot", 6) === 6 && sloppyNonWritable.slot === 5,
+  "sloppy assignment returns its value without changing a non-writable property");
 
 const deleted = { slot: 0 };
 writeAt(deleted, keyFrom(["sl", "ot"]), 3);
