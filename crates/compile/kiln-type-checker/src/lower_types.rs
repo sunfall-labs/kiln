@@ -972,7 +972,15 @@ impl<'a, 's> Lower<'a, 's> {
         let (type_params, params, ret, has_body) = self.function_type_parts(f);
         let (this_param, params) = self.file.split_this_parameter(params);
         let body = if has_body {
-            b::FnBody::Block(self.statements(&f.body))
+            // `x => e` is lowered as the `return e` it means, with the span of the whole arrow:
+            // a braced body's `return` is always inside the arrow.
+            match f.body.as_slice() {
+                [k::Statement {
+                    kind: k::StatementKind::Return(Some(value)),
+                    span,
+                }] if f.arrow && *span == f.span => b::FnBody::Expr(self.expr(value)),
+                _ => b::FnBody::Block(self.statements(&f.body)),
+            }
         } else {
             b::FnBody::None
         };
