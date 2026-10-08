@@ -4,12 +4,49 @@ Goal: execute every pinned Effect test directly in kiln, prioritizing native, wi
 bundling sources. Bun supplies the direct-TypeScript performance comparison; the official
 Node/Vitest inventory and per-case outcomes establish correctness and runner fidelity.
 
-## Current checkpoint, 2026-10-06
+## Current checkpoint, 2026-10-07
+
+The goal remains incomplete. The last verified public main is `d43e10ae`; current
+local milestones have not been published because `git push origin HEAD:main`
+fails with `Could not resolve host: github.com`. Public main cannot be refreshed
+or independently reverified while that failure persists.
+
+The [prepared iterator evaluation](prepared-iterator-evaluation-20261008/)
+preserves complete original inventories for interpreter Hash (24/25 passing)
+and native Sharding (62/66 passing). Their exact failing IDs and original
+five-second timeout errors match the production CLI. ClusterWorkflowEngine
+compilation timed out after 1,200 seconds before any case ran; this is not
+complete native 113-case coverage. The original failed supervisor receipt and
+supplemental harness provenance correction are retained beside the results.
+
+The [shared-key cache evaluation](native-shared-key-cache-evaluation-20261008/)
+found mixed results on checksum-matched workloads, so that candidate remains
+outside production. A separate computed-string own-write cache and interpreter
+own-slot hint are being validated in an isolated combined candidate. The hint's
+two focused mutation/key-domain tests pass; that does not prove upstream deadline
+acceptance or a performance gain.
+
+The [native iterator validation](native-iterator-validation-20261008/supplemental-evidence.md)
+records a correction for async `yield*` publishing an extra iterator-result object.
+The complete async regression and the original failing probe now match Node
+in ordinary and GC-stress runs. The full regression also passes with 1, 2 and
+16 concurrent realms, including GC stress. Prepared iterator calls and the
+computed-string write-cache probe pass interpreter/native parity, stress and
+realm checks. An interpreter async-generator request-queue defect still prevents
+parity on the full async regression; its isolated repair is being tested.
+These focused results do not establish complete upstream acceptance or speed gains.
+
+Complete fresh native and interpreter runs of all 322 files and 11,019 official
+cases, the required final gate, all checksum-matched Bun benchmark comparisons,
+latest-main integration and successful publication remain required. Original
+case/hook budgets, assertion bodies, modes and skips remain authoritative.
+
+## Historical checkpoint, 2026-10-06
 
 Public main includes the bounded generic known-call analysis at `6d5fe097` and
 materialized-intrinsic lookup index at `d87b1e38`. Both were normally pushed and
-remote main was verified. The earlier network/publication restrictions below are
-historical and no longer apply.
+remote main was verified. Publication succeeded at that checkpoint. Current publication attempts are again
+blocked by GitHub DNS resolution, as recorded above.
 
 The [complete frozen interpreter survey](interpreter-survey-20261006/) selected
 all 322 files and registered all 11,019 official cases. It recorded 10,941 passes,
