@@ -808,6 +808,40 @@ pub fn candidate_number_parameters_with_profile(
     proto: &FunctionProto,
     profile: Option<&FunctionTypeProfile>,
 ) -> Vec<usize> {
+    candidate_number_parameters_with_evidence(graph, proto, profile)
+        .into_iter()
+        .map(|(slot, _)| slot)
+        .collect()
+}
+
+/// Why a parameter is speculated to be a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberEvidence {
+    /// The checker's `number` contract (`FunctionProto::type_annotations`).
+    Annotation,
+    /// A type profile observed numbers at this slot.
+    Profile,
+    /// The body's own arithmetic makes the guess worthwhile (inference heuristic).
+    Inference,
+}
+
+impl NumberEvidence {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Annotation => "annotation",
+            Self::Profile => "profile",
+            Self::Inference => "inference",
+        }
+    }
+}
+
+/// As [`candidate_number_parameters_with_profile`], naming the first evidence that nominated
+/// each slot (annotation, then profile, then inference).
+pub fn candidate_number_parameters_with_evidence(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    profile: Option<&FunctionTypeProfile>,
+) -> Vec<(usize, NumberEvidence)> {
     if proto.parameter_count == 0 || proto.generator || proto.asynchronous || proto.mapped_arguments
     {
         return Vec::new();
@@ -820,7 +854,7 @@ pub fn candidate_number_parameters_with_profile(
             .is_some_and(|ann| ann.is_number())
             && graph.initial_locals.get(slot).is_some()
         {
-            annotated_candidates.push(slot);
+            annotated_candidates.push((slot, NumberEvidence::Annotation));
         }
     }
     // Step 3.2: treat parameters observed as numbers in type profile as candidate numbers for guarded speculation
@@ -829,9 +863,9 @@ pub fn candidate_number_parameters_with_profile(
             if (tag == "number" || tag == "int")
                 && (slot < proto.parameter_count as usize)
                 && graph.initial_locals.get(slot).is_some()
-                && !annotated_candidates.contains(&slot)
+                && !annotated_candidates.iter().any(|(s, _)| *s == slot)
             {
-                annotated_candidates.push(slot);
+                annotated_candidates.push((slot, NumberEvidence::Profile));
             }
         }
     }
@@ -918,13 +952,13 @@ pub fn candidate_number_parameters_with_profile(
         });
         if has_body_numbers || has_numeric_comparison {
             for slot in useful {
-                if !result.contains(&slot) {
-                    result.push(slot);
+                if !result.iter().any(|(s, _)| *s == slot) {
+                    result.push((slot, NumberEvidence::Inference));
                 }
             }
         }
     }
-    result.sort_unstable();
+    result.sort_unstable_by_key(|(slot, _)| *slot);
     result
 }
 

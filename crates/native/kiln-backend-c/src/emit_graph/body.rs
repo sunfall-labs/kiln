@@ -6,7 +6,7 @@ use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
     BasicBlock, BlockId, Effects, FunctionGraph, FunctionTypeProfile, GraphOp, InductionVariable,
     Proven, Terminator, ValueId, array_slots, candidate_array_parameters_with_profile,
-    candidate_number_parameters_with_profile, find_induction_variables,
+    candidate_number_parameters_with_evidence, find_induction_variables,
     proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
 use crate::prelude::lookup_speculation_invariant;
@@ -772,6 +772,7 @@ pub fn emit_function_from_graph_with_profile(
         kind,
         func_profile,
         type_profile_record,
+        &index.to_string(),
     );
     output.push_str("}\n");
     if plan.compact && kind == EntryKind::Boxed {
@@ -899,6 +900,7 @@ pub fn emit_entry_from_graph_with_profile(
         EntryKind::Boxed,
         None,
         type_profile_record,
+        "entry",
     );
     shared_sites
 }
@@ -997,6 +999,7 @@ pub fn emit_async_entry_body(
         EntryKind::Boxed,
         None,
         type_profile_record,
+        "entry",
     );
     output.push_str("}\n");
     shared_sites
@@ -2813,6 +2816,101 @@ fn boxed_uses(
     }
 }
 
+/// `KILN_NATIVE_TRACE_SPECULATION=1`: whether the emitter reports each function's speculations.
+fn speculation_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("KILN_NATIVE_TRACE_SPECULATION")
+            .is_some_and(|value| value != "0" && !value.is_empty())
+    })
+}
+
+/// One stderr line per function that speculates, written from the decision points' own results.
+/// `versioned=false` means the candidates below were found but the emitter did not clone the
+/// body (size, suspension, generic-only, `KILN_SPECULATE=0`), so none of them changed the code.
+#[allow(clippy::too_many_arguments)]
+fn trace_speculation(
+    symbol: &str,
+    proto: &FunctionProto,
+    plan: &CallPlan,
+    versioned: bool,
+    number_params: &[(usize, crate::graph::NumberEvidence)],
+    array_params: &[usize],
+    upvalue_arrays: usize,
+    calls: usize,
+    fields: usize,
+    spread_sinks: usize,
+    label: &str,
+) {
+    use std::fmt::Write as _;
+    let index = label.parse::<usize>().ok();
+    let typed_entry = index.is_some_and(|i| plan.typed_entries.get(i).copied().unwrap_or(false));
+    let typed_return = index.is_some_and(|i| plan.typed_returns.get(i).copied().unwrap_or(false));
+    if number_params.is_empty()
+        && array_params.is_empty()
+        && upvalue_arrays == 0
+        && calls == 0
+        && fields == 0
+        && spread_sinks == 0
+        && !typed_entry
+        && !typed_return
+    {
+        return;
+    }
+    let name = proto
+        .effective_name_units()
+        .map(|name| name.to_lossy_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "<anonymous>".into());
+    let mut line =
+        format!("kiln-speculation fn={label} name={name} symbol={symbol} versioned={versioned}");
+    for (slot, evidence) in number_params {
+        write!(line, " number_param[{slot}]={}", evidence.label()).unwrap();
+    }
+    for slot in array_params {
+        write!(line, " array_param[{slot}]=profile").unwrap();
+    }
+    if upvalue_arrays > 0 {
+        write!(
+            line,
+            " spec_arrays={upvalue_arrays}(invariant-upvalue-indexed)"
+        )
+        .unwrap();
+    }
+    if calls > 0 {
+        write!(line, " spec_calls={calls}(method-result-feeds-arithmetic)").unwrap();
+    }
+    if fields > 0 {
+        write!(
+            line,
+            " spec_fields={fields}(property-read-feeds-arithmetic)"
+        )
+        .unwrap();
+    }
+    if spread_sinks > 0 {
+        write!(line, " spread_sinks={spread_sinks}").unwrap();
+    }
+    if typed_entry {
+        line.push_str(" typed_entry=proven-number-params");
+    }
+    if typed_return {
+        line.push_str(" typed_return=proven-number");
+    }
+    // Whether the checker's facts survived to this function at all. They are attached by
+    // `apply_source_types`, so `absent` on a `.ts` function means they were lost on the way.
+    let facts = proto
+        .type_annotations
+        .as_ref()
+        .is_some_and(|annotations| annotations.source_types.is_some());
+    write!(
+        line,
+        " source_types={}",
+        if facts { "present" } else { "absent" }
+    )
+    .unwrap();
+    eprintln!("{line}");
+}
+
 /// The SSA value declarations, every block with its terminator, and the tail: what a function
 /// body and the entry point share once their prologues are written.
 #[allow(clippy::too_many_arguments)]
@@ -2833,6 +2931,7 @@ fn emit_blocks(
     kind: EntryKind,
     func_profile: Option<&FunctionTypeProfile>,
     type_profile_record: bool,
+    trace_label: &str,
 ) -> (usize, usize) {
     let body_start = output.len();
     // The reads of `this`, each with its column in the function's receiver-shape cache: one
@@ -2842,7 +2941,12 @@ fn emit_blocks(
     } else {
         this_columns(graph).0
     };
-    let candidate_params = candidate_number_parameters_with_profile(graph, proto, func_profile);
+    let candidate_params = candidate_number_parameters_with_evidence(graph, proto, func_profile);
+    let candidate_params_evidence = candidate_params;
+    let candidate_params: Vec<usize> = candidate_params_evidence
+        .iter()
+        .map(|(slot, _)| *slot)
+        .collect();
     let candidate_array_params =
         candidate_array_parameters_with_profile(graph, proto, func_profile, program);
     let speculate_enabled = plan.speculate.unwrap_or(true);
@@ -2875,6 +2979,7 @@ fn emit_blocks(
             })
         })
         .collect();
+    let upvalue_arrays = spec_arrays.len();
     // Parameter reads are eligible only when candidate selection proved a simple positional
     // binding. Include every read of that slot so the existing array property tier sees the same
     // receiver value throughout the body; the entry guard below checks the original argument.
@@ -2960,6 +3065,22 @@ fn emit_blocks(
             || !spec_calls.is_empty()
             || !spec_fields.is_empty()
             || !graph.spread_sinks.is_empty());
+
+    if kind == EntryKind::Boxed && speculation_trace_enabled() {
+        trace_speculation(
+            symbol,
+            proto,
+            plan,
+            versioning,
+            &candidate_params_evidence,
+            &candidate_array_params,
+            upvalue_arrays,
+            spec_calls.len(),
+            spec_fields.len(),
+            graph.spread_sinks.len(),
+            trace_label,
+        );
+    }
 
     let baseline_numbers = &plan.numbers;
     let baseline_ints = &plan.ints;
