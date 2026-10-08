@@ -6,7 +6,7 @@ Node/Vitest inventory and per-case outcomes establish correctness and runner fid
 
 ## Current checkpoint, 2026-10-08
 
-The goal remains incomplete. GitHub and localhost sockets are reachable again. Remote main was fetched and verified at `d43e10ae`, an ancestor of local milestone `f0eefa7e`; publication waits for the required gate. The earlier DNS and EPERM failures are retained as historical evidence.
+The goal remains incomplete. GitHub and localhost sockets are reachable again. Milestone `f0eefa7e` was pushed to main at the user’s explicit request and remote HEAD verified. The earlier DNS and EPERM failures are historical evidence. Publication of a checkpoint does not establish completion.
 
 The [complete interpreter survey](full-interpreter-322-20261008/) completed every original file and all 11,019 canonical records: 10,907 passed, 67 failed, 45 skipped. Every failing ID is retained. This is a failed survey, not acceptance. No assertion, case mode or deadline was relaxed.
 
@@ -16,7 +16,7 @@ The fresh full native run selected all 322 files, then stopped at the disk guard
 
 The eight `HttpClient` interpreter cases that failed as `ServeError` in the restricted full run were replayed in isolation after localhost access was restored; all eight passed with Node/Vitest modes and outcomes matching. The [focused replay archive](httpclient-vm-replay-unrestricted-20261008/) preserves the exact IDs and hashes. This one-file result does not change the full 322-file interpreter totals or establish full-suite acceptance.
 
-The routine gate is running on the clean integration milestone. Complete final-source native/interpreter replays, every remaining original-deadline failure, checksum-matched Bun benchmarks and successful main publication remain required.
+The [checkpoint gate](checkpoint-gate-20261008/) finished with five failed steps. Native parity passed 676 matches with no divergences, and routine Test262 met its chunk baselines (97,729/102,522; 116 deferred). The stale facts and absent-answer inventories and two test synchronization races have focused verified repairs. Async iterator cleanup now matches all 17 native thirdparty probes in a separate candidate; its interpreter follow-up remains under validation. The original native Hash test still records 24/25 passing under both baseline and isolated O2 policy, so O2 is held. Complete final-source native/interpreter replays, every remaining original-deadline failure, a passing final gate and checksum-matched Bun benchmarks remain required.
 
 ## Historical checkpoint, 2026-10-07
 
