@@ -153,6 +153,8 @@ pub use kiln_hir::source_types::{CheckResult, SourceDiagnostic, SourceType, Type
 struct SnapshotHost<'a> {
     snapshot: &'a SourceSnapshot,
     unsupported: Mutex<Vec<SourceDiagnostic>>,
+    /// Early errors in the files parsed so far, for [`uncovered_early`].
+    early: Mutex<Vec<SourceDiagnostic>>,
     directories: BTreeMap<String, BTreeSet<Vec<u8>>>,
     threads: usize,
 }
@@ -212,6 +214,7 @@ impl<'a> SnapshotHost<'a> {
         Self {
             snapshot,
             unsupported: Mutex::new(Vec::new()),
+            early: Mutex::new(Vec::new()),
             directories,
             threads: check_threads(),
         }
@@ -353,8 +356,10 @@ impl Host for SnapshotHost<'_> {
             .or_else(library)
             .or_else(unparsed);
         if let Some(module) = module.as_ref() {
-            let (file, unsupported) = lower_module(module, &name, arena, atoms);
-            self.unsupported.lock().unwrap().extend(unsupported);
+            let lowered = lower_module(module, &name, arena, atoms);
+            self.unsupported.lock().unwrap().extend(lowered.unsupported);
+            self.early.lock().unwrap().extend(lowered.early);
+            let file = lowered.file;
             file
         } else {
             self.unsupported.lock().unwrap().push(SourceDiagnostic {
@@ -699,35 +704,45 @@ fn push_config_errors(
     }
 }
 
-/// The checker's file for `module`, the oxc frontend's parse of the file at `name`, and what the
-/// checker cannot be trusted with in it: the parser's own diagnostics, which have no TypeScript
-/// code, and whatever the adapter does not cover. Each makes a result incomplete.
+/// A module lowered for the checker.
+pub(crate) struct Lowered<'s> {
+    pub file: hir::File<'s>,
+    /// What the checker cannot be trusted with: the parser's own diagnostics, which have no
+    /// TypeScript code, and whatever the adapter does not cover. Each makes a result incomplete.
+    pub unsupported: Vec<SourceDiagnostic>,
+    /// The frontend's early errors. The module parsed, so it is checked, and TypeScript reports
+    /// these itself from its grammar checks; see [`uncovered_early`].
+    pub early: Vec<SourceDiagnostic>,
+}
+
+/// The checker's file for `module`, the oxc frontend's parse of the file at `name`.
 pub(crate) fn lower_module<'s>(
     module: &Module,
     name: &str,
     arena: &'s Arena,
     atoms: &Interner<'s>,
-) -> (hir::File<'s>, Vec<SourceDiagnostic>) {
+) -> Lowered<'s> {
     let source_module = module
         .type_syntax
         .original_module
         .as_deref()
         .unwrap_or(module);
-    let mut errors = Vec::new();
+    let (mut errors, mut early) = (Vec::new(), Vec::new());
     // Owned parser diagnostics remain authoritative. Checking a recovered AST must neither erase
     // them nor publish specialization facts as complete.
     if source_module.panicked || !source_module.diagnostics.is_empty() {
-        errors.extend(
-            source_module
-                .diagnostics
-                .iter()
-                .map(|diagnostic| SourceDiagnostic {
-                    path: Some(name.to_owned()),
-                    span: diagnostic.span,
-                    code: None,
-                    message: diagnostic.message.clone(),
-                }),
-        );
+        for diagnostic in &source_module.diagnostics {
+            let reported = SourceDiagnostic {
+                path: Some(name.to_owned()),
+                span: diagnostic.span,
+                code: None,
+                message: diagnostic.message.clone(),
+            };
+            match diagnostic.early {
+                true => early.push(reported),
+                false => errors.push(reported),
+            }
+        }
         if source_module.panicked && source_module.diagnostics.is_empty() {
             errors.push(SourceDiagnostic {
                 path: Some(name.to_owned()),
@@ -757,7 +772,34 @@ pub(crate) fn lower_module<'s>(
                 message: format!("checker adapter does not cover {message}"),
             }),
     );
-    (file, errors)
+    Lowered {
+        file,
+        unsupported: errors,
+        early,
+    }
+}
+
+/// The early errors in `early` that no checker diagnostic in `reported` overlaps. TypeScript
+/// reports most early errors itself, with a code and its own wording; one it does not is still an
+/// error the program has, so it is kept, and its result stays incomplete.
+pub(crate) fn uncovered_early(
+    early: Vec<SourceDiagnostic>,
+    reported: &[crate::driver::Diagnostic],
+) -> Vec<SourceDiagnostic> {
+    early
+        .into_iter()
+        .filter(|e| {
+            let (Some(path), Some(span)) = (e.path.as_deref(), e.span) else {
+                return true;
+            };
+            !reported.iter().any(|d| {
+                d.path == path.as_bytes()
+                    && !d.has_undefined_range
+                    && d.start <= span.end.max(span.start)
+                    && span.start <= d.end.max(d.start)
+            })
+        })
+        .collect()
 }
 
 fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions) -> CheckResult {
@@ -854,7 +896,9 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
             .collect();
         let (types, facts_ran_out) = source_facts(program, &sources, options, &host);
         ran_out_in.extend(facts_ran_out);
-        let unsupported = host.unsupported.lock().unwrap();
+        let early = std::mem::take(&mut *host.early.lock().unwrap());
+        let mut unsupported = host.unsupported.lock().unwrap();
+        unsupported.extend(uncovered_early(early, &report.diagnostics));
         let complete = complete_files(
             files,
             &sources,

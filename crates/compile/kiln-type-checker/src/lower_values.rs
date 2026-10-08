@@ -1474,11 +1474,25 @@ impl<'a, 's> Lower<'a, 's> {
     }
 
     pub(super) fn statements(&mut self, statements: &[k::Statement]) -> b::IdList<b::StmtId> {
-        let ids: Vec<_> = statements
-            .iter()
-            .map(|statement| self.statement(statement))
-            .collect();
+        let mut ids = Vec::with_capacity(statements.len());
+        for statement in statements {
+            if !self.is_parameter_property_assignment(statement) {
+                ids.push(self.statement(statement));
+            }
+        }
         self.file.list(&ids)
+    }
+
+    /// The `this.x = x` the frontend adds for the parameter property `x`; see
+    /// `Lower::parameter_properties`.
+    fn is_parameter_property_assignment(&self, statement: &k::Statement) -> bool {
+        matches!(
+            &statement.kind,
+            k::StatementKind::Expression(k::Expression {
+                kind: k::ExpressionKind::MemberAssignment { object, .. },
+                ..
+            }) if matches!(object.kind, k::ExpressionKind::This)
+        ) && self.parameter_properties.contains(&statement.span)
     }
 
     pub(super) fn variable_decls(
@@ -1498,12 +1512,16 @@ impl<'a, 's> Lower<'a, 's> {
                     .initializer
                     .as_ref()
                     .map_or(b::ExprId::NONE, |expr| self.expr(expr));
+                let definite = (self.module.type_syntax.definite_variables).contains(&decl.span);
                 b::VarDecl {
                     pat,
                     ty,
                     init,
                     kind: var_kind(kind),
-                    flags,
+                    flags: match definite {
+                        true => flags | b::Flags::DEFINITE,
+                        false => flags,
+                    },
                     loc: Self::loc(decl.span),
                 }
             })
@@ -2101,6 +2119,15 @@ impl<'a, 's> Lower<'a, 's> {
             .as_ref()
             .map_or(b::IdList::EMPTY, |site| self.ty_list(&site.implements));
         let mut members = Vec::new();
+        // `accessor x = v` arrives as the frontend runs it: a private storage field and a getter
+        // and setter, all with the declaration's span. The checker reads the declaration.
+        let accessors: Vec<&k::TypeClassMemberSite> = site.as_ref().map_or(Vec::new(), |site| {
+            (site.members.iter())
+                .filter(|member| member.kind == k::TypeClassMemberKind::Accessor)
+                .collect()
+        });
+        let is_accessor = |span: k::Span| accessors.iter().any(|member| member.span == span);
+        let mut accessor_values: Vec<(k::Span, b::ExprId)> = Vec::new();
         if let Some(constructor) = &class.constructor {
             let member_site = site.as_ref().and_then(|site| {
                 site.members.iter().find(|member| {
@@ -2111,6 +2138,21 @@ impl<'a, 's> Lower<'a, 's> {
             });
             let func = self.function(constructor);
             self.file[func].kind = b::FnKind::Constructor;
+            // `constructor(public x)`: the binder declares the property from the parameter.
+            if let Some(site) = &site {
+                for index in self.file[func].params.range() {
+                    let param = &mut self.file.params[index];
+                    let property = site.members.iter().find(|member| {
+                        member.kind == k::TypeClassMemberKind::ParameterProperty
+                            && member.span.start <= param.pos
+                            && param.pos < member.span.end
+                    });
+                    if let Some(property) = property {
+                        param.flags |= b::Flags::PARAMETER_PROPERTY
+                            | class_member_flags(Some(property), false);
+                    }
+                }
+            }
             members.push(b::Member {
                 kind: b::MemberKind::Constructor,
                 key: b::PropKey::None,
@@ -2124,37 +2166,10 @@ impl<'a, 's> Lower<'a, 's> {
                 modifiers: b::Span::EMPTY,
             });
         }
-        if let Some(site) = &site {
-            for property in site
-                .members
-                .iter()
-                .filter(|member| member.kind == k::TypeClassMemberKind::ParameterProperty)
-            {
-                let annotation = self
-                    .module
-                    .type_syntax
-                    .annotations
-                    .iter()
-                    .find(|annotation| annotation.owner_span == property.span)
-                    .cloned();
-                let ty = annotation
-                    .as_ref()
-                    .map_or(b::TypeNodeId::NONE, |annotation| self.ty(&annotation.ty));
-                members.push(b::Member {
-                    kind: b::MemberKind::Property,
-                    key: self.class_site_key(property),
-                    flags: class_member_flags(Some(property), false),
-                    ty,
-                    init: b::ExprId::NONE,
-                    func: b::FnId::NONE,
-                    name_pos: self.name_pos(property.span, None),
-                    start: property.span.start,
-                    loc: Self::loc(property.span),
-                    modifiers: b::Span::EMPTY,
-                });
-            }
-        }
         for method in &class.methods {
+            if is_accessor(method.span) {
+                continue;
+            }
             let member_site = site.as_ref().and_then(|site| {
                 site.members
                     .iter()
@@ -2259,6 +2274,16 @@ impl<'a, 's> Lower<'a, 's> {
         }
         for init in &class.initialisers {
             match init {
+                k::ClassInitialiser::Field(field)
+                    if is_accessor(field.span)
+                        && matches!(&field.key, k::ObjectKey::Private(name) if name.starts_with('%')) =>
+                {
+                    let value = field
+                        .value
+                        .as_ref()
+                        .map_or(b::ExprId::NONE, |expr| self.expr(expr));
+                    accessor_values.push((field.span, value));
+                }
                 k::ClassInitialiser::Field(field) => {
                     let key = self.key(&field.key);
                     let field_annotation = self
@@ -2322,6 +2347,32 @@ impl<'a, 's> Lower<'a, 's> {
                     members.push(index);
                 }
             }
+        }
+        for member in &accessors {
+            let annotation = (self.module.type_syntax.annotations.iter())
+                .find(|annotation| {
+                    annotation.owner_span == member.span
+                        && matches!(annotation.site, k::TypeSite::ClassField { .. })
+                })
+                .cloned();
+            let ty = annotation
+                .as_ref()
+                .map_or(b::TypeNodeId::NONE, |annotation| self.ty(&annotation.ty));
+            let init = (accessor_values.iter())
+                .find(|(span, _)| *span == member.span)
+                .map_or(b::ExprId::NONE, |&(_, value)| value);
+            members.push(b::Member {
+                kind: b::MemberKind::Property,
+                key: self.class_site_key(member),
+                flags: class_member_flags(Some(member), false) | b::Flags::ACCESSOR,
+                ty,
+                init,
+                func: b::FnId::NONE,
+                name_pos: self.name_pos(member.span, None),
+                start: member.span.start,
+                loc: Self::loc(member.span),
+                modifiers: b::Span::EMPTY,
+            });
         }
         let mut members = members;
         members.sort_by_key(|member| member.start);

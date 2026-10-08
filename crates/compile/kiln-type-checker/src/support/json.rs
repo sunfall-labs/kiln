@@ -32,6 +32,8 @@ pub fn parse_source_file<'s>(
 ) -> File<'s> {
     let mut builder = FileBuilder {
         kind: FileKind::Json,
+        // A JSON file is bound as a module, though it has no `ExternalModuleIndicator`.
+        has_module_syntax: true,
         source_len: text.len() as u32,
         text: Cow::Owned(text.to_vec()),
         ..FileBuilder::default()

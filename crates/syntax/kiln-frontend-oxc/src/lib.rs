@@ -4653,6 +4653,15 @@ fn capture_type_syntax(
         // would otherwise lose the statement -- and with it the module's export shape. The
         // expression is lowered exactly as an enum initializer is: a fresh lowerer over the
         // authored source, so its spans address the text the checker reads.
+        fn visit_export_named_declaration(
+            &mut self,
+            node: &oxc_ast::ast::ExportNamedDeclaration<'a>,
+        ) {
+            if node.specifiers.is_empty() {
+                (self.result.empty_exports).push(HirSpan::new(node.span.start, node.span.end));
+            }
+            walk::walk_export_named_declaration(self, node);
+        }
         fn visit_ts_export_assignment(&mut self, node: &oxc_ast::ast::TSExportAssignment<'a>) {
             let mut lowerer =
                 Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
@@ -4760,6 +4769,9 @@ fn capture_type_syntax(
             walk::walk_ts_instantiation_expression(self, node);
         }
         fn visit_variable_declarator(&mut self, node: &oxc_ast::ast::VariableDeclarator<'a>) {
+            if node.definite {
+                (self.result.definite_variables).push(HirSpan::new(node.span.start, node.span.end));
+            }
             if let Some(annotation) = node.type_annotation.as_deref() {
                 let ty_span = annotation.type_annotation.span();
                 self.classified
@@ -5847,6 +5859,7 @@ fn lower_parsed_in_context(
         diagnostics.push(Diagnostic {
             message: "dynamic source origin exceeds supported parser span bounds".into(),
             span: None,
+            early: false,
         });
     }
 
@@ -6324,6 +6337,7 @@ fn lower_diagnostic(diagnostic: &OxcDiagnostic) -> Diagnostic {
     Diagnostic {
         message: diagnostic.to_string(),
         span: diagnostic_span,
+        early: false,
     }
 }
 
@@ -6618,6 +6632,9 @@ fn early_errors_with_source_units(
         visitor.visit_program(&parsed.program);
         errors.extend(visitor.errors);
     }
+    for error in &mut errors {
+        error.early = true;
+    }
     errors
 }
 
@@ -6669,6 +6686,7 @@ impl<'ast, 'source> Visit<'ast> for RawSurrogateRegExpVisitor<'source> {
                     message: "Invalid regular expression: escaped lone surrogate in Unicode mode"
                         .into(),
                     span: Some(HirSpan::new(literal.span.start, literal.span.end)),
+                    early: true,
                 });
                 break;
             }

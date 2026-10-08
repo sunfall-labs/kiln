@@ -124,20 +124,26 @@ def main() -> int:
     parser.add_argument("--only", help="run only the tests whose path contains this text")
     parser.add_argument("--report", type=Path, help="keep the per-test report here")
     parser.add_argument(
+        "--from-report", type=Path, help="grade an existing report instead of running the suite"
+    )
+    parser.add_argument(
         "--threads", type=int, help="workers; by default the CPUs, bounded by KILN_JOBS"
     )
     args = parser.parse_args()
     if args.update and args.only:
         sys.exit("ts-conformance: --update records the whole suite; drop --only")
 
-    cache = cache_dir()
-    bundle = fetch_bundle(cache)
-    runner = args.runner or build_runner()
-    report = args.report or cache / f"report-{os.getpid()}.tsv"
-    run(runner, bundle, report, args.only, args.threads)
-    results = read_report(report)
-    if not args.report:
-        report.unlink()
+    if args.from_report:
+        results = read_report(args.from_report)
+    else:
+        cache = cache_dir()
+        bundle = fetch_bundle(cache)
+        runner = args.runner or build_runner()
+        report = args.report or cache / f"report-{os.getpid()}.tsv"
+        run(runner, bundle, report, args.only, args.threads)
+        results = read_report(report)
+        if not args.report:
+            report.unlink()
 
     levels = collections.Counter(level for level, _ in results.values())
     total = len(results)

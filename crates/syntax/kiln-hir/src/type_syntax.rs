@@ -42,6 +42,11 @@ pub struct TypeSyntax {
     /// `export = expression`, which executable HIR refuses as a statement. The checker lowers it
     /// to `ExportAssignment` from here.
     pub export_assignments: Vec<TypeExportAssignment>,
+    /// `export {}` statements, which name nothing and so are in no export list, by span. One
+    /// makes a declaration file export only what it says (`setExportContextFlag`).
+    pub empty_exports: Vec<Span>,
+    /// Variable declarators with a definite assignment assertion (`let x!: T`), by span.
+    pub definite_variables: Vec<Span>,
     /// ES `import`/`export` statements written inside `declare module "m" { ... }` bodies.
     /// Oxc's module record covers only the program's top level and executable HIR drops these
     /// statements, so the checker lowers them from here into the ambient module's body.

@@ -59,6 +59,10 @@ pub enum SourceGoal {
 pub struct Diagnostic {
     pub message: String,
     pub span: Option<Span>,
+    /// An early error: the program parsed, and the ECMAScript static semantics reject it (`eval`
+    /// assigned in strict code, a redeclared `let`). TypeScript reports these from its checker
+    /// and binder, so the source checker can check such a module and report them itself.
+    pub early: bool,
 }
 
 /// Source identity retained when parser input has a source mapping.

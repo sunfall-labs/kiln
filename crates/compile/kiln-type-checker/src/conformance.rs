@@ -245,6 +245,8 @@ pub struct Virtual {
     frontend: Frontend,
     /// What the frontend and the adapter could not represent, in the files parsed so far.
     unsupported: std::sync::Mutex<Vec<SourceDiagnostic>>,
+    /// The frontend's early errors in the files parsed so far.
+    early: std::sync::Mutex<Vec<SourceDiagnostic>>,
 }
 
 /// A source file's parse by kiln's frontend: its path and its text.
@@ -261,6 +263,7 @@ impl Virtual {
             bundle,
             frontend,
             unsupported: std::sync::Mutex::new(Vec::new()),
+            early: std::sync::Mutex::new(Vec::new()),
             files: BTreeMap::new(),
             directories: BTreeMap::new(),
             links: BTreeMap::new(),
@@ -444,9 +447,10 @@ impl Host for Virtual {
         }
         let source = String::from_utf8_lossy(text);
         let module = (self.frontend)(&name, &source);
-        let (file, unsupported) = crate::snapshot::lower_module(&module, &name, arena, atoms);
-        self.unsupported.lock().unwrap().extend(unsupported);
-        file
+        let lowered = crate::snapshot::lower_module(&module, &name, arena, atoms);
+        self.unsupported.lock().unwrap().extend(lowered.unsupported);
+        self.early.lock().unwrap().extend(lowered.early);
+        lowered.file
     }
     fn parse_package_json(
         &self,
@@ -1927,6 +1931,9 @@ fn run_one(
         .chain(others.iter().copied())
         .map(|unit| (absolute(&unit.name, &cwd), unit.content.clone()))
         .collect();
+    let early = std::mem::take(&mut *host.early.lock().unwrap());
+    let mut unsupported = std::mem::take(&mut *host.unsupported.lock().unwrap());
+    unsupported.extend(crate::snapshot::uncovered_early(early, &report.diagnostics));
     Some(Ran {
         report,
         inputs,
@@ -1937,7 +1944,7 @@ fn run_one(
         repeats_without_checking: emits_declarations && !no_check && !no_emit,
         has_non_dts_files: (roots.iter().chain(&others)).any(|it| !it.name.ends_with(".d.ts")),
         trace,
-        unsupported: std::mem::take(&mut *host.unsupported.lock().unwrap()),
+        unsupported,
     })
 }
 

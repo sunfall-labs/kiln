@@ -248,7 +248,43 @@ impl Lower<'_, '_> {
             self.module_attributes_object(attributes);
         }
         let module = self.module;
-        self.module_statements(&module.imports, &module.exports, &module.requested_modules)
+        let mut result =
+            self.module_statements(&module.imports, &module.exports, &module.requested_modules);
+        // `export {}`, which names nothing and so is in no export list.
+        let empty_exports = self.module.type_syntax.empty_exports.clone();
+        let is_nested = |span: k::Span, containers: &[(k::Span, bool)]| {
+            (containers.iter())
+                .any(|(container, _)| container.start <= span.start && span.end <= container.end)
+        };
+        for span in empty_exports {
+            if is_nested(span, &self.containers) {
+                continue;
+            }
+            let export = self.file.add_export(b::Export {
+                spec: Atom::NONE,
+                has_module_specifier: false,
+                items: b::Span::EMPTY,
+                type_only: false,
+                mode: b::ResolutionMode::None,
+                stmt: b::StmtId::NONE,
+            });
+            let stmt = self.file.stmt(b::StmtKind::ExportNamed(export), span.start);
+            self.file[stmt].loc = Self::loc(span);
+            result.push((span.start, stmt));
+        }
+        // `export as namespace X`, which executable HIR erases (Bun: `namespace_export_declaration`
+        // -> `StmtKind::ExportAsNamespace`, positioned at `export`). It is only valid at the top
+        // level, and a namespace body is not given one.
+        let namespace_exports = self.module.type_syntax.namespace_exports.clone();
+        for export in &namespace_exports {
+            let stmt = self.file.stmt(
+                b::StmtKind::ExportAsNamespace(self.atom(&export.name)),
+                export.span.start,
+            );
+            self.file[stmt].loc = Self::loc(export.span);
+            result.push((export.span.start, stmt));
+        }
+        result
     }
 
     /// The `import`/`export` statements of the ambient module declared at `span`
@@ -570,17 +606,6 @@ impl Lower<'_, '_> {
             let stmt = self.file.stmt(kind, e.statement_span.start);
             self.file[stmt].loc = Self::loc(e.statement_span);
             result.push((e.statement_span.start, stmt));
-        }
-        // `export as namespace X`, which executable HIR erases (Bun: `namespace_export_declaration`
-        // -> `StmtKind::ExportAsNamespace`, positioned at `export`).
-        let namespace_exports = self.module.type_syntax.namespace_exports.clone();
-        for export in &namespace_exports {
-            let stmt = self.file.stmt(
-                b::StmtKind::ExportAsNamespace(self.atom(&export.name)),
-                export.span.start,
-            );
-            self.file[stmt].loc = Self::loc(export.span);
-            result.push((export.span.start, stmt));
         }
         result
     }

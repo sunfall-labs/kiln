@@ -143,13 +143,8 @@ fn main() {
         projects.par_iter().for_each(|project| {
             let name = project.file_name().unwrap();
             let root = std::fs::canonicalize(project).unwrap();
-            let started = std::time::Instant::now();
             let lines = std::panic::catch_unwind(|| check_project(&root, &libraries))
                 .unwrap_or_else(|_| vec!["kiln: panic".to_owned()]);
-            let elapsed = started.elapsed();
-            if elapsed.as_secs() >= 5 {
-                eprintln!("slow: {} {elapsed:?}", name.to_string_lossy());
-            }
             let mut text = lines.join("\n");
             if !text.is_empty() {
                 text.push('\n');
