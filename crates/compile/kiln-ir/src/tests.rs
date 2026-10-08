@@ -2676,22 +2676,37 @@ fn a_reference_target_is_evaluated_before_the_value_it_receives() {
             .position(|instruction| instruction == wanted)
             .expect("instruction is emitted")
     };
-    let receiver = at(&Instruction::LoadLocal(0));
     // The value an element receives is whatever stepping the iterator produced, so the step
-    // is what has to come after the receiver and before the store. The step is an `Apply` of
-    // the `next` the record captured, not a fresh read of it: the read happens once, when the
-    // iterator is opened, which is before the first element's receiver is even evaluated.
+    // is what has to come after the receiver and before the store. The step calls the `next`
+    // method captured when the iterator is opened, not a fresh read of it.
     let next = program
         .constants
         .iter()
         .position(|constant| matches!(constant, Constant::String(name) if name == "next"))
         .expect("the walk names the method it captures") as u32;
     let captured = at(&Instruction::GetProperty(next));
+    let receiver = program
+        .code
+        .iter()
+        .enumerate()
+        .skip(captured + 1)
+        .find_map(|(index, instruction)| {
+            matches!(instruction, Instruction::LoadLocal(0)).then_some(index)
+        })
+        .expect("the member receiver is evaluated after opening the iterator");
     assert!(
         captured < receiver,
         "the iterator record is complete before any element is taken"
     );
-    let read = at(&Instruction::Apply);
+    let read = program
+        .code
+        .iter()
+        .enumerate()
+        .skip(captured + 1)
+        .find_map(|(index, instruction)| {
+            matches!(instruction, Instruction::CallComputed { argc: 0 }).then_some(index)
+        })
+        .expect("iterator next uses a fixed-arity call");
     let store = program
         .code
         .iter()
@@ -2704,6 +2719,60 @@ fn a_reference_target_is_evaluated_before_the_value_it_receives() {
         .expect("the element is stored through the reference");
     assert!(receiver < read, "the receiver is evaluated before the read");
     assert!(read < store, "the value exists before it is stored");
+}
+
+#[test]
+fn iterator_steps_use_prepared_calls_without_argument_arrays() {
+    let for_of = statement(StatementKind::ForOf {
+        kind: VariableKind::Const,
+        pattern: Pattern::Identifier("value".into()),
+        iterable: identifier("iterable"),
+        body: Box::new(statement(StatementKind::Expression(identifier("value")))),
+        awaiting: false,
+    });
+    let program = compile(&module(vec![for_of])).expect("valid HIR compiles");
+    assert!(
+        program
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::CallComputed { argc: 0 }))
+    );
+    assert!(!program.code.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::Apply | Instruction::NewArray { count: 0 }
+    )));
+
+    let delegated = Expression {
+        kind: ExpressionKind::Yield {
+            delegate: true,
+            value: Some(Box::new(identifier("iterable"))),
+        },
+        span: Span::default(),
+    };
+    let generator = statement(StatementKind::Function(Box::new(kiln_hir::Function {
+        inferred_name: None,
+        strict: false,
+        binds_own_name: false,
+        name: Some("delegate".into()),
+        arrow: false,
+        generator: true,
+        asynchronous: false,
+        parameters: Vec::new(),
+        rest: None,
+        return_type: None,
+        body: vec![statement(StatementKind::Return(Some(delegated)))],
+        span: Span::default(),
+    })));
+    let program = compile(&module(vec![generator])).expect("valid generator compiles");
+    let code = &program.functions[0].code;
+    assert!(
+        code.iter()
+            .any(|instruction| matches!(instruction, Instruction::CallComputed { argc: 1 }))
+    );
+    assert!(!code.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::Apply | Instruction::NewArray { count: 1 }
+    )));
 }
 
 /// `let [o.p] = xs` is a syntax error, and the parser says so first -- but nothing in the

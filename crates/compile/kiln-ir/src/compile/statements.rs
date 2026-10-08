@@ -398,6 +398,29 @@ impl super::Compiler {
         self.patch_jump(finished);
     }
 
+    /// Call the `next` method captured when the iterator record was created.
+    ///
+    /// The iterator protocol consumes the actual arguments, not an argument-array object, so a
+    /// fixed-arity call avoids materializing a temporary array for every step. `CallComputed`
+    /// keeps the receiver and captured callee together; its key operand is metadata only, and an
+    /// undefined placeholder preserves `Apply`'s lack of a method-name hint.
+    pub(super) fn emit_call_captured_iterator_next(
+        &mut self,
+        iterator: &str,
+        next_method: &str,
+        sent: Option<&str>,
+    ) {
+        self.load_hidden(iterator);
+        self.push_constant(Constant::Undefined);
+        self.load_hidden(next_method);
+        if let Some(sent) = sent {
+            self.load_hidden(sent);
+        }
+        self.code.push(Instruction::CallComputed {
+            argc: u16::from(sent.is_some()),
+        });
+    }
+
     /// One `IteratorStep`, leaving the value it produced when `want_value` is set.
     ///
     /// An exhausted iterator yields `undefined` rather than stopping the walk: `var [a, b] = [1]`
@@ -417,10 +440,7 @@ impl super::Compiler {
         // closed.
         self.push_constant(Constant::Boolean(true));
         self.store_hidden(done);
-        self.load_hidden(iterator);
-        self.load_hidden(next_method);
-        self.code.push(Instruction::NewArray { count: 0 });
-        self.code.push(Instruction::Apply);
+        self.emit_call_captured_iterator_next(iterator, next_method, None);
         self.guard_iterator_result();
         self.store_hidden(step);
         self.load_hidden(step);
@@ -471,10 +491,7 @@ impl super::Compiler {
         let drained = self.emit_jump(Instruction::JumpIfTruthy(0));
         self.push_constant(Constant::Boolean(true));
         self.store_hidden(done);
-        self.load_hidden(iterator);
-        self.load_hidden(next_method);
-        self.code.push(Instruction::NewArray { count: 0 });
-        self.code.push(Instruction::Apply);
+        self.emit_call_captured_iterator_next(iterator, next_method, None);
         self.guard_iterator_result();
         self.store_hidden(step);
         self.load_hidden(step);
@@ -1959,10 +1976,7 @@ impl super::Compiler {
         let handler_jump = self.emit_jump(Instruction::PushHandler(0));
 
         let start = self.code.len();
-        self.load_hidden(&iterator_binding);
-        self.load_hidden(&next_binding);
-        self.code.push(Instruction::NewArray { count: 0 });
-        self.code.push(Instruction::Apply);
+        self.emit_call_captured_iterator_next(&iterator_binding, &next_binding, None);
         if awaiting {
             // An async iterator hands back a promise of the result object; a sync one hands back
             // the object itself and has nothing to wait for here.
@@ -2149,11 +2163,11 @@ impl super::Compiler {
         self.declare_hidden(&sent_binding, span);
 
         let start = self.code.len();
-        self.load_hidden(&iterator_binding);
-        self.load_hidden(&next_binding);
-        self.load_hidden(&sent_binding);
-        self.code.push(Instruction::NewArray { count: 1 });
-        self.code.push(Instruction::Apply);
+        self.emit_call_captured_iterator_next(
+            &iterator_binding,
+            &next_binding,
+            Some(&sent_binding),
+        );
         if asynchronous {
             // An async iterator answers with a promise of the step, so the step object itself
             // is what has to be awaited. A wrapped sync iterator answers with the step directly
