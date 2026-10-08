@@ -233,7 +233,12 @@ pub fn parse_authored(path: &str, source: &str) -> Module {
         return parse(path, source);
     }
     let mut type_syntax = capture_type_syntax(Some(path), source, &parsed.program, None);
-    (type_syntax.body, type_syntax.jsx) = capture_original_body(Some(path), source, &parsed, None);
+    (
+        type_syntax.body,
+        type_syntax.jsx,
+        type_syntax.deferred_imports,
+        type_syntax.for_in_bindings,
+    ) = capture_original_body(Some(path), source, &parsed, None);
     retain_erased_declarations(&mut type_syntax);
     let mut module = lower_parsed_in_context(
         Some(path),
@@ -409,7 +414,12 @@ fn transform_static_typescript(
     // Preserve the authored declaration tree for the checker while the executable HIR is built
     // from transformed JavaScript. This uses the original parser result before TS erasure.
     let mut type_syntax = capture_type_syntax(Some(path), source, &parsed.program, None);
-    (type_syntax.body, type_syntax.jsx) = capture_original_body(Some(path), source, &parsed, None);
+    (
+        type_syntax.body,
+        type_syntax.jsx,
+        type_syntax.deferred_imports,
+        type_syntax.for_in_bindings,
+    ) = capture_original_body(Some(path), source, &parsed, None);
     retain_erased_declarations(&mut type_syntax);
     let mut original_module = lower_parsed_in_context(
         Some(path),
@@ -2620,7 +2630,12 @@ fn parse_source_with_commonjs_requires(
         .parse();
     let mut type_syntax = capture_type_syntax(path, source, &parsed.program, None);
     if source_type.is_typescript() {
-        (type_syntax.body, type_syntax.jsx) = capture_original_body(path, source, &parsed, None);
+        (
+            type_syntax.body,
+            type_syntax.jsx,
+            type_syntax.deferred_imports,
+            type_syntax.for_in_bindings,
+        ) = capture_original_body(path, source, &parsed, None);
         retain_erased_declarations(&mut type_syntax);
     }
 
@@ -2915,8 +2930,12 @@ fn parse_source_in_context_with_units(
     // Type syntax must come from the original AST, before JSX lowering and DCE mutate it.
     let mut type_syntax = capture_type_syntax(path, source, &parsed.program, native_import_meta);
     if source_type.is_typescript() {
-        (type_syntax.body, type_syntax.jsx) =
-            capture_original_body(path, source, &parsed, native_import_meta);
+        (
+            type_syntax.body,
+            type_syntax.jsx,
+            type_syntax.deferred_imports,
+            type_syntax.for_in_bindings,
+        ) = capture_original_body(path, source, &parsed, native_import_meta);
         retain_erased_declarations(&mut type_syntax);
     }
 
@@ -3475,8 +3494,16 @@ fn capture_type_syntax(
                     .map(|annotation| self.convert(&annotation.type_annotation)),
                 optional: false,
                 rest: false,
-                has_default: false,
+                default: None,
             })
+        }
+        fn owned_expression(
+            &self,
+            expression: &oxc_ast::ast::Expression<'_>,
+        ) -> kiln_hir::Expression {
+            let mut lowerer =
+                Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
+            lowerer.expression(expression)
         }
         fn owned_pattern(
             &self,
@@ -3545,17 +3572,10 @@ fn capture_type_syntax(
                         },
                         constraint: Box::new(self.convert(&n.constraint)),
                         name_type: n.name_type.as_ref().map(|t| Box::new(self.convert(t))),
-                        value: Box::new(
-                            n.type_annotation
-                                .as_ref()
-                                .map(|t| self.convert(t))
-                                .unwrap_or_else(|| HirTypeExpr {
-                                    span: hir_span,
-                                    kind: HirTypeExprKind::Unsupported {
-                                        syntax: self.raw(span),
-                                    },
-                                }),
-                        ),
+                        value: n
+                            .type_annotation
+                            .as_ref()
+                            .map(|t| Box::new(self.convert(t))),
                         readonly: modifier(n.readonly),
                         optional: modifier(n.optional),
                     }
@@ -3904,7 +3924,10 @@ fn capture_type_syntax(
                         ty,
                         optional: p.optional,
                         rest: false,
-                        has_default: p.initializer.is_some(),
+                        default: p
+                            .initializer
+                            .as_ref()
+                            .map(|i| Box::new(self.owned_expression(i))),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -3931,7 +3954,7 @@ fn capture_type_syntax(
                     ty,
                     optional: false,
                     rest: true,
-                    has_default: false,
+                    default: None,
                 });
             }
             kiln_hir::TypeSignature {
@@ -3957,13 +3980,7 @@ fn capture_type_syntax(
                         let ty = p
                             .type_annotation
                             .as_deref()
-                            .map(|a| self.convert(&a.type_annotation))
-                            .unwrap_or_else(|| HirTypeExpr {
-                                span: HirSpan::new(span.start, span.end),
-                                kind: HirTypeExprKind::Unsupported {
-                                    syntax: self.raw(span),
-                                },
-                            });
+                            .map(|a| self.convert(&a.type_annotation));
                         kiln_hir::TypeMember {
                             name,
                             key: self.owned_key(&p.key, p.computed),
@@ -4264,6 +4281,7 @@ fn capture_type_syntax(
                         readonly: property.readonly,
                         abstract_: property.r#type
                             == oxc_ast::ast::PropertyDefinitionType::TSAbstractPropertyDefinition,
+                        declare: property.declare,
                         accessibility: Self::accessibility(property.accessibility),
                         override_: property.r#override,
                         definite: property.definite,
@@ -4278,7 +4296,9 @@ fn capture_type_syntax(
                         static_: property.r#static,
                         optional: false,
                         readonly: false,
-                        abstract_: false,
+                        abstract_: property.r#type
+                            == oxc_ast::ast::AccessorPropertyType::TSAbstractAccessorProperty,
+                        declare: false,
                         accessibility: Self::accessibility(property.accessibility),
                         override_: property.r#override,
                         definite: property.definite,
@@ -4302,6 +4322,7 @@ fn capture_type_syntax(
                         readonly: false,
                         abstract_: method.r#type
                             == oxc_ast::ast::MethodDefinitionType::TSAbstractMethodDefinition,
+                        declare: false,
                         accessibility: Self::accessibility(method.accessibility),
                         override_: method.r#override,
                         definite: false,
@@ -4317,6 +4338,7 @@ fn capture_type_syntax(
                         optional: false,
                         readonly: false,
                         abstract_: false,
+                        declare: false,
                         accessibility: None,
                         override_: false,
                         definite: false,
@@ -4332,6 +4354,7 @@ fn capture_type_syntax(
                         optional: false,
                         readonly: index.readonly,
                         abstract_: false,
+                        declare: false,
                         accessibility: None,
                         override_: false,
                         definite: false,
@@ -4372,6 +4395,7 @@ fn capture_type_syntax(
                         optional: parameter.optional,
                         readonly: parameter.readonly,
                         abstract_: false,
+                        declare: false,
                         accessibility: Self::accessibility(parameter.accessibility),
                         override_: parameter.r#override,
                         definite: false,
@@ -4606,6 +4630,10 @@ fn capture_type_syntax(
             walk::walk_function(self, node, flags);
         }
         fn visit_import_declaration(&mut self, node: &oxc_ast::ast::ImportDeclaration<'a>) {
+            if node.phase == Some(oxc_ast::ast::ImportPhase::Defer) {
+                (self.result.deferred_import_declarations)
+                    .push(HirSpan::new(node.span.start, node.span.end));
+            }
             if node.import_kind.is_type() || node.specifiers.as_ref().is_some_and(|specifiers| {
                 specifiers.iter().any(|specifier| matches!(specifier, oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(s) if s.import_kind.is_type()))
             }) {
@@ -5134,6 +5162,22 @@ fn capture_type_syntax(
         classified: HashSet::new(),
         dotted: HashSet::new(),
     };
+    // `getCommentPragmas`: the comments before the first token.
+    let first_token = program
+        .directives
+        .first()
+        .map(|directive| directive.span.start)
+        .into_iter()
+        .chain(program.body.first().map(|statement| statement.span().start))
+        .min()
+        .unwrap_or(u32::MAX);
+    for comment in &program.comments {
+        if comment.kind == oxc_ast::ast::CommentKind::Line || comment.span.start >= first_token {
+            continue;
+        }
+        let raw = collector.raw(comment.span);
+        jsx_pragmas(&raw, &mut collector.result.jsx_pragmas);
+    }
     for comment in &program.comments {
         if comment.kind != oxc_ast::ast::CommentKind::Line {
             continue;
@@ -5205,10 +5249,21 @@ fn capture_type_syntax(
         ] {
             if let Some((value, position)) = attrs.get(key) {
                 let resolution_mode = if kind == kiln_hir::TypeReferenceKind::Types {
-                    match attrs.get("resolution-mode").map(|(mode, _)| mode.as_str()) {
-                        Some("import") => Some(kiln_hir::TypeResolutionMode::Import),
-                        Some("require") => Some(kiln_hir::TypeResolutionMode::Require),
-                        _ => None,
+                    match attrs.get("resolution-mode") {
+                        Some((mode, _)) if mode == "import" => {
+                            Some(kiln_hir::TypeResolutionMode::Import)
+                        }
+                        Some((mode, _)) if mode == "require" => {
+                            Some(kiln_hir::TypeResolutionMode::Require)
+                        }
+                        Some((mode, at)) => {
+                            collector
+                                .result
+                                .invalid_resolution_modes
+                                .push(HirSpan::new(*at, *at + mode.len() as u32));
+                            None
+                        }
+                        None => None,
                     }
                 } else {
                     None
@@ -5279,17 +5334,69 @@ fn capture_type_syntax(
     collector.result
 }
 
+/// `extractPragmas` for the `/* */` comment `text`: the JSX pragmas in it. The remainder of the
+/// line after an `@` that is followed by a name is that pragma's argument.
+fn jsx_pragmas(text: &str, pragmas: &mut kiln_hir::TypeJsxPragmas) {
+    let text = text.strip_suffix("*/").unwrap_or(text);
+    let blank = |c: char| matches!(c, ' ' | '\t');
+    for line in text
+        .get(2..)
+        .unwrap_or_default()
+        .split(['\n', '\r', '\u{2028}', '\u{2029}'])
+    {
+        let mut rest = line;
+        while let Some(at) = rest.find('@') {
+            rest = &rest[at + 1..];
+            let name_end = rest
+                .find(|c: char| matches!(c, ' ' | '\t' | '\r' | '\n'))
+                .unwrap_or(rest.len());
+            if name_end == 0 {
+                continue;
+            }
+            let name = &rest[..name_end];
+            let after = rest[name_end..].trim_start_matches(blank);
+            let argument_end = after
+                .find(|c: char| matches!(c, ' ' | '\t' | '\r' | '\n'))
+                .unwrap_or(after.len());
+            let argument = &after[..argument_end];
+            if !argument.is_empty() {
+                if name.eq_ignore_ascii_case("jsx") {
+                    pragmas.factory = Some(argument.to_owned());
+                } else if name.eq_ignore_ascii_case("jsxFrag") {
+                    pragmas.fragment_factory = Some(argument.to_owned());
+                } else if name.eq_ignore_ascii_case("jsxImportSource") {
+                    pragmas.import_source = Some(argument.to_owned());
+                } else if name.eq_ignore_ascii_case("jsxRuntime") {
+                    pragmas.classic = match argument {
+                        "classic" => Some(true),
+                        "automatic" => Some(false),
+                        _ => None,
+                    };
+                }
+            }
+            // The rest of the line is that pragma's arguments.
+            break;
+        }
+    }
+}
+
 fn capture_original_body(
     path: Option<&str>,
     source: &str,
     parsed: &oxc_parser::ParserReturn<'_>,
     native_import_meta: Option<bool>,
-) -> (Vec<HirStatement>, Vec<kiln_hir::JsxSite>) {
+) -> (
+    Vec<HirStatement>,
+    Vec<kiln_hir::JsxSite>,
+    Vec<HirSpan>,
+    Vec<kiln_hir::ForInBindingSite>,
+) {
     let mut lowerer = Lowerer::new(source, path, native_import_meta);
+    lowerer.original = true;
     let body = lowerer.statements(&parsed.program.body);
     let mut jsx = std::mem::take(&mut lowerer.jsx);
     jsx.sort_by_key(|site| (site.span.start, site.span.end));
-    (body, jsx)
+    (body, jsx, lowerer.deferred_imports, lowerer.for_in_bindings)
 }
 
 /// `Lowerer` intentionally drops erased TS declarations from the executable HIR. The checker
@@ -5928,6 +6035,9 @@ fn lower_parsed_in_context(
         active_enum_name: None,
         enum_merge: false,
         jsx: Vec::new(),
+        original: false,
+        deferred_imports: Vec::new(),
+        for_in_bindings: Vec::new(),
     };
     let body = lowerer.statements(&parsed.program.body);
     let source_origin =
@@ -6853,6 +6963,13 @@ struct Lowerer<'a, 's> {
     source_map: Option<&'a [usize]>,
     /// The JSX this lowering met, for the type checker. Executable HIR has none.
     jsx: Vec<kiln_hir::JsxSite>,
+    /// Lowering the authored body for the type checker rather than the executable one: a
+    /// construct the runtime does not run is kept as the syntax it is.
+    original: bool,
+    /// The `import.defer(…)` calls of an original body, by span.
+    deferred_imports: Vec<HirSpan>,
+    /// The binding of each `for (var … in …)` of an original body.
+    for_in_bindings: Vec<kiln_hir::ForInBindingSite>,
 }
 
 impl<'a, 's> Lowerer<'a, 's> {
@@ -6869,6 +6986,9 @@ impl<'a, 's> Lowerer<'a, 's> {
             source_units: None,
             source_map: None,
             jsx: Vec::new(),
+            original: false,
+            deferred_imports: Vec::new(),
+            for_in_bindings: Vec::new(),
         }
     }
 }
@@ -7106,6 +7226,9 @@ impl Lowerer<'_, '_> {
             source_units: None,
             source_map: None,
             jsx: Vec::new(),
+            original: false,
+            deferred_imports: Vec::new(),
+            for_in_bindings: Vec::new(),
         };
         let expression = nested.expression(&statement.expression);
         inline_eval_syntax(&expression).then_some(expression)
@@ -7378,6 +7501,17 @@ impl Lowerer<'_, '_> {
                 }
             }
             Statement::ForInStatement(statement) => {
+                // The checker binds what the loop declares from the pattern as written.
+                if self.original
+                    && let ForStatementLeft::VariableDeclaration(declaration) = &statement.left
+                    && let Some(declarator) = declaration.declarations.first()
+                {
+                    let pattern = self.pattern(&declarator.id, statement_span);
+                    self.for_in_bindings.push(kiln_hir::ForInBindingSite {
+                        span: statement_span,
+                        pattern,
+                    });
+                }
                 let (kind, name) = match self.for_binding(&statement.left) {
                     Some(binding) => binding,
                     // `for (x in o)` is the same desugaring as the `for-of` above, for the same
@@ -8410,7 +8544,10 @@ impl Lowerer<'_, '_> {
                 // hands back a different thing -- a deferred namespace, a module source object --
                 // and lowering one as an ordinary import would resolve its promise with the wrong
                 // value rather than saying it is not implemented.
-                if import.phase.is_some() {
+                if import.phase == Some(oxc_ast::ast::ImportPhase::Defer) && self.original {
+                    // The checker reads the call as an `import()` that was deferred.
+                    self.deferred_imports.push(expression_span);
+                } else if import.phase.is_some() {
                     return self.unsupported_expression(
                         "phased dynamic import expression",
                         expression_span,
@@ -8432,6 +8569,10 @@ impl Lowerer<'_, '_> {
             },
             Expression::PrivateInExpression(_) => {
                 return self.unsupported_expression("private-in expression", expression_span);
+            }
+            // The checker reads `import.meta` as the meta-property it is.
+            Expression::ImportMeta(_) if self.original => {
+                return self.unsupported_expression("import.meta", expression_span);
             }
             Expression::ImportMeta(_) => {
                 // A native entry uses the executable identity; bundled dependencies need their
@@ -9073,7 +9214,8 @@ impl Lowerer<'_, '_> {
                     // `declare` fields describe a type only and must not become own properties
                     // at construction time. Besides changing reflection, materializing one as
                     // `undefined` breaks checks such as Object.hasOwn on optional issue fields.
-                    if property.declare {
+                    // The checker still sees them: they are members of the class's type.
+                    if property.declare && !self.original {
                         continue;
                     }
                     let key = self
@@ -9140,22 +9282,29 @@ impl Lowerer<'_, '_> {
                     // members. Two of them are separate `ClassMethod`s here, so lowering one
                     // would evaluate the key twice -- an observable wrong answer, where a
                     // refusal is only a missing feature.
-                    if accessor.computed {
-                        return Err("computed class accessor property".into());
-                    }
-                    // `accessor #x` needs a private getter/setter pair under `#x` beside a
-                    // second private name for the storage, and the duplicate-name rules that
-                    // go with it. Not attempted.
-                    if matches!(
+                    //
+                    // An original body, which the checker reads and nothing runs, keeps the
+                    // storage field alone: the checker reads the declaration and takes only its
+                    // initializer from here.
+                    let private = matches!(
                         accessor.key,
                         oxc_ast::ast::PropertyKey::PrivateIdentifier(_)
-                    ) {
-                        return Err("private class accessor property".into());
-                    }
-                    let Some(key) = oxc_static_key_units(&accessor.key) else {
+                    );
+                    let static_key = oxc_static_key_units(&accessor.key);
+                    let only_storage = accessor.computed || private || static_key.is_none();
+                    if only_storage && !self.original {
+                        if accessor.computed {
+                            return Err("computed class accessor property".into());
+                        }
+                        // `accessor #x` needs a private getter/setter pair under `#x` beside a
+                        // second private name for the storage, and the duplicate-name rules
+                        // that go with it. Not attempted.
+                        if private {
+                            return Err("private class accessor property".into());
+                        }
                         return Err("class accessor property name".into());
-                    };
-                    let key = key;
+                    }
+                    let key = static_key.unwrap_or_default();
                     // The backing slot is a private name the program cannot have written: `%`
                     // is not an identifier character, so this can never collide with a `#x` the
                     // class declares, and nothing can reach the storage except the two
@@ -9217,6 +9366,9 @@ impl Lowerer<'_, '_> {
                         value,
                         is_static: accessor.r#static,
                     }));
+                    if only_storage {
+                        continue;
+                    }
                     methods.push(kiln_hir::ClassMethod {
                         span: member_span,
                         key: kiln_hir::ObjectKey::Static(key.clone().into()),
@@ -9529,13 +9681,16 @@ impl Lowerer<'_, '_> {
             return None;
         };
         let declarator = declaration.declarations.first()?;
-        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
-            return None;
-        };
         let kind = match declaration.kind {
             VariableDeclarationKind::Var => HirVariableKind::Var,
             VariableDeclarationKind::Const => HirVariableKind::Const,
             _ => HirVariableKind::Let,
+        };
+        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            // An original body keeps the loop; the checker reads the pattern from its site.
+            return self
+                .original
+                .then(|| (kind, format!("%forin{}", declarator.span.start)));
         };
         Some((kind, identifier.name.to_string()))
     }
@@ -10420,7 +10575,12 @@ mod retain_erased_declarations_equivalence {
         let parsed = Parser::new(&allocator, source, source_type).parse();
         assert!(parsed.diagnostics.is_empty(), "{path}");
         let mut syntax = capture_type_syntax(Some(path), source, &parsed.program, None);
-        (syntax.body, syntax.jsx) = capture_original_body(Some(path), source, &parsed, None);
+        (
+            syntax.body,
+            syntax.jsx,
+            syntax.deferred_imports,
+            syntax.for_in_bindings,
+        ) = capture_original_body(Some(path), source, &parsed, None);
         let mut reference = syntax.clone();
         retain_erased_declarations(&mut syntax);
         retain_erased_declarations_reference(&mut reference);

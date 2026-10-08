@@ -64,6 +64,8 @@ pub struct TypeSyntax {
     /// `/// <reference ... />` comments with none of `path`, `types`, `lib` or `no-default-lib`
     /// written as TypeScript reads them, by span: an invalid directive (1084).
     pub invalid_references: Vec<Span>,
+    /// The value of a `resolution-mode="…"` that is neither `import` nor `require` (1453), by span.
+    pub invalid_resolution_modes: Vec<Span>,
     /// `export {}` statements, which name nothing and so are in no export list, by span. One
     /// makes a declaration file export only what it says (`setExportContextFlag`).
     pub empty_exports: Vec<Span>,
@@ -83,6 +85,17 @@ pub struct TypeSyntax {
     /// JSX elements and fragments of `body`, which executable HIR has none of: there, each is an
     /// unsupported expression with the element's span. Sorted by start.
     pub jsx: Vec<JsxSite>,
+    /// `import.defer(…)` calls of `body`, by span. In `body` each is an `import()` call; the
+    /// executable HIR has an unsupported expression there.
+    pub deferred_imports: Vec<Span>,
+    /// `/* @jsxImportSource preact */` and the other JSX pragmas of the comments before the first
+    /// token.
+    pub jsx_pragmas: TypeJsxPragmas,
+    /// `import defer * as ns from "m"` statements, by span.
+    pub deferred_import_declarations: Vec<Span>,
+    /// What each `for (var … in …)` of `body` declares, as written. The statement itself names
+    /// only an identifier.
+    pub for_in_bindings: Vec<ForInBindingSite>,
     /// Where declarations' names start, which executable HIR does not record: `node.Name()`.
     pub names: Vec<NameSite>,
     /// Triple-slash references retained from the parser's comment table.
@@ -91,6 +104,25 @@ pub struct TypeSyntax {
     /// TypeScript executable HIR lowered before TS erasure, JSX lowering, or DCE.
     /// JavaScript uses Module::body without duplicating its executable tree.
     pub body: Vec<crate::Statement>,
+}
+
+/// `/* @jsxRuntime classic */`, `/* @jsx h */`, `/* @jsxFrag Fragment */` and
+/// `/* @jsxImportSource preact */`: the last of each wins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypeJsxPragmas {
+    /// `Some(true)`: classic. `Some(false)`: automatic.
+    pub classic: Option<bool>,
+    pub factory: Option<String>,
+    pub fragment_factory: Option<String>,
+    pub import_source: Option<String>,
+}
+
+/// The binding of a `for (var … in …)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForInBindingSite {
+    /// The statement.
+    pub span: Span,
+    pub pattern: crate::Pattern,
 }
 
 /// A JSX element or fragment, for the type checker.
@@ -379,6 +411,8 @@ pub struct TypeClassMemberSite {
     pub optional: bool,
     pub readonly: bool,
     pub abstract_: bool,
+    /// `declare x: T`.
+    pub declare: bool,
     pub accessibility: Option<TypeAccessibility>,
     pub override_: bool,
     /// `x!: T`: the exclamation token of a property, which executable HIR drops.
@@ -452,7 +486,8 @@ pub enum TypeExprKind {
         parameter: TypeParameter,
         constraint: Box<TypeExpr>,
         name_type: Option<Box<TypeExpr>>,
-        value: Box<TypeExpr>,
+        /// `None` is `{ [P in K] }`: the template is implicitly `any`.
+        value: Option<Box<TypeExpr>>,
         readonly: Modifier,
         optional: Modifier,
     },
@@ -571,7 +606,8 @@ pub struct TypeMember {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeMemberKind {
-    Property(TypeExpr),
+    /// `None` is a property signature without a type annotation: implicitly `any`.
+    Property(Option<TypeExpr>),
     Method(TypeSignature),
     Call(TypeSignature),
     Construct(TypeSignature),
@@ -606,5 +642,7 @@ pub struct TypeSignatureParameter {
     pub ty: Option<TypeExpr>,
     pub optional: bool,
     pub rest: bool,
-    pub has_default: bool,
+    /// The initializer of `(a = 1) => void` or a bodiless method's parameter. Never evaluated:
+    /// TypeScript reports it (TS2371) and stops.
+    pub default: Option<Box<crate::Expression>>,
 }
