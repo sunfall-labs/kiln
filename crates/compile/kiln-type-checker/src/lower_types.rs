@@ -706,7 +706,13 @@ impl<'a, 's> Lower<'a, 's> {
             T::Object(members) => b::TypeNodeKind::Object(self.members(members)),
             T::Function(sig) => b::TypeNodeKind::Fn(self.signature(sig, b::FnKind::FunctionType)),
             T::Constructor(sig) => {
-                b::TypeNodeKind::Fn(self.signature(sig, b::FnKind::ConstructorType))
+                let func = self.signature(sig, b::FnKind::ConstructorType);
+                // `abstract new () => T`
+                let written = self.module.source.get(sig.span.start as usize..);
+                if written.is_some_and(|text| text.starts_with("abstract")) {
+                    self.file[func].flags |= b::Flags::ABSTRACT;
+                }
+                b::TypeNodeKind::Fn(func)
             }
             T::Unsupported { syntax } | T::Raw { syntax } => {
                 self.error(t.span, format!("type syntax: {syntax}"));
@@ -796,10 +802,14 @@ impl<'a, 's> Lower<'a, 's> {
         if p.rest {
             flags |= b::Flags::REST;
         }
+        let default = match &p.default {
+            Some(default) => self.expr(default),
+            None => b::ExprId::NONE,
+        };
         b::Param {
             pat,
             ty,
-            default: b::ExprId::NONE,
+            default,
             flags,
             pos: p.span.start,
             loc: Self::loc(p.span),

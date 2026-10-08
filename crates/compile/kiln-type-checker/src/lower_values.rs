@@ -515,11 +515,17 @@ impl<'a, 's> Lower<'a, 's> {
                 target,
                 value,
             } => {
-                let target_id = self.file.expr(
-                    b::ExprKind::Ident(self.atom(target)),
-                    span.start,
-                    span.start + target.len() as u32,
-                );
+                // `(x) = 1`: the executable assignment starts at the parenthesis.
+                let source = self.module.source.as_bytes();
+                let mut start = span.start as usize;
+                while source.get(start) == Some(&b'(') {
+                    start = crate::engine::check::spans::skip_trivia(source, start + 1);
+                }
+                let at = k::Span::new(start as u32, (start + target.len()) as u32);
+                let target_id =
+                    self.file
+                        .expr(b::ExprKind::Ident(self.atom(target)), at.start, at.end);
+                let target_id = self.wrapped(target_id, at);
                 let value = self.expr(value);
                 b::ExprKind::Assign {
                     op: assign(*operator),
@@ -948,10 +954,18 @@ impl<'a, 's> Lower<'a, 's> {
                 prefix,
                 target,
             } => {
-                let (start, end) = self.update_operand(span, *prefix);
-                let operand = self
-                    .file
-                    .expr(b::ExprKind::Ident(self.atom(target)), start, end);
+                // `++((x))`: the operand is the name, inside whatever parentheses are around it.
+                let (mut start, _) = self.update_operand(span, *prefix);
+                let source = self.module.source.as_bytes();
+                while source.get(start as usize) == Some(&b'(') {
+                    start =
+                        crate::engine::check::spans::skip_trivia(source, start as usize + 1) as u32;
+                }
+                let at = k::Span::new(start, start + target.len() as u32);
+                let operand =
+                    self.file
+                        .expr(b::ExprKind::Ident(self.atom(target)), at.start, at.end);
+                let operand = self.wrapped(operand, at);
                 b::ExprKind::Unary {
                     op: match (*increment, *prefix) {
                         (true, true) => b::UnOp::PreInc,
@@ -1929,11 +1943,10 @@ impl<'a, 's> Lower<'a, 's> {
                 object,
                 body,
             } => {
-                let pat = self.file.pat(
-                    b::PatKind::Ident(self.atom(name)),
-                    statement.span.start,
-                    statement.span.end,
-                );
+                let at = self.binding_span(name, statement.span);
+                let pat = self
+                    .file
+                    .pat(b::PatKind::Ident(self.atom(name)), at.start, at.end);
                 let var = b::VarDecl {
                     pat,
                     ty: b::TypeNodeId::NONE,
@@ -1984,21 +1997,49 @@ impl<'a, 's> Lower<'a, 's> {
                 cases,
             } => {
                 let expr = self.expr(discriminant);
-                let cases: Vec<_> = cases
-                    .iter()
-                    .map(|case| b::Case {
+                // A clause starts at its `case` or `default` and, with no statements, ends at its
+                // `:`. The source between two clauses says where.
+                let source = self.module.source.as_bytes();
+                let mut previous_end = discriminant.span.end as usize;
+                let mut lowered = Vec::with_capacity(cases.len());
+                for case in cases {
+                    let keyword: &[u8] = if case.test.is_some() {
+                        b"case"
+                    } else {
+                        b"default"
+                    };
+                    let window_end = match (&case.test, case.body.first()) {
+                        (Some(test), _) => test.span.start as usize,
+                        (None, Some(first)) => first.span.start as usize,
+                        (None, None) => statement.span.end as usize,
+                    };
+                    let window =
+                        &source[previous_end.min(window_end)..window_end.min(source.len())];
+                    let pos = window
+                        .windows(keyword.len())
+                        .rposition(|word| word == keyword)
+                        .map_or(statement.span.start, |at| (previous_end + at) as u32);
+                    let after = case
+                        .test
+                        .as_ref()
+                        .map_or(pos as usize + keyword.len(), |test| test.span.end as usize);
+                    let colon = source
+                        .get(after..)
+                        .and_then(|rest| rest.iter().position(|&byte| byte == b':'))
+                        .map_or(after, |at| after + at + 1);
+                    let end = case.body.last().map_or(colon as u32, |s| s.span.end);
+                    previous_end = end as usize;
+                    lowered.push(b::Case {
                         test: case
                             .test
                             .as_ref()
                             .map_or(b::ExprId::NONE, |test| self.expr(test)),
                         body: self.statements(&case.body),
-                        pos: case
-                            .test
-                            .as_ref()
-                            .map_or(statement.span.start, |test| test.span.start),
-                        end: case.body.last().map_or(statement.span.end, |s| s.span.end),
-                    })
-                    .collect();
+                        pos,
+                        end,
+                    });
+                }
+                let cases = lowered;
                 b::StmtKind::Switch {
                     expr,
                     cases: self.file.add_cases(&cases),
@@ -2169,9 +2210,11 @@ impl<'a, 's> Lower<'a, 's> {
             flags |= b::Flags::ABSTRACT;
         }
         let type_params = self.type_parameters(&site.type_parameters);
-        let extends = site.extends.as_ref().map_or(b::ExprId::NONE, |heritage| {
-            self.class_heritage_expr(heritage)
-        });
+        let extends = match (&site.extends_expression, &site.extends) {
+            (Some(expression), _) => self.expr(expression),
+            (None, Some(heritage)) => self.class_heritage_expr(heritage),
+            (None, None) => b::ExprId::NONE,
+        };
         let extends_args = site
             .extends
             .as_ref()

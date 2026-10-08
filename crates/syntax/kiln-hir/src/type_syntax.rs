@@ -440,6 +440,8 @@ pub struct TypeClassSite {
     pub default_exported: bool,
     pub type_parameters: Vec<TypeParameter>,
     pub extends: Option<TypeExpr>,
+    /// The `extends` expression when it is not a plain or dotted name: `extends mixin(A, B)`.
+    pub extends_expression: Option<Box<crate::Expression>>,
     pub implements: Vec<TypeExpr>,
     pub abstract_: bool,
     pub declared: bool,
@@ -684,4 +686,6 @@ pub struct TypeSignatureParameter {
     pub optional: bool,
     pub rest: bool,
     pub has_default: bool,
+    /// The initializer, when `has_default`.
+    pub default: Option<Box<crate::Expression>>,
 }

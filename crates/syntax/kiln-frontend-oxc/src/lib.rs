@@ -3476,6 +3476,7 @@ fn capture_type_syntax(
                 optional: false,
                 rest: false,
                 has_default: false,
+                default: None,
             })
         }
         fn owned_pattern(
@@ -3905,6 +3906,14 @@ fn capture_type_syntax(
                         optional: p.optional,
                         rest: false,
                         has_default: p.initializer.is_some(),
+                        default: p.initializer.as_ref().map(|initializer| {
+                            let mut lowerer = Lowerer::new(
+                                self.source,
+                                self.path.as_deref(),
+                                self.native_import_meta,
+                            );
+                            Box::new(lowerer.expression(initializer))
+                        }),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -3932,6 +3941,7 @@ fn capture_type_syntax(
                     optional: false,
                     rest: true,
                     has_default: false,
+                    default: None,
                 });
             }
             kiln_hir::TypeSignature {
@@ -4388,6 +4398,18 @@ fn capture_type_syntax(
                 default_exported: self.is_default_exported(node.span),
                 type_parameters: self.parameters(node.type_parameters.as_deref()),
                 extends,
+                extends_expression: node.heritage.as_ref().and_then(|heritage| {
+                    self.heritage_name_parts(&heritage.expression)
+                        .is_none()
+                        .then(|| {
+                            let mut lowerer = Lowerer::new(
+                                self.source,
+                                self.path.as_deref(),
+                                self.native_import_meta,
+                            );
+                            Box::new(lowerer.expression(&heritage.expression))
+                        })
+                }),
                 implements,
                 abstract_: node.r#abstract,
                 declared: node.declare,
@@ -4979,6 +5001,17 @@ fn capture_type_syntax(
             walk::walk_ts_satisfies_expression(self, node);
         }
         fn visit_ts_type_assertion(&mut self, node: &oxc_ast::ast::TSTypeAssertion<'a>) {
+            if self.raw(node.type_annotation.span()).trim() == "const" {
+                self.result
+                    .expression_wrappers
+                    .push(kiln_hir::TypeExpressionWrapperSite {
+                        owner_span: HirSpan::new(node.span.start, node.span.end),
+                        operand_span: self.operand_span(&node.expression),
+                        kind: kiln_hir::TypeExpressionWrapperKind::AsConst,
+                    });
+                walk::walk_ts_type_assertion(self, node);
+                return;
+            }
             let span = node.type_annotation.span();
             self.result.annotations.push(HirTypeAnnotationSite {
                 site: HirTypeSite::AsExpression,
