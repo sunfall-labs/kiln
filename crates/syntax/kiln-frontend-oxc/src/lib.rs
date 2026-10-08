@@ -4671,20 +4671,6 @@ fn capture_type_syntax(
             (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
             walk::walk_object_pattern(self, node);
         }
-        fn visit_array_assignment_target(
-            &mut self,
-            node: &oxc_ast::ast::ArrayAssignmentTarget<'a>,
-        ) {
-            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
-            walk::walk_array_assignment_target(self, node);
-        }
-        fn visit_object_assignment_target(
-            &mut self,
-            node: &oxc_ast::ast::ObjectAssignmentTarget<'a>,
-        ) {
-            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
-            walk::walk_object_assignment_target(self, node);
-        }
         fn visit_export_named_declaration(
             &mut self,
             node: &oxc_ast::ast::ExportNamedDeclaration<'a>,
@@ -4846,6 +4832,109 @@ fn capture_type_syntax(
                 ty: self.convert(&node.type_annotation),
             });
             walk::walk_ts_as_expression(self, node);
+        }
+        fn visit_array_assignment_target(
+            &mut self,
+            node: &oxc_ast::ast::ArrayAssignmentTarget<'a>,
+        ) {
+            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
+            use oxc_ast::ast::AssignmentTargetMaybeDefault as Maybe;
+            let elements = node
+                .elements
+                .iter()
+                .map(|element| match element {
+                    // A hole: nothing is assigned.
+                    None => kiln_hir::AssignmentElementSite {
+                        span: HirSpan::new(node.span.start, node.span.start),
+                        target: HirSpan::new(node.span.start, node.span.start),
+                        key: None,
+                    },
+                    Some(element) => {
+                        let (whole, target) = match element {
+                            Maybe::AssignmentTargetWithDefault(it) => (it.span, it.binding.span()),
+                            other => (other.span(), other.span()),
+                        };
+                        kiln_hir::AssignmentElementSite {
+                            span: HirSpan::new(whole.start, whole.end),
+                            target: HirSpan::new(target.start, target.end),
+                            key: None,
+                        }
+                    }
+                })
+                .collect();
+            self.result
+                .assignment_patterns
+                .push(kiln_hir::AssignmentPatternSite {
+                    span: HirSpan::new(node.span.start, node.span.end),
+                    elements,
+                });
+            walk::walk_array_assignment_target(self, node);
+        }
+        fn visit_object_assignment_target(
+            &mut self,
+            node: &oxc_ast::ast::ObjectAssignmentTarget<'a>,
+        ) {
+            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
+            use oxc_ast::ast::{
+                AssignmentTargetMaybeDefault as Maybe, AssignmentTargetProperty as Property,
+            };
+            let elements = node
+                .properties
+                .iter()
+                .map(|property| match property {
+                    Property::AssignmentTargetPropertyIdentifier(it) => {
+                        let binding = it.binding.span;
+                        kiln_hir::AssignmentElementSite {
+                            span: HirSpan::new(it.span.start, it.span.end),
+                            target: HirSpan::new(binding.start, binding.end),
+                            key: Some(HirSpan::new(binding.start, binding.end)),
+                        }
+                    }
+                    Property::AssignmentTargetPropertyProperty(it) => {
+                        let target = match &it.binding {
+                            Maybe::AssignmentTargetWithDefault(with) => with.binding.span(),
+                            other => other.span(),
+                        };
+                        let key = it.name.span();
+                        kiln_hir::AssignmentElementSite {
+                            span: HirSpan::new(it.span.start, it.span.end),
+                            target: HirSpan::new(target.start, target.end),
+                            key: Some(HirSpan::new(key.start, key.end)),
+                        }
+                    }
+                })
+                .collect();
+            self.result
+                .assignment_patterns
+                .push(kiln_hir::AssignmentPatternSite {
+                    span: HirSpan::new(node.span.start, node.span.end),
+                    elements,
+                });
+            walk::walk_object_assignment_target(self, node);
+        }
+        fn visit_try_statement(&mut self, node: &oxc_ast::ast::TryStatement<'a>) {
+            if let Some(param) = node
+                .handler
+                .as_ref()
+                .and_then(|clause| clause.param.as_ref())
+            {
+                let pattern = param.pattern.span();
+                let annotation = param.type_annotation.as_deref().map(|annotation| {
+                    let ty = annotation.type_annotation.span();
+                    self.classified
+                        .insert((annotation.span.start, annotation.span.end));
+                    (
+                        HirSpan::new(ty.start, ty.end),
+                        self.convert(&annotation.type_annotation),
+                    )
+                });
+                self.result.catches.push(kiln_hir::CatchSite {
+                    try_span: HirSpan::new(node.span.start, node.span.end),
+                    param_span: HirSpan::new(pattern.start, pattern.end),
+                    annotation,
+                });
+            }
+            walk::walk_try_statement(self, node);
         }
         fn visit_import_meta(&mut self, node: &oxc_ast::ast::ImportMeta) {
             self.result
@@ -5329,6 +5418,10 @@ fn capture_type_syntax(
                 });
         }
     }
+    collector
+        .result
+        .assignment_patterns
+        .sort_by_key(|site| (site.span.start, site.span.end));
     collector
         .result
         .annotations

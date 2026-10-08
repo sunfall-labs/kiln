@@ -10,12 +10,13 @@ use std::sync::Arc;
 pub mod source_types;
 pub mod type_syntax;
 pub use type_syntax::{
-    AmbientModuleItems, BindingIdentifierSite, DeferredImportSite, EnumMember, EnumMemberNameKind,
-    FunctionSignatureSite, JsxAttributeSite, JsxChildSite, JsxSite, Modifier as TypeModifier,
-    NameSite, TupleElement as TypeTupleElement, TypeAccessibility, TypeAnnotationSite,
-    TypeClassMemberKind, TypeClassMemberSite, TypeClassSite, TypeCommentDirective, TypeDeclaration,
-    TypeDeclarationKind, TypeDecoratorOwner, TypeDecoratorSite, TypeExportAssignment, TypeExpr,
-    TypeExprKind, TypeExpressionWrapperKind, TypeExpressionWrapperSite, TypeImportEquals,
+    AmbientModuleItems, AssignmentElementSite, AssignmentPatternSite, BindingIdentifierSite,
+    CatchSite, DeferredImportSite, EnumMember, EnumMemberNameKind, FunctionSignatureSite,
+    JsxAttributeSite, JsxChildSite, JsxSite, Modifier as TypeModifier, NameSite,
+    TupleElement as TypeTupleElement, TypeAccessibility, TypeAnnotationSite, TypeClassMemberKind,
+    TypeClassMemberSite, TypeClassSite, TypeCommentDirective, TypeDeclaration, TypeDeclarationKind,
+    TypeDecoratorOwner, TypeDecoratorSite, TypeExportAssignment, TypeExpr, TypeExprKind,
+    TypeExpressionWrapperKind, TypeExpressionWrapperSite, TypeImportEquals,
     TypeImportEqualsReference, TypeInstantiationKind, TypeInstantiationSite, TypeJsxPragmas,
     TypeKeyword, TypeLiteral, TypeMember, TypeMemberKind, TypeModuleAttribute,
     TypeModuleAttributeKeyKind, TypeModuleAttributes, TypeModuleAttributesKeyword,

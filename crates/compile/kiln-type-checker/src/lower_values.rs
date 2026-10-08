@@ -179,7 +179,9 @@ impl<'a, 's> Lower<'a, 's> {
                         // its default or its identifier does; a nested pattern has no span here.
                         let end = match &prop.value {
                             k::Pattern::WithDefault { default, .. } => Some(default.span.end),
-                            k::Pattern::Identifier(_) => Some(self.file[value].end),
+                            k::Pattern::Identifier(_)
+                            | k::Pattern::Object { .. }
+                            | k::Pattern::Array { .. } => Some(self.file[value].end),
                             _ => None,
                         };
                         // Of the names whose owner ends there, the property's own starts first: a
@@ -227,12 +229,25 @@ impl<'a, 's> Lower<'a, 's> {
                             Some(k::Pattern::WithDefault { default, .. }) => self.expr(default),
                             _ => b::ExprId::NONE,
                         };
+                        // `BindingElement.Pos()` and `.End()`: a name or a nested pattern has the
+                        // span of its own, and a default ends the element.
+                        let (start, end) = match element {
+                            Some(k::Pattern::WithDefault { default, .. }) => {
+                                (self.file[pat].pos, default.span.end)
+                            }
+                            Some(
+                                k::Pattern::Identifier(_)
+                                | k::Pattern::Object { .. }
+                                | k::Pattern::Array { .. },
+                            ) => (self.file[pat].pos, self.file[pat].end),
+                            _ => (span.start, span.end),
+                        };
                         b::PatElem {
                             pat,
                             default,
                             is_rest: false,
-                            start: span.start,
-                            end: span.end,
+                            start,
+                            end,
                         }
                     })
                     .collect();
@@ -1494,6 +1509,25 @@ impl<'a, 's> Lower<'a, 's> {
     }
 
     fn pattern_target(&mut self, pattern: &k::Pattern, span: k::Span) -> b::ExprId {
+        self.pattern_target_with(pattern, span, span)
+    }
+
+    /// The elements of the destructuring assignment target at `span`, if the frontend saw one.
+    fn assignment_pattern(&self, span: k::Span) -> Option<&'a k::AssignmentPatternSite> {
+        let sites = &self.module.type_syntax.assignment_patterns;
+        let at =
+            sites.partition_point(|site| (site.span.start, site.span.end) < (span.start, span.end));
+        sites.get(at).filter(|site| site.span == span)
+    }
+
+    /// `pattern`, written as `span`; `target` is what a default is assigned to, which is `span`
+    /// without the default (`a = 1`).
+    fn pattern_target_with(
+        &mut self,
+        pattern: &k::Pattern,
+        span: k::Span,
+        target: k::Span,
+    ) -> b::ExprId {
         let span = match pattern {
             k::Pattern::Object { .. } | k::Pattern::Array { .. } => self.pattern_span(span),
             _ => span,
@@ -1546,7 +1580,7 @@ impl<'a, 's> Lower<'a, 's> {
                 )
             }
             k::Pattern::WithDefault { inner, default } => {
-                let target = self.pattern_target(inner, span);
+                let target = self.pattern_target(inner, target);
                 let value = self.expr(default);
                 self.file.expr(
                     b::ExprKind::Assign {
@@ -1559,11 +1593,25 @@ impl<'a, 's> Lower<'a, 's> {
                 )
             }
             k::Pattern::Array { elements, rest } => {
+                let site = self.assignment_pattern(span);
                 let mut ids: Vec<_> = elements
                     .iter()
-                    .map(|item| match item {
-                        Some(item) => self.pattern_target(item, span),
-                        None => self.file.expr(b::ExprKind::Missing, span.start, span.end),
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let at = site.and_then(|site| site.elements.get(i));
+                        match item {
+                            Some(item) => match at {
+                                Some(at) => self.pattern_target_with(item, at.span, at.target),
+                                None => self.pattern_target(item, span),
+                            },
+                            None => match at {
+                                Some(at) => {
+                                    self.file
+                                        .expr(b::ExprKind::Missing, at.span.start, at.span.end)
+                                }
+                                None => self.file.expr(b::ExprKind::Missing, span.start, span.end),
+                            },
+                        }
                     })
                     .collect();
                 if let Some(rest) = rest {
@@ -1577,20 +1625,39 @@ impl<'a, 's> Lower<'a, 's> {
             }
             k::Pattern::Object { properties, rest } => {
                 let mut props = Vec::with_capacity(properties.len() + usize::from(rest.is_some()));
-                for p in properties {
+                let site = self.assignment_pattern(span);
+                for (i, p) in properties.iter().enumerate() {
                     let key = match &p.key {
                         k::PatternKey::Static(s) => b::PropKey::Name(self.atom_units(s)),
                         k::PatternKey::Computed(e) => b::PropKey::Computed(self.expr(e)),
                     };
-                    let value = self.pattern_target(&p.value, span);
+                    let at = site.and_then(|site| site.elements.get(i));
+                    let value = match at {
+                        // `y: z = 1` assigns from `z`; the property starts at `y`.
+                        Some(at) => self.pattern_target_with(
+                            &p.value,
+                            k::Span::new(at.target.start, at.span.end),
+                            at.target,
+                        ),
+                        None => self.pattern_target(&p.value, span),
+                    };
+                    let (whole, pos) = match at {
+                        Some(at) => (at.span, at.key.map_or(at.span.start, |key| key.start)),
+                        None => (span, span.start),
+                    };
+                    // `{ x }` and `{ x = 1 }`: the name is the target.
+                    let shorthand = at.is_some_and(|at| at.key == Some(at.target));
                     props.push(b::Prop {
-                        kind: b::PropKind::Init,
+                        kind: match shorthand {
+                            true => b::PropKind::Shorthand,
+                            false => b::PropKind::Init,
+                        },
                         key,
                         name_kind: b::NameKind::Identifier,
                         value,
-                        pos: span.start,
-                        start: span.start,
-                        end: span.end,
+                        pos,
+                        start: whole.start,
+                        end: whole.end,
                         postfix_token: 0,
                     });
                 }
@@ -1953,22 +2020,74 @@ impl<'a, 's> Lower<'a, 's> {
             } => {
                 let block = self.block(block, statement.span.start);
                 let (param, handler) = if let Some(handler) = handler {
-                    let param = handler.binding.as_ref().map_or(b::VarDeclId::NONE, |name| {
-                        let pat = self.file.pat(
-                            b::PatKind::Ident(self.atom(name)),
-                            statement.span.start,
-                            statement.span.end,
-                        );
-                        self.file.add_var_decl(b::VarDecl {
-                            pat,
-                            ty: b::TypeNodeId::NONE,
-                            init: b::ExprId::NONE,
-                            kind: b::VarKind::Let,
-                            flags: b::Flags::empty(),
-                            loc: Self::loc(statement.span),
-                        })
-                    });
-                    (param, self.block(&handler.body, statement.span.start))
+                    let site = self
+                        .module
+                        .type_syntax
+                        .catches
+                        .iter()
+                        .find(|site| site.try_span == statement.span);
+                    let mut body = handler.body.as_slice();
+                    let param = match site {
+                        Some(site) => {
+                            // `catch ({ message })` is a hidden name and, first in the block, the
+                            // declaration that takes the thrown value apart.
+                            let destructured = match body.split_first() {
+                                Some((first, rest))
+                                    if handler
+                                        .binding
+                                        .as_deref()
+                                        .is_some_and(|name| name.starts_with("%catch")) =>
+                                {
+                                    body = rest;
+                                    match &first.kind {
+                                        k::StatementKind::Variable { declarations, .. } => {
+                                            declarations.first().map(|it| &it.pattern)
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            };
+                            let at = site.param_span;
+                            let pat = match (destructured, handler.binding.as_deref()) {
+                                (Some(pattern), _) => self.pattern(pattern, at),
+                                (None, Some(name)) => self.file.pat(
+                                    b::PatKind::Ident(self.atom(name)),
+                                    at.start,
+                                    at.end,
+                                ),
+                                (None, None) => unreachable!("a catch site has a parameter"),
+                            };
+                            let ty = match &site.annotation {
+                                Some((_, ty)) => self.ty(&ty.clone()),
+                                None => b::TypeNodeId::NONE,
+                            };
+                            self.file.add_var_decl(b::VarDecl {
+                                pat,
+                                ty,
+                                init: b::ExprId::NONE,
+                                kind: b::VarKind::Let,
+                                flags: b::Flags::empty(),
+                                loc: Self::loc(at),
+                            })
+                        }
+                        None => handler.binding.as_ref().map_or(b::VarDeclId::NONE, |name| {
+                            let pat = self.file.pat(
+                                b::PatKind::Ident(self.atom(name)),
+                                statement.span.start,
+                                statement.span.end,
+                            );
+                            self.file.add_var_decl(b::VarDecl {
+                                pat,
+                                ty: b::TypeNodeId::NONE,
+                                init: b::ExprId::NONE,
+                                kind: b::VarKind::Let,
+                                flags: b::Flags::empty(),
+                                loc: Self::loc(statement.span),
+                            })
+                        }),
+                    };
+                    (param, self.block(body, statement.span.start))
                 } else {
                     (b::VarDeclId::NONE, b::StmtId::NONE)
                 };
@@ -2340,11 +2459,7 @@ impl<'a, 's> Lower<'a, 's> {
         Some(b::Member {
             kind: b::MemberKind::IndexSignature,
             key: b::PropKey::None,
-            flags: if member.readonly {
-                b::Flags::READONLY
-            } else {
-                b::Flags::empty()
-            },
+            flags: class_member_flags(Some(member), false),
             ty: ret,
             init: b::ExprId::NONE,
             func,
@@ -2541,7 +2656,7 @@ impl<'a, 's> Lower<'a, 's> {
                     ty: b::TypeNodeId::NONE,
                     init: b::ExprId::NONE,
                     func,
-                    name_pos: member.span.start,
+                    name_pos: self.file[func].name_pos,
                     start: member.span.start,
                     loc: Self::loc(member.span),
                     modifiers: b::Span::EMPTY,

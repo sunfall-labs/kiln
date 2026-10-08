@@ -975,10 +975,12 @@ impl<'a, 's> Lower<'a, 's> {
             // `x => e` is lowered as the `return e` it means, with the span of the whole arrow:
             // a braced body's `return` is always inside the arrow.
             match f.body.as_slice() {
-                [k::Statement {
-                    kind: k::StatementKind::Return(Some(value)),
-                    span,
-                }] if f.arrow && *span == f.span => b::FnBody::Expr(self.expr(value)),
+                [
+                    k::Statement {
+                        kind: k::StatementKind::Return(Some(value)),
+                        span,
+                    },
+                ] if f.arrow && *span == f.span => b::FnBody::Expr(self.expr(value)),
                 _ => b::FnBody::Block(self.statements(&f.body)),
             }
         } else {

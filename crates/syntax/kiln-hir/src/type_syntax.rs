@@ -31,6 +31,35 @@ pub struct DeferredImportSite {
     pub call: crate::Expression,
 }
 
+/// An array or object destructuring assignment target and where its elements are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignmentPatternSite {
+    pub span: Span,
+    /// In source order, holes included for an array; not the rest element.
+    pub elements: Vec<AssignmentElementSite>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssignmentElementSite {
+    /// The element with its default: `a = 1`, `y: z = 1`.
+    pub span: Span,
+    /// What is assigned to, without the default.
+    pub target: Span,
+    /// The name of an object property: `y` of `y: z`, or the shorthand.
+    pub key: Option<Span>,
+}
+
+/// The parameter of a `catch` clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatchSite {
+    /// The `try` statement.
+    pub try_span: Span,
+    /// The binding, without its annotation.
+    pub param_span: Span,
+    /// `catch (e: T)`: where `T` is, and what it is.
+    pub annotation: Option<(Span, TypeExpr)>,
+}
+
 /// A `@ts-ignore` or `@ts-expect-error` comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeCommentDirective {
@@ -119,6 +148,12 @@ pub struct TypeSyntax {
     /// Where `import.meta` is written, by span. Executable HIR spells it as the object or call that
     /// stands for it at run time.
     pub import_metas: Vec<Span>,
+    /// The elements of each destructuring assignment target (`[a, b] = xs`, `({ x, y: z } = o)`),
+    /// which executable HIR patterns have no spans for. Sorted by `span`.
+    pub assignment_patterns: Vec<AssignmentPatternSite>,
+    /// The `catch (param)` of each `try`, which executable HIR reduces to a name (a pattern is
+    /// destructured by its first statement).
+    pub catches: Vec<CatchSite>,
     /// The `import.defer(..)` expressions, which executable HIR refuses as unsupported.
     pub deferred_imports: Vec<DeferredImportSite>,
     /// `/* @jsx h */`, `@jsxFrag`, `@jsxImportSource` and `@jsxRuntime` in the block comments
