@@ -2368,6 +2368,7 @@ dependencies = [
  "kiln-hir",
  "kiln-host-abi",
  "kiln-ir",
+ "kiln-jobs",
  "kiln-module-graph",
  "kiln-module-resolver",
  "kiln-native-runtime",
@@ -2420,6 +2421,7 @@ dependencies = [
  "kiln-host-abi",
  "kiln-interpreter",
  "kiln-ir",
+ "kiln-jobs",
  "kiln-liveness",
  "kiln-module-eval",
  "kiln-module-graph",
@@ -2455,7 +2457,9 @@ dependencies = [
  "kiln-digest",
  "kiln-hir",
  "kiln-ir",
+ "kiln-jobs",
  "proptest",
+ "rayon",
  "serde",
 ]
 
@@ -2620,6 +2624,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-jobs"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "kiln-json"
 version = "0.1.0"
 dependencies = [
@@ -2708,6 +2719,7 @@ dependencies = [
  "kiln-host-abi",
  "kiln-interpreter",
  "kiln-ir",
+ "kiln-jobs",
  "kiln-liveness",
  "kiln-module-graph",
  "kiln-module-resolver",
@@ -2869,6 +2881,7 @@ dependencies = [
  "kiln-frontend-oxc",
  "kiln-hir",
  "kiln-ir",
+ "kiln-jobs",
  "kiln-number-core",
  "kiln-string",
  "libc",

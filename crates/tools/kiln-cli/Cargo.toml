@@ -21,6 +21,7 @@ kiln-ir = { workspace = true }
 kiln-module-graph = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
+kiln-jobs = { workspace = true }
 rayon = { workspace = true }
 annotate-snippets = { workspace = true }
 url = { workspace = true }

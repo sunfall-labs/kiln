@@ -161,17 +161,7 @@ struct SnapshotHost<'a> {
 /// `RAYON_NUM_THREADS`. Loading, binding and resolution are the donor's parallel phases; the
 /// engine publishes their results under its own task protocol, whatever the thread count.
 fn check_threads() -> usize {
-    let mut threads = std::thread::available_parallelism().map_or(1, |cores| cores.get());
-    for name in ["KILN_JOBS", "RAYON_NUM_THREADS"] {
-        if let Some(count) = std::env::var(name)
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|count| *count > 0)
-        {
-            threads = threads.min(count);
-        }
-    }
-    threads
+    kiln_jobs::budget(usize::MAX)
 }
 
 /// The stack of a checker worker thread, as for the calling thread in [`check_with_stack`].
@@ -182,11 +172,8 @@ const WORKER_STACK: usize = 8 << 20;
 fn worker_pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(check_threads().saturating_sub(1).max(1))
-            .stack_size(WORKER_STACK)
-            .thread_name(|index| format!("kiln-source-check-{index}"))
-            .build()
+        let threads = check_threads().saturating_sub(1).max(1);
+        kiln_jobs::pool("kiln-source-check", threads, Some(WORKER_STACK))
             .expect("source checker thread pool")
     })
 }

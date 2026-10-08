@@ -13,6 +13,7 @@ use kiln_proto::{
     NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, RecordedWorkers, Request,
     ResolutionMap, Response, RunSummary, ScalarValueSummary, SourceView, Stats, StepBudget,
 };
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -1874,58 +1875,36 @@ fn prepare_payloads<E: QueryEngine>(
 ) -> HashMap<PathBuf, PreparedPayload> {
     let (modules, commonjs) = payload_modules(engine, project_root, formats);
     engine.prepare_module_irs(&modules);
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |cores| cores.get())
-        .min(8)
-        .min(commonjs.len());
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let prepared = commonjs
-        .iter()
-        .map(|_| Mutex::new(None))
-        .collect::<Vec<Mutex<Option<PreparedPayload>>>>();
-    let work = || {
-        loop {
-            let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let Some((module_path, path, source, identity)) = commonjs.get(at) else {
-                break;
-            };
-            // A panic is left for the walk's own request to report.
-            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                commonjs_payload(module_path, path, source, identity)
-            }));
-            if let Ok(payload) = payload {
-                *prepared[at]
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()) = Some(payload);
-            }
-        }
+    let prepare = |(module_path, path, source, identity): &(PathBuf, String, String, String)| {
+        // A panic is left for the walk's own request to report.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            commonjs_payload(module_path, path, source, identity)
+        }))
+        .ok()
     };
-    if threads > 0 {
-        std::thread::scope(|scope| {
-            for _ in 1..threads {
-                let spawned = std::thread::Builder::new()
-                    .name("kiln-commonjs".into())
-                    .stack_size(crate::SERVE_STACK_BYTES)
-                    .spawn_scoped(scope, work);
-                if spawned.is_err() {
-                    break;
-                }
-            }
-            work();
-        });
-    }
+    let prepared: Vec<Option<PreparedPayload>> = match commonjs_pool() {
+        Some(pool) if commonjs.len() > 1 => {
+            pool.install(|| commonjs.par_iter().map(prepare).collect())
+        }
+        _ => commonjs.iter().map(prepare).collect(),
+    };
     commonjs
         .into_iter()
         .zip(prepared)
-        .filter_map(|((module_path, ..), payload)| {
-            Some((
-                module_path,
-                payload
-                    .into_inner()
-                    .unwrap_or_else(|poison| poison.into_inner())?,
-            ))
-        })
+        .filter_map(|((module_path, ..), payload)| Some((module_path, payload?)))
         .collect()
+}
+
+/// The pool that compiles CommonJS payloads ahead of a graph walk: the available CPUs, at most
+/// eight, bounded by any positive `KILN_JOBS` or `RAYON_NUM_THREADS`, with the stack of a request
+/// thread, where these payloads are otherwise compiled.
+fn commonjs_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let stack = Some(crate::SERVE_STACK_BYTES);
+        kiln_jobs::pool("kiln-commonjs", kiln_jobs::budget(8), stack)
+    })
+    .as_ref()
 }
 
 fn module_payload<E: QueryEngine>(

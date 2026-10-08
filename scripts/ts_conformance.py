@@ -86,15 +86,16 @@ def build_runner() -> Path:
     return REPO / "target" / "release" / "examples" / "ts_conformance"
 
 
-def run(runner: Path, bundle: Path, report: Path, only: str | None, threads: int) -> None:
+def run(runner: Path, bundle: Path, report: Path, only: str | None, threads: int | None) -> None:
     command = [
         str(runner),
         f"--bundle={bundle}",
         "--lib=/internal/bundled/libs",
         "--testlib=/_submodules/TypeScript/tests/lib",
-        f"--threads={threads}",
         f"--report={report}",
     ]
+    if threads:
+        command.append(f"--threads={threads}")
     if only:
         command.append(f"--only={only}")
     command += [f"{name}={cases}={baselines}={baselines}/names.txt" for name, cases, baselines in SUITES]
@@ -122,7 +123,9 @@ def main() -> int:
     parser.add_argument("--runner", type=Path, help="a built ts_conformance example")
     parser.add_argument("--only", help="run only the tests whose path contains this text")
     parser.add_argument("--report", type=Path, help="keep the per-test report here")
-    parser.add_argument("--threads", type=int, default=min(os.cpu_count() or 4, 16))
+    parser.add_argument(
+        "--threads", type=int, help="workers; by default the CPUs, bounded by KILN_JOBS"
+    )
     args = parser.parse_args()
     if args.update and args.only:
         sys.exit("ts-conformance: --update records the whole suite; drop --only")

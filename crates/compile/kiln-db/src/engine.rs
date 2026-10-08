@@ -16,6 +16,7 @@
 //! hash by hand and without the compiler having to know it is happening.
 
 use ahash::AHashMap;
+use rayon::prelude::*;
 
 use crate::{
     Compiled, CompiledModule, FileId, Frontend, FunctionSummary, Interface, Parsed, Project,
@@ -387,50 +388,26 @@ impl MemoEngine {
                 })
             })
             .collect::<Vec<_>>();
-        let threads = parse_threads().min(stale.len());
-        if threads < 2 {
+        if stale.len() < 2 {
             return;
         }
+        let Some(pool) = parse_pool() else { return };
         let frontend = self.frontend;
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let parsed = (0..stale.len())
-            .map(|_| std::sync::Mutex::new(None))
-            .collect::<Vec<std::sync::Mutex<Option<Parsed>>>>();
         let files_state = &self.files;
-        let work = || {
-            loop {
-                let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(&file) = stale.get(at) else { break };
-                let state = &files_state[file.0 as usize];
-                let result = std::panic::catch_unwind(|| {
-                    Parsed::new(&state.source, frontend(&state.path, &state.source))
-                });
-                if let Ok(value) = result {
-                    *parsed[at]
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner()) = Some(value);
-                }
-            }
-        };
-        std::thread::scope(|scope| {
-            for _ in 1..threads {
-                // A worker's stack matches the daemon's request threads, where these parses
-                // otherwise run.
-                let spawned = std::thread::Builder::new()
-                    .name("kiln-parse".into())
-                    .stack_size(PARSE_STACK_BYTES)
-                    .spawn_scoped(scope, work);
-                if spawned.is_err() {
-                    break;
-                }
-            }
-            work();
+        let parsed: Vec<Option<Parsed>> = pool.install(|| {
+            stale
+                .par_iter()
+                .map(|&file| {
+                    let state = &files_state[file.0 as usize];
+                    std::panic::catch_unwind(|| {
+                        Parsed::new(&state.source, frontend(&state.path, &state.source))
+                    })
+                    .ok()
+                })
+                .collect()
         });
         for (file, value) in stale.into_iter().zip(parsed) {
-            let Some(value) = value
-                .into_inner()
-                .unwrap_or_else(|poison| poison.into_inner())
-            else {
+            let Some(value) = value else {
                 continue;
             };
             self.stats.parse_computed += 1;
@@ -446,12 +423,13 @@ impl MemoEngine {
     }
 
     fn compute_source_check(&mut self, file: FileId) -> (SourceCheck, Vec<QueryKey>) {
-        if let Some(pending) = self.pending_check.take() {
-            if pending.file == file && pending.epoch == self.epoch {
-                match pending.handle.join() {
-                    Ok(result) => return (result, pending.deps),
-                    Err(panic) => std::panic::resume_unwind(panic),
-                }
+        if let Some(pending) = self.pending_check.take()
+            && pending.file == file
+            && pending.epoch == self.epoch
+        {
+            match pending.handle.join() {
+                Ok(result) => return (result, pending.deps),
+                Err(panic) => std::panic::resume_unwind(panic),
             }
         }
         let Some(inputs) = self.source_check_inputs(file) else {
@@ -817,22 +795,16 @@ fn module_ir_as(
 /// The stack of a parallel parse worker: the daemon's request-thread stack.
 const PARSE_STACK_BYTES: usize = 16 * 1024 * 1024;
 
-/// Parallel parse workers: the available CPUs, at most eight, bounded by any positive
-/// `KILN_JOBS` or `RAYON_NUM_THREADS`.
-fn parse_threads() -> usize {
-    let mut threads = std::thread::available_parallelism()
-        .map_or(1, |cores| cores.get())
-        .min(8);
-    for name in ["KILN_JOBS", "RAYON_NUM_THREADS"] {
-        if let Some(count) = std::env::var(name)
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|count| *count > 0)
-        {
-            threads = threads.min(count);
-        }
-    }
-    threads
+/// The pool that parses and compiles modules ahead of a graph walk: the available CPUs, at most
+/// eight, bounded by any positive `KILN_JOBS` or `RAYON_NUM_THREADS`. `None` if its threads
+/// cannot be created; the walk then computes each module when it asks for it.
+fn parse_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let stack = Some(PARSE_STACK_BYTES);
+        kiln_jobs::pool("kiln-parse", kiln_jobs::budget(8), stack)
+    })
+    .as_ref()
 }
 
 /// Tiny deterministic frontend used only by this crate's query-engine tests.
@@ -1209,52 +1181,28 @@ impl QueryEngine for MemoEngine {
                 revision,
             });
         }
-        let threads = parse_threads().min(jobs.len());
-        if threads == 0 {
+        if jobs.is_empty() {
             return;
         }
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let programs = (0..jobs.len())
-            .map(|_| std::sync::Mutex::new(None))
-            .collect::<Vec<std::sync::Mutex<Option<CompiledModule>>>>();
         let this = &*self;
-        let work = || {
-            loop {
-                let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(job) = jobs.get(at) else { break };
-                let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    module_ir_as(
-                        &this.file(job.file).path,
-                        &job.parsed,
-                        &job.identity,
-                        this.supplied_check(job.supplier),
-                    )
-                }));
-                // A panic is left for the graph walk's own request to report.
-                if let Ok(compiled) = compiled {
-                    *programs[at]
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner()) = Some(compiled);
-                }
-            }
+        let compile = |job: &Job| {
+            // A panic is left for the graph walk's own request to report.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                module_ir_as(
+                    &this.file(job.file).path,
+                    &job.parsed,
+                    &job.identity,
+                    this.supplied_check(job.supplier),
+                )
+            }))
+            .ok()
         };
-        std::thread::scope(|scope| {
-            for _ in 1..threads {
-                let spawned = std::thread::Builder::new()
-                    .name("kiln-module-ir".into())
-                    .stack_size(PARSE_STACK_BYTES)
-                    .spawn_scoped(scope, work);
-                if spawned.is_err() {
-                    break;
-                }
-            }
-            work();
-        });
+        let programs: Vec<Option<CompiledModule>> = match parse_pool() {
+            Some(pool) => pool.install(|| jobs.par_iter().map(compile).collect()),
+            None => jobs.iter().map(compile).collect(),
+        };
         for (job, program) in jobs.into_iter().zip(programs) {
-            let Some(program) = program
-                .into_inner()
-                .unwrap_or_else(|poison| poison.into_inner())
-            else {
+            let Some(program) = program else {
                 continue;
             };
             self.stats.ir_computed += 1;

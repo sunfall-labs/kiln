@@ -1972,11 +1972,7 @@ pub fn run(suite: &Suite, setup: &Setup) -> Vec<Outcome> {
     }
     // Each worker checks one test at a time, as `kiln check` checks with one thread: a test is
     // small, and its own plan would only contend with the other workers.
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(setup.threads.max(1))
-        .stack_size(TEST_STACK)
-        .thread_name(|index| format!("kiln-ts-conformance-{index}"))
-        .build()
+    let pool = kiln_jobs::pool("kiln-ts-conformance", setup.threads, Some(TEST_STACK))
         .expect("conformance thread pool");
     let mut outcomes: Vec<Outcome> = pool.install(|| {
         tests
@@ -2362,7 +2358,7 @@ pub fn run_from_command_line(args: &[&[u8]], frontend: Frontend) -> bool {
         types_and_symbols: args.iter().any(|it| it == "--types-and-symbols"),
         declarations: args.iter().any(|it| it == "--declarations"),
         traces: args.iter().any(|it| it == "--traces"),
-        threads: number("threads").unwrap_or(8),
+        threads: number("threads").unwrap_or_else(|| kiln_jobs::budget(usize::MAX)),
         frontend,
         every: number("every").unwrap_or(1),
         first: number("first").unwrap_or(0),

@@ -21,6 +21,7 @@ kiln-native-runtime = { workspace = true }
 kiln-native-toolchain = { workspace = true }
 kiln-frontend-oxc = { workspace = true }
 parking_lot = { workspace = true }
+kiln-jobs = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

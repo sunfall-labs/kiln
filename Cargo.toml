@@ -25,6 +25,7 @@ kiln-data-formats = { path = "crates/foundation/kiln-data-formats" }
 kiln-date-core = { path = "crates/foundation/kiln-date-core" }
 kiln-db = { path = "crates/compile/kiln-db" }
 kiln-digest = { path = "crates/foundation/kiln-digest" }
+kiln-jobs = { path = "crates/foundation/kiln-jobs" }
 kiln-hir = { path = "crates/syntax/kiln-hir" }
 kiln-host-abi = { path = "crates/foundation/kiln-host-abi" }
 kiln-host-gui = { path = "crates/host/kiln-host-gui" }

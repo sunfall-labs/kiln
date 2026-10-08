@@ -16,6 +16,7 @@ bitflags.workspace = true
 rustc-hash.workspace = true
 smallvec.workspace = true
 memchr.workspace = true
+kiln-jobs.workspace = true
 rayon.workspace = true
 libc.workspace = true
 serde_json.workspace = true

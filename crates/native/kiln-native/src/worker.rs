@@ -8,37 +8,10 @@ const MAX_EMIT_THREADS: usize = 4;
 fn emit_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
     POOL.get_or_init(|| {
-        let cores =
-            std::thread::available_parallelism().map_or(MAX_EMIT_THREADS, |cores| cores.get());
-        let kiln_jobs = std::env::var("KILN_JOBS").ok();
-        let rayon_threads = std::env::var("RAYON_NUM_THREADS").ok();
-        let threads = bounded_threads(
-            MAX_EMIT_THREADS,
-            cores,
-            [kiln_jobs.as_deref(), rayon_threads.as_deref()],
-        );
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .thread_name(|index| format!("kiln-native-emit-{index}"))
-            .build()
-            .ok()
+        let threads = kiln_jobs::budget(MAX_EMIT_THREADS);
+        kiln_jobs::pool("kiln-native-emit", threads, None)
     })
     .as_ref()
-}
-
-/// Bound this private pool by its own ceiling, the available CPU count, and any positive caller
-/// limits. This is a per-pool limit, not a process-wide CPU guarantee.
-fn bounded_threads(max_threads: usize, cores: usize, requested: [Option<&str>; 2]) -> usize {
-    let mut threads = max_threads.max(1).min(cores.max(1));
-    for count in requested
-        .into_iter()
-        .flatten()
-        .filter_map(|value| value.parse::<usize>().ok())
-        .filter(|count| *count > 0)
-    {
-        threads = threads.min(count);
-    }
-    threads
 }
 
 pub(crate) fn run_worker<T>(
@@ -174,32 +147,6 @@ pub(crate) fn decode_run_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn emit_pool_honors_positive_caller_limits() {
-        assert_eq!(bounded_threads(MAX_EMIT_THREADS, 32, [None, None]), 4);
-        assert_eq!(bounded_threads(MAX_EMIT_THREADS, 2, [Some("16"), None]), 2);
-        assert_eq!(
-            bounded_threads(MAX_EMIT_THREADS, 32, [Some("16"), Some("1")]),
-            1
-        );
-        assert_eq!(
-            bounded_threads(MAX_EMIT_THREADS, 32, [Some("2"), Some("3")]),
-            2
-        );
-    }
-
-    #[test]
-    fn emit_pool_ignores_invalid_and_nonpositive_limits() {
-        for value in [Some("0"), Some("-1"), Some("nope")] {
-            assert_eq!(bounded_threads(MAX_EMIT_THREADS, 32, [value, None]), 4);
-        }
-        assert_eq!(bounded_threads(MAX_EMIT_THREADS, 0, [None, None]), 1);
-        assert_eq!(
-            bounded_threads(MAX_EMIT_THREADS, 32, [Some("9999"), None]),
-            4
-        );
-    }
 
     #[test]
     fn empty_and_single_item_emission_stay_ordered_and_catch_panics() {

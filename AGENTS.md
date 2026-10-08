@@ -176,9 +176,11 @@ participate in the production C emitter fingerprint; editing a fixture does not 
 native artifacts. These are compilation caches, not cached test verdicts.
 Four CLI HTTP execution/build fixtures likewise reuse artifacts under
 `target/kiln-cli-native-semantic-cache`, while keeping fresh project directories and executing the
-programs on every run. Explicit cache miss/hit tests retain private caches. Source-read and native
-emission pools respect positive `KILN_JOBS` and `RAYON_NUM_THREADS` limits in addition to their
-own caps; those are per-pool bounds, not a global limit on concurrent processes.
+programs on every run. Explicit cache miss/hit tests retain private caches. Every worker pool
+(source reads and parses, module parse and IR, CommonJS payloads, the source checker, native
+emission) is a named rayon pool sized by `kiln-jobs`: the CPUs, its own cap, and any positive
+`KILN_JOBS` or `RAYON_NUM_THREADS`; those are per-pool bounds, not a global limit on concurrent
+processes. A new pool uses `kiln_jobs::budget` and `kiln_jobs::pool` rather than its own copy.
 The test profile optimizes IR, graph and C emission passes at level 1 while retaining debug
 assertions and overflow checks; ordinary dev builds keep their existing settings.
 The cache suite keeps its full stress repetition and contributes to the same workspace totals;

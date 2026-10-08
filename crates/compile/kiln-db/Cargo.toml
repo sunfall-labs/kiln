@@ -13,6 +13,8 @@ ahash = { workspace = true }
 kiln-digest = { workspace = true }
 kiln-hir = { workspace = true }
 kiln-ir = { workspace = true }
+kiln-jobs = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 
 # A dev-dependency compiles only for this crate's own tests, so the property-based memoization
