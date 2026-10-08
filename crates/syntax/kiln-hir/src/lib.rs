@@ -266,6 +266,8 @@ pub enum TypeAnnotation {
     Void,
     Any,
     Other,
+    /// Declared `T[]`, `ReadonlyArray<T>` or a tuple; a guess, guarded at use.
+    Array,
 }
 
 impl TypeAnnotation {

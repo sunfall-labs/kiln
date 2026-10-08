@@ -80,6 +80,7 @@ PROGRAMS = [
     ("object-literal", "bench/non-io/object-literal"),
     ("string-ops", "bench/non-io/string-ops"),
     ("array-functional", "bench/non-io/array-functional"),
+    ("array-param", "bench/non-io/array-param"),
 ]
 if only:
     PROGRAMS = [p for p in PROGRAMS if p[0] in only]

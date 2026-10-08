@@ -1901,6 +1901,17 @@ fn object_profile_selects_only_simple_array_parameter_receivers() {
         crate::graph::candidate_array_parameters_with_profile(&graph, &proto, None, &program)
             .is_empty()
     );
+    // The checker's array fact nominates the slot without a profile, and names itself.
+    let mut declared = proto.clone();
+    declared.type_annotations = Some(kiln_ir::TypeAnnotations {
+        source_types: None,
+        parameters: vec![Some(kiln_ir::TypeAnnotation::Array)],
+        return_type: None,
+    });
+    assert_eq!(
+        crate::graph::candidate_array_parameters_with_evidence(&graph, &declared, None, &program),
+        vec![(0, crate::graph::ArrayEvidence::Annotation)]
+    );
 
     let reassigned = make_proto(
         1,

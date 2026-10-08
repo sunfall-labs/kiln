@@ -811,6 +811,36 @@ fn relative_paths_resolve_imports_and_preserve_source_fact_paths() {
 }
 
 #[test]
+fn parameter_facts_classify_boolean_array_and_tuple() {
+    let result = check_sources(&[(
+        "main.ts",
+        "export function f(a: boolean, b: number[], c: ReadonlyArray<string>, d: [number, number], e: true, g: boolean | undefined, h: {x: number}) { return 0; }",
+    )]);
+    assert_complete(&result);
+    let classes: Vec<(String, TypeClass)> = result
+        .types
+        .iter()
+        .filter(|ty| ty.path == "main.ts" && ty.role == TypeRole::Parameter)
+        .map(|ty| (ty.display.clone(), ty.class.clone()))
+        .collect();
+    let class_of = |display: &str| {
+        classes
+            .iter()
+            .find(|(d, _)| d == display)
+            .unwrap_or_else(|| panic!("no parameter shown as {display}: {classes:?}"))
+            .1
+            .clone()
+    };
+    assert_eq!(class_of("boolean"), TypeClass::Boolean);
+    assert_eq!(class_of("true"), TypeClass::Boolean);
+    assert_eq!(class_of("number[]"), TypeClass::Array);
+    assert_eq!(class_of("readonly string[]"), TypeClass::Array);
+    assert_eq!(class_of("[number, number]"), TypeClass::Tuple);
+    assert_eq!(class_of("{ x: number; }"), TypeClass::Composite);
+    assert_eq!(class_of("boolean | undefined"), TypeClass::Composite);
+}
+
+#[test]
 fn duplicate_canonical_module_paths_are_incomplete() {
     let result = check_sources(&[
         ("main.ts", "const first: number = 1;"),

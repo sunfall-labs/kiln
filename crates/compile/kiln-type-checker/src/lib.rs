@@ -23,7 +23,7 @@ pub use snapshot::{
     SourceType, TypeClass, TypeRole, check, project_roots,
 };
 /// Cache identity for the checker algorithms and owned-syntax adapter.
-pub const CHECKER_VERSION: &str = "bun-43a42a836b/kiln-owned-v6";
+pub const CHECKER_VERSION: &str = "bun-43a42a836b/kiln-owned-v7";
 
 #[cfg(test)]
 mod tests;

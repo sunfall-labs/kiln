@@ -5,7 +5,7 @@ use super::{EntryKind, Site, Speculation, this_site_count, typed_signature};
 use crate::direct::{CallPlan, direct_callable};
 use crate::graph::{
     BasicBlock, BlockId, Effects, FunctionGraph, FunctionTypeProfile, GraphOp, InductionVariable,
-    Proven, Terminator, ValueId, array_slots, candidate_array_parameters_with_profile,
+    Proven, Terminator, ValueId, array_slots, candidate_array_parameters_with_evidence,
     candidate_number_parameters_with_evidence, find_induction_variables,
     proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
@@ -2835,7 +2835,7 @@ fn trace_speculation(
     plan: &CallPlan,
     versioned: bool,
     number_params: &[(usize, crate::graph::NumberEvidence)],
-    array_params: &[usize],
+    array_params: &[(usize, crate::graph::ArrayEvidence)],
     upvalue_arrays: usize,
     calls: usize,
     fields: usize,
@@ -2867,8 +2867,8 @@ fn trace_speculation(
     for (slot, evidence) in number_params {
         write!(line, " number_param[{slot}]={}", evidence.label()).unwrap();
     }
-    for slot in array_params {
-        write!(line, " array_param[{slot}]=profile").unwrap();
+    for (slot, evidence) in array_params {
+        write!(line, " array_param[{slot}]={}", evidence.label()).unwrap();
     }
     if upvalue_arrays > 0 {
         write!(
@@ -2947,8 +2947,12 @@ fn emit_blocks(
         .iter()
         .map(|(slot, _)| *slot)
         .collect();
-    let candidate_array_params =
-        candidate_array_parameters_with_profile(graph, proto, func_profile, program);
+    let candidate_array_params_evidence =
+        candidate_array_parameters_with_evidence(graph, proto, func_profile, program);
+    let candidate_array_params: Vec<usize> = candidate_array_params_evidence
+        .iter()
+        .map(|(slot, _)| *slot)
+        .collect();
     let speculate_enabled = plan.speculate.unwrap_or(true);
     let suspends = graph
         .blocks
@@ -3073,7 +3077,7 @@ fn emit_blocks(
             plan,
             versioning,
             &candidate_params_evidence,
-            &candidate_array_params,
+            &candidate_array_params_evidence,
             upvalue_arrays,
             spec_calls.len(),
             spec_fields.len(),
@@ -3226,6 +3230,8 @@ fn emit_blocks(
                 "(argc > {slot} && KILN_VAL_IS_DOUBLE(args[{slot}]))"
             ));
         }
+        // A value that is both the slot's initial value and a read of it is declared once.
+        let mut declared_param_arrays: HashSet<ValueId> = HashSet::new();
         for &slot in &candidate_array_params {
             let invariant = lookup_speculation_invariant("parameter_array");
             writeln!(
@@ -3242,7 +3248,9 @@ fn emit_blocks(
                 "    const kiln_array *kiln_param_{slot}_arr = (argc > {slot}) ? (const kiln_array *)KILN_VAL_PTR(args[{slot}]) : NULL; (void)kiln_param_{slot}_arr;"
             )
             .unwrap();
-            if let Some(&initial) = graph.initial_locals.get(slot) {
+            if let Some(&initial) = graph.initial_locals.get(slot)
+                && declared_param_arrays.insert(initial)
+            {
                 writeln!(
                     output,
                     "    const kiln_array *kiln_spec_{v}_arr = kiln_param_{slot}_arr; (void)kiln_spec_{v}_arr;",
@@ -3251,7 +3259,9 @@ fn emit_blocks(
                 .unwrap();
             }
             for (vid, op) in &ops {
-                if matches!(op, GraphOp::LoadLocal(load_slot) if *load_slot as usize == slot) {
+                if matches!(op, GraphOp::LoadLocal(load_slot) if *load_slot as usize == slot)
+                    && declared_param_arrays.insert(*vid)
+                {
                     writeln!(
                         output,
                         "    const kiln_array *kiln_spec_{v}_arr = kiln_param_{slot}_arr; (void)kiln_spec_{v}_arr;",

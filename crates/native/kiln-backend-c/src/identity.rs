@@ -640,6 +640,7 @@ pub(super) fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
                     Some(kiln_ir::TypeAnnotation::Void) => 5,
                     Some(kiln_ir::TypeAnnotation::Any) => 6,
                     Some(kiln_ir::TypeAnnotation::Other) => 7,
+                    Some(kiln_ir::TypeAnnotation::Array) => 8,
                 },
             );
         }

@@ -1081,7 +1081,7 @@ fn export_type(
         TypeClass::Number
     } else if checker.is_string_like(ty) {
         TypeClass::String
-    } else if checker.is_boolean_like(ty) {
+    } else if checker.is_boolean(ty) || checker.is_boolean_like(ty) {
         TypeClass::Boolean
     } else if checker.is_bigint_like(ty) {
         TypeClass::BigInt
@@ -1089,6 +1089,10 @@ fn export_type(
         TypeClass::Symbol
     } else if checker.is_nullish(ty) {
         TypeClass::Nullish
+    } else if checker.is_array(ty) {
+        TypeClass::Array
+    } else if checker.is_tuple(ty) {
+        TypeClass::Tuple
     } else if display == "unknown" {
         TypeClass::Unknown
     } else {

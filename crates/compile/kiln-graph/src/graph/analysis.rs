@@ -744,23 +744,60 @@ pub fn candidate_array_parameters_with_profile(
     profile: Option<&FunctionTypeProfile>,
     program: &Program,
 ) -> Vec<usize> {
+    candidate_array_parameters_with_evidence(graph, proto, profile, program)
+        .into_iter()
+        .map(|(slot, _)| slot)
+        .collect()
+}
+
+/// Why a parameter is speculated to be an array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrayEvidence {
+    /// The checker declared an array or tuple type (`FunctionProto::type_annotations`).
+    Annotation,
+    /// A type profile observed an object at this slot.
+    Profile,
+}
+
+impl ArrayEvidence {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Annotation => "annotation",
+            Self::Profile => "profile",
+        }
+    }
+}
+
+/// As [`candidate_array_parameters_with_profile`], naming the evidence: the checker's array
+/// fact first, then the profile. Either way the emitted entry guard checks the Array kind.
+pub fn candidate_array_parameters_with_evidence(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    profile: Option<&FunctionTypeProfile>,
+    program: &Program,
+) -> Vec<(usize, ArrayEvidence)> {
     if proto.parameter_count == 0
         || proto.generator
         || proto.asynchronous
         || proto.mapped_arguments
         || proto.declared_length != proto.parameter_count
         || proto.prologue_end != 0
-        || profile.is_none()
     {
         return Vec::new();
     }
-    let profile = profile.expect("checked above");
     let mut candidates = Vec::new();
-    for (slot, tag) in profile.parameters.iter().enumerate() {
-        if slot >= proto.parameter_count as usize
-            || tag != "object"
-            || graph.initial_locals.get(slot).is_none()
+    for slot in 0..proto.parameter_count as usize {
+        let evidence = if proto.parameter_type(slot) == Some(kiln_ir::TypeAnnotation::Array) {
+            ArrayEvidence::Annotation
+        } else if profile
+            .and_then(|p| p.parameters.get(slot))
+            .is_some_and(|tag| tag == "object")
         {
+            ArrayEvidence::Profile
+        } else {
+            continue;
+        };
+        if graph.initial_locals.get(slot).is_none() {
             continue;
         }
         let assigned = graph.blocks.iter().any(|block| {
@@ -795,7 +832,7 @@ pub fn candidate_array_parameters_with_profile(
             })
         });
         if uses_array_tier {
-            candidates.push(slot);
+            candidates.push((slot, evidence));
         }
     }
     candidates

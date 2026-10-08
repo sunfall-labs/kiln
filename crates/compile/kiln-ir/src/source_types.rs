@@ -19,6 +19,7 @@ fn coarse(class: &TypeClass) -> Option<TypeAnnotation> {
         TypeClass::Number => Some(TypeAnnotation::Number),
         TypeClass::Boolean => Some(TypeAnnotation::Boolean),
         TypeClass::String => Some(TypeAnnotation::String),
+        TypeClass::Array | TypeClass::Tuple => Some(TypeAnnotation::Array),
         _ => None,
     }
 }

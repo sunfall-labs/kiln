@@ -13,6 +13,10 @@ pub enum TypeClass {
     BigInt,
     Symbol,
     Nullish,
+    /// `T[]` or `ReadonlyArray<T>`: a JavaScript array at run time (if the type is true).
+    Array,
+    /// A tuple type; also a JavaScript array at run time.
+    Tuple,
     Any,
     Unknown,
     Composite,
