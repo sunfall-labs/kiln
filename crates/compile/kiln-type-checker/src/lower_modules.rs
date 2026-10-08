@@ -546,7 +546,27 @@ impl Lower<'_, '_> {
                     s.span == e.statement_span
                         && matches!(s.kind, k::StatementKind::ExportDefault(_))
                 });
-                if declared || class || in_body {
+                // `export function f() {}`, `export const x = 1`: the statement in the body
+                // carries the flag (`inline_export_flags`).
+                let inline = body[at..]
+                    .iter()
+                    .take_while(|s| s.span.start < e.statement_span.end)
+                    .any(|s| {
+                        inside(s.span)
+                            && match &s.kind {
+                                k::StatementKind::Variable { .. } => self
+                                    .inline_export_flags(s.span, false)
+                                    .contains(b::Flags::EXPORT),
+                                k::StatementKind::Function(function) => {
+                                    (function.name.as_deref())
+                                        .is_some_and(|name| name != k::DEFAULT_EXPORT_LOCAL)
+                                        && (self.inline_export_flags(s.span, true))
+                                            .contains(b::Flags::EXPORT)
+                                }
+                                _ => false,
+                            }
+                    });
+                if declared || class || in_body || inline {
                     continue;
                 }
             }

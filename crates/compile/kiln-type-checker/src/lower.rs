@@ -22,6 +22,9 @@ pub(crate) struct Lower<'a, 's> {
     /// as TypeScript emits it, with a `this.x = x` statement of the parameter's span in the body;
     /// the checker reads the parameter, and that statement is not in the source.
     pub(super) parameter_properties: rustc_hash::FxHashSet<k::Span>,
+    /// The spans of the module's top-level statements, which alone can be exported inline; see
+    /// `Lower::inline_export_flags`.
+    pub(super) top_level: rustc_hash::FxHashSet<k::Span>,
     /// The binding patterns already given to a pattern node; see `Lower::pattern_span`.
     pub(super) used_patterns: rustc_hash::FxHashSet<u32>,
     /// The `import x = ...` declarations lowered so far, by start.
@@ -180,7 +183,15 @@ impl<'a, 's> Lower<'a, 's> {
             .filter(|member| member.kind == k::TypeClassMemberKind::ParameterProperty)
             .map(|member| member.span)
             .collect();
+        let top_level = match module.source_kind {
+            k::SourceKind::JavaScript | k::SourceKind::Jsx => &module.body,
+            k::SourceKind::TypeScript | k::SourceKind::Tsx => &module.type_syntax.body,
+        }
+        .iter()
+        .map(|statement| statement.span)
+        .collect();
         Self {
+            top_level,
             parameter_properties,
             used_patterns: rustc_hash::FxHashSet::default(),
             file,

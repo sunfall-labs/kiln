@@ -114,6 +114,24 @@ impl<'a, 's> Lower<'a, 's> {
         }
     }
 
+    /// `export` or `export default` written on the top-level declaration at `span`, which the
+    /// module record otherwise describes as a separate `export { name }`.
+    pub(super) fn inline_export_flags(&self, span: k::Span, can_be_default: bool) -> b::Flags {
+        let syntax = &self.module.type_syntax;
+        if !self.top_level.contains(&span) {
+            return b::Flags::empty();
+        }
+        // The statement can start at `export`, and the declaration at its keyword.
+        let covers = |declared: &k::Span| declared.end == span.end && declared.start >= span.start;
+        if can_be_default && syntax.default_exported_declarations.iter().any(covers) {
+            b::Flags::EXPORT | b::Flags::DEFAULT
+        } else if syntax.exported_declarations.iter().any(covers) {
+            b::Flags::EXPORT
+        } else {
+            b::Flags::empty()
+        }
+    }
+
     /// Whether `span` is inside the body of a `declare namespace`, `declare module` or
     /// `declare global`, where the parser sets `NodeFlagsAmbient` on every node.
     pub(super) fn in_ambient_declaration(&self, span: k::Span) -> bool {
@@ -910,8 +928,18 @@ impl<'a, 's> Lower<'a, 's> {
                         let obj = self.expr(object);
                         let atom = self.atom_units(name);
                         // `a.b++` ends with its operator.
-                        let end = self.update_operand(span, *prefix).1;
-                        let name_pos = end.saturating_sub(name.len() as u32);
+                        // The name is the last thing of the member, before any `)` around it.
+                        let source = self.module.source.as_bytes();
+                        let written = name.to_lossy_string();
+                        let limit = self.update_operand(span, *prefix).1;
+                        let within = (source.get(object.span.end as usize..limit as usize))
+                            .unwrap_or_default();
+                        let name_pos = (within.windows(written.len().max(1)))
+                            .rposition(|it| it == written.as_bytes())
+                            .map_or(limit.saturating_sub(written.len() as u32), |at| {
+                                object.span.end + at as u32
+                            });
+                        let end = name_pos + written.len() as u32;
                         self.file.expr(
                             b::ExprKind::Dot {
                                 obj,
@@ -1638,14 +1666,30 @@ impl<'a, 's> Lower<'a, 's> {
             }
             S::Expression(expr) => b::StmtKind::Expr(self.expr(expr)),
             S::Variable { kind, declarations } => {
-                let flags = self.namespace_export_flag(statement.span);
+                let mut flags = self.namespace_export_flag(statement.span)
+                    | self.inline_export_flags(statement.span, false);
+                // `NodeFlagsAmbient`, inside a declared namespace or module.
+                if self.in_ambient_declaration(statement.span) {
+                    flags |= b::Flags::AMBIENT;
+                }
                 let vars = self.variable_decls(*kind, declarations, flags);
                 b::StmtKind::Var(vars)
             }
             S::Function(function) => {
                 let func = self.function(function);
                 self.file[func].kind = b::FnKind::Decl;
-                let flags = self.namespace_export_flag(statement.span);
+                let mut flags = self.namespace_export_flag(statement.span);
+                // `export default function () {}` keeps its own export statement.
+                if function
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name != k::DEFAULT_EXPORT_LOCAL)
+                {
+                    flags |= self.inline_export_flags(statement.span, true);
+                }
+                if self.in_ambient_declaration(statement.span) {
+                    flags |= b::Flags::AMBIENT;
+                }
                 self.file[func].flags |= flags;
                 b::StmtKind::Fn(func)
             }
