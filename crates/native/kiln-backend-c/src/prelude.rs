@@ -2456,7 +2456,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
                     prototype is explicitly null",
     },
     AbsentAnswer {
-        function: "kiln_c99_prototype_store_read_with_receiver",
+        function: "kiln_c99_prototype_store_read",
         sites: 1,
         proved_by: "an accessor with no getter returns undefined by the language rule",
     },

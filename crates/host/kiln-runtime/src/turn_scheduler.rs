@@ -2537,10 +2537,20 @@ mod tests {
         let replacement_lane = first_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_ne!(original_lane, replacement_lane);
         release_tx.send(()).unwrap();
+        let completion_deadline = Instant::now() + Duration::from_secs(2);
         assert_eq!(
-            second_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            second_rx
+                .recv_timeout(completion_deadline.saturating_duration_since(Instant::now()))
+                .unwrap(),
             original_lane
         );
+        while movable.status() == TurnStatus::Active {
+            assert!(
+                Instant::now() < completion_deadline,
+                "movable turn did not complete after its Done outcome"
+            );
+            std::thread::yield_now();
+        }
         assert_eq!(blocker.status(), TurnStatus::Complete);
         assert_eq!(movable.status(), TurnStatus::Complete);
     }
