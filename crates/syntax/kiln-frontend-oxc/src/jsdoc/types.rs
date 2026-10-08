@@ -1567,7 +1567,7 @@ impl<'a> TypeParser<'a> {
                 },
                 constraint: Box::new(constraint),
                 name_type,
-                value: Box::new(value),
+                value: Some(Box::new(value)),
                 readonly,
                 optional,
             },
@@ -2029,7 +2029,7 @@ impl<'a> TypeParser<'a> {
             optional,
             readonly,
             this_parameter: None,
-            kind: TypeMemberKind::Property(ty),
+            kind: TypeMemberKind::Property(Some(ty)),
         })
     }
 
@@ -2157,7 +2157,7 @@ impl<'a> TypeParser<'a> {
                 ty,
                 optional: false,
                 rest: false,
-                has_default: false,
+                default: None,
             });
         }
         let rest = self.parse_optional(Tok::DotDotDot);
@@ -2176,11 +2176,17 @@ impl<'a> TypeParser<'a> {
             };
         let optional = self.parse_optional(Tok::Question);
         let ty = self.parse_optional_type_annotation();
-        let mut has_default = false;
+        // The initializer is never evaluated (TypeScript reports TS2371 and stops), so it stands
+        // as its span alone.
+        let mut default = None;
         if self.tok() == Tok::Eq {
             self.next_token();
+            let at = self.pos();
             self.skip_initializer();
-            has_default = true;
+            default = Some(Box::new(kiln_hir::Expression {
+                kind: kiln_hir::ExpressionKind::Identifier("undefined".to_owned()),
+                span: Span::new(at as u32, self.end().max(at) as u32),
+            }));
         }
         Some(TypeSignatureParameter {
             name,
@@ -2190,7 +2196,7 @@ impl<'a> TypeParser<'a> {
             ty,
             optional,
             rest,
-            has_default,
+            default,
         })
     }
 }
