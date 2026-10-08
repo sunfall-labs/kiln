@@ -557,9 +557,8 @@ impl super::Compiler {
     /// Returns the jump taken when there is no `return` to call, which the caller patches to
     /// wherever it lands after dealing with the result: an absent `return` leaves nothing.
     ///
-    /// Applied rather than called by name, because the language reads `return` once and a second
-    /// read would run an accessor twice. The empty argument array is also what `return` sees as
-    /// its own `arguments`, whose length one test asserts.
+    /// The language reads `return` once; a prepared call preserves that captured value and the
+    /// iterator receiver without allocating an argument array for the zero-argument invocation.
     pub(super) fn emit_iterator_return(&mut self, binding: &str, span: Span) -> usize {
         let name = self.constant_index(Constant::String("return".to_owned().into()));
         let held = format!("%closing{}", self.hidden_bindings);
@@ -574,8 +573,8 @@ impl super::Compiler {
         self.patch_jump(present);
         self.load_hidden(binding);
         self.load_hidden(&held);
-        self.code.push(Instruction::NewArray { count: 0 });
-        self.code.push(Instruction::Apply);
+        self.code
+            .push(Instruction::CallMethodPrepared { name, argc: 0 });
         absent
     }
 

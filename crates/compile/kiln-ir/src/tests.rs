@@ -2775,6 +2775,83 @@ fn iterator_steps_use_prepared_calls_without_argument_arrays() {
     )));
 }
 
+#[test]
+fn iterator_close_uses_the_saved_return_method_with_zero_arguments() {
+    fn close_loop(awaiting: bool) -> Statement {
+        let mut function = match function(
+            "close",
+            &[],
+            vec![statement(StatementKind::ForOf {
+                kind: VariableKind::Const,
+                pattern: Pattern::Identifier("value".into()),
+                iterable: identifier("iterable"),
+                body: Box::new(statement(StatementKind::Break { label: None })),
+                awaiting,
+            })],
+        ) {
+            Statement {
+                kind: StatementKind::Function(function),
+                ..
+            } => *function,
+            _ => unreachable!(),
+        };
+        function.asynchronous = awaiting;
+        statement(StatementKind::Function(Box::new(function)))
+    }
+
+    for awaiting in [false, true] {
+        let program =
+            compile(&module(vec![close_loop(awaiting)])).expect("iterator close function compiles");
+        let code = &program.functions[0].code;
+        let return_name = program
+            .constants
+            .iter()
+            .position(|constant| matches!(constant, Constant::String(name) if name == "return"))
+            .expect("close names the optional return method") as u32;
+        let reads = code
+            .iter()
+            .enumerate()
+            .filter_map(|(index, instruction)| {
+                matches!(instruction, Instruction::GetProperty(name) if *name == return_name)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let close_calls = code
+            .iter()
+            .enumerate()
+            .filter_map(|(index, instruction)| {
+                matches!(instruction, Instruction::CallMethodPrepared { name, argc: 0 } if *name == return_name)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert!(!close_calls.is_empty(), "saved return method is called");
+        assert_eq!(reads.len(), close_calls.len(), "one read per cleanup path");
+        for (path, (&read, &call)) in reads.iter().zip(&close_calls).enumerate() {
+            let end = close_calls.get(path + 1).copied().unwrap_or(code.len());
+            assert!(read < call && call < end, "capture precedes its call");
+            assert_eq!(
+                code[read..=call]
+                    .iter()
+                    .filter(|instruction| {
+                        matches!(instruction, Instruction::GetProperty(name) if *name == return_name)
+                    })
+                    .count(),
+                1,
+                "return is read once along this cleanup path"
+            );
+            assert!(
+                !code[read..=call].iter().any(|instruction| {
+                    matches!(
+                        instruction,
+                        Instruction::NewArray { count: 0 } | Instruction::Apply
+                    )
+                }),
+                "the saved zero-argument method call needs no argument array"
+            );
+        }
+    }
+}
+
 /// `let [o.p] = xs` is a syntax error, and the parser says so first -- but nothing in the
 /// HIR shape prevents a frontend from building it, so the walk refuses it rather than
 /// storing through a reference in a position that only ever declares names.
