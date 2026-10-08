@@ -10,16 +10,17 @@ use std::sync::Arc;
 pub mod source_types;
 pub mod type_syntax;
 pub use type_syntax::{
-    BindingIdentifierSite, EnumMember, EnumMemberNameKind, FunctionSignatureSite,
-    Modifier as TypeModifier, TupleElement as TypeTupleElement, TypeAccessibility,
-    TypeAnnotationSite, TypeClassMemberKind, TypeClassMemberSite, TypeClassSite, TypeDeclaration,
-    TypeDeclarationKind, TypeExpr, TypeExprKind, TypeExpressionWrapperKind,
+    AmbientModuleItems, BindingIdentifierSite, EnumMember, EnumMemberNameKind,
+    FunctionSignatureSite, JsxAttributeSite, JsxChildSite, JsxSite, Modifier as TypeModifier,
+    NameSite, TupleElement as TypeTupleElement, TypeAccessibility, TypeAnnotationSite,
+    TypeClassMemberKind, TypeClassMemberSite, TypeClassSite, TypeDeclaration, TypeDeclarationKind,
+    TypeExportAssignment, TypeExpr, TypeExprKind, TypeExpressionWrapperKind,
     TypeExpressionWrapperSite, TypeImportEquals, TypeImportEqualsReference, TypeInstantiationKind,
     TypeInstantiationSite, TypeKeyword, TypeLiteral, TypeMember, TypeMemberKind,
     TypeModuleAttribute, TypeModuleAttributeKeyKind, TypeModuleAttributes,
-    TypeModuleAttributesKeyword, TypeOperator, TypeParameter, TypeReferenceDirective,
-    TypeReferenceKind, TypeResolutionMode, TypeSignature, TypeSignatureParameter, TypeSite,
-    TypeSyntax,
+    TypeModuleAttributesKeyword, TypeNamespaceExport, TypeOperator, TypeParameter,
+    TypeReferenceDirective, TypeReferenceKind, TypeResolutionMode, TypeSignature,
+    TypeSignatureParameter, TypeSite, TypeSyntax,
 };
 
 pub use kiln_string::StringUnits;

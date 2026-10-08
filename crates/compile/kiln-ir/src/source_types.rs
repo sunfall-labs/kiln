@@ -31,7 +31,7 @@ pub fn apply_source_types(
     checker_identity: &str,
     program: &mut Program,
 ) {
-    if !checked.complete {
+    if !checked.is_complete_for(path) {
         return;
     }
     // Index this module once. Large projects carry facts for many imported modules;

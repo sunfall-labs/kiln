@@ -15,13 +15,28 @@ impl<'a, 's> Lower<'a, 's> {
         b::TypeNodeId,
         bool,
     ) {
-        let signature = self
-            .module
-            .type_syntax
-            .signatures
+        let sites = &self.module.type_syntax.signatures;
+        // The executable function of a method or an accessor spans the whole definition
+        // (`m<T>(this: X) {}`, `get p() {}`, after `static`), because `toString` answers what was
+        // written. Its signature site spans Oxc's function node, which starts at `<` or `(`. Both
+        // end at the body's `}`, and no function nested in that body can end there too.
+        let candidates = self
+            .signatures_by_end
+            .get(&function.span.end)
+            .map(|list| list.as_slice())
+            .unwrap_or_default();
+        let signature = candidates
             .iter()
+            .map(|&i| &sites[i as usize])
             .find(|site| site.owner_span == function.span)
-            .map(|site| site.clone());
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .map(|&i| &sites[i as usize])
+                    .filter(|site| site.owner_span.start > function.span.start)
+                    .min_by_key(|site| site.owner_span.start)
+            })
+            .cloned();
         let (type_params, signature) = if let Some(site) = signature {
             (
                 self.type_parameters(&site.signature.type_parameters),
@@ -115,23 +130,37 @@ impl<'a, 's> Lower<'a, 's> {
 
     pub(super) fn call_type_arguments(&mut self, span: k::Span) -> b::IdList<b::TypeNodeId> {
         let args = self
-            .module
-            .type_syntax
-            .instantiations
-            .iter()
-            .find(|site| site.owner_span == span)
-            .map(|site| site.arguments.clone())
+            .instantiations_by_owner
+            .get(&span)
+            .map(|&i| {
+                self.module.type_syntax.instantiations[i as usize]
+                    .arguments
+                    .clone()
+            })
             .unwrap_or_default();
         self.ty_list(&args)
     }
 
     pub(super) fn declaration_at(&mut self, span: k::Span) -> Option<b::StmtId> {
+        let declarations = &self.module.type_syntax.declarations;
         let declaration = self
-            .module
-            .type_syntax
-            .declarations
-            .iter()
-            .find(|d| d.span == span && !matches!(d.kind, k::TypeDeclarationKind::Import))
+            .declarations_by_span
+            .get(&span)
+            .and_then(|list| list.first())
+            .map(|&i| &declarations[i as usize])
+            .or_else(|| {
+                // `export namespace N {}` / `export enum E {}`: executable lowering keeps these as
+                // one statement spanning the `export`, so no marker carries the declaration's
+                // own span. The declaration is the exported one ending where the statement does;
+                // `export namespace A.B {}` nests `B` with the same end, but only `A` is exported.
+                self.exported_declarations_by_end
+                    .get(&span.end)
+                    .into_iter()
+                    .flatten()
+                    .map(|&i| &declarations[i as usize])
+                    .filter(|d| d.span.start > span.start)
+                    .min_by_key(|d| d.span.start)
+            })
             .cloned()?;
         if matches!(declaration.kind, k::TypeDeclarationKind::Class) {
             return self.class_declaration_at(span);
@@ -158,7 +187,7 @@ impl<'a, 's> Lower<'a, 's> {
                         flags |= b::Flags::EXPORT;
                     }
                     if declaration.default_exported {
-                        flags |= b::Flags::DEFAULT;
+                        flags |= b::Flags::EXPORT | b::Flags::DEFAULT;
                     }
                     if declaration.const_ {
                         flags |= b::Flags::CONST;
@@ -188,7 +217,7 @@ impl<'a, 's> Lower<'a, 's> {
             flags |= b::Flags::EXPORT;
         }
         if declaration.default_exported {
-            flags |= b::Flags::DEFAULT;
+            flags |= b::Flags::EXPORT | b::Flags::DEFAULT;
         }
         if declaration.const_ {
             flags |= b::Flags::CONST;
@@ -199,7 +228,7 @@ impl<'a, 's> Lower<'a, 's> {
                 let ty = self.ty(ty);
                 b::StmtKind::TypeAlias(self.file.add_alias(b::Alias {
                     name,
-                    name_pos: declaration.span.start,
+                    name_pos: self.name_pos(declaration.span, declaration.name.as_deref()),
                     flags,
                     type_params,
                     ty,
@@ -212,7 +241,7 @@ impl<'a, 's> Lower<'a, 's> {
                 let members = self.members(&declaration.members);
                 b::StmtKind::Interface(self.file.add_interface(b::Interface {
                     name,
-                    name_pos: declaration.span.start,
+                    name_pos: self.name_pos(declaration.span, declaration.name.as_deref()),
                     flags,
                     type_params,
                     extends,
@@ -244,7 +273,7 @@ impl<'a, 's> Lower<'a, 's> {
                 let members = self.file.add_enum_members(&members);
                 b::StmtKind::Enum(self.file.add_enum(b::Enum {
                     name,
-                    name_pos: declaration.span.start,
+                    name_pos: self.name_pos(declaration.span, declaration.name.as_deref()),
                     flags,
                     members,
                     stmt: b::StmtId::NONE,
@@ -286,6 +315,23 @@ impl<'a, 's> Lower<'a, 's> {
                             .collect::<Vec<_>>(),
                     );
                 }
+                // `export { a as b }` / `import x = require("m")` in the block: executable HIR
+                // drops them, so a block holding only these has an empty `declaration.body`.
+                // Merge them after the rebuild above, which would otherwise discard them (and
+                // leave the namespace looking uninstantiated with no `b` in its exports).
+                let items = self.ambient_module_items(declaration.span);
+                if !items.is_empty() {
+                    let mut all: Vec<(u32, b::StmtId)> = self
+                        .file
+                        .ids::<b::StmtId>(body)
+                        .map(|stmt| (self.file[stmt].start, stmt))
+                        .collect();
+                    all.extend(items);
+                    all.sort_by_key(|(pos, _)| *pos);
+                    body = self
+                        .file
+                        .list(&all.into_iter().map(|(_, stmt)| stmt).collect::<Vec<_>>());
+                }
                 let module_name = if declaration.global || name.is_none() {
                     b::ModuleName::Global
                 } else {
@@ -293,38 +339,50 @@ impl<'a, 's> Lower<'a, 's> {
                 };
                 let module = self.file.add_module(b::Module {
                     name: module_name,
-                    name_pos: declaration.span.start,
+                    name_pos: self.name_pos(declaration.span, declaration.name.as_deref()),
                     flags,
                     body,
                     has_body: true,
-                    specifies_module: declaration.source_text.trim_start().starts_with("module "),
+                    specifies_module: self.namespace_specifies_module(declaration),
                     stmt: b::StmtId::NONE,
                 });
                 b::StmtKind::Module(module)
             }
             k::TypeDeclarationKind::Module => {
-                let body = if declaration.body.is_empty() {
+                let mut items: Vec<(u32, b::StmtId)> = (declaration.body.iter())
+                    .map(|statement| (statement.span.start, self.statement(statement)))
+                    .collect();
+                if !declaration.global {
+                    // `import`/`export` in the body: executable HIR drops them.
+                    items.extend(self.ambient_module_items(declaration.span));
+                    items.sort_by_key(|(pos, _)| *pos);
+                }
+                // `declare module "m";` (shorthand, every import `any`) has no block; `{}` and a
+                // block of only imports/exports do.
+                let has_body =
+                    !items.is_empty() || declaration.source_text.trim_end().ends_with('}');
+                let body = if items.is_empty() {
                     b::IdList::EMPTY
                 } else {
-                    self.statements(&declaration.body)
+                    let ids: Vec<_> = items.into_iter().map(|(_, stmt)| stmt).collect();
+                    self.file.list(&ids)
                 };
                 let module_name = if declaration.global {
                     b::ModuleName::Global
                 } else {
-                    let text = declaration.name.as_deref().unwrap_or("");
-                    if text.starts_with('"') || text.starts_with('\'') {
-                        b::ModuleName::String(self.atom(text.trim_matches(['"', '\''])))
-                    } else {
-                        b::ModuleName::Ident(self.atom(text))
-                    }
+                    // `declare module "m"`: the frontend records the string's value. A module
+                    // with an identifier name is a `Namespace`.
+                    b::ModuleName::String(self.atom(declaration.name.as_deref().unwrap_or("")))
                 };
                 let module = self.file.add_module(b::Module {
                     name: module_name,
-                    name_pos: declaration.span.start,
+                    name_pos: self.name_pos(declaration.span, declaration.name.as_deref()),
                     flags,
                     body,
-                    has_body: !declaration.body.is_empty(),
-                    specifies_module: true,
+                    has_body,
+                    // `ModuleDeclaration.Keyword` only matters for an identifier name: a string
+                    // name or `global` never reports 1540, whatever keyword precedes it.
+                    specifies_module: false,
                     stmt: b::StmtId::NONE,
                 });
                 b::StmtKind::Module(module)
@@ -343,8 +401,11 @@ impl<'a, 's> Lower<'a, 's> {
                 };
                 let function = self.signature(&site.signature, b::FnKind::FunctionType);
                 self.file[function].kind = b::FnKind::Decl;
+                // `declare function`: the parser's `NodeFlagsAmbient` is on the declaration itself.
+                self.file[function].flags |= flags;
                 self.file[function].name = name;
-                self.file[function].name_pos = declaration.span.start;
+                self.file[function].name_pos =
+                    self.name_pos(declaration.span, declaration.name.as_deref());
                 b::StmtKind::Fn(function)
             }
             _ => {
@@ -529,16 +590,17 @@ impl<'a, 's> Lower<'a, 's> {
                 is_typeof,
                 options,
             } => {
-                let name = self.name(qualifier, t.span.start);
-                let args = self.ty_list(arguments);
-                let (mode, attributes) = self.import_type_attributes(options.as_deref());
-                let spec = self.atom(specifier);
                 let spec_pos = self
                     .module
                     .source
                     .get(t.span.start as usize..t.span.end as usize)
                     .and_then(|source| source.find(['\'', '"']))
                     .map_or(t.span.start, |offset| t.span.start + offset as u32);
+                // The qualifier follows the specifier's string, which may contain its text.
+                let name = self.name(qualifier, spec_pos + specifier.len() as u32 + 2);
+                let args = self.ty_list(arguments);
+                let (mode, attributes) = self.import_type_attributes(options.as_deref());
+                let spec = self.atom(specifier);
                 self.file.specifier_uses.push(b::SpecifierUse {
                     spec,
                     pos: spec_pos,
@@ -786,7 +848,7 @@ impl<'a, 's> Lower<'a, 's> {
                             kind: b::FnKind::Getter,
                             flags: b::Flags::empty(),
                             name: Atom::NONE,
-                            name_pos: m.span.start,
+                            name_pos: self.name_pos(m.span, None),
                             type_params: b::Span::EMPTY,
                             params: b::Span::EMPTY,
                             this_param,
@@ -821,7 +883,7 @@ impl<'a, 's> Lower<'a, 's> {
                             kind: b::FnKind::IndexSignature,
                             flags: b::Flags::empty(),
                             name: Atom::NONE,
-                            name_pos: m.span.start,
+                            name_pos: self.name_pos(m.span, None),
                             type_params: b::Span::EMPTY,
                             params: param,
                             this_param: b::ParamId::NONE,
@@ -864,13 +926,17 @@ impl<'a, 's> Lower<'a, 's> {
                     ty,
                     init,
                     func,
-                    name_pos: m.span.start,
+                    name_pos: self.name_pos(m.span, None),
                     start: m.span.start,
                     loc: Self::loc(m.span),
                     modifiers: b::Span::EMPTY,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let mut members = members;
+        for member in &mut members {
+            member.flags |= self.literal_name_flags(member);
+        }
         self.file.add_members(&members)
     }
     pub(super) fn function(&mut self, f: &k::Function) -> b::FnId {
@@ -896,7 +962,10 @@ impl<'a, 's> Lower<'a, 's> {
             },
             flags,
             name: f.name.as_deref().map_or(Atom::NONE, |n| self.atom(n)),
-            name_pos: f.span.start,
+            name_pos: match f.name.as_deref() {
+                Some(name) => self.name_pos(f.span, Some(name)),
+                None => f.span.start,
+            },
             type_params,
             params,
             this_param,
@@ -906,6 +975,32 @@ impl<'a, 's> Lower<'a, 's> {
             start: f.span.start,
         })
     }
+    /// `node.Loc.Pos()` is the node's full start: the end of the previous token, so that the
+    /// range covers the leading trivia (where `checkJSDocComment` finds a node's JSDoc). Kiln's
+    /// spans start at the first token, which `Self::loc` records; widen each recorded range.
+    fn widen_locs_to_full_start(&mut self) {
+        use crate::engine::check::spans::skip_trivia_back;
+        let file = &mut self.file;
+        let text: &[u8] = &file.text;
+        let widen = |loc: &mut b::TextRange| {
+            if loc.end != 0 {
+                loc.pos = skip_trivia_back(text, loc.pos as usize) as u32;
+            }
+        };
+        file.stmts.iter_mut().for_each(|it| widen(&mut it.loc));
+        file.var_decls.iter_mut().for_each(|it| widen(&mut it.loc));
+        file.enum_members
+            .iter_mut()
+            .for_each(|it| widen(&mut it.loc));
+        // A node reparsed from a JSDoc tag keeps the tag's position (`scopes_of_reparsed_tag`).
+        (file.members.iter_mut())
+            .filter(|it| !it.flags.contains(b::Flags::REPARSED))
+            .for_each(|it| widen(&mut it.loc));
+        (file.params.iter_mut())
+            .filter(|it| !it.flags.contains(b::Flags::REPARSED))
+            .for_each(|it| widen(&mut it.loc));
+    }
+
     pub fn finish(
         mut self,
         arena: &'s crate::engine::session::Arena,
@@ -942,11 +1037,45 @@ impl<'a, 's> Lower<'a, 's> {
         self.file
             .import_attributes
             .sort_by_key(|attributes| attributes.0);
+        // By expression; for one expression, innermost first, the order they were found in.
+        self.file.parens.sort_by_key(|paren| paren.0.0);
+        self.file.jsx_expressions.sort_by_key(|braces| braces.0.0);
         self.file
             .specifier_uses
             .sort_by_key(|specifier| specifier.pos);
+        self.widen_locs_to_full_start();
         let (mut file, _) = self.file.into_arena(arena, session);
         file.finish_nodes();
         (file, self.unsupported)
+    }
+
+    /// `ModuleDeclaration.Keyword == KindModuleKeyword` for `module a {}`, `declare module a {}`
+    /// or `export module a {}`. The `b` of `module a.b {}` is a declaration of its own that
+    /// starts at `b`, so it takes the keyword of the outermost declaration of the chain: the
+    /// one that ends where it does.
+    fn namespace_specifies_module(&self, declaration: &k::TypeDeclaration) -> bool {
+        let outermost = self
+            .module
+            .type_syntax
+            .declarations
+            .iter()
+            .filter(|outer| {
+                matches!(outer.kind, k::TypeDeclarationKind::Namespace)
+                    && outer.span.end == declaration.span.end
+                    && outer.span.start <= declaration.span.start
+            })
+            .min_by_key(|outer| outer.span.start)
+            .unwrap_or(declaration);
+        let mut rest = outermost.source_text.trim_start();
+        for modifier in ["export", "declare"] {
+            if let Some(after) = rest.strip_prefix(modifier)
+                && after.starts_with(|c: char| c.is_whitespace())
+            {
+                rest = after.trim_start();
+            }
+        }
+        rest.strip_prefix("module").is_some_and(|after| {
+            !after.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '$')
+        })
     }
 }

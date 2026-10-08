@@ -160,6 +160,378 @@ fn read_pool() -> Option<&'static rayon::ThreadPool> {
     .as_ref()
 }
 
+/// What dependency collection reads from one module's parse. A module whose bytes have not changed
+/// requests what it requested before, so these are kept by content between invocations and the
+/// module is parsed again only when its text, its path, the parse kind or the `kiln` build differs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RequestFacts {
+    /// Specifiers with at least one type-only occurrence, in request order.
+    type_only: Vec<String>,
+    /// `Module::runtime_requested_modules`.
+    runtime: Vec<String>,
+    /// `Module::node_runtime_requests` as (specifier, captured importer).
+    node_runtime: Vec<(String, String)>,
+    /// Literal dynamic import targets.
+    dynamic: Vec<String>,
+    /// The requires a CommonJS parse reports.
+    requires: Option<Vec<String>>,
+}
+
+impl RequestFacts {
+    fn of((module, requires): Parsed) -> Self {
+        RequestFacts {
+            type_only: module
+                .requested_modules
+                .iter()
+                .filter(|requested| requested.occurrences.iter().any(|o| o.type_only))
+                .map(|requested| requested.specifier.clone())
+                .collect(),
+            runtime: module
+                .runtime_requested_modules()
+                .into_iter()
+                .map(|request| request.specifier.clone())
+                .collect(),
+            node_runtime: module
+                .node_runtime_requests
+                .iter()
+                .map(|request| (request.specifier.clone(), request.importer.clone()))
+                .collect(),
+            dynamic: kiln_ir::collect_dynamic_imports(&module.body)
+                .into_iter()
+                .filter_map(|target| match target {
+                    kiln_ir::DynamicImportTarget::Static(specifier) => Some(specifier),
+                    _ => None,
+                })
+                .collect(),
+            requires,
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!([
+            self.type_only,
+            self.runtime,
+            self.node_runtime,
+            self.dynamic,
+            self.requires,
+        ])
+    }
+
+    fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let strings = |value: &serde_json::Value| -> Option<Vec<String>> {
+            value
+                .as_array()?
+                .iter()
+                .map(|s| s.as_str().map(str::to_owned))
+                .collect()
+        };
+        let [type_only, runtime, node_runtime, dynamic, requires] = value.as_array()?.as_slice()
+        else {
+            return None;
+        };
+        Some(RequestFacts {
+            type_only: strings(type_only)?,
+            runtime: strings(runtime)?,
+            node_runtime: node_runtime
+                .as_array()?
+                .iter()
+                .map(|pair| {
+                    let pair = strings(pair)?;
+                    let [specifier, importer] = <[String; 2]>::try_from(pair).ok()?;
+                    Some((specifier, importer))
+                })
+                .collect::<Option<_>>()?,
+            dynamic: strings(dynamic)?,
+            requires: match requires {
+                serde_json::Value::Null => None,
+                requires => Some(strings(requires)?),
+            },
+        })
+    }
+}
+
+/// (path, content digest, parsed as CommonJS)
+type RequestKey = (String, String, bool);
+
+/// `kiln_frontend_oxc::discover_module_specifiers` of each `(path, text)`, in order: kept by content
+/// beside the request facts, and parsed on the parse threads when not.
+fn discover_specifiers(
+    index: &mut RequestIndex,
+    sources: &[(PathBuf, String, String)],
+) -> Vec<Vec<String>> {
+    let keys = sources
+        .iter()
+        .map(|(_, path, text)| (path.clone(), index.digest(path, text)))
+        .collect::<Vec<_>>();
+    let discover = |(_, path, text): &(PathBuf, String, String)| {
+        kiln_frontend_oxc::discover_module_specifiers(path, text)
+    };
+    let missing = (0..sources.len())
+        .filter(|&at| index.get_discovered(&keys[at]).is_none())
+        .collect::<Vec<_>>();
+    let found: Vec<Vec<String>> = match parse_pool() {
+        Some(pool) if missing.len() > 1 => pool.install(|| {
+            missing
+                .par_iter()
+                .map(|&at| discover(&sources[at]))
+                .collect()
+        }),
+        _ => missing.iter().map(|&at| discover(&sources[at])).collect(),
+    };
+    for (at, specifiers) in missing.into_iter().zip(found) {
+        index.insert_discovered(keys[at].clone(), specifiers);
+    }
+    keys.iter()
+        .map(|key| index.get_discovered(key).cloned().unwrap_or_default())
+        .collect()
+}
+
+/// [`RequestFacts`] by [`RequestKey`], stored beside the source digest index and valid only for
+/// the `kiln` build that wrote it.
+#[derive(Default)]
+struct RequestIndex {
+    identity: u64,
+    entries: HashMap<RequestKey, RequestFacts>,
+    /// Module specifiers the checker metadata capture discovers, by (path, content digest).
+    discovered: HashMap<(String, String), Vec<String>>,
+    /// Content digests by path, for this capture only; see [`RequestIndex::digest`].
+    digests: HashMap<String, String>,
+    changed: bool,
+}
+
+fn request_index_path(root: &Path) -> PathBuf {
+    root.join(".kiln").join("request-index.json")
+}
+
+impl RequestIndex {
+    fn load(root: &Path) -> Self {
+        let identity = kiln_daemon::build_identity();
+        let mut index = RequestIndex {
+            identity,
+            ..RequestIndex::default()
+        };
+        // Without a build identity, facts written by another build could be read as this one's.
+        if identity == 0 {
+            return index;
+        }
+        let Ok(text) = std::fs::read_to_string(request_index_path(root)) else {
+            return index;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return index;
+        };
+        if value["identity"].as_str() != Some(identity.to_string().as_str()) {
+            return index;
+        }
+        for entry in value["entries"].as_array().into_iter().flatten() {
+            let (Some(path), Some(digest), Some(commonjs), Some(facts)) = (
+                entry[0].as_str(),
+                entry[1].as_str(),
+                entry[2].as_bool(),
+                RequestFacts::from_json(&entry[3]),
+            ) else {
+                continue;
+            };
+            index
+                .entries
+                .insert((path.to_owned(), digest.to_owned(), commonjs), facts);
+        }
+        for entry in value["discovered"].as_array().into_iter().flatten() {
+            let (Some(path), Some(digest), Some(specifiers)) =
+                (entry[0].as_str(), entry[1].as_str(), entry[2].as_array())
+            else {
+                continue;
+            };
+            let Some(specifiers) = specifiers
+                .iter()
+                .map(|specifier| specifier.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            index
+                .discovered
+                .insert((path.to_owned(), digest.to_owned()), specifiers);
+        }
+        index
+    }
+
+    fn get_discovered(&self, key: &(String, String)) -> Option<&Vec<String>> {
+        (self.identity != 0)
+            .then(|| self.discovered.get(key))
+            .flatten()
+    }
+
+    fn insert_discovered(&mut self, key: (String, String), specifiers: Vec<String>) {
+        if self.identity == 0 {
+            return;
+        }
+        self.discovered
+            .retain(|(path, digest), _| path != &key.0 || digest == &key.1);
+        self.discovered.insert(key, specifiers);
+        self.changed = true;
+    }
+
+    fn key(&mut self, path: &str, text: &str, commonjs: bool) -> RequestKey {
+        (path.to_owned(), self.digest(path, text), commonjs)
+    }
+
+    /// `path`'s content digest. One index serves one capture, which reads each path once, so a
+    /// path's digest is computed once however many lookups name it.
+    fn digest(&mut self, path: &str, text: &str) -> String {
+        if let Some(digest) = self.digests.get(path) {
+            return digest.clone();
+        }
+        let digest = source_digest(text).to_hex();
+        self.digests.insert(path.to_owned(), digest.clone());
+        digest
+    }
+
+    fn get(&self, key: &RequestKey) -> Option<&RequestFacts> {
+        (self.identity != 0)
+            .then(|| self.entries.get(key))
+            .flatten()
+    }
+
+    fn insert(&mut self, key: RequestKey, facts: RequestFacts) {
+        if self.identity == 0 {
+            return;
+        }
+        // A path keeps only the facts of its latest bytes.
+        self.entries
+            .retain(|(path, digest, _), _| path != &key.0 || digest == &key.1);
+        self.entries.insert(key, facts);
+        self.changed = true;
+    }
+
+    /// Best-effort, like the digest index: a failed write costs a parse next time.
+    fn store(&self, root: &Path) {
+        if !self.changed {
+            return;
+        }
+        let path = request_index_path(root);
+        let Some(parent) = path.parent() else { return };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let mut entries = self.entries.iter().collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(right.0));
+        let entries = entries
+            .into_iter()
+            .map(|((path, digest, commonjs), facts)| {
+                serde_json::json!([path, digest, commonjs, facts.to_json()])
+            })
+            .collect::<Vec<_>>();
+        let mut discovered = self.discovered.iter().collect::<Vec<_>>();
+        discovered.sort_by(|left, right| left.0.cmp(right.0));
+        let discovered = discovered
+            .into_iter()
+            .map(|((path, digest), specifiers)| serde_json::json!([path, digest, specifiers]))
+            .collect::<Vec<_>>();
+        let text = serde_json::json!({
+            "identity": self.identity.to_string(),
+            "entries": entries,
+            "discovered": discovered,
+        })
+        .to_string();
+        let temporary = path.with_extension(format!("tmp.{}", std::process::id()));
+        if std::fs::write(&temporary, text).is_ok() && std::fs::rename(&temporary, &path).is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+    }
+}
+
+/// Dependency collection parses every reachable module only to learn what it requests, and the
+/// parse is most of its cost. The walk stays sequential, because its order decides which edge
+/// and which error is seen first; each module is parsed ahead on these threads as soon as its text
+/// is read, and the walk takes the result when it reaches the module. A parse runs on a stack as
+/// large as the daemon's request threads, so a source the walk could parse on the main thread is
+/// never refused here for depth.
+fn parse_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(read_threads())
+            .stack_size(kiln_daemon::SERVE_STACK_BYTES)
+            .thread_name(|index| format!("kiln-source-parse-{index}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+/// A parse with the requires a CommonJS parse reports.
+type Parsed = (kiln_hir::Module, Option<Vec<String>>);
+
+fn parse_for_requests(path: &str, text: &str, commonjs: bool) -> Parsed {
+    if commonjs {
+        let (module, requires) = kiln_frontend_oxc::parse_commonjs_with_requires(path, text);
+        (module, Some(requires))
+    } else {
+        (kiln_frontend_oxc::parse(path, text), None)
+    }
+}
+
+type ParseSlot = Option<std::thread::Result<Parsed>>;
+
+/// Parses started ahead of the walk, by path, with the module kind each one assumed.
+#[derive(Default)]
+struct ParseAhead {
+    started: HashMap<
+        PathBuf,
+        (
+            bool,
+            std::sync::Arc<(std::sync::Mutex<ParseSlot>, std::sync::Condvar)>,
+        ),
+    >,
+}
+
+impl ParseAhead {
+    fn start(&mut self, target: &Path, text: &str, commonjs: bool) {
+        let Some(pool) = parse_pool() else {
+            return;
+        };
+        let Some(path) = target.to_str() else {
+            return;
+        };
+        let slot = std::sync::Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
+        self.started
+            .insert(target.to_owned(), (commonjs, std::sync::Arc::clone(&slot)));
+        let (path, text) = (path.to_owned(), text.to_owned());
+        pool.spawn(move || {
+            let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse_for_requests(&path, &text, commonjs)
+            }));
+            let (result, done) = &*slot;
+            *result.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(parsed);
+            done.notify_all();
+        });
+    }
+
+    /// The module parsed as `commonjs` says, from the parse started ahead when it assumed the
+    /// same kind, otherwise parsed now.
+    fn take(&mut self, target: &Path, path: &str, text: &str, commonjs: bool) -> Parsed {
+        if let Some((assumed, slot)) = self.started.remove(target)
+            && assumed == commonjs
+        {
+            let (result, done) = &*slot;
+            let mut result = result.lock().unwrap_or_else(|poison| poison.into_inner());
+            loop {
+                match result.take() {
+                    Some(Ok(parsed)) => return parsed,
+                    Some(Err(panic)) => std::panic::resume_unwind(panic),
+                    None => {
+                        result = done
+                            .wait(result)
+                            .unwrap_or_else(|poison| poison.into_inner())
+                    }
+                }
+            }
+        }
+        parse_for_requests(path, text, commonjs)
+    }
+}
+
 /// Read every walked source, paired with the absolute, symlink-free path that names its
 /// `FileId`, optionally substituting one already-read snapshot.
 ///
@@ -490,6 +862,8 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
             "additional module includes require the Node adapter".to_owned(),
         ));
     }
+    // The walk reads the project; it does not write it.
+    let _filesystem = kiln_module_resolver::FilesystemSnapshot::begin();
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
     let entry = PathBuf::from(entry);
@@ -520,6 +894,8 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
     // Static imports from the entry are strict graph roots. Literal dynamic imports and
     // CommonJS requires are runtime-reachable subtrees: capture anything that exists, but do not
     // reject the whole snapshot when a descendant is unavailable.
+    let mut parse_ahead = ParseAhead::default();
+    let mut request_index = RequestIndex::load(root);
     let mut pending = vec![(entry, true)];
     let mut declared_includes = Vec::new();
     let mut checker_metadata = BTreeMap::<String, String>::new();
@@ -632,27 +1008,27 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
             continue;
         }
         let commonjs = importer_format == Some(ResolverNodeModuleFormat::CommonJs);
-        let (module, static_requires) = if commonjs {
-            let (module, requires) =
-                kiln_frontend_oxc::parse_commonjs_with_requires(importer_path, importer_text);
-            (module, Some(requires))
-        } else {
-            (kiln_frontend_oxc::parse(importer_path, importer_text), None)
+        let key = request_index.key(importer_path, importer_text, commonjs);
+        let facts = match request_index.get(&key) {
+            Some(facts) => facts.clone(),
+            None => {
+                let facts = RequestFacts::of(parse_ahead.take(
+                    &importer,
+                    importer_path,
+                    importer_text,
+                    commonjs,
+                ));
+                request_index.insert(key, facts.clone());
+                facts
+            }
         };
         if capture_checker_metadata && !commonjs {
-            for requested in &module.requested_modules {
-                if !requested
-                    .occurrences
-                    .iter()
-                    .any(|occurrence| occurrence.type_only)
-                {
-                    continue;
-                }
-                if kiln_module_resolver::NodeBuiltin::parse(&requested.specifier).is_some() {
+            for specifier in &facts.type_only {
+                if kiln_module_resolver::NodeBuiltin::parse(specifier).is_some() {
                     continue;
                 }
                 let Ok(resolved) = resolver.resolve_with_metadata_for_request(
-                    &requested.specifier,
+                    specifier,
                     &importer,
                     NodeRequestKind::Import,
                 ) else {
@@ -665,41 +1041,35 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
             }
         }
         let mut requests: Vec<(String, NodeRequestKind, bool, PathBuf)> = if commonjs {
-            static_requires
+            facts
+                .requires
                 .expect("CommonJS facts exist")
                 .into_iter()
                 .map(|specifier| (specifier, NodeRequestKind::Require, true, importer.clone()))
                 .collect()
         } else {
-            module
-                .runtime_requested_modules()
+            facts
+                .runtime
                 .into_iter()
-                .map(|request| {
-                    (
-                        request.specifier.clone(),
-                        NodeRequestKind::Import,
-                        true,
-                        importer.clone(),
-                    )
-                })
+                .map(|specifier| (specifier, NodeRequestKind::Import, true, importer.clone()))
                 .collect()
         };
         // Literal createRequire/getBuiltinModule calls are lazy at runtime, but a relative
         // createRequire target still needs its source text in the synchronized snapshot.
         // Reuse facts from the classified parse above. Reparsing by extension loses CommonJS
         // context for .js files and misses dependencies revealed by bounded literal eval.
-        for runtime in &module.node_runtime_requests {
-            let runtime_importer = captured_importer_path(&runtime.importer)?;
+        for (runtime_specifier, runtime_importer) in facts.node_runtime {
+            let runtime_importer = captured_importer_path(&runtime_importer)?;
             if !requests
                 .iter()
                 .any(|(existing, kind, _, existing_importer)| {
-                    existing == &runtime.specifier
+                    existing == &runtime_specifier
                         && *kind == NodeRequestKind::Require
                         && existing_importer == &runtime_importer
                 })
             {
                 requests.push((
-                    runtime.specifier.clone(),
+                    runtime_specifier,
                     NodeRequestKind::Require,
                     false,
                     runtime_importer,
@@ -711,12 +1081,10 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
         // but source synchronization still has to capture the complete reachable closure.  If we
         // omit them, native graph construction can discover a downstream relative import whose
         // source and pinned Node format were never sent by the client.
-        for target in kiln_ir::collect_dynamic_imports(&module.body) {
-            if let kiln_ir::DynamicImportTarget::Static(specifier) = target
-                && !requests.iter().any(|(existing, kind, _, _)| {
-                    existing == &specifier && *kind == NodeRequestKind::Import
-                })
-            {
+        for specifier in facts.dynamic {
+            if !requests.iter().any(|(existing, kind, _, _)| {
+                existing == &specifier && *kind == NodeRequestKind::Import
+            }) {
                 // Dynamic import always uses the import condition, even in a CommonJS module;
                 // a missing target remains a deferred runtime rejection rather than a build error.
                 requests.push((specifier, NodeRequestKind::Import, false, importer.clone()));
@@ -829,6 +1197,21 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
                 let target_path = target.to_str().ok_or_else(|| {
                     Error::BadInput(format!("path is not valid UTF-8: {}", target.display()))
                 })?;
+                // The walk parses a source as CommonJS only by the format it records here.
+                let commonjs = node_formats.get(&target).is_some_and(|format| {
+                    *format == to_wire_node_format(ResolverNodeModuleFormat::CommonJs)
+                });
+                let data = target
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(kiln_data_formats::is_data_extension);
+                if !data
+                    && let Some(path) = target.to_str()
+                    && let key = request_index.key(path, &target_text, commonjs)
+                    && request_index.get(&key).is_none()
+                {
+                    parse_ahead.start(&target, &target_text, commonjs);
+                }
                 indexes.insert(target.clone(), texts.len());
                 texts.push((target_path.to_owned(), target_text));
             }
@@ -836,6 +1219,7 @@ pub(crate) fn include_reachable_dependencies_with_checker_metadata(
         }
     }
 
+    request_index.store(root);
     texts.sort_by(|left, right| left.0.cmp(&right.0));
     let checker_metadata = checker_metadata.into_iter().collect();
     let targets = texts
@@ -913,6 +1297,9 @@ pub(crate) fn capture_checker_metadata(
     source_override: Option<(&str, &str)>,
     package_metadata: Vec<(String, String)>,
 ) -> Result<()> {
+    // Capture reads the project; it does not write it.
+    let _filesystem = kiln_module_resolver::FilesystemSnapshot::begin();
+    let mut request_index = RequestIndex::load(root);
     let canonical_root = PathBuf::from(crate::commands::canonical_path(root)?);
     let mut walked_paths = HashSet::new();
     for source in walked_sources {
@@ -925,9 +1312,16 @@ pub(crate) fn capture_checker_metadata(
         })?;
         walked_paths.insert(canonical_root.join(relative).to_string_lossy().into_owned());
     }
+    let text_index = texts
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(index, (path, _))| (path.clone(), index))
+        .collect();
     let mut capture = CheckerInputCapture {
         walked_paths,
         texts,
+        text_index,
         source_override,
         extra: BTreeMap::new(),
         total_bytes: 0,
@@ -948,6 +1342,7 @@ pub(crate) fn capture_checker_metadata(
     // `exports.types` condition, and discovering its metadata must not relax runtime resolution.
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve checker metadata: {error}")))?;
+    let mut discovered = Vec::new();
     for source in walked_sources.iter().filter(|path| is_typescript(path)) {
         let absolute = canonical_root.join(source.strip_prefix(root).map_err(|_| {
             Error::BadInput(format!(
@@ -957,13 +1352,20 @@ pub(crate) fn capture_checker_metadata(
             ))
         })?);
         let (source_text, importer) = capture.capture(&absolute)?;
-        let importer_text = importer.to_str().ok_or_else(|| {
-            Error::BadInput(format!(
-                "checker source path is not valid UTF-8: {}",
-                importer.display()
-            ))
-        })?;
-        let specifiers = kiln_frontend_oxc::discover_module_specifiers(importer_text, &source_text);
+        let importer_text = importer
+            .to_str()
+            .ok_or_else(|| {
+                Error::BadInput(format!(
+                    "checker source path is not valid UTF-8: {}",
+                    importer.display()
+                ))
+            })?
+            .to_owned();
+        discovered.push((importer, importer_text, source_text));
+    }
+    let specifiers = discover_specifiers(&mut request_index, &discovered);
+    for ((importer, _, _), specifiers) in discovered.iter().zip(specifiers) {
+        let importer = importer.clone();
         for specifier in specifiers {
             if specifier.starts_with('.')
                 || Path::new(&specifier).is_absolute()
@@ -977,6 +1379,11 @@ pub(crate) fn capture_checker_metadata(
                 .and_then(|resolved| resolved.package_json)
                 .or_else(|| find_package_manifest(&canonical_root, &importer, &specifier));
             if let Some(manifest) = manifest {
+                let (_, canonical) = capture.capture(&manifest)?;
+                package_manifests.insert(canonical);
+            }
+            // TypeScript also looks for the package's types in `@types`.
+            if let Some(manifest) = find_types_manifest(&canonical_root, &importer, &specifier) {
                 let (_, canonical) = capture.capture(&manifest)?;
                 package_manifests.insert(canonical);
             }
@@ -1044,12 +1451,26 @@ pub(crate) fn capture_checker_metadata(
     }
 
     let mut checked_configs = HashSet::new();
+    // `compilerOptions.types` of any configuration read; `None` if none names them, and then
+    // every package of `node_modules/@types` is included.
+    let mut type_packages: Option<BTreeSet<String>> = None;
     while let Some(config) = config_queue.pop_first() {
         let (text, canonical) = capture.capture(&config)?;
         if !checked_configs.insert(canonical.clone()) {
             continue;
         }
         let value = parse_metadata_json(&canonical, &text)?;
+        if let Some(types) = value
+            .get("compilerOptions")
+            .and_then(|options| options.get("types"))
+            .and_then(|types| types.as_array())
+        {
+            type_packages.get_or_insert_with(BTreeSet::new).extend(
+                types
+                    .iter()
+                    .filter_map(|name| name.as_str().map(str::to_owned)),
+            );
+        }
         let Some(extends) = value.get("extends") else {
             continue;
         };
@@ -1120,6 +1541,31 @@ pub(crate) fn capture_checker_metadata(
         }
     }
 
+    // `getAutomaticTypeDirectiveNames`: the packages that `types` names, or all of `@types`, in
+    // the `node_modules/@types` of the project's directory and those above it.
+    for ancestor in canonical_root.ancestors() {
+        let types_directory = ancestor.join("node_modules").join("@types");
+        let names: Vec<String> = match &type_packages {
+            Some(names) => names
+                .iter()
+                .map(|name| name.strip_prefix("@types/").unwrap_or(name).to_owned())
+                .collect(),
+            None => std::fs::read_dir(&types_directory)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect(),
+        };
+        for name in names {
+            let manifest = types_directory.join(&name).join("package.json");
+            if manifest.is_file() {
+                let (_, canonical) = capture.capture(&manifest)?;
+                package_manifests.insert(canonical);
+            }
+        }
+    }
+
     let mut package_roots = BTreeSet::new();
     for manifest in &package_manifests {
         if manifest
@@ -1150,15 +1596,20 @@ pub(crate) fn capture_checker_metadata(
         scan_package_declarations(&package_root, &mut capture, &mut declaration_queue)?;
         // Declarations may reference type-only packages with no runtime graph edge. Follow those
         // imports through the same package resolver and capture each package's declaration tree.
-        let declarations = std::mem::take(&mut declaration_queue);
-        for (path, text) in declarations {
-            let Some(path_string) = path.to_str() else {
-                return Err(Error::BadInput(format!(
-                    "declaration path is not valid UTF-8: {}",
-                    path.display()
-                )));
-            };
-            let specifiers = kiln_frontend_oxc::discover_module_specifiers(path_string, &text);
+        let declarations = std::mem::take(&mut declaration_queue)
+            .into_iter()
+            .map(|(path, text)| {
+                let path_string = path.to_str().map(str::to_owned).ok_or_else(|| {
+                    Error::BadInput(format!(
+                        "declaration path is not valid UTF-8: {}",
+                        path.display()
+                    ))
+                })?;
+                Ok((path, path_string, text))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let specifiers = discover_specifiers(&mut request_index, &declarations);
+        for ((path, _, _), specifiers) in declarations.into_iter().zip(specifiers) {
             for specifier in specifiers {
                 if specifier.starts_with('.')
                     || Path::new(&specifier).is_absolute()
@@ -1171,7 +1622,8 @@ pub(crate) fn capture_checker_metadata(
                     .ok()
                     .and_then(|resolved| resolved.package_json)
                     .or_else(|| find_package_manifest(&canonical_root, &path, &specifier));
-                if let Some(package_json) = manifest {
+                let types_manifest = find_types_manifest(&canonical_root, &path, &specifier);
+                for package_json in manifest.into_iter().chain(types_manifest) {
                     let (_, manifest) = capture.capture(&package_json)?;
                     if let Some(parent) = manifest.parent() {
                         if manifest
@@ -1188,13 +1640,94 @@ pub(crate) fn capture_checker_metadata(
         }
     }
 
+    // Package managers link packages into `node_modules`, and every captured path is the
+    // link-free one. The checker resolves through the links, so it needs them too.
+    let links = node_modules_links(
+        &canonical_root,
+        capture
+            .extra
+            .keys()
+            .chain(capture.texts.iter().map(|(path, _)| path))
+            .map(Path::new),
+    );
+    if !links.is_empty() {
+        let path = canonical_root.join(kiln_hir::source_types::CHECKER_LINKS_FILE);
+        let text = serde_json::to_string(&links)
+            .map_err(|error| Error::BadInput(format!("cannot record package links: {error}")))?;
+        capture
+            .extra
+            .insert(path.to_string_lossy().into_owned(), text);
+    }
+    request_index.store(root);
     capture.texts.extend(capture.extra);
     Ok(())
+}
+
+/// The symbolic links in the `node_modules` directories that hold `paths`, or the project's own,
+/// directly or in a scope: each link's path, and the path it names.
+fn node_modules_links<'p>(
+    root: &Path,
+    paths: impl Iterator<Item = &'p Path>,
+) -> BTreeMap<String, String> {
+    let mut directories = BTreeSet::new();
+    for path in paths {
+        for ancestor in path.ancestors().skip(1) {
+            if ancestor
+                .file_name()
+                .is_some_and(|name| name == "node_modules")
+            {
+                directories.insert(ancestor.to_path_buf());
+            }
+        }
+    }
+    for ancestor in root.ancestors() {
+        let modules = ancestor.join("node_modules");
+        if modules.is_dir() {
+            directories.insert(modules);
+        }
+    }
+    let mut links = BTreeMap::new();
+    let scan = |directory: &Path, links: &mut BTreeMap<String, String>, scopes: bool| {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        let mut nested = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_symlink() {
+                if let Ok(target) = std::fs::canonicalize(&path)
+                    && target.is_dir()
+                {
+                    links.insert(
+                        path.to_string_lossy().into_owned(),
+                        target.to_string_lossy().into_owned(),
+                    );
+                }
+            } else if scopes
+                && kind.is_dir()
+                && entry.file_name().to_string_lossy().starts_with('@')
+            {
+                nested.push(path);
+            }
+        }
+        nested
+    };
+    for directory in &directories {
+        for scope in scan(directory, &mut links, true) {
+            scan(&scope, &mut links, false);
+        }
+    }
+    links
 }
 
 struct CheckerInputCapture<'a> {
     walked_paths: HashSet<String>,
     texts: &'a mut Vec<(String, String)>,
+    /// Positions in `texts` by path. Capture only reads `texts`; what it adds goes to `extra`.
+    text_index: HashMap<String, usize>,
     source_override: Option<(&'a str, &'a str)>,
     extra: BTreeMap<String, String>,
     total_bytes: usize,
@@ -1203,10 +1736,10 @@ struct CheckerInputCapture<'a> {
 
 impl CheckerInputCapture<'_> {
     fn capture(&mut self, path: &Path) -> Result<(String, PathBuf)> {
-        let canonical = std::fs::canonicalize(path).map_err(|source| {
+        let canonical = kiln_module_resolver::snapshot_canonicalize(path).map_err(|kind| {
             Error::io(
                 format!("cannot resolve checker input {}", path.display()),
-                source,
+                std::io::Error::from(kind),
             )
         })?;
         let path_string = canonical.to_str().ok_or_else(|| {
@@ -1219,8 +1752,8 @@ impl CheckerInputCapture<'_> {
             && override_path == path_string
         {
             override_text.to_owned()
-        } else if let Some((_, text)) = self.texts.iter().find(|(known, _)| known == path_string) {
-            text.clone()
+        } else if let Some(&index) = self.text_index.get(path_string) {
+            self.texts[index].1.clone()
         } else if let Some(text) = self.extra.get(path_string) {
             text.clone()
         } else {
@@ -1235,11 +1768,61 @@ impl CheckerInputCapture<'_> {
         Ok((text, canonical))
     }
 
+    /// [`Self::capture`] for each of `paths`, reading the files not captured yet in parallel.
+    fn capture_many(&mut self, paths: &[PathBuf]) -> Result<Vec<(String, PathBuf)>> {
+        let read = |path: &PathBuf| -> Result<(PathBuf, Option<String>)> {
+            let canonical = kiln_module_resolver::snapshot_canonicalize(path).map_err(|kind| {
+                Error::io(
+                    format!("cannot resolve checker input {}", path.display()),
+                    std::io::Error::from(kind),
+                )
+            })?;
+            let known = canonical.to_str().is_some_and(|path| {
+                self.text_index.contains_key(path)
+                    || self.extra.contains_key(path)
+                    || self
+                        .source_override
+                        .is_some_and(|(override_path, _)| override_path == path)
+            });
+            if known {
+                return Ok((canonical, None));
+            }
+            let text = std::fs::read_to_string(&canonical).map_err(|source| {
+                Error::io(
+                    format!("cannot read checker input {}", canonical.display()),
+                    source,
+                )
+            })?;
+            Ok((canonical, Some(text)))
+        };
+        let read: Vec<Result<(PathBuf, Option<String>)>> = match parse_pool() {
+            Some(pool) if paths.len() > 1 => pool.install(|| paths.par_iter().map(read).collect()),
+            _ => paths.iter().map(read).collect(),
+        };
+        let mut captured = Vec::with_capacity(read.len());
+        for (path, result) in paths.iter().zip(read) {
+            match result? {
+                (canonical, Some(text)) => {
+                    let path_string = canonical.to_str().ok_or_else(|| {
+                        Error::BadInput(format!(
+                            "checker input path is not valid UTF-8: {}",
+                            canonical.display()
+                        ))
+                    })?;
+                    self.store(path_string, &text)?;
+                    captured.push((text, canonical));
+                }
+                (_, None) => captured.push(self.capture(path)?),
+            }
+        }
+        Ok(captured)
+    }
+
     fn record_supplied(&mut self, path: &Path, text: String) -> Result<PathBuf> {
-        let canonical = std::fs::canonicalize(path).map_err(|source| {
+        let canonical = kiln_module_resolver::snapshot_canonicalize(path).map_err(|kind| {
             Error::io(
                 format!("cannot resolve checker input {}", path.display()),
-                source,
+                std::io::Error::from(kind),
             )
         })?;
         let path_string = canonical.to_str().ok_or_else(|| {
@@ -1253,7 +1836,7 @@ impl CheckerInputCapture<'_> {
     }
 
     fn store(&mut self, path: &str, text: &str) -> Result<()> {
-        if self.walked_paths.contains(path) || self.texts.iter().any(|(known, _)| known == path) {
+        if self.walked_paths.contains(path) || self.text_index.contains_key(path) {
             return Ok(());
         }
         if self.extra.contains_key(path) {
@@ -1290,6 +1873,21 @@ fn add_ancestor_dirs(root: &Path, mut directory: Option<&Path>, output: &mut BTr
     }
 }
 
+/// The manifest of the `@types` package for the package of `specifier`, the nearest one above
+/// `importer`: `@types/a__b` for `@a/b`.
+fn find_types_manifest(root: &Path, importer: &Path, specifier: &str) -> Option<PathBuf> {
+    let package_name = if let Some(scoped) = specifier.strip_prefix('@') {
+        let (scope, package) = scoped.split_once('/')?;
+        format!("{scope}__{package}")
+    } else {
+        specifier.split('/').next()?.to_owned()
+    };
+    if package_name.is_empty() || specifier.starts_with("@types/") {
+        return None;
+    }
+    find_package_manifest(root, importer, &format!("@types/{package_name}"))
+}
+
 fn find_package_manifest(root: &Path, importer: &Path, specifier: &str) -> Option<PathBuf> {
     let package_name = if let Some(scoped) = specifier.strip_prefix('@') {
         let (scope, package) = scoped.split_once('/')?;
@@ -1297,14 +1895,24 @@ fn find_package_manifest(root: &Path, importer: &Path, specifier: &str) -> Optio
     } else {
         specifier.split('/').next()?.to_owned()
     };
+    // `mangleScopedPackageName`: TypeScript looks for `@types/a__b` where `@a/b` is missing.
+    let types_name = format!(
+        "@types/{}",
+        package_name.strip_prefix('@').map_or_else(
+            || package_name.clone(),
+            |scoped| scoped.replacen('/', "__", 1)
+        )
+    );
     let mut directory = importer.parent()?;
     loop {
-        let manifest = directory
-            .join("node_modules")
-            .join(&package_name)
-            .join("package.json");
-        if manifest.is_file() {
-            return Some(manifest);
+        for name in [&package_name, &types_name] {
+            let manifest = directory
+                .join("node_modules")
+                .join(name)
+                .join("package.json");
+            if manifest.is_file() {
+                return Some(manifest);
+            }
         }
         if directory == root {
             break;
@@ -1438,6 +2046,7 @@ fn scan_package_declarations(
     declarations: &mut Vec<(PathBuf, String)>,
 ) -> Result<()> {
     let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
     while let Some(directory) = pending.pop() {
         capture.directories_scanned += 1;
         if capture.directories_scanned > MAX_CHECKER_METADATA_DIRECTORIES {
@@ -1484,10 +2093,12 @@ fn scan_package_declarations(
             if path.is_dir() {
                 pending.push(path);
             } else {
-                let (text, canonical) = capture.capture(&path)?;
-                declarations.push((canonical, text));
+                files.push(path);
             }
         }
+    }
+    for (text, canonical) in capture.capture_many(&files)? {
+        declarations.push((canonical, text));
     }
     Ok(())
 }
@@ -1900,6 +2511,7 @@ mod tests {
         let mut capture = CheckerInputCapture {
             walked_paths: HashSet::new(),
             texts: &mut Vec::new(),
+            text_index: HashMap::new(),
             source_override: None,
             extra: BTreeMap::new(),
             total_bytes: 0,

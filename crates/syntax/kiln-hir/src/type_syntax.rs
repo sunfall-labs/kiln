@@ -39,12 +39,84 @@ pub struct TypeSyntax {
     pub module_attributes: Vec<TypeModuleAttributes>,
     /// `import X = ...` aliases, which Oxc's executable HIR intentionally erases.
     pub import_equals: Vec<TypeImportEquals>,
+    /// `export = expression`, which executable HIR refuses as a statement. The checker lowers it
+    /// to `ExportAssignment` from here.
+    pub export_assignments: Vec<TypeExportAssignment>,
+    /// ES `import`/`export` statements written inside `declare module "m" { ... }` bodies.
+    /// Oxc's module record covers only the program's top level and executable HIR drops these
+    /// statements, so the checker lowers them from here into the ambient module's body.
+    pub ambient_module_items: AmbientModuleItems,
+    /// Top-level `export as namespace X` (a UMD global), which executable HIR erases. The checker
+    /// lowers each to `ExportAsNamespace` from here.
+    pub namespace_exports: Vec<TypeNamespaceExport>,
+    /// JSX elements and fragments of `body`, which executable HIR has none of: there, each is an
+    /// unsupported expression with the element's span. Sorted by start.
+    pub jsx: Vec<JsxSite>,
+    /// Where declarations' names start, which executable HIR does not record: `node.Name()`.
+    pub names: Vec<NameSite>,
     /// Triple-slash references retained from the parser's comment table.
     pub references: Vec<TypeReferenceDirective>,
     pub no_default_lib: bool,
     /// TypeScript executable HIR lowered before TS erasure, JSX lowering, or DCE.
     /// JavaScript uses Module::body without duplicating its executable tree.
     pub body: Vec<crate::Statement>,
+}
+
+/// A JSX element or fragment, for the type checker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsxSite {
+    pub span: Span,
+    /// The tag name: an identifier, `this`, a member access, or a string for a name with `-` or
+    /// `:`. `None` for a fragment.
+    pub tag: Option<crate::Expression>,
+    /// The name in `</tag>`. `None` for `<tag />` and for a fragment.
+    pub close_tag: Option<crate::Expression>,
+    pub attributes: Vec<JsxAttributeSite>,
+    pub children: Vec<JsxChildSite>,
+    /// The end of the opening element or fragment.
+    pub opening_end: u32,
+    /// The start of `</tag>` or `</>`. `None` for `<tag />`.
+    pub close_start: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsxAttributeSite {
+    /// `name`, `name="text"`, `name={expression}`, `name=<element />`.
+    Named {
+        name: String,
+        span: Span,
+        /// The value, and the span of its braces if it has them.
+        value: Option<(crate::Expression, Option<Span>)>,
+    },
+    /// `{...argument}`
+    Spread {
+        span: Span,
+        argument: crate::Expression,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsxChildSite {
+    /// Text that is not only white space with a line break.
+    Text { value: String, span: Span },
+    /// An element or a fragment.
+    Element(crate::Expression),
+    /// `{expression}`, `{}`, `{...expression}`: the expression, if any, and the braces.
+    Braces {
+        expression: Option<crate::Expression>,
+        braces: Span,
+    },
+}
+
+/// The name of a declaration, a member or a property. Found by the end of the node that owns it
+/// (which decorators and `export` do not move) and its text: an identifier's name, `#name`, a
+/// string literal's value, a number as written, or `[` for a computed name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameSite {
+    pub owner_end: u32,
+    pub name: String,
+    /// The start of the name; for a computed name, of its `[`.
+    pub start: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +188,34 @@ pub struct TypeImportEquals {
     pub declared: bool,
 }
 
+/// The module-record view of the `import`/`export` statements of every ambient external module
+/// body in a file, in the same shape as [`Module::imports`](crate::Module::imports),
+/// [`Module::exports`](crate::Module::exports) and
+/// [`Module::requested_modules`](crate::Module::requested_modules). A body owns the entries whose
+/// `statement_span` lies inside its declaration's span. Inline `export <declaration>` is not
+/// recorded: the declaration carries its own export flag, as at the top level.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AmbientModuleItems {
+    pub imports: Vec<crate::Import>,
+    pub exports: Vec<crate::Export>,
+    pub requested_modules: Vec<crate::RequestedModule>,
+}
+
+/// `export = expression`: the statement's span and its expression, lowered as executable HIR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeExportAssignment {
+    pub span: Span,
+    pub expression: crate::Expression,
+}
+
+/// `export as namespace name`: the statement's span, the name and where the name starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeNamespaceExport {
+    pub span: Span,
+    pub name: String,
+    pub name_start: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeImportEqualsReference {
     ExternalModule(String),
@@ -149,6 +249,8 @@ pub struct TypeExpressionWrapperSite {
 pub enum TypeExpressionWrapperKind {
     NonNull,
     AsConst,
+    /// `( … )`: the owner span includes the parentheses, which executable HIR drops.
+    Parenthesized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +350,8 @@ pub struct TypeClassMemberSite {
     pub abstract_: bool,
     pub accessibility: Option<TypeAccessibility>,
     pub override_: bool,
+    /// `x!: T`: the exclamation token of a property, which executable HIR drops.
+    pub definite: bool,
     pub key_type: Option<TypeExpr>,
     pub value_type: Option<TypeExpr>,
 }

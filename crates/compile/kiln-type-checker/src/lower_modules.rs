@@ -84,20 +84,44 @@ impl Lower<'_, '_> {
         }
     }
 
+    /// Every module request occurrence: the top level's, then those written inside ambient
+    /// module bodies. Statement spans never collide between the two.
+    fn request_occurrences(&self) -> impl Iterator<Item = &k::ModuleRequestOccurrence> {
+        self.module
+            .requested_modules
+            .iter()
+            .chain(
+                &self
+                    .module
+                    .type_syntax
+                    .ambient_module_items
+                    .requested_modules,
+            )
+            .flat_map(|request| &request.occurrences)
+    }
+
+    /// `moduleSpecifier.Pos()`: where the string literal of the `kind` request written by the
+    /// statement at `statement_span` starts. The statement's start if none is recorded.
+    fn specifier_pos(&self, statement_span: k::Span, kind: k::ModuleRequestKind) -> u32 {
+        self.request_occurrences()
+            .find(|occurrence| {
+                occurrence.statement_span == statement_span && occurrence.kind == kind
+            })
+            .map_or(statement_span.start, |occurrence| {
+                occurrence.specifier_span.start
+            })
+    }
+
     fn declaration_is_type_only(
         &self,
         statement_span: k::Span,
         kind: k::ModuleRequestKind,
     ) -> bool {
-        self.module
-            .requested_modules
-            .iter()
-            .flat_map(|request| &request.occurrences)
-            .any(|occurrence| {
-                occurrence.statement_span == statement_span
-                    && occurrence.kind == kind
-                    && occurrence.type_only
-            })
+        self.request_occurrences().any(|occurrence| {
+            occurrence.statement_span == statement_span
+                && occurrence.kind == kind
+                && occurrence.type_only
+        })
     }
 
     /// Lower a TypeScript `import X = ...` declaration at its source position.
@@ -109,8 +133,17 @@ impl Lower<'_, '_> {
             .type_syntax
             .import_equals
             .iter()
-            .find(|import| import.span == span)?
-            .clone();
+            .find(|import| {
+                import.span == span
+                    // `export import x = N.y`: the statement is the `export` declaration, whose
+                    // span ends where the import-equals node it wraps does (`tsc` keeps `export`
+                    // as a modifier of one `ImportEqualsDeclaration`, as Bun's lowering does).
+                    || (import.exported
+                        && import.span.end == span.end
+                        && import.span.start > span.start)
+            })?;
+        self.lowered_import_equals.insert(import.span.start);
+        let import = import.clone();
         let source = self
             .module
             .source
@@ -189,17 +222,103 @@ impl Lower<'_, '_> {
         Some(stmt)
     }
 
+    /// Lower `export = expression` at its source position. Executable lowering refuses it, so
+    /// the expression comes from `type_syntax.export_assignments` (Bun: `SExportEquals` ->
+    /// `StmtKind::ExportAssign`).
+    pub(super) fn export_assignment_at(&mut self, span: k::Span) -> Option<b::StmtId> {
+        let expression = self
+            .module
+            .type_syntax
+            .export_assignments
+            .iter()
+            .find(|assignment| assignment.span == span)?
+            .expression
+            .clone();
+        let expression = self.expr(&expression);
+        let stmt = self
+            .file
+            .stmt(b::StmtKind::ExportAssign(expression), span.start);
+        self.file[stmt].loc = Self::loc(span);
+        Some(stmt)
+    }
+
     pub(super) fn module_items(&mut self) -> Vec<(u32, b::StmtId)> {
-        let mut result = Vec::new();
         let module_attributes = self.module.type_syntax.module_attributes.clone();
         for attributes in &module_attributes {
             self.module_attributes_object(attributes);
         }
+        let module = self.module;
+        self.module_statements(&module.imports, &module.exports, &module.requested_modules)
+    }
+
+    /// The `import`/`export` statements of the ambient module declared at `span`
+    /// (`declare module "m" { ... }`), which executable HIR drops from its body. Bun lowers them
+    /// as the block's own `Import`/`ExportNamed`/`ExportStar` statements.
+    pub(super) fn ambient_module_items(&mut self, span: k::Span) -> Vec<(u32, b::StmtId)> {
+        let syntax = &self.module.type_syntax;
+        let items = &syntax.ambient_module_items;
+        // An item belongs to the innermost module or namespace around it: `declare module "m"`
+        // may hold `namespace N { export { a as b } }`.
+        let containers: Vec<k::Span> = syntax
+            .declarations
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    k::TypeDeclarationKind::Module | k::TypeDeclarationKind::Namespace
+                ) && d.span.start >= span.start
+                    && d.span.end <= span.end
+                    && d.span != span
+            })
+            .map(|d| d.span)
+            .collect();
+        let inside = |s: k::Span| {
+            s.start >= span.start
+                && s.end <= span.end
+                && !containers
+                    .iter()
+                    .any(|inner| s.start >= inner.start && s.end <= inner.end)
+        };
+        let imports: Vec<_> = (items.imports.iter())
+            .filter(|i| inside(i.statement_span))
+            .cloned()
+            .collect();
+        let exports: Vec<_> = (items.exports.iter())
+            .filter(|e| inside(e.statement_span))
+            .cloned()
+            .collect();
+        let requests: Vec<_> = (items.requested_modules.iter())
+            .filter(|r| r.occurrences.iter().all(|o| inside(o.statement_span)))
+            .cloned()
+            .collect();
+        let mut statements = self.module_statements(&imports, &exports, &requests);
+        // `import x = require("m")` in a nested body, which no statement of it stands for.
+        let pending: Vec<k::Span> = syntax
+            .import_equals
+            .iter()
+            .filter(|i| inside(i.span) && !self.lowered_import_equals.contains(&i.span.start))
+            .map(|i| i.span)
+            .collect();
+        for span in pending {
+            if let Some(statement) = self.import_equals_at(span) {
+                statements.push((span.start, statement));
+            }
+        }
+        statements
+    }
+
+    fn module_statements(
+        &mut self,
+        imports: &[k::Import],
+        exports: &[k::Export],
+        requested_modules: &[k::RequestedModule],
+    ) -> Vec<(u32, b::StmtId)> {
+        let mut result = Vec::new();
         let mut groups: BTreeMap<k::Span, Vec<&k::Import>> = BTreeMap::new();
-        for i in &self.module.imports {
+        for i in imports {
             groups.entry(i.statement_span).or_default().push(i);
         }
-        for request in &self.module.requested_modules {
+        for request in requested_modules {
             for occurrence in &request.occurrences {
                 if occurrence.kind == k::ModuleRequestKind::Import {
                     groups.entry(occurrence.statement_span).or_default();
@@ -208,8 +327,7 @@ impl Lower<'_, '_> {
         }
         for (span, imports) in groups {
             let source = imports.first().map(|i| i.source.as_str()).or_else(|| {
-                self.module
-                    .requested_modules
+                requested_modules
                     .iter()
                     .find(|r| r.occurrences.iter().any(|o| o.statement_span == span))
                     .map(|r| r.specifier.as_str())
@@ -244,13 +362,23 @@ impl Lower<'_, '_> {
                     }),
                 }
             }
+            // `importClause.NamedBindings` is `NamedImports`, empty or not: a `{` before the
+            // specifier's quote.
+            let clause = self
+                .module
+                .source
+                .get(span.start as usize..span.end as usize)
+                .unwrap_or_default();
+            let clause = &clause[..clause.find(['"', '\'']).unwrap_or(clause.len())];
+            let has_named_imports = !specs.is_empty() || clause.contains('{');
             let named = self.file.add_import_specs(&specs);
             let spec = self.atom(source);
             let mode = self.module_resolution_mode(span, type_only);
+            // A side-effect import has no import clause: `import {} from "m"` has one.
             self.file.specifier_uses.push(b::SpecifierUse {
                 spec,
-                pos: span.start,
-                kind: if default.is_none() && namespace.is_none() && named.is_empty() {
+                pos: self.specifier_pos(span, k::ModuleRequestKind::Import),
+                kind: if default.is_none() && namespace.is_none() && !has_named_imports {
                     b::SpecifierKind::SideEffect
                 } else {
                     b::SpecifierKind::Import
@@ -267,6 +395,7 @@ impl Lower<'_, '_> {
                 clause_end: span.end,
                 namespace_start: namespace_pos,
                 named,
+                has_named_imports,
                 type_only,
                 is_deferred: false,
                 mode,
@@ -276,26 +405,46 @@ impl Lower<'_, '_> {
             self.file[stmt].loc = Self::loc(span);
             result.push((span.start, stmt));
         }
-        for e in &self.module.exports {
+        for e in exports {
             let declaration_type_only =
                 self.declaration_is_type_only(e.statement_span, k::ModuleRequestKind::Export);
             let mode = self.module_resolution_mode(e.statement_span, declaration_type_only);
             // Inline exported declarations (including `export declare const x, y`) already carry
             // export flags on the declarations. The module-record pass also reports each binding
             // as a local export, but lowering that second representation duplicates the symbols.
-            if matches!(&e.origin, k::ExportOrigin::Local { .. })
-                && self
-                    .module
-                    .type_syntax
+            if matches!(&e.origin, k::ExportOrigin::Local { .. }) {
+                // Both lists are sorted by start.
+                let syntax = &self.module.type_syntax;
+                let inside = |span: k::Span| {
+                    span.start >= e.statement_span.start && span.end <= e.statement_span.end
+                };
+                let from = syntax
                     .declarations
+                    .partition_point(|d| d.span.start < e.statement_span.start);
+                let declared = syntax.declarations[from..]
                     .iter()
-                    .any(|declaration| {
-                        declaration.exported
-                            && declaration.span.start >= e.statement_span.start
-                            && declaration.span.end <= e.statement_span.end
-                    })
-            {
-                continue;
+                    .take_while(|d| d.span.start < e.statement_span.end)
+                    .any(|d| (d.exported || d.default_exported) && inside(d.span));
+                let from = syntax
+                    .classes
+                    .partition_point(|c| c.span.start < e.statement_span.start);
+                let class = syntax.classes[from..]
+                    .iter()
+                    .take_while(|c| c.span.start < e.statement_span.end)
+                    .any(|c| (c.exported || c.default_exported) && inside(c.span));
+                // `export default name`: the statement is in the body already.
+                let body = match self.module.source_kind {
+                    k::SourceKind::JavaScript | k::SourceKind::Jsx => &self.module.body,
+                    k::SourceKind::TypeScript | k::SourceKind::Tsx => &syntax.body,
+                };
+                let at = body.partition_point(|s| s.span.start < e.statement_span.start);
+                let in_body = body.get(at).is_some_and(|s| {
+                    s.span == e.statement_span
+                        && matches!(s.kind, k::StatementKind::ExportDefault(_))
+                });
+                if declared || class || in_body {
+                    continue;
+                }
             }
             let exported = e
                 .exported
@@ -308,9 +457,34 @@ impl Lower<'_, '_> {
                     imported: k::ImportName::Name(local),
                     ..
                 } => {
-                    let spec = match &e.origin {
-                        k::ExportOrigin::ReExport { source, .. } => self.atom(source),
-                        _ => Atom::NONE,
+                    // `import { a } from "m"; export { a }`: the module record follows the
+                    // import, and gives the import's statement, but the statement exports the
+                    // local binding.
+                    let has_from = e.statement_span.start <= e.span.start
+                        && e.span.end <= e.statement_span.end;
+                    let written = self
+                        .module
+                        .source
+                        .get(e.span.start as usize..e.span.end as usize)
+                        .unwrap_or_default();
+                    let written_local = written
+                        .trim()
+                        .trim_start_matches("type ")
+                        .split(" as ")
+                        .next()
+                        .unwrap_or_default()
+                        .trim();
+                    let (spec, local) = match &e.origin {
+                        k::ExportOrigin::ReExport { source, .. } if has_from => {
+                            (self.atom(source), local.as_str())
+                        }
+                        k::ExportOrigin::ReExport { .. } if !written_local.is_empty() => {
+                            (Atom::NONE, written_local)
+                        }
+                        k::ExportOrigin::ReExport { source, .. } => {
+                            (self.atom(source), local.as_str())
+                        }
+                        _ => (Atom::NONE, local.as_str()),
                     };
                     let items = self.file.add_export_specs(&[b::ExportSpec {
                         start: e.span.start,
@@ -325,12 +499,13 @@ impl Lower<'_, '_> {
                     if spec.is_some() {
                         self.file.specifier_uses.push(b::SpecifierUse {
                             spec,
-                            pos: e.statement_span.start,
+                            pos: self.specifier_pos(e.statement_span, k::ModuleRequestKind::Export),
                             kind: b::SpecifierKind::Import,
                             mode,
                         });
                     }
                     b::StmtKind::ExportNamed(self.file.add_export(b::Export {
+                        has_module_specifier: spec.is_some(),
                         spec,
                         items,
                         type_only: e.type_only,
@@ -343,7 +518,7 @@ impl Lower<'_, '_> {
                     let spec = self.atom(source);
                     self.file.specifier_uses.push(b::SpecifierUse {
                         spec,
-                        pos: e.statement_span.start,
+                        pos: self.specifier_pos(e.statement_span, k::ModuleRequestKind::Export),
                         kind: b::SpecifierKind::Import,
                         mode,
                     });
@@ -374,12 +549,13 @@ impl Lower<'_, '_> {
                     }]);
                     self.file.specifier_uses.push(b::SpecifierUse {
                         spec,
-                        pos: e.statement_span.start,
+                        pos: self.specifier_pos(e.statement_span, k::ModuleRequestKind::Export),
                         kind: b::SpecifierKind::Import,
                         mode,
                     });
                     b::StmtKind::ExportNamed(self.file.add_export(b::Export {
                         spec,
+                        has_module_specifier: true,
                         items,
                         type_only: e.type_only,
                         mode,
@@ -394,6 +570,17 @@ impl Lower<'_, '_> {
             let stmt = self.file.stmt(kind, e.statement_span.start);
             self.file[stmt].loc = Self::loc(e.statement_span);
             result.push((e.statement_span.start, stmt));
+        }
+        // `export as namespace X`, which executable HIR erases (Bun: `namespace_export_declaration`
+        // -> `StmtKind::ExportAsNamespace`, positioned at `export`).
+        let namespace_exports = self.module.type_syntax.namespace_exports.clone();
+        for export in &namespace_exports {
+            let stmt = self.file.stmt(
+                b::StmtKind::ExportAsNamespace(self.atom(&export.name)),
+                export.span.start,
+            );
+            self.file[stmt].loc = Self::loc(export.span);
+            result.push((export.span.start, stmt));
         }
         result
     }

@@ -2,7 +2,7 @@
 //! checker engine's AST-shaped HIR.
 
 use crate::engine::{atom::Atom, hir as b};
-use crate::lower::Lower;
+use crate::lower::{Lower, Wrapper};
 use kiln_hir as k;
 
 impl<'a, 's> Lower<'a, 's> {
@@ -16,49 +16,108 @@ impl<'a, 's> Lower<'a, 's> {
     ) -> b::Span<b::ModifierId> {
         // Keep the canonical TypeScript modifier order: export precedes declare, and default
         // follows both. The checker validates this sequence and declaration emit uses it too.
-        let modifiers = [b::Flags::EXPORT, b::Flags::AMBIENT, b::Flags::DEFAULT]
-            .into_iter()
-            .filter(|flag| flags.contains(*flag))
-            .map(|flag| b::Modifier {
-                kind: b::ModifierKind::Keyword(flag),
-                pos,
-            })
-            .collect::<Vec<_>>();
+        let written = self.written_modifiers(pos);
+        let modifiers = [
+            (b::Flags::EXPORT, "export"),
+            (b::Flags::AMBIENT, "declare"),
+            (b::Flags::DEFAULT, "default"),
+        ]
+        .into_iter()
+        .filter(|(flag, _)| flags.contains(*flag))
+        // Ambient context makes a declaration `AMBIENT` without a written `declare`, which
+        // would then be one too many (1038).
+        .filter(|(flag, word)| {
+            *flag != b::Flags::AMBIENT || written.iter().any(|(written, _)| written == word)
+        })
+        .map(|(flag, word)| b::Modifier {
+            kind: b::ModifierKind::Keyword(flag),
+            pos: written
+                .iter()
+                .find(|(written, _)| *written == word)
+                .map_or(pos, |(_, at)| *at),
+        })
+        .collect::<Vec<_>>();
         self.file.add_modifiers(&modifiers)
+    }
+
+    /// The modifier keywords written around `pos`, a declaration's start: those just before it,
+    /// which executable HIR's span leaves out, and those at it. Each with where it starts.
+    fn written_modifiers(&self, pos: u32) -> smallvec::SmallVec<[(&'static str, u32); 3]> {
+        const WORDS: [&str; 3] = ["export", "declare", "default"];
+        let text = self.module.source.as_bytes();
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+        let mut found = smallvec::SmallVec::new();
+        // Backwards over white space and the keywords.
+        let mut end = (pos as usize).min(text.len());
+        loop {
+            while end > 0 && text[end - 1].is_ascii_whitespace() {
+                end -= 1;
+            }
+            let mut start = end;
+            while start > 0 && is_word(text[start - 1]) {
+                start -= 1;
+            }
+            match WORDS.iter().find(|w| w.as_bytes() == &text[start..end]) {
+                Some(word) if start < end => {
+                    found.push((*word, start as u32));
+                    end = start;
+                }
+                _ => break,
+            }
+        }
+        // Forwards from `pos`.
+        let mut start = (pos as usize).min(text.len());
+        loop {
+            let mut end = start;
+            while end < text.len() && is_word(text[end]) {
+                end += 1;
+            }
+            match WORDS.iter().find(|w| w.as_bytes() == &text[start..end]) {
+                Some(word) if start < end => {
+                    found.push((*word, start as u32));
+                    start = end;
+                    while start < text.len() && text[start].is_ascii_whitespace() {
+                        start += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+        found
     }
 
     /// Oxc removes `export` from executable statements in namespace bodies. The
     /// module-record export table only describes file-level exports, so recover
     /// that modifier from the retained declaration span for namespace members.
     pub(super) fn namespace_export_flag(&self, span: k::Span) -> b::Flags {
-        let nested = self
-            .module
-            .type_syntax
-            .declarations
-            .iter()
-            .any(|declaration| {
-                matches!(
-                    declaration.kind,
-                    k::TypeDeclarationKind::Namespace | k::TypeDeclarationKind::Module
-                ) && declaration.span.start <= span.start
-                    && declaration.span.end >= span.end
-                    && declaration.span != span
-            });
-        let exported = self
-            .module
-            .type_syntax
-            .exported_declarations
-            .iter()
-            .any(|declaration| {
-                declaration.end == span.end
-                    && declaration.start >= span.start
-                    && declaration.start <= span.end
-            });
-        if nested && exported {
+        let nested = self.containers.iter().any(|(container, _)| {
+            container.start <= span.start && container.end >= span.end && *container != span
+        });
+        let exported = nested
+            && self
+                .export_wrapped_by_end
+                .get(&span.end)
+                .is_some_and(|starts| {
+                    starts
+                        .iter()
+                        .any(|&start| start >= span.start && start <= span.end)
+                });
+        if exported {
             b::Flags::EXPORT
         } else {
             b::Flags::empty()
         }
+    }
+
+    /// Whether `span` is inside the body of a `declare namespace`, `declare module` or
+    /// `declare global`, where the parser sets `NodeFlagsAmbient` on every node.
+    pub(super) fn in_ambient_declaration(&self, span: k::Span) -> bool {
+        self.containers.iter().any(|(container, declared)| {
+            *declared
+                && container.start <= span.start
+                && container.end >= span.end
+                && *container != span
+        })
     }
 
     pub(super) fn binding_span(&self, name: &str, span: k::Span) -> k::Span {
@@ -93,15 +152,27 @@ impl<'a, 's> Lower<'a, 's> {
                             k::Pattern::WithDefault { default, .. } => self.expr(default),
                             _ => b::ExprId::NONE,
                         };
+                        // `BindingElement.Pos()`, `.Name().Pos()`, `.End()`: the property ends where
+                        // its default or its identifier does; a nested pattern has no span here.
+                        let end = match &prop.value {
+                            k::Pattern::WithDefault { default, .. } => Some(default.span.end),
+                            k::Pattern::Identifier(_) => Some(self.file[value].end),
+                            _ => None,
+                        };
+                        // Of the names whose owner ends there, the property's own starts first: a
+                        // name inside its default (`= function f() {}`) starts after it.
+                        let key_pos = end.map_or(span.start, |end| {
+                            self.name_pos(k::Span::new(span.start, end), None)
+                        });
                         b::PatProp {
                             key,
                             name_kind: b::NameKind::Identifier,
                             value,
                             default,
                             is_rest: false,
-                            pos: span.start,
-                            key_pos: span.start,
-                            end: span.end,
+                            pos: key_pos,
+                            key_pos,
+                            end: end.filter(|_| key_pos != span.start).unwrap_or(span.end),
                         }
                     })
                     .collect();
@@ -163,12 +234,32 @@ impl<'a, 's> Lower<'a, 's> {
         self.file.pat(kind, span.start, span.end)
     }
 
+    /// The name of `#name`, which keeps its `#` as the checker spells it (`PRIVATE_NAME_PREFIX`,
+    /// `written_name`): `#x` and `"x"` are different names. Executable HIR drops the `#`.
+    fn private_atom(&self, name: &str) -> Atom {
+        match name.starts_with('#') {
+            true => self.atom(name),
+            false => self.atom(&format!("#{name}")),
+        }
+    }
+
     pub(super) fn key(&mut self, key: &k::ObjectKey) -> b::PropKey {
         match key {
             k::ObjectKey::Static(text) => b::PropKey::Name(self.atom_units(text)),
             k::ObjectKey::Computed(expr) => b::PropKey::Computed(self.expr(expr)),
-            k::ObjectKey::Private(name) => b::PropKey::Private(self.atom(name)),
+            k::ObjectKey::Private(name) => b::PropKey::Private(self.private_atom(name)),
         }
+    }
+
+    /// The `...` before the operand at `operand`: where a spread element, or the spread of an
+    /// object literal, starts. Executable HIR spans only the operand, which for `...(e)` does
+    /// not even include the parenthesis.
+    fn spread_start(&self, operand: k::Span) -> u32 {
+        let before = &self.module.source.as_bytes()[..operand.start as usize];
+        before
+            .windows(3)
+            .rposition(|window| window == b"...")
+            .map_or(operand.start, |at| at as u32)
     }
 
     pub(super) fn args(&mut self, args: &[k::ListElement], span: k::Span) -> b::IdList<b::ExprId> {
@@ -181,8 +272,9 @@ impl<'a, 's> Lower<'a, 's> {
                 }
                 k::ListElement::Spread(expr) => {
                     let value = self.expr(expr);
+                    let start = self.spread_start(expr.span);
                     self.file
-                        .expr(b::ExprKind::Spread(value), expr.span.start, expr.span.end)
+                        .expr(b::ExprKind::Spread(value), start, expr.span.end)
                 }
             })
             .collect();
@@ -333,15 +425,31 @@ impl<'a, 's> Lower<'a, 's> {
             } => {
                 let obj = self.expr(object);
                 let name = self.atom(property);
+                let name_pos = assigned_property_pos(
+                    &self.file.text,
+                    object.span.end,
+                    value.span.start,
+                    property,
+                );
+                // Executable HIR spans the whole assignment; the target `a.b` ends with its name.
+                // `a.b!`, `(a.b)` and `a.b as T` are wrappers of that span, as for any operand.
+                let name_end = name_pos + property.len() as u32;
                 let target = self.file.expr(
                     b::ExprKind::Dot {
                         obj,
                         name,
-                        name_pos: span.end.saturating_sub(property.len() as u32),
+                        name_pos,
                         chain: b::Chain::No,
                     },
                     object.span.start,
-                    span.end,
+                    name_end,
+                );
+                let target = self.wrapped(
+                    target,
+                    k::Span {
+                        start: object.span.start,
+                        end: name_end,
+                    },
                 );
                 let value = self.expr(value);
                 b::ExprKind::Assign {
@@ -381,7 +489,7 @@ impl<'a, 's> Lower<'a, 's> {
                 value,
             } => {
                 let obj = self.expr(object);
-                let name_atom = self.atom(name);
+                let name_atom = self.private_atom(name);
                 let target = self.file.expr(
                     b::ExprKind::Dot {
                         obj,
@@ -408,15 +516,21 @@ impl<'a, 's> Lower<'a, 's> {
                     .file
                     .expr(b::ExprKind::Super, span.start, span.start + 5);
                 let name = self.atom(property);
+                let name_pos = assigned_property_pos(
+                    &self.file.text,
+                    span.start + 5,
+                    value.span.start,
+                    property,
+                );
                 let target = self.file.expr(
                     b::ExprKind::Dot {
                         obj,
                         name,
-                        name_pos: span.end.saturating_sub(property.len() as u32),
+                        name_pos,
                         chain: b::Chain::No,
                     },
                     span.start,
-                    span.end,
+                    name_pos + property.len() as u32,
                 );
                 let value = self.expr(value);
                 b::ExprKind::Assign {
@@ -451,7 +565,7 @@ impl<'a, 's> Lower<'a, 's> {
                 }
             }
             E::PrivateIn { name, object } => {
-                let name_atom = self.atom(name);
+                let name_atom = self.private_atom(name);
                 let left = self.file.expr(
                     b::ExprKind::PrivateIdentifier(name_atom),
                     span.start,
@@ -509,11 +623,9 @@ impl<'a, 's> Lower<'a, 's> {
                             }
                             k::ListElement::Spread(expr) => {
                                 let value = self.expr(expr);
-                                self.file.expr(
-                                    b::ExprKind::Spread(value),
-                                    expr.span.start,
-                                    expr.span.end,
-                                )
+                                let start = self.spread_start(expr.span);
+                                self.file
+                                    .expr(b::ExprKind::Spread(value), start, expr.span.end)
                             }
                         })
                         .collect();
@@ -619,7 +731,7 @@ impl<'a, 's> Lower<'a, 's> {
                 optional,
             } => {
                 let obj = self.expr(object);
-                let name_atom = self.atom(name);
+                let name_atom = self.private_atom(name);
                 b::ExprKind::Dot {
                     obj,
                     name: name_atom,
@@ -681,7 +793,7 @@ impl<'a, 's> Lower<'a, 's> {
                     }
                     k::ObjectKey::Private(name) => {
                         let obj = self.expr(object);
-                        let name_atom = self.atom(name);
+                        let name_atom = self.private_atom(name);
                         self.file.expr(
                             b::ExprKind::Dot {
                                 obj,
@@ -732,7 +844,16 @@ impl<'a, 's> Lower<'a, 's> {
                     k::ObjectKey::Static(name) => {
                         let obj = self.expr(object);
                         let atom = self.atom_units(name);
-                        let name_pos = span.end.saturating_sub(name.len() as u32);
+                        // `a.b++` ends with its operator.
+                        let end = match *prefix {
+                            true => span.end,
+                            false => {
+                                let source = self.module.source.as_bytes();
+                                let before = &source[..span.end.saturating_sub(2) as usize];
+                                before.trim_ascii_end().len() as u32
+                            }
+                        };
+                        let name_pos = end.saturating_sub(name.len() as u32);
                         self.file.expr(
                             b::ExprKind::Dot {
                                 obj,
@@ -741,7 +862,7 @@ impl<'a, 's> Lower<'a, 's> {
                                 chain: b::Chain::No,
                             },
                             object.span.start,
-                            span.end,
+                            end,
                         )
                     }
                     k::ObjectKey::Computed(key) => {
@@ -759,7 +880,7 @@ impl<'a, 's> Lower<'a, 's> {
                     }
                     k::ObjectKey::Private(name) => {
                         let obj = self.expr(object);
-                        let atom = self.atom(name);
+                        let atom = self.private_atom(name);
                         let name_pos =
                             private_key_pos(&self.file.text, object.span.end, span.end, name);
                         self.file.expr(
@@ -796,7 +917,36 @@ impl<'a, 's> Lower<'a, 's> {
             },
             E::Await(value) => b::ExprKind::Await(self.expr(value)),
             E::ImportCall { specifier, options } => {
-                let mut args = vec![self.expr(specifier)];
+                let argument = self.expr(specifier);
+                // `collectDynamicImportOrRequireOrJsDocImportCalls`: a string literal, not one in
+                // parentheses or behind a cast.
+                // `File::parens` is not sorted yet; the argument's are the latest.
+                let parenthesized = self.file.parens.iter().rev().any(|p| p.0 == argument);
+                if !parenthesized {
+                    let literal = match self.file[argument].kind {
+                        b::ExprKind::String(text) => Some(text),
+                        _ => None,
+                    }
+                    .or_else(|| match &specifier.kind {
+                        E::Template {
+                            quasis,
+                            expressions,
+                        } if expressions.is_empty() && quasis.len() == 1 => {
+                            Some(self.atom_units(&quasis[0]))
+                        }
+                        _ => None,
+                    });
+                    if let Some(spec) = literal {
+                        let pos = self.file[argument].pos;
+                        self.file.specifier_uses.push(b::SpecifierUse {
+                            spec,
+                            pos,
+                            kind: b::SpecifierKind::ImportCall,
+                            mode: b::ResolutionMode::None,
+                        });
+                    }
+                }
+                let mut args = vec![argument];
                 if let Some(options) = options {
                     args.push(self.expr(options));
                 }
@@ -831,6 +981,11 @@ impl<'a, 's> Lower<'a, 's> {
                         k::ObjectMember::Property(property) => {
                             let key = self.key(&property.key);
                             let value = self.expr(&property.value);
+                            if property.form == k::PropertyForm::Method
+                                && let b::ExprKind::Fn(func) = self.file[value].kind
+                            {
+                                self.file[func].name_pos = self.name_pos(property.span, None);
+                            }
                             let kind = match property.form {
                                 k::PropertyForm::KeyValue => b::PropKind::Init,
                                 k::PropertyForm::Shorthand => b::PropKind::Shorthand,
@@ -841,7 +996,7 @@ impl<'a, 's> Lower<'a, 's> {
                                 key,
                                 name_kind: b::NameKind::Identifier,
                                 value,
-                                pos: property.span.start,
+                                pos: self.name_pos(property.span, None),
                                 start: property.span.start,
                                 end: property.span.end,
                                 postfix_token: 0,
@@ -855,7 +1010,7 @@ impl<'a, 's> Lower<'a, 's> {
                                 name_kind: b::NameKind::Identifier,
                                 value,
                                 pos: expr.span.start,
-                                start: expr.span.start,
+                                start: self.spread_start(expr.span),
                                 end: expr.span.end,
                                 postfix_token: 0,
                             });
@@ -871,6 +1026,14 @@ impl<'a, 's> Lower<'a, 's> {
                                 k::MethodKind::Get => b::FnKind::Getter,
                                 _ => b::FnKind::Setter,
                             };
+                            let name_pos = self.name_pos(
+                                k::Span {
+                                    start: 0,
+                                    end: function.span.end,
+                                },
+                                None,
+                            );
+                            self.file[func].name_pos = name_pos;
                             let value = self.file.expr(
                                 b::ExprKind::Fn(func),
                                 function.span.start,
@@ -884,12 +1047,17 @@ impl<'a, 's> Lower<'a, 's> {
                                 key,
                                 name_kind: b::NameKind::Identifier,
                                 value,
-                                pos: function.span.start,
+                                pos: name_pos,
                                 start: function.span.start,
                                 end: function.span.end,
                                 postfix_token: 0,
                             });
                         }
+                    }
+                }
+                for prop in &mut props {
+                    if matches!(prop.key, b::PropKey::Name(_)) {
+                        prop.name_kind = self.literal_name_kind(prop.pos);
                     }
                 }
                 b::ExprKind::Object(self.file.add_props(&props))
@@ -915,91 +1083,208 @@ impl<'a, 's> Lower<'a, 's> {
                 self.template(&quasis, &[], span)
             }
             E::RegExp { .. } => b::ExprKind::Regex,
+            E::Unsupported { feature } if feature == "JSX expression" => {
+                match self.jsx_site(span) {
+                    Some(site) => self.jsx(site),
+                    None => {
+                        self.error(span, feature.clone());
+                        b::ExprKind::Missing
+                    }
+                }
+            }
+            // `a={}`: an attribute without an expression, which the checker reports itself.
+            E::Unsupported { feature } if feature == "empty JSX expression" => b::ExprKind::Missing,
             E::Unsupported { feature } => {
                 self.error(span, feature.clone());
                 b::ExprKind::Missing
             }
         };
         let expression = self.file.expr(kind, span.start, span.end);
-        // The frontend erases TypeScript wrappers from executable HIR. Follow the exact
-        // operand-span chain so nested assertions survive without wrapping child expressions.
-        #[derive(Clone)]
-        enum WrapperKind {
-            As(k::TypeExpr),
-            Satisfies(k::TypeExpr),
-            NonNull,
-            AsConst,
-            Instantiation(Vec<k::TypeExpr>),
-        }
-        #[derive(Clone)]
-        struct Wrapper {
-            owner: k::Span,
-            operand: k::Span,
-            kind: WrapperKind,
-        }
-        let syntax = &self.module.type_syntax;
-        let mut wrappers: Vec<_> = syntax
-            .annotations
-            .iter()
-            .filter_map(|site| {
-                let operand = site.operand_span?;
-                let kind = match site.site {
-                    k::TypeSite::AsExpression => WrapperKind::As(site.ty.clone()),
-                    k::TypeSite::SatisfiesExpression => WrapperKind::Satisfies(site.ty.clone()),
-                    _ => return None,
-                };
-                Some(Wrapper {
-                    owner: site.owner_span,
-                    operand,
-                    kind,
-                })
-            })
-            .chain(syntax.expression_wrappers.iter().map(|site| Wrapper {
-                owner: site.owner_span,
-                operand: site.operand_span,
-                kind: match site.kind {
-                    k::TypeExpressionWrapperKind::NonNull => WrapperKind::NonNull,
-                    k::TypeExpressionWrapperKind::AsConst => WrapperKind::AsConst,
-                },
-            }))
-            .chain(syntax.instantiations.iter().filter_map(|site| {
-                (site.kind == k::TypeInstantiationKind::Expression).then_some(Wrapper {
-                    owner: site.owner_span,
-                    operand: site.operand_span?,
-                    kind: WrapperKind::Instantiation(site.arguments.clone()),
-                })
-            }))
-            .collect();
+        self.wrapped(expression, span)
+    }
+
+    /// `expression`, which spans `span`, inside the wrappers that the source writes around it.
+    fn wrapped(&mut self, expression: b::ExprId, span: k::Span) -> b::ExprId {
+        // The frontend erases TypeScript wrappers and parentheses from executable HIR. Follow the
+        // exact operand-span chain so nested assertions survive without wrapping child
+        // expressions. Parentheses wrap no expression of their own: they are `File::parens`.
         let mut expression = expression;
         let mut operand_span = span;
+        let mut used: smallvec::SmallVec<[Wrapper; 4]> = smallvec::SmallVec::new();
         loop {
-            let Some(index) = wrappers
-                .iter()
-                .position(|site| site.operand == operand_span)
-            else {
+            let syntax = &self.module.type_syntax;
+            let candidates = self.wrappers.get(&operand_span);
+            let unused = |w: &&Wrapper| !used.contains(*w);
+            // Parentheses first: `(x)!` puts them around `x`, `(x!)` around `x!`.
+            let next = candidates.and_then(|list| {
+                list.iter()
+                    .filter(unused)
+                    .filter(|w| {
+                        matches!(w, Wrapper::Expression(i)
+                            if syntax.expression_wrappers[*i as usize].kind
+                                == k::TypeExpressionWrapperKind::Parenthesized)
+                    })
+                    .min_by_key(|w| match w {
+                        Wrapper::Expression(i) => {
+                            let owner = syntax.expression_wrappers[*i as usize].owner_span;
+                            owner.end - owner.start
+                        }
+                        _ => u32::MAX,
+                    })
+                    .or_else(|| list.iter().find(unused))
+                    .copied()
+            });
+            let Some(wrapper) = next else {
                 break;
             };
-            let site = wrappers.remove(index);
-            let kind = match site.kind {
-                WrapperKind::As(ty) => b::ExprKind::As {
-                    expr: expression,
-                    ty: self.ty(&ty),
-                },
-                WrapperKind::Satisfies(ty) => b::ExprKind::Satisfies {
-                    expr: expression,
-                    ty: self.ty(&ty),
-                },
-                WrapperKind::NonNull => b::ExprKind::NonNull(expression),
-                WrapperKind::AsConst => b::ExprKind::AsConst(expression),
-                WrapperKind::Instantiation(arguments) => b::ExprKind::Instantiation {
-                    expr: expression,
-                    type_args: self.ty_list(&arguments),
-                },
+            used.push(wrapper);
+            let (owner, kind) = match wrapper {
+                Wrapper::Annotation(i) => {
+                    let site = &syntax.annotations[i as usize];
+                    let ty = self.ty(&site.ty.clone());
+                    let kind = if site.site == k::TypeSite::AsExpression {
+                        b::ExprKind::As {
+                            expr: expression,
+                            ty,
+                        }
+                    } else {
+                        b::ExprKind::Satisfies {
+                            expr: expression,
+                            ty,
+                        }
+                    };
+                    (
+                        self.module.type_syntax.annotations[i as usize].owner_span,
+                        kind,
+                    )
+                }
+                Wrapper::Expression(i) => {
+                    let site = &syntax.expression_wrappers[i as usize];
+                    let owner = site.owner_span;
+                    match site.kind {
+                        k::TypeExpressionWrapperKind::NonNull => {
+                            (owner, b::ExprKind::NonNull(expression))
+                        }
+                        k::TypeExpressionWrapperKind::AsConst => {
+                            (owner, b::ExprKind::AsConst(expression))
+                        }
+                        k::TypeExpressionWrapperKind::Parenthesized => {
+                            self.file.parens.push((expression, owner.start, owner.end));
+                            continue;
+                        }
+                    }
+                }
+                Wrapper::Instantiation(i) => {
+                    let site = &syntax.instantiations[i as usize];
+                    let owner = site.owner_span;
+                    let arguments = site.arguments.clone();
+                    let type_args = self.ty_list(&arguments);
+                    (
+                        owner,
+                        b::ExprKind::Instantiation {
+                            expr: expression,
+                            type_args,
+                        },
+                    )
+                }
             };
-            expression = self.file.expr(kind, site.owner.start, site.owner.end);
-            operand_span = site.owner;
+            expression = self.file.expr(kind, owner.start, owner.end);
+            operand_span = owner;
         }
         expression
+    }
+
+    fn jsx_site(&self, span: k::Span) -> Option<&'a k::JsxSite> {
+        let sites = &self.module.type_syntax.jsx;
+        let at =
+            sites.partition_point(|site| (site.span.start, site.span.end) < (span.start, span.end));
+        sites.get(at).filter(|site| site.span == span)
+    }
+
+    /// `parseJsxElementOrSelfClosingElementOrFragment`
+    fn jsx(&mut self, site: &'a k::JsxSite) -> b::ExprKind {
+        let tag = site
+            .tag
+            .as_ref()
+            .map_or(b::ExprId::NONE, |tag| self.expr(tag));
+        let mut props = Vec::with_capacity(site.attributes.len());
+        let mut braced = Vec::new();
+        for attribute in &site.attributes {
+            match attribute {
+                k::JsxAttributeSite::Named { name, span, value } => {
+                    let value_id = value
+                        .as_ref()
+                        .map_or(b::ExprId::NONE, |(value, _)| self.expr(value));
+                    if let Some((_, Some(braces))) = value {
+                        // `parseJsxAttributeValue`: the attribute ends with its `JsxExpression`.
+                        braced.push((value_id, braces.start, span.end));
+                    }
+                    props.push(b::Prop {
+                        kind: b::PropKind::Init,
+                        key: b::PropKey::Name(self.atom(name)),
+                        name_kind: b::NameKind::Jsx,
+                        value: value_id,
+                        pos: span.start,
+                        start: span.start,
+                        end: span.end,
+                        postfix_token: 0,
+                    });
+                }
+                k::JsxAttributeSite::Spread { span, argument } => {
+                    let value = self.expr(argument);
+                    props.push(b::Prop {
+                        kind: b::PropKind::Spread,
+                        key: b::PropKey::None,
+                        name_kind: b::NameKind::Jsx,
+                        value,
+                        pos: argument.span.start,
+                        start: span.start,
+                        end: span.end,
+                        postfix_token: 0,
+                    });
+                }
+            }
+        }
+        let attrs = self.file.add_props(&props);
+        let mut children = Vec::with_capacity(site.children.len());
+        for child in &site.children {
+            let id = match child {
+                k::JsxChildSite::Text { value, span } => {
+                    let text = self.atom(value);
+                    self.file
+                        .expr(b::ExprKind::String(text), span.start, span.end)
+                }
+                k::JsxChildSite::Element(element) => self.expr(element),
+                k::JsxChildSite::Braces { expression, braces } => {
+                    let id = match expression {
+                        Some(expression) => self.expr(expression),
+                        None => {
+                            self.file
+                                .expr(b::ExprKind::Missing, braces.end - 1, braces.end - 1)
+                        }
+                    };
+                    braced.push((id, braces.start, braces.end));
+                    id
+                }
+            };
+            children.push(id);
+        }
+        let children = self.file.list(&children);
+        let close_tag = site
+            .close_tag
+            .as_ref()
+            .map_or(b::ExprId::NONE, |tag| self.expr(tag));
+        self.file.jsx_expressions.extend(braced);
+        b::ExprKind::Jsx(self.file.add_jsx(b::Jsx {
+            tag,
+            close_tag,
+            attrs,
+            children,
+            type_args: b::IdList::EMPTY,
+            opening_end: site.opening_end,
+            close_pos: site.close_start.unwrap_or(u32::MAX),
+            end: site.span.end,
+        }))
     }
 
     fn template(
@@ -1104,7 +1389,7 @@ impl<'a, 's> Lower<'a, 's> {
             }
             k::Pattern::PrivateMember { object, name } => {
                 let obj = self.expr(object);
-                let name_atom = self.atom(name);
+                let name_atom = self.private_atom(name);
                 let name_pos = private_key_pos(&self.file.text, object.span.end, span.end, name);
                 self.file.expr(
                     b::ExprKind::Dot {
@@ -1233,6 +1518,9 @@ impl<'a, 's> Lower<'a, 's> {
 
     pub(super) fn statement(&mut self, statement: &k::Statement) -> b::StmtId {
         if let Some(lowered) = self.import_equals_at(statement.span) {
+            return lowered;
+        }
+        if let Some(lowered) = self.export_assignment_at(statement.span) {
             return lowered;
         }
         if let Some(lowered) = self.class_declaration_at(statement.span) {
@@ -1458,7 +1746,30 @@ impl<'a, 's> Lower<'a, 's> {
         };
         let id = self.file.stmt(kind, statement.span.start);
         self.file[id].loc = Self::loc(statement.span);
+        // Executable HIR drops `export` from a declaration (the module record carries it), but
+        // the grammar reads it from the statement's modifiers: 1046 in a declaration file.
+        match kind {
+            b::StmtKind::Class(class) => self.file[id].modifiers = self.file[class].modifiers,
+            b::StmtKind::Var(_) if self.is_export_declaration(statement.span) => {
+                self.file[id].modifiers =
+                    self.declaration_modifiers(b::Flags::EXPORT, statement.span.start);
+            }
+            _ => {}
+        }
         id
+    }
+
+    /// Whether `span` is the declaration of an `export` declaration.
+    fn is_export_declaration(&self, span: k::Span) -> bool {
+        self.module
+            .type_syntax
+            .exported_declarations
+            .iter()
+            .any(|declaration| {
+                declaration.end == span.end
+                    && declaration.start >= span.start
+                    && declaration.start <= span.end
+            })
     }
 
     pub(super) fn class_declaration_at(&mut self, span: k::Span) -> Option<b::StmtId> {
@@ -1478,7 +1789,7 @@ impl<'a, 's> Lower<'a, 's> {
             flags |= b::Flags::EXPORT;
         }
         if site.default_exported {
-            flags |= b::Flags::DEFAULT;
+            flags |= b::Flags::EXPORT | b::Flags::DEFAULT;
         }
         if site.abstract_ {
             flags |= b::Flags::ABSTRACT;
@@ -1528,7 +1839,7 @@ impl<'a, 's> Lower<'a, 's> {
                         ty,
                         init: b::ExprId::NONE,
                         func: b::FnId::NONE,
-                        name_pos: member.span.start,
+                        name_pos: self.name_pos(member.span, None),
                         start: member.span.start,
                         loc: Self::loc(member.span),
                         modifiers: b::Span::EMPTY,
@@ -1567,7 +1878,7 @@ impl<'a, 's> Lower<'a, 's> {
                         .as_deref()
                         .map_or(Atom::NONE, |name| self.atom(name));
                     self.file[func].name = member_name;
-                    self.file[func].name_pos = member.span.start;
+                    self.file[func].name_pos = self.name_pos(member.span, None);
                     self.file[func].anchor = member.span.start;
                     self.file[func].start = member.span.start;
                     members.push(b::Member {
@@ -1581,7 +1892,7 @@ impl<'a, 's> Lower<'a, 's> {
                         ty: b::TypeNodeId::NONE,
                         init: b::ExprId::NONE,
                         func,
-                        name_pos: member.span.start,
+                        name_pos: self.name_pos(member.span, None),
                         start: member.span.start,
                         loc: Self::loc(member.span),
                         modifiers: b::Span::EMPTY,
@@ -1611,7 +1922,7 @@ impl<'a, 's> Lower<'a, 's> {
                         ty,
                         init: b::ExprId::NONE,
                         func: b::FnId::NONE,
-                        name_pos: member.span.start,
+                        name_pos: self.name_pos(member.span, None),
                         start: member.span.start,
                         loc: Self::loc(member.span),
                         modifiers: b::Span::EMPTY,
@@ -1620,6 +1931,9 @@ impl<'a, 's> Lower<'a, 's> {
             }
         }
         members.sort_by_key(|member| member.start);
+        for member in &mut members {
+            member.flags |= self.literal_name_flags(member);
+        }
         let members = self.file.add_members(&members);
         let class_modifiers = self.declaration_modifiers(flags, span.start);
         let class = self.file.add_class(b::Class {
@@ -1690,7 +2004,7 @@ impl<'a, 's> Lower<'a, 's> {
             return b::PropKey::None;
         };
         if name.starts_with('#') {
-            b::PropKey::Private(self.atom(name.trim_start_matches('#')))
+            b::PropKey::Private(self.private_atom(name))
         } else {
             b::PropKey::Name(self.atom(name))
         }
@@ -1749,25 +2063,21 @@ impl<'a, 's> Lower<'a, 's> {
 
     fn class(&mut self, class: &k::Class) -> b::ClassId {
         let name = class.name.as_deref().map_or(Atom::NONE, |n| self.atom(n));
-        let site = self
-            .module
-            .type_syntax
-            .classes
-            .iter()
-            .find(|site| site.span == class.span)
-            .cloned();
+        let site = self.class_site(class.span).cloned();
         let class_flags = site.as_ref().map_or_else(b::Flags::empty, |site| {
             let mut flags = b::Flags::empty();
             if site.exported {
                 flags |= b::Flags::EXPORT;
             }
             if site.default_exported {
-                flags |= b::Flags::DEFAULT;
+                flags |= b::Flags::EXPORT | b::Flags::DEFAULT;
             }
             if site.abstract_ {
                 flags |= b::Flags::ABSTRACT;
             }
-            if site.declared {
+            // `NodeFlagsAmbient`: `declare class`, or any class in a `declare namespace`,
+            // `declare module` or `declare global`.
+            if site.declared || self.in_ambient_declaration(class.span) {
                 flags |= b::Flags::AMBIENT;
             }
             flags
@@ -1837,7 +2147,7 @@ impl<'a, 's> Lower<'a, 's> {
                     ty,
                     init: b::ExprId::NONE,
                     func: b::FnId::NONE,
-                    name_pos: property.span.start,
+                    name_pos: self.name_pos(property.span, None),
                     start: property.span.start,
                     loc: Self::loc(property.span),
                     modifiers: b::Span::EMPTY,
@@ -1857,6 +2167,7 @@ impl<'a, 's> Lower<'a, 's> {
                 k::MethodKind::Set => b::FnKind::Setter,
             };
             let key = self.key(&method.key);
+            self.file[func].name_pos = self.name_pos(method.span, None);
             members.push(b::Member {
                 kind: match method.kind {
                     k::MethodKind::Normal => b::MemberKind::Method,
@@ -1868,7 +2179,7 @@ impl<'a, 's> Lower<'a, 's> {
                 ty: b::TypeNodeId::NONE,
                 init: b::ExprId::NONE,
                 func,
-                name_pos: method.span.start,
+                name_pos: self.name_pos(method.span, None),
                 start: method.span.start,
                 loc: Self::loc(method.span),
                 modifiers: b::Span::EMPTY,
@@ -1925,7 +2236,7 @@ impl<'a, 's> Lower<'a, 's> {
                     .as_deref()
                     .map_or(Atom::NONE, |name| self.atom(name));
                 self.file[func].name = member_name;
-                self.file[func].name_pos = member.span.start;
+                self.file[func].name_pos = self.name_pos(member.span, None);
                 self.file[func].anchor = member.span.start;
                 self.file[func].start = member.span.start;
                 members.push(b::Member {
@@ -1977,7 +2288,7 @@ impl<'a, 's> Lower<'a, 's> {
                         ty,
                         init: value,
                         func: b::FnId::NONE,
-                        name_pos: field.span.start,
+                        name_pos: self.name_pos(field.span, None),
                         start: field.span.start,
                         loc: Self::loc(field.span),
                         modifiers: b::Span::EMPTY,
@@ -2014,7 +2325,11 @@ impl<'a, 's> Lower<'a, 's> {
         }
         let mut members = members;
         members.sort_by_key(|member| member.start);
+        for member in &mut members {
+            member.flags |= self.literal_name_flags(member);
+        }
         let members = self.file.add_members(&members);
+        let modifiers = self.declaration_modifiers(class_flags, class.span.start);
         self.file.add_class(b::Class {
             name,
             name_pos: site.as_ref().map_or(class.span.start, |site| site.name_pos),
@@ -2027,7 +2342,7 @@ impl<'a, 's> Lower<'a, 's> {
             other_implements: b::IdList::EMPTY,
             members,
             start: class.span.start,
-            modifiers: b::Span::EMPTY,
+            modifiers,
         })
     }
 }
@@ -2049,6 +2364,10 @@ fn class_member_flags(site: Option<&k::TypeClassMemberSite>, static_fallback: bo
         }
         if site.override_ {
             flags |= b::Flags::OVERRIDE;
+        }
+        // `parsePropertyDeclaration`: `?` and `!` exclude each other.
+        if site.definite && !site.optional {
+            flags |= b::Flags::DEFINITE;
         }
         match site.accessibility {
             Some(k::TypeAccessibility::Private) => flags |= b::Flags::PRIVATE,
@@ -2123,6 +2442,23 @@ fn assign(op: k::AssignmentOperator) -> Option<b::BinOp> {
 }
 
 /// Position of a private identifier's `#`, used by the engine to distinguish it from `"#x"`.
+/// `name.Pos()` of the property of the assignment target `object.name`, whose span executable
+/// HIR does not keep: the end of the whole assignment is the end of its value. The token after the
+/// `.` that follows the object, or else the last `name` written before the value.
+fn assigned_property_pos(source: &[u8], object_end: u32, value_start: u32, name: &str) -> u32 {
+    use crate::engine::check::spans::skip_trivia;
+    let dot = skip_trivia(source, object_end as usize);
+    if source.get(dot) == Some(&b'.') {
+        return skip_trivia(source, dot + 1) as u32;
+    }
+    let end = (value_start as usize).min(source.len());
+    let start = (object_end as usize).min(end);
+    source[start..end]
+        .windows(name.len().max(1))
+        .rposition(|window| window == name.as_bytes())
+        .map_or(object_end, |offset| (start + offset) as u32)
+}
+
 fn private_key_pos(source: &[u8], start: u32, end: u32, name: &str) -> u32 {
     let needle = [b"#".as_slice(), name.as_bytes()].concat();
     let start = start as usize;

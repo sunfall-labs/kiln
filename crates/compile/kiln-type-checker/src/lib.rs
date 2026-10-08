@@ -9,15 +9,16 @@ mod lower;
 mod lower_modules;
 mod lower_types;
 mod lower_values;
+mod plan;
 mod snapshot;
 mod support;
 pub use libraries::STANDARD_LIBRARIES;
 pub use snapshot::{
-    CheckOptions, CheckResult, FactSelection, SourceDiagnostic, SourceSnapshot, SourceType,
-    TypeClass, TypeRole, check,
+    CheckOptions, CheckResult, FactSelection, Libraries, SourceDiagnostic, SourceSnapshot,
+    SourceType, TypeClass, TypeRole, check, project_roots,
 };
 /// Cache identity for the checker algorithms and owned-syntax adapter.
-pub const CHECKER_VERSION: &str = "bun-bbdc5a519e0a06d1b3133b564f91096b9ba10a31/kiln-owned-v3";
+pub const CHECKER_VERSION: &str = "bun-43a42a836b/kiln-owned-v4";
 
 #[cfg(test)]
 mod tests;

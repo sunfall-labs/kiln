@@ -4,7 +4,7 @@ use crate::{
         check::Program,
         hir,
         json::Json,
-        program::Files,
+        program::{FileId, Files},
         resolve::{Host, Options, ScriptKind},
         session::{Arena, Session},
     },
@@ -14,7 +14,7 @@ use kiln_hir::{Module, Span};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 /// Immutable source inputs. Libraries and package metadata must be supplied explicitly.
@@ -22,13 +22,109 @@ use std::{
 pub struct SourceSnapshot {
     pub modules: BTreeMap<String, Arc<Module>>,
     pub auxiliary_files: BTreeMap<String, Arc<[u8]>>,
+    /// Declaration libraries parsed only when a check loads them. A library path also present in
+    /// `modules` is read from `modules`.
+    pub libraries: Option<Arc<Libraries>>,
+    /// Symbolic links among the snapshot's directories: the absolute path of a link and the
+    /// absolute, link-free path it names. Package managers link packages into `node_modules`
+    /// (`node_modules/effect` -> `node_modules/.bun/effect@4/node_modules/effect`), and module
+    /// resolution looks them up through the link, as it would on the file system.
+    pub links: BTreeMap<String, String>,
 }
+
+/// The pinned declaration libraries under the checker's library directory, each parsed by the
+/// frontend the composition root supplies the first time a check loads it, then shared by every
+/// later check. A program reads only the libraries its `lib` setting references, and the
+/// frontend's result for a library depends on nothing but its text.
+pub struct Libraries {
+    entries: BTreeMap<String, Library>,
+    parse: fn(&str, &str) -> Module,
+}
+
+struct Library {
+    source: &'static str,
+    parsed: OnceLock<Arc<Module>>,
+}
+
+impl Libraries {
+    /// [`crate::STANDARD_LIBRARIES`] under `/__kiln_typescript_lib`.
+    pub fn standard(parse: fn(&str, &str) -> Module) -> Self {
+        let entries = crate::STANDARD_LIBRARIES
+            .iter()
+            .map(|&(name, source)| {
+                let library = Library {
+                    source,
+                    parsed: OnceLock::new(),
+                };
+                (format!("{LIBRARY_DIRECTORY}/{name}"), library)
+            })
+            .collect();
+        Self { entries, parse }
+    }
+
+    /// Parse `roots`, named as in a `lib` setting (`"esnext"`), and every library they reference,
+    /// on up to `threads` threads. A check that loads one of them while this runs waits for that
+    /// library's parse instead of starting another.
+    pub fn prepare(&self, roots: &[&str], threads: usize) {
+        let mut pending = roots
+            .iter()
+            .map(|name| format!("{LIBRARY_DIRECTORY}/lib.{name}.d.ts"))
+            .collect::<Vec<_>>();
+        let mut closure = BTreeSet::new();
+        while let Some(path) = pending.pop() {
+            let Some(library) = self.entries.get(&path) else {
+                continue;
+            };
+            if !closure.insert(path) {
+                continue;
+            }
+            // The pinned libraries spell every reference this way, below their license header.
+            const REFERENCE: &str = "/// <reference lib=\"";
+            for (at, _) in library.source.match_indices(REFERENCE) {
+                let rest = &library.source[at + REFERENCE.len()..];
+                if let Some((name, _)) = rest.split_once('"') {
+                    pending.push(format!("{LIBRARY_DIRECTORY}/lib.{name}.d.ts"));
+                }
+            }
+        }
+        // The largest first: `lib.es5.d.ts` alone is the longest parse of the closure.
+        let mut closure = closure.into_iter().collect::<Vec<_>>();
+        closure.sort_by_key(|path| std::cmp::Reverse(self.entries[path].source.len()));
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let work = || {
+            while let Some(path) =
+                closure.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            {
+                self.module(path);
+            }
+        };
+        worker_pool().in_place_scope(|scope| {
+            for _ in 1..threads.max(1).min(closure.len()) {
+                scope.spawn(|_| work());
+            }
+            work();
+        });
+    }
+
+    fn module(&self, path: &str) -> Option<&Arc<Module>> {
+        let library = self.entries.get(path)?;
+        Some(
+            library
+                .parsed
+                .get_or_init(|| Arc::new((self.parse)(path, library.source))),
+        )
+    }
+}
+
+const LIBRARY_DIRECTORY: &str = "/__kiln_typescript_lib";
 /// Select owned facts without changing checking or diagnostics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FactSelection {
     #[default]
     All,
     FunctionContracts,
+    /// No facts: diagnostics only, for a caller that compiles nothing it keeps.
+    None,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckOptions {
@@ -58,14 +154,51 @@ struct SnapshotHost<'a> {
     snapshot: &'a SourceSnapshot,
     unsupported: Mutex<Vec<SourceDiagnostic>>,
     directories: BTreeMap<String, BTreeSet<Vec<u8>>>,
+    threads: usize,
+}
+
+/// The threads of one check: the available CPUs, bounded by any positive `KILN_JOBS` or
+/// `RAYON_NUM_THREADS`. Loading, binding and resolution are the donor's parallel phases; the
+/// engine publishes their results under its own task protocol, whatever the thread count.
+fn check_threads() -> usize {
+    let mut threads = std::thread::available_parallelism().map_or(1, |cores| cores.get());
+    for name in ["KILN_JOBS", "RAYON_NUM_THREADS"] {
+        if let Some(count) = std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|count| *count > 0)
+        {
+            threads = threads.min(count);
+        }
+    }
+    threads
+}
+
+/// The stack of a checker worker thread, as for the calling thread in [`check_with_stack`].
+const WORKER_STACK: usize = 8 << 20;
+
+/// The checker's worker threads, shared by every check in the process, each with the stack the
+/// checker needs. Their mimalloc heaps stay warm from one check to the next.
+fn worker_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(check_threads().saturating_sub(1).max(1))
+            .stack_size(WORKER_STACK)
+            .thread_name(|index| format!("kiln-source-check-{index}"))
+            .build()
+            .expect("source checker thread pool")
+    })
 }
 impl<'a> SnapshotHost<'a> {
     fn new(snapshot: &'a SourceSnapshot) -> Self {
         let mut directories: BTreeMap<String, BTreeSet<Vec<u8>>> = BTreeMap::new();
+        let libraries = snapshot.libraries.iter().flat_map(|l| l.entries.keys());
         for path in snapshot
             .modules
             .keys()
             .chain(snapshot.auxiliary_files.keys())
+            .chain(libraries)
         {
             let mut remaining = path.as_str();
             while let Some((parent, name)) = remaining.rsplit_once('/') {
@@ -80,16 +213,53 @@ impl<'a> SnapshotHost<'a> {
                 remaining = parent;
             }
         }
+        for link in snapshot.links.keys() {
+            if let Some((parent, name)) = link.rsplit_once('/') {
+                let directory = if parent.is_empty() { "/" } else { parent };
+                directories
+                    .entry(directory.into())
+                    .or_default()
+                    .insert(name.as_bytes().to_vec());
+            }
+        }
         Self {
             snapshot,
             unsupported: Mutex::new(Vec::new()),
             directories,
+            threads: check_threads(),
         }
     }
 }
+impl SnapshotHost<'_> {
+    /// `path` with every link among its directories replaced by what it names: its `realpath`.
+    fn follow<'p>(&self, path: &'p str) -> Cow<'p, str> {
+        let links = &self.snapshot.links;
+        if links.is_empty() {
+            return Cow::Borrowed(path);
+        }
+        let mut path = Cow::Borrowed(path);
+        // A link's target may itself contain links; each round replaces the first one.
+        for _ in 0..40 {
+            let mut replaced = None;
+            for (at, _) in path.match_indices('/').skip(1).chain([(path.len(), "")]) {
+                if let Some(target) = links.get(&path[..at]) {
+                    replaced = Some(format!("{target}{}", &path[at..]));
+                    break;
+                }
+            }
+            match replaced {
+                Some(next) => path = Cow::Owned(next),
+                None => break,
+            }
+        }
+        path
+    }
+}
+
 impl Host for SnapshotHost<'_> {
     fn read(&self, path: &[u8]) -> Option<Cow<'static, [u8]>> {
         let path = std::str::from_utf8(path).ok()?;
+        let path = &*self.follow(path);
         self.snapshot
             .modules
             .get(path)
@@ -107,16 +277,28 @@ impl Host for SnapshotHost<'_> {
                     .get(path)
                     .map(|t| Cow::Owned(t.to_vec()))
             })
+            .or_else(|| {
+                let library = self.snapshot.libraries.as_ref()?.entries.get(path)?;
+                Some(Cow::Borrowed(library.source.as_bytes()))
+            })
     }
     fn is_file(&self, path: &[u8]) -> bool {
         std::str::from_utf8(path).is_ok_and(|p| {
-            self.snapshot.modules.contains_key(p) || self.snapshot.auxiliary_files.contains_key(p)
+            let p = &*self.follow(p);
+            self.snapshot.modules.contains_key(p)
+                || self.snapshot.auxiliary_files.contains_key(p)
+                || self
+                    .snapshot
+                    .libraries
+                    .as_ref()
+                    .is_some_and(|libraries| libraries.entries.contains_key(p))
         })
     }
     fn is_dir(&self, path: &[u8]) -> bool {
         let Ok(path) = std::str::from_utf8(path) else {
             return false;
         };
+        let path = &*self.follow(path);
         let directory = if path == "/" {
             path
         } else {
@@ -126,12 +308,16 @@ impl Host for SnapshotHost<'_> {
     }
 
     fn realpath(&self, path: &[u8]) -> Vec<u8> {
-        path.to_vec()
+        match std::str::from_utf8(path) {
+            Ok(text) => self.follow(text).as_bytes().to_vec(),
+            Err(_) => path.to_vec(),
+        }
     }
     fn list_dir(&self, path: &[u8]) -> Vec<Vec<u8>> {
         let Ok(path) = std::str::from_utf8(path) else {
             return Vec::new();
         };
+        let path = &*self.follow(path);
         let directory = if path == "/" {
             path
         } else {
@@ -163,7 +349,23 @@ impl Host for SnapshotHost<'_> {
         if name.ends_with(".json") || name.ends_with(".jsonc") {
             return crate::support::json::parse_source_file(arena, atoms.session(), atoms, text);
         }
-        if let Some(module) = self.snapshot.modules.get(&name) {
+        let library = || self.snapshot.libraries.as_ref()?.module(&name).cloned();
+        // A source that the caller supplied as text, unparsed: parsed now that the program
+        // loads it. JavaScript a TypeScript program never loads needs no parse at all.
+        let unparsed = || {
+            let source = self.snapshot.auxiliary_files.get(&name)?;
+            let parse = self.snapshot.libraries.as_ref()?.parse;
+            let text = std::str::from_utf8(source).ok()?;
+            Some(Arc::new(parse(&name, text)))
+        };
+        let module = self
+            .snapshot
+            .modules
+            .get(&name)
+            .cloned()
+            .or_else(library)
+            .or_else(unparsed);
+        if let Some(module) = module.as_ref() {
             let source_module = module
                 .type_syntax
                 .original_module
@@ -193,8 +395,13 @@ impl Host for SnapshotHost<'_> {
             // The loader's arena belongs to this session. Its lifetime is narrowed to the parse call.
             let (mut file, unsupported) =
                 Lower::new(source_module, atoms).finish(arena, atoms.session());
-            if name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts") {
+            if is_declaration_file_name(&name) {
                 file.kind = hir::FileKind::Declaration;
+            } else if matches!(
+                source_module.source_kind,
+                kiln_hir::SourceKind::Tsx | kiln_hir::SourceKind::Jsx
+            ) {
+                file.kind = hir::FileKind::Tsx;
             }
             self.unsupported
                 .lock()
@@ -227,12 +434,54 @@ impl Host for SnapshotHost<'_> {
         crate::support::json::parse(text)
     }
     fn parallel(&self, count: usize, work: &(dyn Fn(usize) + Sync)) {
-        for i in 0..count {
-            work(i)
+        let threads = self.threads.min(count);
+        if threads <= 1 {
+            for i in 0..count {
+                work(i)
+            }
+            return;
         }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let run = || {
+            loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= count {
+                    break;
+                }
+                work(i);
+            }
+        };
+        // The engine calls this at every barrier of every step. Spawning its threads each time
+        // cost more than the work of most barriers: hundreds of thread creations per check.
+        worker_pool().in_place_scope(|scope| {
+            for _ in 1..threads {
+                scope.spawn(|_| run());
+            }
+            run();
+        });
+    }
+    fn threads(&self) -> usize {
+        self.threads
     }
 }
 /// Check one immutable project. No filesystem reads or parser/checker identities escape.
+/// The root files of the project that the configuration at `config_path` describes, in
+/// TypeScript's order: its `files`, then the matches of `include` among the snapshot's paths.
+/// Empty if the configuration cannot be read.
+pub fn project_roots(snapshot: &SourceSnapshot, config_path: &str) -> Vec<String> {
+    let session = Session::new();
+    let host = SnapshotHost::new(snapshot);
+    crate::engine::config::load_overriding(&host, &session, config_path.as_bytes(), &|_| Vec::new())
+        .map(|project| {
+            project
+                .files
+                .into_iter()
+                .map(|path| String::from_utf8_lossy(&path).into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn check(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions) -> CheckResult {
     if let Some(path) = snapshot
         .modules
@@ -270,7 +519,20 @@ pub fn check(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions
         || roots.iter().any(|p| needs_normalization(p))
     {
         let directory = lexical_path(&options.current_directory, "/");
-        let mut normalized = SourceSnapshot::default();
+        let mut normalized = SourceSnapshot {
+            libraries: snapshot.libraries.clone(),
+            links: snapshot
+                .links
+                .iter()
+                .map(|(link, target)| {
+                    (
+                        lexical_path(link, &directory),
+                        lexical_path(target, &directory),
+                    )
+                })
+                .collect(),
+            ..SourceSnapshot::default()
+        };
         let mut original_paths = BTreeMap::new();
         for (path, module) in &snapshot.modules {
             let normalized_path = lexical_path(path, &directory);
@@ -331,6 +593,12 @@ pub fn check(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions
                 ty.path.clone_from(path);
             }
         }
+        for (file, _) in &mut checked.files {
+            if let Some(path) = original_paths.get(file) {
+                file.clone_from(path);
+            }
+        }
+        checked.files.sort();
         for diagnostic in &mut checked.diagnostics {
             if let Some(path) = diagnostic.path.as_mut()
                 && let Some(original) = original_paths.get(path)
@@ -371,7 +639,7 @@ fn check_with_stack(
         return std::thread::scope(|scope| {
             std::thread::Builder::new()
                 .name("kiln-source-check".into())
-                .stack_size(8 << 20)
+                .stack_size(WORKER_STACK)
                 .spawn_scoped(scope, || check_inner(snapshot, roots, options))
                 .expect("source checker thread creation failed")
                 .join()
@@ -380,6 +648,118 @@ fn check_with_stack(
     }
     check_inner(snapshot, roots, options)
 }
+/// Each source file of the program with whether its own facts are complete: no file it reaches
+/// through its references and imports has an adapter gap or ran out of stack. A gap with no file,
+/// or in a file that is not a module or that augments the global scope, can change any file's
+/// types, as can an invalid configuration; then no file is complete.
+fn complete_files(
+    files: &Files<'_>,
+    sources: &[(FileId, String)],
+    unsupported: &[SourceDiagnostic],
+    ran_out_in: &[FileId],
+    configuration_valid: bool,
+) -> Vec<(String, bool)> {
+    let count = files.modules.len();
+    let by_path: std::collections::HashMap<&[u8], FileId> = (0..count)
+        .flat_map(|index| {
+            let id = FileId(index as u32);
+            let module = files.module(id);
+            [(module.path.text, id), (module.file_name(), id)]
+        })
+        .collect();
+    let mut global = !configuration_valid;
+    let mut gaps: Vec<FileId> = ran_out_in.to_vec();
+    for diagnostic in unsupported {
+        match diagnostic
+            .path
+            .as_deref()
+            .and_then(|path| by_path.get(path.as_bytes()))
+        {
+            Some(&id) => gaps.push(id),
+            None => global = true,
+        }
+    }
+    for &id in &gaps {
+        let module = files.module(id);
+        if !module.is_module() || !module.bound.global_augmentations.is_empty() {
+            global = true;
+        }
+    }
+    // Everything that reaches a gap, by walking the edges backwards from the gaps.
+    let mut importers: Vec<Vec<FileId>> = vec![Vec::new(); count];
+    for index in 0..count {
+        for &edge in files.module(FileId(index as u32)).edges {
+            importers[edge.idx()].push(FileId(index as u32));
+        }
+    }
+    let mut tainted = vec![false; count];
+    while let Some(id) = gaps.pop() {
+        if !std::mem::replace(&mut tainted[id.idx()], true) {
+            gaps.extend(importers[id.idx()].iter().copied());
+        }
+    }
+    let mut complete: Vec<(String, bool)> = sources
+        .iter()
+        .map(|(id, path)| (path.clone(), !global && !tainted[id.idx()]))
+        .collect();
+    complete.sort();
+    complete
+}
+
+/// `isDeclarationFileName`: `.d.ts`, `.d.mts`, `.d.cts` and `.d.<extension>.ts`, in any case.
+fn is_declaration_file_name(name: &str) -> bool {
+    let file = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+    file.ends_with(".d.ts")
+        || file.ends_with(".d.mts")
+        || file.ends_with(".d.cts")
+        || file
+            .strip_suffix(".ts")
+            .and_then(|stem| stem.rsplit_once(".d."))
+            .is_some_and(|(_, extension)| !extension.is_empty() && !extension.contains('.'))
+}
+
+/// A configuration that cannot be read: its errors, and no check, so nothing is complete.
+fn unreadable_config(
+    errors: Vec<crate::engine::config::ConfigError>,
+    options: &CheckOptions,
+) -> CheckResult {
+    let mut result = CheckResult {
+        checker_identity: format!("{}:{options:?}", crate::CHECKER_VERSION),
+        complete: false,
+        ..Default::default()
+    };
+    push_config_errors(&mut result, errors, options);
+    result
+}
+
+fn push_config_errors(
+    result: &mut CheckResult,
+    errors: Vec<crate::engine::config::ConfigError>,
+    options: &CheckOptions,
+) {
+    for error in errors {
+        let mut message = Vec::new();
+        if let Some((_, template)) = crate::engine::messages::message(error.code) {
+            crate::engine::messages::format(&mut message, template, &error.args);
+        }
+        let (path, span) =
+            error
+                .at
+                .map_or((options.config_path.clone(), None), |(path, start, end)| {
+                    (
+                        Some(String::from_utf8_lossy(&path).into_owned()),
+                        Some(Span::new(start, end)),
+                    )
+                });
+        result.diagnostics.push(SourceDiagnostic {
+            path,
+            span,
+            code: Some(error.code),
+            message: String::from_utf8_lossy(&message).into_owned(),
+        });
+    }
+}
+
 fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions) -> CheckResult {
     let session = Session::new();
     let host = SnapshotHost::new(snapshot);
@@ -389,8 +769,14 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
             crate::engine::config::load_overriding(&host, &session, path.as_bytes(), &|_| {
                 Vec::new()
             });
-        config_errors = project.errors;
-        project.options
+        match project {
+            Ok(project) => {
+                config_errors = project.errors;
+                project.options
+            }
+            // `tsc`: the file cannot be read (TS5083), and nothing is checked.
+            Err(errors) => return unreadable_config(errors, options),
+        }
     } else {
         let mut opts = Options::default();
         opts.base_dir = options.current_directory.as_bytes().to_vec();
@@ -423,59 +809,138 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
     };
     opts.current_directory = options.current_directory.as_bytes().to_vec();
     opts.no_emit = true;
-    opts.lib_dir = b"/__kiln_typescript_lib".to_vec();
+    opts.lib_dir = LIBRARY_DIRECTORY.as_bytes().to_vec();
     let roots: Vec<_> = roots.iter().map(|p| p.as_bytes().to_vec()).collect();
     let files = session
         .arena()
         .alloc(Files::load(&session, &host, opts, &roots));
     let program = Program::new(&session, files);
-    let mut checker = program.checker();
-    checker.begin_stack_budget();
-    checker.begin_task(0, 0, true);
-    let mut checked_files = Vec::new();
-    let mut ran_out = false;
     let mut result = CheckResult {
         checker_identity: format!("{}:{options:?}", crate::CHECKER_VERSION),
         complete: true,
         ..Default::default()
     };
     let configuration_valid = config_errors.is_empty();
-    for error in config_errors {
-        let mut message = Vec::new();
-        if let Some((_, template)) = crate::engine::messages::message(error.code) {
-            crate::engine::messages::format(&mut message, template, &error.args);
-        }
-        let (path, span) =
-            error
-                .at
-                .map_or((options.config_path.clone(), None), |(path, start, end)| {
-                    (
-                        Some(String::from_utf8_lossy(&path).into_owned()),
-                        Some(Span::new(start, end)),
-                    )
-                });
-        result.diagnostics.push(SourceDiagnostic {
-            path,
-            span,
-            code: Some(error.code),
-            message: String::from_utf8_lossy(&message).into_owned(),
-        });
+    push_config_errors(&mut result, config_errors, options);
+    // The donor driver's plan: steps of tasks, each task a checker of its own on some thread, and a
+    // barrier after each step that validates, links and publishes the tasks in task order. An
+    // invalid task's files are checked again in a later round of the same step.
+    let to_check: &[FileId] = files.order;
+    let bytes_of = |index: usize| files.module(to_check[index]).hir.source_len as usize;
+    // The identifiers of a file's expressions and its type nodes: each is a symbol to resolve or a
+    // type to compute (the donor's estimate).
+    let costs: Vec<usize> = to_check
+        .iter()
+        .map(|&file| {
+            let hir = &files.module(file).hir;
+            let identifiers = hir
+                .exprs
+                .iter()
+                .filter(|it| it.kind.tag() == hir::ExprTag::Ident)
+                .count();
+            identifiers + hir.types.len() + 1
+        })
+        .collect();
+    let cost_of = |index: usize| costs[index];
+    let plan = crate::plan::Plan::new(to_check.len(), &bytes_of, &cost_of);
+    let in_parallel = |count: usize, work: &(dyn Fn(usize) + Sync)| host.parallel(count, work);
+    struct Outcome<'s> {
+        finished: crate::engine::check::task::Finished<'s>,
+        checked: Vec<(FileId, crate::engine::check::errors::Checked)>,
+        /// The files in which the native stack ran out.
+        ran_out: Vec<FileId>,
     }
-    for &id in files.order {
-        let checked = checker.check_file(id);
-        let module = files.module(id);
-        let path = String::from_utf8_lossy(module.file_name()).into_owned();
-        checked_files.push((id, path.clone(), checked));
-        ran_out |= checker.take_ran_out_of_stack();
-        if path.starts_with("/__kiln_typescript_lib/") {
-            continue;
+    let mut checked_files = Vec::new();
+    let mut ran_out_in: Vec<FileId> = Vec::new();
+    for (number, step) in plan.steps.iter().enumerate() {
+        let mut tasks = step.clone();
+        while !tasks.is_empty() {
+            let outcomes: Vec<Mutex<Option<Outcome>>> =
+                tasks.iter().map(|_| Mutex::new(None)).collect();
+            host.parallel(tasks.len(), &|index| {
+                let mut checker = program.checker();
+                checker.begin_stack_budget();
+                checker.begin_task(number as u32, index as u32, true);
+                let (mut checked, mut ran_out) = (Vec::new(), Vec::new());
+                for &file in &tasks[index] {
+                    let file = to_check[file];
+                    checked.push((file, checker.check_file(file)));
+                    if checker.take_ran_out_of_stack() {
+                        ran_out.push(file);
+                    }
+                }
+                let finished = checker.end_task();
+                *outcomes[index].lock().unwrap() = Some(Outcome {
+                    finished,
+                    checked,
+                    ran_out,
+                });
+            });
+            let outcomes: Vec<Outcome> = outcomes
+                .into_iter()
+                .map(|outcome| outcome.into_inner().unwrap().unwrap())
+                .collect();
+            let (mut finished, mut accepted) = (Vec::new(), Vec::new());
+            for outcome in outcomes {
+                finished.push(outcome.finished);
+                accepted.push((outcome.checked, outcome.ran_out));
+            }
+            let is_invalid = program.validate(&finished);
+            let mut invalid = Vec::new();
+            let mut at = is_invalid.iter();
+            finished.retain(|_| !*at.next().unwrap());
+            for ((checked, task_ran_out), (&is_invalid, task)) in
+                accepted.into_iter().zip(is_invalid.iter().zip(&tasks))
+            {
+                if is_invalid {
+                    invalid.extend(task.iter().copied());
+                } else {
+                    ran_out_in.extend(task_ran_out);
+                    checked_files.extend(checked);
+                }
+            }
+            program.link(&mut finished, &in_parallel);
+            program.publish(&mut finished, &in_parallel, false);
+            tasks = crate::plan::Plan::cut(invalid, &cost_of);
         }
+    }
+    // The contracts of each source file, read from the published state by checkers outside the
+    // plan, whose own writes are dropped with them.
+    let sources: Vec<(FileId, String)> = to_check
+        .iter()
+        .map(|&id| {
+            (
+                id,
+                String::from_utf8_lossy(files.module(id).file_name()).into_owned(),
+            )
+        })
+        .filter(|(_, path)| !path.starts_with(LIBRARY_DIRECTORY))
+        .collect();
+    // A declaration file compiles to nothing, so its facts would go unread.
+    let fact_sources: Vec<usize> = if options.facts == FactSelection::None {
+        Vec::new()
+    } else {
+        (0..sources.len())
+            .filter(|&index| files.module(sources[index].0).hir.kind != hir::FileKind::Declaration)
+            .collect()
+    };
+    let facts: Vec<Mutex<(Vec<SourceType>, bool)>> =
+        fact_sources.iter().map(|_| Mutex::default()).collect();
+    host.parallel(fact_sources.len(), &|index| {
+        let (id, path) = (
+            sources[fact_sources[index]].0,
+            sources[fact_sources[index]].1.as_str(),
+        );
+        let module = files.module(id);
+        let mut checker = program.checker();
+        checker.begin_stack_budget();
+        let mut types = Vec::new();
         if options.facts == FactSelection::All {
             for (index, e) in module.hir.exprs.iter().enumerate() {
                 let ty = checker.type_of_expr(id, hir::ExprId(index as u32));
-                result.types.push(export_type(
+                types.push(export_type(
                     &mut checker,
-                    &path,
+                    path,
                     Span::new(e.pos, e.end),
                     TypeRole::Expression,
                     ty,
@@ -484,9 +949,9 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
         }
         for (index, p) in module.hir.params.iter().enumerate() {
             let ty = checker.type_of_param(id, hir::ParamId(index as u32));
-            result.types.push(export_type(
+            types.push(export_type(
                 &mut checker,
-                &path,
+                path,
                 Span::new(p.loc.pos, p.loc.end),
                 TypeRole::Parameter,
                 ty,
@@ -494,9 +959,9 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
         }
         for (index, f) in module.hir.fns.iter().enumerate() {
             let ty = checker.return_type_of_fn(id, hir::FnId(index as u32));
-            result.types.push(export_type(
+            types.push(export_type(
                 &mut checker,
-                &path,
+                path,
                 Span::new(
                     f.start,
                     if f.ret.is_some() {
@@ -509,17 +974,29 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
                 ty,
             ));
         }
-    }
-    ran_out |= checker.take_ran_out_of_stack();
-    let mut finished = vec![checker.end_task()];
-    drop(checker);
-    let serial = |count: usize, work: &(dyn Fn(usize) + Sync)| {
-        for i in 0..count {
-            work(i)
+        let ran_out = checker.take_ran_out_of_stack();
+        *facts[index].lock().unwrap() = (types, ran_out);
+    });
+    for (fact, &(id, _)) in facts
+        .into_iter()
+        .zip(fact_sources.iter().map(|&index| &sources[index]))
+    {
+        let (types, fact_ran_out) = fact.into_inner().unwrap();
+        result.types.extend(types);
+        if fact_ran_out {
+            ran_out_in.push(id);
         }
-    };
-    program.link(&mut finished, &serial);
-    program.publish(&mut finished, &serial, false);
+    }
+    let ran_out = !ran_out_in.is_empty();
+    // Diagnostics in program order, as a serial check reports them.
+    checked_files.sort_by_key(|&(id, _)| files.rank_of_file(id));
+    let checked_files: Vec<_> = checked_files
+        .into_iter()
+        .map(|(id, checked)| {
+            let path = String::from_utf8_lossy(files.module(id).file_name()).into_owned();
+            (id, path, checked)
+        })
+        .collect();
     for (id, path, checked) in checked_files {
         for d in program.finish_file(id, checked) {
             result.diagnostics.push(SourceDiagnostic {
@@ -546,6 +1023,32 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
     }
     let unsupported = host.unsupported.into_inner().unwrap();
     result.complete = configuration_valid && unsupported.is_empty() && !ran_out;
+    result.files = complete_files(
+        files,
+        &sources,
+        &unsupported,
+        &ran_out_in,
+        configuration_valid,
+    );
+    // A parser error at the place of a checker error is the same error: TypeScript reports it
+    // from the checker's grammar checks, with a code. The result stays incomplete.
+    let coded: std::collections::HashSet<(&str, u32)> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.code.is_some())
+        .filter_map(|d| Some((d.path.as_deref()?, d.span?.start)))
+        .collect();
+    let unsupported: Vec<_> = unsupported
+        .into_iter()
+        .filter(|d| {
+            d.code.is_some()
+                || !d
+                    .path
+                    .as_deref()
+                    .zip(d.span)
+                    .is_some_and(|(path, span)| coded.contains(&(path, span.start)))
+        })
+        .collect();
     result.diagnostics.extend(unsupported);
     if ran_out {
         result.diagnostics.push(SourceDiagnostic {

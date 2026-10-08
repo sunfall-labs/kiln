@@ -5,7 +5,7 @@
 //! *process lifetime* the resource being protected here: no single client may be able to wedge
 //! the daemon, because doing so throws away everything warm.
 
-use kiln_db::{MemoEngine, QueryEngine};
+use kiln_db::{FileId, MemoEngine, QueryEngine, Revision};
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Request, ResolutionMap, Response, SourceDigest, SourceView, Stats, StepBudget, SyncId,
@@ -52,6 +52,9 @@ pub(crate) struct DaemonState<E> {
     pub(crate) source_view: SourceView,
     pub(crate) resolutions: Option<ResolutionMap>,
     pub(crate) graph_cache: GraphCache,
+    /// Each held source's digest at the revision it was computed for, so a sync compares an
+    /// unchanged project without hashing every source again.
+    pub(crate) source_digests: HashMap<FileId, (Revision, SourceDigest)>,
 }
 
 /// Connection-local synchronization state. Staged text is private until CommitSync obtains the
@@ -184,8 +187,70 @@ impl Daemon<MemoEngine> {
 }
 
 fn production_engine() -> MemoEngine {
-    MemoEngine::with_summary_query(kiln_frontend_oxc::parse, kiln_backend_c::summarize_program)
-        .with_source_check_query(check_source_types)
+    let mut engine =
+        MemoEngine::with_summary_query(parse_source, kiln_backend_c::summarize_program)
+            .with_source_check_query(check_source_types);
+    if TYPE_FACTS_UNUSED.load(std::sync::atomic::Ordering::Relaxed) {
+        kiln_db::QueryEngine::set_compile_facts(&mut engine, false);
+    }
+    engine
+}
+
+/// Whether this process serves requests one after another, so that a result kept from one is
+/// worth what keeping it costs. A one-shot command answers once and keeps nothing.
+static SERVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn serving() -> bool {
+    SERVING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set by [`without_type_facts`]: nothing this process compiles outlives it.
+static TYPE_FACTS_UNUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// For a process whose compiled programs are discarded, as a one-shot `kiln check`'s are: source
+/// checks report diagnostics without type facts, and compiling does not wait for them, so the
+/// check and the module graph run at once. A daemon keeps both, since later builds read them.
+pub fn without_type_facts() {
+    TYPE_FACTS_UNUSED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The production frontend. A declaration file has no executable code, so it is parsed as the
+/// source checker reads it, without the transform, code generation and second parse that
+/// [`kiln_frontend_oxc::parse`] spends on executable TypeScript; on a project that synchronizes
+/// its packages' declarations that was most of the parse time of a check.
+fn parse_source(path: &str, source: &str) -> kiln_hir::Module {
+    if [".d.ts", ".d.mts", ".d.cts"]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+    {
+        kiln_frontend_oxc::parse_authored(path, source)
+    } else {
+        kiln_frontend_oxc::parse(path, source)
+    }
+}
+
+/// The declaration libraries of every source check in this process. A check parses only the
+/// libraries its configuration loads, each once per process, and reads a library's authored
+/// module alone, never its transformed executable form.
+fn source_check_libraries() -> &'static std::sync::Arc<kiln_type_checker::Libraries> {
+    static LIBRARIES: std::sync::OnceLock<std::sync::Arc<kiln_type_checker::Libraries>> =
+        std::sync::OnceLock::new();
+    LIBRARIES.get_or_init(|| {
+        std::sync::Arc::new(kiln_type_checker::Libraries::standard(
+            kiln_frontend_oxc::parse_authored,
+        ))
+    })
+}
+
+/// Start parsing the `esnext` declaration libraries in the background, so a TypeScript check
+/// that follows finds them parsed: the CLI spends its first milliseconds reading and resolving
+/// the project on one thread. A library the check needs before its parse finishes is waited for,
+/// not parsed twice; one outside `esnext` is parsed when the check loads it.
+pub fn prewarm_source_checker() {
+    let _ = std::thread::Builder::new()
+        .name("kiln-library-prewarm".into())
+        .stack_size(crate::SERVE_STACK_BYTES)
+        .spawn(|| source_check_libraries().prepare(&["esnext"], 4));
 }
 
 /// The composition root supplies immutable parsed library inputs; neither database nor checker reads disk.
@@ -194,27 +259,24 @@ pub(crate) fn check_source_types(
     modules: &[(String, std::sync::Arc<kiln_hir::Module>)],
     auxiliary: &[(String, std::sync::Arc<[u8]>)],
 ) -> kiln_hir::source_types::CheckResult {
-    use std::collections::BTreeMap;
-    use std::sync::{Arc, OnceLock};
-    static LIBRARIES: OnceLock<BTreeMap<String, Arc<kiln_hir::Module>>> = OnceLock::new();
-    let libraries = LIBRARIES.get_or_init(|| {
-        kiln_type_checker::STANDARD_LIBRARIES
-            .iter()
-            .map(|(name, source)| {
-                let path = format!("/__kiln_typescript_lib/{name}");
-                let module = kiln_frontend_oxc::parse(&path, source);
-                (path, Arc::new(module))
-            })
-            .collect()
-    });
-    let mut snapshot = kiln_type_checker::SourceSnapshot::default();
-    snapshot
-        .modules
-        .extend(libraries.iter().map(|(p, m)| (p.clone(), m.clone())));
+    use std::sync::Arc;
+    let libraries = source_check_libraries();
+    let mut snapshot = kiln_type_checker::SourceSnapshot {
+        libraries: Some(libraries.clone()),
+        ..Default::default()
+    };
     snapshot
         .modules
         .extend(modules.iter().map(|(p, m)| (p.clone(), Arc::clone(m))));
     snapshot.auxiliary_files.extend(auxiliary.iter().cloned());
+    for (path, bytes) in auxiliary {
+        if path.ends_with(kiln_hir::source_types::CHECKER_LINKS_FILE)
+            && let Ok(links) =
+                serde_json::from_slice::<std::collections::BTreeMap<String, String>>(bytes)
+        {
+            snapshot.links.extend(links);
+        }
+    }
     // Ambient declarations belong to the entry package snapshot even when no runtime import
     // reaches them. A workspace snapshot can contain sibling packages; their declarations are
     // not ambient in this package and should enter only through normal module resolution.
@@ -270,7 +332,11 @@ pub(crate) fn check_source_types(
         config_path,
         current_directory,
         libraries: vec!["esnext".into()],
-        facts: kiln_type_checker::FactSelection::FunctionContracts,
+        facts: if TYPE_FACTS_UNUSED.load(std::sync::atomic::Ordering::Relaxed) {
+            kiln_type_checker::FactSelection::None
+        } else {
+            kiln_type_checker::FactSelection::FunctionContracts
+        },
         ..Default::default()
     };
     kiln_type_checker::check(&snapshot, &roots, &options)
@@ -316,6 +382,7 @@ impl LocalClient {
                 source_view: SourceView(0),
                 resolutions: None,
                 graph_cache: GraphCache::default(),
+                source_digests: HashMap::new(),
             })),
             Arc::new(crate::testing::ConformanceCoordinator::default()),
         )
@@ -462,6 +529,7 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
                 source_view: SourceView(0),
                 resolutions: None,
                 graph_cache: GraphCache::default(),
+                source_digests: HashMap::new(),
             })),
             _socket: SocketGuard(socket.to_path_buf()),
         })
@@ -493,6 +561,7 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
         // Before the first connection, and before any rebuild can replace the file underneath us:
         // this daemon's answers belong to the build it started from, whatever is at that path now.
         let _ = crate::build_identity();
+        SERVING.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
         for incoming in self.listener.incoming() {
@@ -718,16 +787,27 @@ fn begin_sync<E: QueryEngine>(
         );
     }
 
-    let guard = state.lock().unwrap_or_else(PoisonError::into_inner);
-    let held = guard
-        .engine
+    let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+    let DaemonState {
+        engine,
+        source_digests,
+        ..
+    } = &mut *guard;
+    let held = engine
         .source_files()
         .into_iter()
         .filter_map(|(file, path)| {
-            guard
-                .engine
-                .source(file)
-                .map(|text| (path, kiln_proto::source_digest(text)))
+            let text = engine.source(file)?;
+            let revision = engine.source_revision(file)?;
+            let digest = match source_digests.get(&file) {
+                Some((at, digest)) if *at == revision => *digest,
+                _ => {
+                    let digest = kiln_proto::source_digest(text);
+                    source_digests.insert(file, (revision, digest));
+                    digest
+                }
+            };
+            Some((path, digest))
         })
         .collect::<BTreeMap<_, _>>();
     let needed = manifest

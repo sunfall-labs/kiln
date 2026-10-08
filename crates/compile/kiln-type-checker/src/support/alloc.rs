@@ -32,8 +32,20 @@ impl Default for Arena {
     }
 }
 
+/// `mi_option_allow_thp` in mimalloc 3.
+const MI_OPTION_ALLOW_THP: libmimalloc_sys::mi_option_t = 43;
+
 impl Arena {
     pub fn new() -> Self {
+        // Every check thread starts its own heap on fresh memory. With transparent huge pages,
+        // mimalloc advises each new region huge and the first touch of a page zeroes 2 MiB, which
+        // made a 16-thread load slower than a serial one. Only that advice is withdrawn; the
+        // process's THP setting is untouched.
+        static NO_HUGE_PAGE_ADVICE: std::sync::Once = std::sync::Once::new();
+        NO_HUGE_PAGE_ADVICE.call_once(|| {
+            // SAFETY: setting a mimalloc option has no preconditions.
+            unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_ALLOW_THP, 0) }
+        });
         // SAFETY: mimalloc heap creation has no preconditions.
         let heap = unsafe { libmimalloc_sys::mi_heap_new() };
         Self {

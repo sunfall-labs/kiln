@@ -1,6 +1,6 @@
 Bun-derived TypeScript checker
-Sources: https://github.com/oven-sh/bun/tree/bbdc5a519e0a06d1b3133b564f91096b9ba10a31/src/sema
-Support ports: src/bun_core/string/identifier.rs and src/wyhash/lib.rs at the same pinned commit; path algorithms adapted from src/paths/resolve_path.rs.
+Sources: https://github.com/oven-sh/bun/tree/43a42a836b/src/sema (first ported at bbdc5a519e0a06d1b3133b564f91096b9ba10a31)
+Support ports: src/bun_core/string/identifier.rs and src/wyhash/lib.rs at bbdc5a519e0a06d1b3133b564f91096b9ba10a31; path algorithms adapted from src/paths/resolve_path.rs.
 Copyright Bun contributors. Infrastructure under MIT.
 Binder and checker contain ports of microsoft/typescript-go, Copyright Microsoft Corporation, Apache License 2.0.
 Local integration and owned syntax adaptation: Kiln contributors.

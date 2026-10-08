@@ -436,6 +436,15 @@ pub trait QueryEngine {
     fn module_ir(&mut self, file: FileId) -> CompiledModule {
         kiln_ir::compile_module(&self.parse(file).module)
     }
+    /// Compute ahead, possibly in parallel, what [`Self::module_ir_with_identity`] would answer
+    /// for each `(file, identity)`, so that a graph walk which asks for them one at a time finds
+    /// them computed. An engine without such a path does nothing.
+    fn prepare_module_irs(&mut self, _modules: &[(FileId, String)]) {}
+    /// Start `file`'s source check on another thread if forcing it would compute it, so that
+    /// work which does not wait for its facts runs meanwhile. Forcing it joins.
+    fn begin_source_check(&mut self, _file: FileId) {}
+    /// Whether compiling a TypeScript module waits for its source check's facts. On by default.
+    fn set_compile_facts(&mut self, _on: bool) {}
     /// Compile module IR using a stable logical identity for private names. The default is
     /// intentionally uncached; memoizing engines should key this query by both file and identity.
     fn module_ir_with_identity(&mut self, file: FileId, identity: &str) -> CompiledModule {

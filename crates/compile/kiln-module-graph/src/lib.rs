@@ -53,12 +53,43 @@ fn compiler_generated_helper_target(
     ))
 }
 
+/// A Node builtin's compiled program under `identity` (its logical path when `None`). Builtin
+/// sources are part of this binary, so a program is compiled once per process and copied after.
+fn builtin_program(
+    builtin: NodeBuiltin,
+    identity: Option<&str>,
+) -> Result<ModuleProgram, Vec<kiln_ir::CompileDiagnostic>> {
+    type Programs = HashMap<(NodeBuiltin, Option<String>), Arc<ModuleProgram>>;
+    static PROGRAMS: std::sync::OnceLock<std::sync::Mutex<Programs>> = std::sync::OnceLock::new();
+    let programs = PROGRAMS.get_or_init(Default::default);
+    let key = (builtin, identity.map(str::to_owned));
+    let held = programs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .cloned();
+    if let Some(program) = held {
+        return Ok(ModuleProgram::clone(&program));
+    }
+    let source = kiln_builtins::builtin_source(builtin);
+    let mut hir = kiln_frontend_oxc::parse(kiln_builtins::builtin_logical_path(builtin), source);
+    if let Some(identity) = identity {
+        hir.module_id = Arc::from(identity);
+    }
+    let program = compile_module(&hir)?;
+    programs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, Arc::new(program.clone()));
+    Ok(program)
+}
+
 /// A cache-stable identity for private names in one project graph. Files retain their absolute
 /// paths everywhere else (resolution, diagnostics, and `import.meta`); only the compiler identity
 /// uses the path relative to the canonical project root.
 pub fn graph_module_identity(project_root: &Path, path: &Path) -> String {
-    let logical_root =
-        fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let logical_root = kiln_module_resolver::snapshot_canonicalize(project_root)
+        .unwrap_or_else(|_| project_root.to_path_buf());
     path.strip_prefix(&logical_root)
         .unwrap_or(path)
         .to_string_lossy()
@@ -509,15 +540,13 @@ impl ModuleGraph {
                 return Ok(path);
             }
 
-            let source = kiln_builtins::builtin_source(builtin);
-            let logical_path = kiln_builtins::builtin_logical_path(builtin);
-            let mut hir = kiln_frontend_oxc::parse(logical_path, source);
-            hir.module_id = Arc::from(graph_module_identity(project_root, &path));
-            let program =
-                compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+            let identity = graph_module_identity(project_root, &path);
+            let program = builtin_program(builtin, Some(&identity)).map_err(|diagnostics| {
+                ModuleGraphError::Compile {
                     path: path.clone(),
                     diagnostics,
-                })?;
+                }
+            })?;
             validate_exports(&path, &program)?;
 
             let mut dependencies = Vec::with_capacity(program.dependencies.len());
@@ -1976,6 +2005,7 @@ enum WorkItem {
     Exit(Box<ModuleNode>),
 }
 
+#[derive(Clone)]
 struct DynamicWork {
     importer: PathBuf,
     specifier: String,
@@ -1983,6 +2013,7 @@ struct DynamicWork {
     source: ModuleSource,
 }
 
+#[derive(Clone)]
 struct RuntimeWork {
     owner: PathBuf,
     importer: PathBuf,
@@ -2064,10 +2095,7 @@ where
                     });
                     let result = self
                         .visit_static(dynamic.path.clone(), Some(dynamic.source))
-                        .and_then(|_| {
-                            let export_resolutions = resolve_exports(&self.modules, &self.order)?;
-                            validate_links(&self.modules, &self.order, &export_resolutions)
-                        });
+                        .and_then(|_| self.validate_added_links());
                     let journal = self.dynamic_journal.take().expect("dynamic journal exists");
                     if let Err(error) = result {
                         self.rollback_dynamic(journal);
@@ -2088,10 +2116,7 @@ where
                     });
                     let result = self
                         .visit_static(runtime.path.clone(), Some(runtime.source))
-                        .and_then(|_| {
-                            let export_resolutions = resolve_exports(&self.modules, &self.order)?;
-                            validate_links(&self.modules, &self.order, &export_resolutions)
-                        });
+                        .and_then(|_| self.validate_added_links());
                     let journal = self.dynamic_journal.take().expect("runtime journal exists");
                     if let Err(error) = result {
                         self.rollback_dynamic(journal);
@@ -2119,10 +2144,7 @@ where
             });
             let result = self
                 .visit_static(runtime.path.clone(), Some(runtime.source))
-                .and_then(|_| {
-                    let export_resolutions = resolve_exports(&self.modules, &self.order)?;
-                    validate_links(&self.modules, &self.order, &export_resolutions)
-                });
+                .and_then(|_| self.validate_added_links());
             let journal = self.dynamic_journal.take().expect("runtime journal exists");
             if let Err(error) = result {
                 self.rollback_runtime(journal);
@@ -2140,6 +2162,53 @@ where
             }
         }
         Ok(())
+    }
+
+    /// Validate the links of the modules the deferred request in progress added, as a validation
+    /// of the whole graph would. Every static import of a module the graph held before was already
+    /// visited, so no earlier module's links or exports change: a name an earlier module imports
+    /// from one that reaches a CommonJS module already offered that name before. The first error,
+    /// if any, is therefore among the added modules, in graph order, and only the export tables of
+    /// the modules they import from are needed. Resolving and validating the whole graph after
+    /// each request made the cost quadratic: 19 resolutions of 500 modules for one TUI project.
+    fn validate_added_links(&self) -> Result<(), ModuleGraphError> {
+        let from = self
+            .dynamic_journal
+            .as_ref()
+            .expect("a deferred request is in progress")
+            .order_before;
+        let added = &self.order[from..];
+        // Built only when an added module imports a name: indexing the whole graph again for
+        // each deferred request that adds none cost more than the requests.
+        let mut resolver = None;
+        let mut tables = HashMap::new();
+        for importer_path in added {
+            let Some(importer) = self.modules.get(importer_path) else {
+                continue;
+            };
+            for import in &importer.program.imports {
+                if import.imported == kiln_ir::NAMESPACE_IMPORT {
+                    continue;
+                }
+                let Some(dependency) = importer
+                    .dependencies
+                    .iter()
+                    .find(|dependency| dependency.specifier == import.source)
+                else {
+                    continue;
+                };
+                if tables.contains_key(&dependency.target) {
+                    continue;
+                }
+                let resolver = resolver.get_or_insert_with(|| ExportResolver::new(&self.modules));
+                if let Some((&target, _)) =
+                    resolver.modules.get_key_value(dependency.target.as_path())
+                {
+                    tables.insert(dependency.target.clone(), export_table(resolver, target));
+                }
+            }
+        }
+        validate_links(&self.modules, added, &tables)
     }
 
     /// Keep targets of authored TS value imports that lowering erased only when the resolver
@@ -2461,15 +2530,13 @@ where
                                 )
                             }
                             ModuleSource::NodeBuiltin(builtin) => {
-                                let source = kiln_builtins::builtin_source(builtin);
-                                let path_str = kiln_builtins::builtin_logical_path(builtin);
-                                let hir = kiln_frontend_oxc::parse(path_str, source);
-                                let program = compile_module(&hir).map_err(|diagnostics| {
-                                    ModuleGraphError::Compile {
-                                        path: path.clone(),
-                                        diagnostics,
-                                    }
-                                })?;
+                                let program =
+                                    builtin_program(builtin, None).map_err(|diagnostics| {
+                                        ModuleGraphError::Compile {
+                                            path: path.clone(),
+                                            diagnostics,
+                                        }
+                                    })?;
                                 (program, None)
                             }
                         };
@@ -2850,22 +2917,34 @@ fn validate_links(
     order: &[PathBuf],
     export_resolutions: &HashMap<PathBuf, BTreeMap<String, ResolvedExport>>,
 ) -> Result<(), ModuleGraphError> {
+    // Hashed rather than ordered lookups: an ordered map of paths compares them component by
+    // component, and this runs once per import of every module, once per dynamic request.
+    let by_path: HashMap<&Path, &ModuleNode> = modules
+        .iter()
+        .map(|(path, node)| (path.as_path(), node))
+        .collect();
     for importer_path in order {
-        let importer =
-            modules
-                .get(importer_path)
-                .ok_or_else(|| ModuleGraphError::InternalMissingModule {
-                    path: importer_path.clone(),
-                })?;
+        let importer = by_path
+            .get(importer_path.as_path())
+            .copied()
+            .ok_or_else(|| ModuleGraphError::InternalMissingModule {
+                path: importer_path.clone(),
+            })?;
+        // The first dependency for each specifier, as a search of the list would find it.
+        let mut targets: HashMap<&str, &Dependency> = HashMap::new();
+        for dependency in &importer.dependencies {
+            targets
+                .entry(dependency.specifier.as_str())
+                .or_insert(dependency);
+        }
         for import in &importer.program.imports {
             if importer.source == ModuleSource::CommonJs && import.source == COMMONJS_WRAPPER_SOURCE
             {
                 continue;
             }
-            let dependency = importer
-                .dependencies
-                .iter()
-                .find(|dependency| dependency.specifier == import.source)
+            let dependency = targets
+                .get(import.source.as_str())
+                .copied()
                 .ok_or_else(|| ModuleGraphError::UnresolvedImport {
                     importer: importer_path.clone(),
                     source: import.source.clone(),
@@ -2873,17 +2952,15 @@ fn validate_links(
             // Looked up for its own sake: a dependency naming a module the graph does not hold
             // is an internal inconsistency, and saying so here is clearer than the missing-export
             // error the check below would otherwise produce.
-            if !modules.contains_key(&dependency.target) {
+            let Some(target_node) = by_path.get(dependency.target.as_path()) else {
                 return Err(ModuleGraphError::InternalMissingModule {
                     path: dependency.target.clone(),
                 });
-            }
+            };
             // A namespace import names no export, so there is nothing to check: it takes
             // whatever the provider has, including nothing.
             if import.imported != kiln_ir::NAMESPACE_IMPORT {
-                if let Some(target_node) = modules.get(&dependency.target)
-                    && target_node.source == ModuleSource::CommonJs
-                {
+                if target_node.source == ModuleSource::CommonJs {
                     continue;
                 }
                 match export_resolutions
@@ -2933,8 +3010,73 @@ fn validate_links(
 /// on a set that only grows, and the depth either can reach is bounded by the number of distinct
 /// `(module, name)` pairs in the graph.
 struct ExportResolver<'graph> {
-    modules: &'graph BTreeMap<PathBuf, ModuleNode>,
-    commonjs_imported_names: HashMap<PathBuf, HashSet<String>>,
+    /// Each module, indexed the first time a question reaches it: a deferred request validates
+    /// the links of a few added modules, and indexing all of a large graph for each one cost more
+    /// than the questions.
+    modules: HashMap<&'graph Path, LazyIndexed<'graph>>,
+    commonjs_imported_names: HashMap<&'graph Path, HashSet<&'graph str>>,
+}
+
+struct LazyIndexed<'graph> {
+    node: &'graph ModuleNode,
+    indexed: std::cell::OnceCell<Indexed<'graph>>,
+}
+
+/// The target of a module's first dependency written as `specifier`, as [`Indexed::targets`]
+/// records it.
+fn dependency_target<'graph>(node: &'graph ModuleNode, specifier: &str) -> Option<&'graph Path> {
+    node.dependencies
+        .iter()
+        .find(|dependency| dependency.specifier == specifier)
+        .map(|dependency| dependency.target.as_path())
+}
+
+/// One module's lookups, each answering what the first match of a linear search through its
+/// program would: a graph is resolved once per dynamic request, and modules with hundreds of
+/// exports made every name a scan of all of them.
+struct Indexed<'graph> {
+    node: &'graph ModuleNode,
+    /// The exports other than `export *`, by name.
+    exports: HashMap<&'graph str, &'graph kiln_ir::ExportBinding>,
+    /// Every `export * from` specifier, in order.
+    stars: Vec<&'graph str>,
+    /// The imports other than the CommonJS wrapper's, by local slot.
+    imports_by_slot: HashMap<u32, &'graph kiln_ir::ImportBinding>,
+    /// The dependency targets, by written specifier.
+    targets: HashMap<&'graph str, &'graph Path>,
+}
+
+impl<'graph> Indexed<'graph> {
+    fn new(node: &'graph ModuleNode) -> Self {
+        let (mut exports, mut stars) = (HashMap::new(), Vec::new());
+        for export in &node.program.exports {
+            match export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX) {
+                Some(specifier) => stars.push(specifier),
+                None => {
+                    exports.entry(export.exported.as_str()).or_insert(export);
+                }
+            }
+        }
+        let mut imports_by_slot = HashMap::new();
+        for import in &node.program.imports {
+            if import.source != COMMONJS_WRAPPER_SOURCE {
+                imports_by_slot.entry(import.local_slot).or_insert(import);
+            }
+        }
+        let mut targets = HashMap::new();
+        for dependency in &node.dependencies {
+            targets
+                .entry(dependency.specifier.as_str())
+                .or_insert(dependency.target.as_path());
+        }
+        Indexed {
+            node,
+            exports,
+            stars,
+            imports_by_slot,
+            targets,
+        }
+    }
 }
 
 /// What one `ResolveExport` question answers.
@@ -2950,23 +3092,31 @@ enum Resolution {
 
 impl<'graph> ExportResolver<'graph> {
     fn new(modules: &'graph BTreeMap<PathBuf, ModuleNode>) -> Self {
+        let indexed: HashMap<&'graph Path, LazyIndexed<'graph>> = modules
+            .iter()
+            .map(|(path, node)| {
+                (
+                    path.as_path(),
+                    LazyIndexed {
+                        node,
+                        indexed: std::cell::OnceCell::new(),
+                    },
+                )
+            })
+            .collect();
         // Collect direct star edges: path -> [target_path]
         let mut star_direct: HashMap<&Path, Vec<&Path>> = HashMap::new();
-        for (path, node) in modules {
-            let stars: Vec<&Path> = node
+        for (&path, module) in &indexed {
+            let stars: Vec<&Path> = module
+                .node
                 .program
                 .exports
                 .iter()
                 .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
-                .filter_map(|specifier| {
-                    node.dependencies
-                        .iter()
-                        .find(|dep| dep.specifier == specifier)
-                        .map(|dep| dep.target.as_path())
-                })
+                .filter_map(|specifier| dependency_target(module.node, specifier))
                 .collect();
             if !stars.is_empty() {
-                star_direct.insert(path.as_path(), stars);
+                star_direct.insert(path, stars);
             }
         }
 
@@ -2995,36 +3145,34 @@ impl<'graph> ExportResolver<'graph> {
         }
 
         // Collect all named exports requested from CommonJS modules by any importer in the graph.
-        let mut commonjs_imported_names: HashMap<PathBuf, HashSet<String>> = HashMap::new();
-        for other in modules.values() {
-            for import in &other.program.imports {
+        let is_commonjs = |path: &Path| {
+            indexed
+                .get(path)
+                .is_some_and(|module| module.node.source == ModuleSource::CommonJs)
+        };
+        let mut commonjs_imported_names: HashMap<&'graph Path, HashSet<&'graph str>> =
+            HashMap::new();
+        for other in indexed.values() {
+            for import in &other.node.program.imports {
                 if import.imported == kiln_ir::NAMESPACE_IMPORT {
                     continue;
                 }
-                let Some(dep) = other
-                    .dependencies
-                    .iter()
-                    .find(|d| d.specifier == import.source)
-                else {
+                let Some(target) = dependency_target(other.node, &import.source) else {
                     continue;
                 };
-                if let Some(target_node) = modules.get(&dep.target) {
-                    if target_node.source == ModuleSource::CommonJs {
-                        commonjs_imported_names
-                            .entry(dep.target.clone())
-                            .or_default()
-                            .insert(import.imported.clone());
-                    }
+                if is_commonjs(target) {
+                    commonjs_imported_names
+                        .entry(target)
+                        .or_default()
+                        .insert(import.imported.as_str());
                 }
-                if let Some(reachable) = star_reachable.get(dep.target.as_path()) {
+                if let Some(reachable) = star_reachable.get(target) {
                     for &cjs_path in reachable {
-                        if let Some(target_node) = modules.get(cjs_path) {
-                            if target_node.source == ModuleSource::CommonJs {
-                                commonjs_imported_names
-                                    .entry(cjs_path.to_path_buf())
-                                    .or_default()
-                                    .insert(import.imported.clone());
-                            }
+                        if is_commonjs(cjs_path) {
+                            commonjs_imported_names
+                                .entry(cjs_path)
+                                .or_default()
+                                .insert(import.imported.as_str());
                         }
                     }
                 }
@@ -3032,102 +3180,89 @@ impl<'graph> ExportResolver<'graph> {
         }
 
         Self {
-            modules,
+            modules: indexed,
             commonjs_imported_names,
         }
     }
 
+    /// The module at `path`, indexed.
+    fn module(&self, path: &Path) -> Option<&Indexed<'graph>> {
+        let lazy = self.modules.get(path)?;
+        Some(lazy.indexed.get_or_init(|| Indexed::new(lazy.node)))
+    }
+
     /// The dependency a module reaches through one written specifier.
-    fn dependency(&self, node: &ModuleNode, specifier: &str) -> Option<&'graph ModuleNode> {
-        let target = &node
-            .dependencies
-            .iter()
-            .find(|dependency| dependency.specifier == specifier)?
-            .target;
-        self.modules.get(target)
-    }
-
-    /// The import entry that makes `slot` an *indirect* export rather than a local one.
-    ///
-    /// `export { a } from './x.js'` is compiled as an import into a slot no source can name plus
-    /// an export of that slot, so an indirect export is recognised by its slot being an import's.
-    fn indirect<'node>(
-        &self,
-        node: &'node ModuleNode,
-        slot: u32,
-    ) -> Option<&'node kiln_ir::ImportBinding> {
-        node.program
-            .imports
-            .iter()
-            .filter(|import| import.source != COMMONJS_WRAPPER_SOURCE)
-            .find(|import| import.local_slot == slot)
-    }
-
-    /// Every `export * from` specifier this module writes.
-    fn star_sources<'node>(&self, node: &'node ModuleNode) -> impl Iterator<Item = &'node str> {
-        node.program
-            .exports
-            .iter()
-            .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
+    fn dependency(&self, module: &Indexed<'graph>, specifier: &str) -> Option<&Indexed<'graph>> {
+        self.module(module.targets.get(specifier)?)
     }
 
     /// The names a module offers, `export *` included. `default` never arrives through a star.
-    fn exported_names(&self, path: &Path, visited: &mut HashSet<PathBuf>) -> Vec<String> {
-        if !visited.insert(path.to_path_buf()) {
+    fn exported_names(
+        &self,
+        path: &'graph Path,
+        visited: &mut HashSet<&'graph Path>,
+    ) -> Vec<String> {
+        if !visited.insert(path) {
             return Vec::new();
         }
-        let Some(node) = self.modules.get(path) else {
+        let Some(module) = self.module(path) else {
             return Vec::new();
         };
+        let node = module.node;
         let mut names = Vec::new();
+        let mut seen = HashSet::new();
+        let mut push = |name: &str, names: &mut Vec<String>| {
+            if seen.insert(name.to_owned()) {
+                names.push(name.to_owned());
+            }
+        };
         // Node's ESM bridge exposes the final `module.exports` value as the default export. The
         // value is materialized by CommonJS execution; the linker only needs its typed shape.
         // It also provides any named export requested from it by an importer in the graph.
         if node.source == ModuleSource::CommonJs {
-            names.push("default".to_owned());
+            push("default", &mut names);
             if let Some(imported) = self.commonjs_imported_names.get(path) {
                 for name in imported {
-                    if !names.contains(name) {
-                        names.push(name.clone());
-                    }
+                    push(name, &mut names);
                 }
             }
         }
         for export in &node.program.exports {
-            if !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
-                && !names.contains(&export.exported)
-            {
-                names.push(export.exported.clone());
+            if !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX) {
+                push(&export.exported, &mut names);
             }
         }
-        for specifier in self.star_sources(node).collect::<Vec<_>>() {
-            let Some(provider) = self.dependency(node, specifier) else {
+        for specifier in &module.stars {
+            let Some(provider) = self.dependency(module, specifier) else {
                 continue;
             };
-            for name in self.exported_names(&provider.path, visited) {
-                if name != "default" && !names.contains(&name) {
-                    names.push(name);
+            for name in self.exported_names(provider.node.path.as_path(), visited) {
+                if name != "default" {
+                    push(&name, &mut names);
                 }
             }
         }
         names
     }
 
-    /// Where one name exported by one module ultimately comes from.
-    fn resolve(
+    fn resolve<'name>(
         &self,
-        path: &Path,
-        name: &str,
-        resolve_set: &mut HashSet<(PathBuf, String)>,
-    ) -> Resolution {
+        path: &'graph Path,
+        name: &'name str,
+        resolve_set: &mut HashSet<(&'graph Path, &'name str)>,
+    ) -> Resolution
+    where
+        'graph: 'name,
+    {
         // The circular import request. The specification returns null here, and the caller that
         // asked on behalf of an `import` or an indirect export turns that into a SyntaxError.
-        if !resolve_set.insert((path.to_path_buf(), name.to_owned())) {
+        if !resolve_set.insert((path, name)) {
             return Resolution::None;
         }
-        let Some(node) = self.modules.get(path) else {
+        let Some(module) = self.module(path) else {
             return Resolution::None;
         };
+        let node = module.node;
         if node.source == ModuleSource::CommonJs {
             if name == "default" {
                 return Resolution::Found(ResolvedExport::Local {
@@ -3140,40 +3275,37 @@ impl<'graph> ExportResolver<'graph> {
                 property: name.to_owned(),
             });
         }
-        if let Some(export) = node
-            .program
-            .exports
-            .iter()
-            .filter(|export| !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX))
-            .find(|export| export.exported == name)
-        {
-            let Some(import) = self.indirect(node, export.local_slot) else {
+        if let Some(export) = module.exports.get(name) {
+            // The import entry that makes the slot an *indirect* export rather than a local one:
+            // `export { a } from './x.js'` is compiled as an import into a slot no source can
+            // name plus an export of that slot.
+            let Some(import) = module.imports_by_slot.get(&export.local_slot) else {
                 // A binding this module declares itself. This is where every chain ends.
                 return Resolution::Found(ResolvedExport::Local {
                     module: path.to_path_buf(),
                     local_slot: export.local_slot,
                 });
             };
-            let Some(provider) = self.dependency(node, &import.source) else {
+            let Some(provider) = self.dependency(module, &import.source) else {
                 return Resolution::None;
             };
             if import.imported == kiln_ir::NAMESPACE_IMPORT {
                 return Resolution::Found(ResolvedExport::Namespace {
-                    module: provider.path.clone(),
+                    module: provider.node.path.clone(),
                 });
             }
-            return self.resolve(&provider.path, &import.imported, resolve_set);
+            return self.resolve(provider.node.path.as_path(), &import.imported, resolve_set);
         }
         // `export *` never forwards a default: a module's default is its own.
         if name == "default" {
             return Resolution::None;
         }
         let mut star = None;
-        for specifier in self.star_sources(node).collect::<Vec<_>>() {
-            let Some(provider) = self.dependency(node, specifier) else {
+        for specifier in &module.stars {
+            let Some(provider) = self.dependency(module, specifier) else {
                 continue;
             };
-            match self.resolve(&provider.path, name, &mut resolve_set.clone()) {
+            match self.resolve(provider.node.path.as_path(), name, &mut resolve_set.clone()) {
                 Resolution::Ambiguous => return Resolution::Ambiguous,
                 Resolution::None => {}
                 Resolution::Found(found) => match &star {
@@ -3211,21 +3343,37 @@ fn resolve_exports(
                 path: module_path.clone(),
             });
         }
-        let mut table = BTreeMap::new();
-        for name in resolver.exported_names(module_path, &mut HashSet::new()) {
-            match resolver.resolve(module_path, &name, &mut HashSet::new()) {
-                Resolution::Found(found) => {
-                    table.insert(name, found);
-                }
-                // Retained rather than dropped so namespace construction can omit it and an
-                // importer can report the difference from a name that is simply not there.
-                Resolution::Ambiguous => {
-                    table.insert(name, ResolvedExport::Ambiguous);
-                }
-                Resolution::None => {}
-            }
-        }
-        tables.insert(module_path.clone(), table);
+        let (&module_path, _) = resolver
+            .modules
+            .get_key_value(module_path.as_path())
+            .expect("checked above");
+        tables.insert(
+            module_path.to_path_buf(),
+            export_table(&resolver, module_path),
+        );
     }
     Ok(tables)
+}
+
+/// Every name one module offers, resolved.
+fn export_table<'graph>(
+    resolver: &ExportResolver<'graph>,
+    module_path: &'graph Path,
+) -> BTreeMap<String, ResolvedExport> {
+    let mut table = BTreeMap::new();
+    for name in resolver.exported_names(module_path, &mut HashSet::new()) {
+        let resolution = resolver.resolve(module_path, &name, &mut HashSet::new());
+        match resolution {
+            Resolution::Found(found) => {
+                table.insert(name, found);
+            }
+            // Retained rather than dropped so namespace construction can omit it and an
+            // importer can report the difference from a name that is simply not there.
+            Resolution::Ambiguous => {
+                table.insert(name, ResolvedExport::Ambiguous);
+            }
+            Resolution::None => {}
+        }
+    }
+    table
 }

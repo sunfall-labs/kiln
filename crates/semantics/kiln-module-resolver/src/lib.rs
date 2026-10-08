@@ -1078,8 +1078,21 @@ impl NodePackageResolver {
             .filter_map(|target| fs::canonicalize(target).ok())
             .collect::<std::collections::BTreeSet<_>>();
         let mut packages = std::collections::BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+        // Targets share directories, so each directory's answer is looked up once.
+        let mut manifests = HashMap::<PathBuf, Option<PathBuf>>::new();
         for target in target_set {
-            if let Some(manifest) = nearest_package_json(&target) {
+            let Some(directory) = target.parent() else {
+                continue;
+            };
+            let manifest = match manifests.get(directory) {
+                Some(manifest) => manifest.clone(),
+                None => {
+                    let manifest = nearest_package_json(&target);
+                    manifests.insert(directory.to_path_buf(), manifest.clone());
+                    manifest
+                }
+            };
+            if let Some(manifest) = manifest {
                 packages.entry(manifest).or_default().push(target);
             }
         }
@@ -1505,8 +1518,33 @@ fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveE
     ) {
         return node_module_format(path, None);
     }
+    let Some(directory) = path.parent() else {
+        return node_module_format(path, None);
+    };
+    let remembered = SNAPSHOT.with_borrow(|snapshot| {
+        let snapshot = snapshot.as_ref()?;
+        let manifest = snapshot.nearest_manifest.get(directory)?;
+        Some(match manifest {
+            Some(manifest) => snapshot.manifest_format.get(manifest).copied().ok_or(()),
+            None => Ok(NodeModuleFormat::CommonJs),
+        })
+    });
+    if let Some(Ok(format)) = remembered {
+        return Ok(format);
+    }
     let manifest = nearest_package_json(path);
-    node_module_format(path, manifest.as_deref())
+    let format = node_module_format(path, manifest.as_deref())?;
+    SNAPSHOT.with_borrow_mut(|snapshot| {
+        if let Some(snapshot) = snapshot.as_mut() {
+            if let Some(manifest) = &manifest {
+                snapshot.manifest_format.insert(manifest.clone(), format);
+            }
+            snapshot
+                .nearest_manifest
+                .insert(directory.to_path_buf(), manifest);
+        }
+    });
+    Ok(format)
 }
 
 /// Whether Node leaves this path's module format to syntax detection.
@@ -2046,6 +2084,111 @@ fn canonical_importer(importer: &Path, project_root: &Path) -> Result<PathBuf, R
     Ok(canonical_importer)
 }
 
+/// Filesystem answers memoized while a [`FilesystemSnapshot`] is held on this thread.
+#[derive(Default)]
+struct FilesystemAnswers {
+    canonical: HashMap<PathBuf, Result<PathBuf, io::ErrorKind>>,
+    regular_file: HashMap<PathBuf, Result<bool, io::ErrorKind>>,
+    /// By directory.
+    nearest_manifest: HashMap<PathBuf, Option<PathBuf>>,
+    /// By manifest; a manifest that cannot be read or parsed is not remembered.
+    manifest_format: HashMap<PathBuf, NodeModuleFormat>,
+}
+
+thread_local! {
+    static SNAPSHOT: std::cell::RefCell<Option<FilesystemAnswers>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// While held, resolution on this thread treats the filesystem as unchanging: a path is
+/// canonicalized, and a file's kind read, once. One graph build or one dependency walk resolves
+/// the same importer once per import it makes -- eighty `realpath`s for an entry with eighty
+/// imports -- and reads a tree that nothing changes while it is resolved. Dropping the guard
+/// forgets every answer.
+pub struct FilesystemSnapshot {
+    outer: bool,
+}
+
+impl FilesystemSnapshot {
+    pub fn begin() -> Self {
+        let outer = SNAPSHOT.with_borrow_mut(|snapshot| {
+            let outer = snapshot.is_none();
+            if outer {
+                *snapshot = Some(FilesystemAnswers::default());
+            }
+            outer
+        });
+        FilesystemSnapshot { outer }
+    }
+}
+
+impl Drop for FilesystemSnapshot {
+    fn drop(&mut self) {
+        if self.outer {
+            SNAPSHOT.with_borrow_mut(|snapshot| *snapshot = None);
+        }
+    }
+}
+
+fn snapshot_answer<T: Clone>(
+    path: &Path,
+    table: fn(&mut FilesystemAnswers) -> &mut HashMap<PathBuf, Result<T, io::ErrorKind>>,
+    read: impl FnOnce() -> Result<T, io::ErrorKind>,
+) -> Result<T, io::ErrorKind> {
+    if let Some(answer) = SNAPSHOT.with_borrow_mut(|snapshot| {
+        snapshot
+            .as_mut()
+            .and_then(|snapshot| table(snapshot).get(path).cloned())
+    }) {
+        return answer;
+    }
+    let answer = read();
+    SNAPSHOT.with_borrow_mut(|snapshot| {
+        if let Some(snapshot) = snapshot.as_mut() {
+            table(snapshot).insert(path.to_path_buf(), answer.clone());
+        }
+    });
+    answer
+}
+
+/// `fs::canonicalize`, remembered while a [`FilesystemSnapshot`] is held. Under a snapshot a path
+/// whose last component is a plain name is resolved from its directory's remembered answer and
+/// one `lstat`: when that component is not a symbolic link, `realpath` would return exactly the
+/// canonical directory joined with it, and the `readlink` of every other component is skipped.
+pub fn snapshot_canonicalize(path: &Path) -> Result<PathBuf, io::ErrorKind> {
+    let in_snapshot = SNAPSHOT.with_borrow(Option::is_some);
+    if !in_snapshot {
+        return fs::canonicalize(path).map_err(|error| error.kind());
+    }
+    snapshot_answer(
+        path,
+        |snapshot| &mut snapshot.canonical,
+        || {
+            let plain_name = path.is_absolute()
+                && path
+                    .components()
+                    .skip(1)
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+                && path.to_str().is_some_and(|text| {
+                    !text.ends_with('/')
+                        && !text.ends_with("/.")
+                        && !text.contains("/./")
+                        && !text.contains("//")
+                });
+            if plain_name
+                && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+                && parent.parent().is_some()
+            {
+                let metadata = fs::symlink_metadata(path).map_err(|error| error.kind())?;
+                if !metadata.file_type().is_symlink() {
+                    return Ok(snapshot_canonicalize(parent)?.join(name));
+                }
+            }
+            fs::canonicalize(path).map_err(|error| error.kind())
+        },
+    )
+}
+
 fn canonical_path(path: &Path, role: PathRole) -> Result<PathBuf, ResolveError> {
     if !path.is_absolute() {
         return Err(ResolveError::NonAbsolutePath {
@@ -2054,7 +2197,7 @@ fn canonical_path(path: &Path, role: PathRole) -> Result<PathBuf, ResolveError> 
         });
     }
     ensure_utf8(path, role)?;
-    fs::canonicalize(path).map_err(|error| match error.kind() {
+    snapshot_canonicalize(path).map_err(|kind| match kind {
         io::ErrorKind::NotFound => ResolveError::Io {
             role,
             path: path.to_path_buf(),
@@ -2090,13 +2233,20 @@ fn metadata_is_dir(path: &Path, role: PathRole) -> Result<bool, ResolveError> {
 }
 
 fn metadata_is_regular_file(path: &Path, role: PathRole) -> Result<bool, ResolveError> {
-    fs::metadata(path)
-        .map(|metadata| metadata.is_file())
-        .map_err(|error| ResolveError::Io {
-            role,
-            path: path.to_path_buf(),
-            kind: error.kind(),
-        })
+    snapshot_answer(
+        path,
+        |snapshot| &mut snapshot.regular_file,
+        || {
+            fs::metadata(path)
+                .map(|metadata| metadata.is_file())
+                .map_err(|error| error.kind())
+        },
+    )
+    .map_err(|kind| ResolveError::Io {
+        role,
+        path: path.to_path_buf(),
+        kind,
+    })
 }
 
 fn has_supported_extension(path: &Path) -> bool {
@@ -2164,6 +2314,44 @@ mod tests {
 
     fn resolver(project: &TempProject) -> ModuleResolver {
         ModuleResolver::new(&project.root).expect("valid project root")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_canonicalization_answers_as_realpath_does() {
+        let project = TempProject::new();
+        let plain = project.write("src/plain.ts", "");
+        project.write("real/inner.ts", "");
+        std::os::unix::fs::symlink(project.root.join("real"), project.root.join("linked"))
+            .expect("directory link");
+        std::os::unix::fs::symlink(&plain, project.root.join("src/alias.ts")).expect("file link");
+        std::os::unix::fs::symlink(project.root.join("absent"), project.root.join("dangling"))
+            .expect("dangling link");
+        let paths = [
+            plain.clone(),
+            project.root.join("linked/inner.ts"),
+            project.root.join("src/alias.ts"),
+            project.root.join("linked/../src/plain.ts"),
+            project.root.join("src/./plain.ts"),
+            project.root.join("src/missing.ts"),
+            project.root.join("missing/plain.ts"),
+            project.root.join("src/plain.ts/inner"),
+            project.root.join("dangling"),
+            project.root.join("linked"),
+            project.root.clone(),
+        ];
+        let _snapshot = FilesystemSnapshot::begin();
+        // Twice: the second answer of each path is the remembered one.
+        for _ in 0..2 {
+            for path in &paths {
+                assert_eq!(
+                    snapshot_canonicalize(path),
+                    fs::canonicalize(path).map_err(|error| error.kind()),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
     }
 
     #[test]

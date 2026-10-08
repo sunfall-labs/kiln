@@ -118,8 +118,47 @@ pub struct MemoEngine {
     stats: Stats,
     /// Derived queries currently being fetched, innermost last. Empty between top-level calls.
     active: Vec<QueryKey>,
+    /// A source check running on its own thread, which forcing it in the same epoch joins.
+    pending_check: Option<PendingCheck>,
+    /// Whether compiling a TypeScript module reads its source check's facts.
+    compile_facts: bool,
     #[cfg(test)]
     cyclic: [Option<Memo<u64>>; 2],
+}
+
+/// [`QueryEngine::begin_source_check`]'s check: its file, the epoch whose inputs it read, the
+/// dependencies those inputs are, and its thread.
+struct PendingCheck {
+    file: FileId,
+    epoch: Epoch,
+    deps: Vec<QueryKey>,
+    handle: std::thread::JoinHandle<SourceCheck>,
+}
+
+impl std::fmt::Debug for PendingCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingCheck")
+            .field("file", &self.file)
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a source check reads: the files TypeScript parses, the rest as text.
+struct CheckInputs {
+    query: SourceCheckQuery,
+    path: String,
+    modules: Vec<(String, std::sync::Arc<crate::HirModule>)>,
+    auxiliary: Vec<(String, std::sync::Arc<[u8]>)>,
+    deps: Vec<QueryKey>,
+}
+
+/// A JavaScript file, which a TypeScript program only reads if it allows JavaScript: the checker
+/// receives its text and parses it if the program loads it.
+fn is_javascript(path: &str) -> bool {
+    [".js", ".mjs", ".cjs", ".jsx"]
+        .iter()
+        .any(|extension| path.ends_with(extension))
 }
 
 impl MemoEngine {
@@ -158,6 +197,8 @@ impl MemoEngine {
             revision: Revision::default(),
             stats: Stats::default(),
             active: Vec::new(),
+            pending_check: None,
+            compile_facts: true,
             #[cfg(test)]
             cyclic: [None, None],
         }
@@ -329,17 +370,114 @@ impl MemoEngine {
         (Parsed::new(&state.source, module), vec![dep])
     }
 
+    /// Parse every stale file among `files` at once, storing each memo exactly as forcing its
+    /// parse would. A parse reads only its own source and the frontend is a pure function, so the
+    /// stored values are the ones a sequential walk would compute. A file whose parse panics is
+    /// left stale: forcing it later reports the panic the way it always has.
+    fn parse_stale_in_parallel(&mut self, files: &[FileId]) {
+        let epoch = self.epoch;
+        let stale = files
+            .iter()
+            .copied()
+            .filter(|&file| {
+                let state = self.file(file);
+                state.parse.as_ref().is_none_or(|memo| {
+                    memo.meta.verified_at != epoch
+                        && state.source_changed_at > memo.meta.verified_at
+                })
+            })
+            .collect::<Vec<_>>();
+        let threads = parse_threads().min(stale.len());
+        if threads < 2 {
+            return;
+        }
+        let frontend = self.frontend;
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let parsed = (0..stale.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect::<Vec<std::sync::Mutex<Option<Parsed>>>>();
+        let files_state = &self.files;
+        let work = || {
+            loop {
+                let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&file) = stale.get(at) else { break };
+                let state = &files_state[file.0 as usize];
+                let result = std::panic::catch_unwind(|| {
+                    Parsed::new(&state.source, frontend(&state.path, &state.source))
+                });
+                if let Ok(value) = result {
+                    *parsed[at]
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner()) = Some(value);
+                }
+            }
+        };
+        std::thread::scope(|scope| {
+            for _ in 1..threads {
+                // A worker's stack matches the daemon's request threads, where these parses
+                // otherwise run.
+                let spawned = std::thread::Builder::new()
+                    .name("kiln-parse".into())
+                    .stack_size(PARSE_STACK_BYTES)
+                    .spawn_scoped(scope, work);
+                if spawned.is_err() {
+                    break;
+                }
+            }
+            work();
+        });
+        for (file, value) in stale.into_iter().zip(parsed) {
+            let Some(value) = value
+                .into_inner()
+                .unwrap_or_else(|poison| poison.into_inner())
+            else {
+                continue;
+            };
+            self.stats.parse_computed += 1;
+            let deps = vec![QueryKey::Source(file)];
+            store(
+                &mut self.files[file.0 as usize].parse,
+                value,
+                deps,
+                epoch,
+                &mut self.stats,
+            );
+        }
+    }
+
     fn compute_source_check(&mut self, file: FileId) -> (SourceCheck, Vec<QueryKey>) {
-        let Some(query) = self.source_check_query else {
+        if let Some(pending) = self.pending_check.take() {
+            if pending.file == file && pending.epoch == self.epoch {
+                match pending.handle.join() {
+                    Ok(result) => return (result, pending.deps),
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            }
+        }
+        let Some(inputs) = self.source_check_inputs(file) else {
             return (SourceCheck::default(), Vec::new());
         };
+        let result = (inputs.query)(&inputs.path, &inputs.modules, &inputs.auxiliary);
+        (result, inputs.deps)
+    }
+
+    fn source_check_inputs(&mut self, file: FileId) -> Option<CheckInputs> {
+        let query = self.source_check_query?;
         self.force(QueryKey::FileSet);
         let active = self.source_files();
+        let parses = active
+            .iter()
+            .filter(|(_, path)| {
+                !(path.ends_with(".json") || path.ends_with(".jsonc") || is_javascript(path))
+            })
+            .map(|&(id, _)| id)
+            .collect::<Vec<_>>();
+        self.parse_stale_in_parallel(&parses);
         let mut deps = vec![QueryKey::FileSet];
-        let mut modules = Vec::with_capacity(active.len());
+        let mut modules = Vec::with_capacity(parses.len());
         let mut auxiliary = Vec::new();
         for (id, path) in active {
-            if path.ends_with(".json") || path.ends_with(".jsonc") {
+            if path.ends_with(".json") || path.ends_with(".jsonc") || is_javascript(&path) {
                 let source = QueryKey::Source(id);
                 self.force(source);
                 deps.push(source);
@@ -362,19 +500,25 @@ impl MemoEngine {
                     .clone(),
             ));
         }
-        let result = query(&self.file(file).path, &modules, &auxiliary);
-        (result, deps)
+        Some(CheckInputs {
+            query,
+            path: self.file(file).path.clone(),
+            modules,
+            auxiliary,
+            deps,
+        })
     }
 
     fn compile_inputs(
         &mut self,
         file: FileId,
-    ) -> (Parsed, Option<SourceCheck>, Option<Epoch>, Vec<QueryKey>) {
+    ) -> (Parsed, Option<FileId>, Option<Epoch>, Vec<QueryKey>) {
         let parse_dep = QueryKey::Parse(file);
         self.force(parse_dep);
         let parsed = self.file(file).parse.as_ref().expect(FORCED).value.clone();
         let mut deps = vec![parse_dep];
         let (checked, checked_epoch) = if self.source_check_query.is_some()
+            && self.compile_facts
             && (parsed.module.type_syntax.original_module.is_some()
                 || matches!(
                     parsed.module.source_kind,
@@ -383,6 +527,11 @@ impl MemoEngine {
             // A root check also resolves its imported modules. Reuse those current facts
             // for compilation, while keeping diagnostic queries rooted at their own entry.
             // Depending on the supplying check preserves its complete source dependency set.
+            // A check whose program contains the module answers for it even when other files
+            // of that program have gaps: whether the module's own facts are usable is decided
+            // per file (`CheckResult::is_complete_for`), and a check rooted at the module itself
+            // would load the same gaps through the same imports. Rooting one check per module
+            // instead made a 240-file project with JSX gaps run 166 whole-program checks.
             let path = &self.file(file).path;
             let supplier = self
                 .files
@@ -390,29 +539,40 @@ impl MemoEngine {
                 .enumerate()
                 .find_map(|(index, state)| {
                     let memo = state.source_check.as_ref()?;
-                    (memo.meta.verified_at == self.epoch
-                        && memo.value.complete
-                        && memo.value.types.iter().any(|ty| &ty.path == path))
-                    .then_some(FileId(index as u32))
+                    (memo.meta.verified_at == self.epoch && memo.value.covers(path))
+                        .then_some(FileId(index as u32))
                 })
                 .unwrap_or(file);
             self.force(QueryKey::SourceCheck(supplier));
             deps.push(QueryKey::SourceCheck(supplier));
             let memo = self.file(supplier).source_check.as_ref().expect(FORCED);
-            (Some(memo.value.clone()), Some(memo.meta.changed_at))
+            (Some(supplier), Some(memo.meta.changed_at))
         } else {
             (None, None)
         };
         (parsed, checked, checked_epoch, deps)
     }
+    /// The facts of the check that [`Self::compile_inputs`] forced, read in place: they cover
+    /// every module of the program, and each module compiles against them.
+    fn supplied_check(&self, supplier: Option<FileId>) -> Option<&SourceCheck> {
+        supplier.map(|supplier| {
+            &self
+                .file(supplier)
+                .source_check
+                .as_ref()
+                .expect(FORCED)
+                .value
+        })
+    }
+
     fn compute_ir(&mut self, file: FileId) -> (Compiled, Vec<QueryKey>) {
-        let (parsed, checked, _, deps) = self.compile_inputs(file);
+        let (parsed, supplier, _, deps) = self.compile_inputs(file);
         let mut result = kiln_ir::compile(&parsed.module);
-        if let (Ok(program), Some(checked)) = (&mut result, checked) {
+        if let (Ok(program), Some(checked)) = (&mut result, self.supplied_check(supplier)) {
             kiln_ir::apply_source_types(
                 &self.file(file).path,
                 &parsed.module,
-                &checked,
+                checked,
                 &checked.checker_identity,
                 program,
             );
@@ -420,13 +580,13 @@ impl MemoEngine {
         (result, deps)
     }
     fn compute_module_ir(&mut self, file: FileId) -> (CompiledModule, Vec<QueryKey>) {
-        let (parsed, checked, _, deps) = self.compile_inputs(file);
+        let (parsed, supplier, _, deps) = self.compile_inputs(file);
         let mut result = kiln_ir::compile_module(&parsed.module);
-        if let (Ok(program), Some(checked)) = (&mut result, checked) {
+        if let (Ok(program), Some(checked)) = (&mut result, self.supplied_check(supplier)) {
             kiln_ir::apply_source_types(
                 &self.file(file).path,
                 &parsed.module,
-                &checked,
+                checked,
                 &checked.checker_identity,
                 &mut program.program,
             );
@@ -630,6 +790,49 @@ fn store<T: PartialEq>(
         },
     });
     changed_at
+}
+
+/// A module's IR under a logical identity, with the facts of the check that covers it.
+fn module_ir_as(
+    path: &str,
+    parsed: &Parsed,
+    identity: &str,
+    checked: Option<&SourceCheck>,
+) -> CompiledModule {
+    let mut module = parsed.module.as_ref().clone();
+    module.module_id = identity.into();
+    let mut program = kiln_ir::compile_module(&module);
+    if let (Ok(program), Some(checked)) = (&mut program, checked) {
+        kiln_ir::apply_source_types(
+            path,
+            &module,
+            checked,
+            &checked.checker_identity,
+            &mut program.program,
+        );
+    }
+    program
+}
+
+/// The stack of a parallel parse worker: the daemon's request-thread stack.
+const PARSE_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Parallel parse workers: the available CPUs, at most eight, bounded by any positive
+/// `KILN_JOBS` or `RAYON_NUM_THREADS`.
+fn parse_threads() -> usize {
+    let mut threads = std::thread::available_parallelism()
+        .map_or(1, |cores| cores.get())
+        .min(8);
+    for name in ["KILN_JOBS", "RAYON_NUM_THREADS"] {
+        if let Some(count) = std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|count| *count > 0)
+        {
+            threads = threads.min(count);
+        }
+    }
+    threads
 }
 
 /// Tiny deterministic frontend used only by this crate's query-engine tests.
@@ -868,7 +1071,7 @@ impl QueryEngine for MemoEngine {
     }
 
     fn module_ir_with_identity(&mut self, file: FileId, identity: &str) -> CompiledModule {
-        let (parsed, checked, checked_epoch, _) = self.compile_inputs(file);
+        let (parsed, supplier, checked_epoch, _) = self.compile_inputs(file);
         let revision = self.file(file).source_revision;
         if let Some((cached_revision, cached_check_epoch, program)) =
             self.file(file).module_ir_by_identity.get(identity)
@@ -879,24 +1082,186 @@ impl QueryEngine for MemoEngine {
             self.stats.validated += 1;
             return program;
         }
-        let mut module = parsed.module.as_ref().clone();
-        module.module_id = identity.into();
-        let mut program = kiln_ir::compile_module(&module);
-        if let (Ok(program), Some(checked)) = (&mut program, checked) {
-            kiln_ir::apply_source_types(
-                &self.file(file).path,
-                &module,
-                &checked,
-                &checked.checker_identity,
-                &mut program.program,
-            );
-        }
+        let program = module_ir_as(
+            &self.file(file).path,
+            &parsed,
+            identity,
+            self.supplied_check(supplier),
+        );
         self.stats.ir_computed += 1;
         self.file_mut(file).module_ir_by_identity.insert(
             identity.to_owned(),
             (revision, checked_epoch, program.clone()),
         );
         program
+    }
+
+    fn set_compile_facts(&mut self, on: bool) {
+        self.compile_facts = on;
+    }
+
+    fn begin_source_check(&mut self, file: FileId) {
+        if self.source_check_query.is_none() || self.pending_check.is_some() {
+            return;
+        }
+        // Only a check that forcing would recompute: one with no memo, or whose file set or one
+        // of whose sources changed since it was verified.
+        if let Some(memo) = self.file(file).source_check.as_ref() {
+            let verified_at = memo.meta.verified_at;
+            if verified_at == self.epoch {
+                return;
+            }
+            let changed = memo.meta.deps.iter().any(|dep| match *dep {
+                QueryKey::FileSet => self.file_set_changed_at > verified_at,
+                QueryKey::Source(id) | QueryKey::Parse(id) => {
+                    self.file(id).source_changed_at > verified_at
+                }
+                _ => true,
+            });
+            if !changed {
+                return;
+            }
+        }
+        let Some(inputs) = self.source_check_inputs(file) else {
+            return;
+        };
+        let CheckInputs {
+            query,
+            path,
+            modules,
+            auxiliary,
+            deps,
+        } = inputs;
+        let spawned = std::thread::Builder::new()
+            .name("kiln-source-check-root".into())
+            .stack_size(PARSE_STACK_BYTES)
+            .spawn(move || query(&path, &modules, &auxiliary));
+        if let Ok(handle) = spawned {
+            self.pending_check = Some(PendingCheck {
+                file,
+                epoch: self.epoch,
+                deps,
+                handle,
+            });
+        }
+    }
+
+    fn prepare_module_irs(&mut self, modules: &[(FileId, String)]) {
+        struct Job {
+            file: FileId,
+            identity: String,
+            parsed: Parsed,
+            supplier: Option<FileId>,
+            checked_epoch: Option<Epoch>,
+            revision: Revision,
+        }
+        let files: Vec<FileId> = modules
+            .iter()
+            .map(|(file, _)| *file)
+            .filter(|&file| self.file(file).source_set)
+            .collect();
+        self.parse_stale_in_parallel(&files);
+        let mut jobs = Vec::new();
+        for (file, identity) in modules {
+            let file = *file;
+            if !self.file(file).source_set {
+                continue;
+            }
+            self.force(QueryKey::Parse(file));
+            let module = &self.file(file).parse.as_ref().expect(FORCED).value.module;
+            let checks_source = self.source_check_query.is_some()
+                && self.compile_facts
+                && (module.type_syntax.original_module.is_some()
+                    || matches!(
+                        module.source_kind,
+                        kiln_hir::SourceKind::TypeScript | kiln_hir::SourceKind::Tsx
+                    ));
+            // A TypeScript module that no current check covers would start a whole-program check
+            // of its own. Only a graph that actually reaches it pays for that.
+            let path = &self.file(file).path;
+            if checks_source
+                && !self.files.iter().any(|state| {
+                    state.source_check.as_ref().is_some_and(|memo| {
+                        memo.meta.verified_at == self.epoch && memo.value.covers(path)
+                    })
+                })
+            {
+                continue;
+            }
+            let (parsed, supplier, checked_epoch, _) = self.compile_inputs(file);
+            let revision = self.file(file).source_revision;
+            if self
+                .file(file)
+                .module_ir_by_identity
+                .get(identity.as_str())
+                .is_some_and(|(cached_revision, cached_check_epoch, _)| {
+                    *cached_revision == revision && *cached_check_epoch == checked_epoch
+                })
+            {
+                continue;
+            }
+            jobs.push(Job {
+                file,
+                identity: identity.clone(),
+                parsed,
+                supplier,
+                checked_epoch,
+                revision,
+            });
+        }
+        let threads = parse_threads().min(jobs.len());
+        if threads == 0 {
+            return;
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let programs = (0..jobs.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect::<Vec<std::sync::Mutex<Option<CompiledModule>>>>();
+        let this = &*self;
+        let work = || {
+            loop {
+                let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(job) = jobs.get(at) else { break };
+                let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    module_ir_as(
+                        &this.file(job.file).path,
+                        &job.parsed,
+                        &job.identity,
+                        this.supplied_check(job.supplier),
+                    )
+                }));
+                // A panic is left for the graph walk's own request to report.
+                if let Ok(compiled) = compiled {
+                    *programs[at]
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner()) = Some(compiled);
+                }
+            }
+        };
+        std::thread::scope(|scope| {
+            for _ in 1..threads {
+                let spawned = std::thread::Builder::new()
+                    .name("kiln-module-ir".into())
+                    .stack_size(PARSE_STACK_BYTES)
+                    .spawn_scoped(scope, work);
+                if spawned.is_err() {
+                    break;
+                }
+            }
+            work();
+        });
+        for (job, program) in jobs.into_iter().zip(programs) {
+            let Some(program) = program
+                .into_inner()
+                .unwrap_or_else(|poison| poison.into_inner())
+            else {
+                continue;
+            };
+            self.stats.ir_computed += 1;
+            self.file_mut(job.file)
+                .module_ir_by_identity
+                .insert(job.identity, (job.revision, job.checked_epoch, program));
+        }
     }
 
     fn function_summaries(&mut self, file: FileId) -> Vec<FunctionSummary> {
@@ -944,6 +1309,19 @@ impl QueryEngine for MemoEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The program of a fixture check is the modules its types describe.
+    fn with_files(mut check: SourceCheck) -> SourceCheck {
+        let mut files: Vec<(String, bool)> = check
+            .types
+            .iter()
+            .map(|ty| (ty.path.clone(), true))
+            .collect();
+        files.sort();
+        files.dedup();
+        check.files = files;
+        check
+    }
 
     const A_V1: &str = "// alpha, first cut\nexport function alpha() {\n  return 1;\n}\n";
     /// Same exports as [`A_V1`], different everything else.
@@ -1655,6 +2033,53 @@ mod tests {
         assert_eq!(db.revision(), Revision(0));
     }
     #[test]
+    fn an_incomplete_check_supplies_every_module_its_program_covers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn frontend(path: &str, text: &str) -> Module {
+            let mut module = fixture_frontend(path, text);
+            module.source = text.into();
+            module.source_kind = SourceKind::TypeScript;
+            module
+        }
+        fn checker(
+            _entry: &str,
+            modules: &[(String, std::sync::Arc<Module>)],
+            _auxiliary: &[(String, std::sync::Arc<[u8]>)],
+        ) -> SourceCheck {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            // A gap in the entry leaves the check incomplete; the module it imports is not.
+            let mut files: Vec<(String, bool)> = modules
+                .iter()
+                .map(|(path, _)| (path.clone(), path != "/main.ts"))
+                .collect();
+            files.sort();
+            SourceCheck {
+                checker_identity: "fixture-v1".into(),
+                complete: false,
+                types: Vec::new(),
+                diagnostics: Vec::new(),
+                files,
+            }
+        }
+        CALLS.store(0, Ordering::SeqCst);
+        let mut db = MemoEngine::new(frontend).with_source_check_query(checker);
+        let root = db.intern("/main.ts");
+        let dependency = db.intern("/dep.ts");
+        db.set_source(root, "import { x } from './dep';".into());
+        db.set_source(dependency, "export const x = 1;".into());
+        let checked = db.source_check(root);
+        assert!(!checked.complete);
+        assert!(checked.is_complete_for("/dep.ts"));
+        assert!(!checked.is_complete_for("/main.ts"));
+        // Compiling either module reads the entry's check instead of checking from itself.
+        db.module_ir(root);
+        db.module_ir(dependency);
+        db.module_ir_with_identity(dependency, "dep.ts");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn source_check_tracks_alias_edits_file_set_and_reuses_unchanged_inputs() {
         use kiln_hir::source_types::{SourceType, TypeClass, TypeRole};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1672,7 +2097,7 @@ mod tests {
         ) -> SourceCheck {
             CALLS.fetch_add(1, Ordering::SeqCst);
             let is_string = modules.iter().any(|(_, m)| m.source.contains("string"));
-            SourceCheck {
+            with_files(SourceCheck {
                 checker_identity: "fixture-v1".into(),
                 complete: true,
                 types: vec![SourceType {
@@ -1687,7 +2112,8 @@ mod tests {
                     },
                 }],
                 diagnostics: Vec::new(),
-            }
+                files: Vec::new(),
+            })
         }
         CALLS.store(0, Ordering::SeqCst);
         let mut db = MemoEngine::new(frontend).with_source_check_query(checker);
@@ -1736,12 +2162,13 @@ mod tests {
                     .iter()
                     .any(|(path, _)| path == "/project/tsconfig.jsonc")
             );
-            SourceCheck {
+            with_files(SourceCheck {
                 checker_identity: "json-auxiliary-v1".into(),
                 complete: true,
                 types: Vec::new(),
                 diagnostics: Vec::new(),
-            }
+                files: Vec::new(),
+            })
         }
 
         CALLS.store(0, Ordering::SeqCst);
@@ -1809,7 +2236,7 @@ mod tests {
             let is_string = modules
                 .iter()
                 .any(|(_, module)| module.source.contains("type Scalar = string"));
-            SourceCheck {
+            with_files(SourceCheck {
                 checker_identity: "identity-contract-v1".into(),
                 complete: true,
                 types: vec![SourceType {
@@ -1824,7 +2251,8 @@ mod tests {
                     },
                 }],
                 diagnostics: Vec::new(),
-            }
+                files: Vec::new(),
+            })
         }
 
         fn contract_frontend(path: &str, text: &str) -> Module {
@@ -1941,7 +2369,7 @@ mod tests {
             _auxiliary: &[(String, std::sync::Arc<[u8]>)],
         ) -> SourceCheck {
             CALLS.fetch_add(1, Ordering::SeqCst);
-            SourceCheck {
+            with_files(SourceCheck {
                 checker_identity: "shared-facts-v1".into(),
                 complete: true,
                 types: modules
@@ -1960,7 +2388,8 @@ mod tests {
                     code: None,
                     message: "entry diagnostic".into(),
                 }],
-            }
+                files: Vec::new(),
+            })
         }
         CALLS.store(0, Ordering::SeqCst);
         let mut db = MemoEngine::new(frontend).with_source_check_query(checker);

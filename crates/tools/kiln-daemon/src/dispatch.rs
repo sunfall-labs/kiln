@@ -13,9 +13,9 @@ use kiln_proto::{
     NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, RecordedWorkers, Request,
     ResolutionMap, Response, RunSummary, ScalarValueSummary, SourceView, Stats, StepBudget,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 /// What the connection loop should do once the response has been written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -484,6 +484,16 @@ pub(crate) fn check_with_cache<E: QueryEngine>(
     };
 
     let parsed = engine.parse(file);
+    // A TypeScript entry's check runs on its own thread while the JavaScript it imports, which
+    // needs none of its facts, compiles.
+    if matches!(
+        parsed.module.source_kind,
+        kiln_hir::SourceKind::TypeScript | kiln_hir::SourceKind::Tsx
+    ) && parsed.module.diagnostics.is_empty()
+    {
+        engine.begin_source_check(file);
+        prepare_javascript_irs(engine, &project_root, resolutions);
+    }
     // The normalized interface is the per-file declared surface and incremental cutoff. Graph
     // resolution below remains separate because stars acquire names only in an entry/root context.
     let interface = engine.interface(file);
@@ -900,6 +910,8 @@ fn source_check_identity_for_sources(sources: &[(&str, Revision)]) -> Option<kil
 pub(crate) fn build_graph_from_snapshot(
     snapshot: &OwnedGraphSnapshot,
 ) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
+    // Nothing writes the project while its graph is built.
+    let _filesystem = kiln_module_resolver::FilesystemSnapshot::begin();
     let declared_includes = declared_include_sources(snapshot.resolutions.as_ref())?;
     let entries = snapshot
         .resolutions
@@ -1620,6 +1632,8 @@ fn build_graph<E: QueryEngine>(
     node: bool,
     preloads: &[PathBuf],
 ) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
+    // Nothing writes the project while its graph is built.
+    let _filesystem = kiln_module_resolver::FilesystemSnapshot::begin();
     let declared_includes = declared_include_sources(resolutions)?;
     let entries = resolutions
         .into_iter()
@@ -1640,23 +1654,7 @@ fn build_graph<E: QueryEngine>(
             )
         })
         .collect::<Vec<_>>();
-    let formats = resolutions
-        .into_iter()
-        .flat_map(|map| &map.node_formats)
-        .map(|format| {
-            (
-                PathBuf::from(&format.path),
-                match format.format {
-                    kiln_proto::NodeModuleFormat::EsModule => {
-                        kiln_module_resolver::NodeModuleFormat::EsModule
-                    }
-                    kiln_proto::NodeModuleFormat::CommonJs => {
-                        kiln_module_resolver::NodeModuleFormat::CommonJs
-                    }
-                },
-            )
-        })
-        .collect::<Vec<_>>();
+    let formats = node_formats(resolutions);
     let runtime_package_aliases = resolutions
         .into_iter()
         .flat_map(|map| &map.runtime_package_aliases)
@@ -1668,7 +1666,13 @@ fn build_graph<E: QueryEngine>(
             )
         })
         .collect::<Vec<_>>();
+    let mut prepared = prepare_payloads(engine, project_root, &formats);
     let provider = |module_path: &Path, source_kind: kiln_module_graph::ModuleSource| {
+        if source_kind == kiln_module_graph::ModuleSource::CommonJs
+            && let Some(payload) = prepared.remove(module_path)
+        {
+            return payload;
+        }
         module_payload(engine, module_path, project_root, source_kind)
     };
     let resolver = if node {
@@ -1701,6 +1705,227 @@ fn build_graph<E: QueryEngine>(
     } else {
         ModuleGraph::build_with_typed_policy_includes(entry, resolver, provider, declared_includes)
     }
+}
+
+/// A CommonJS module's payload: a function of its path, text and graph identity alone, so it is
+/// kept by path and identity beside the text it was compiled from and reused while that text is
+/// unchanged. A package's CommonJS does not change between checks, and recompiling all of it made
+/// every graph rebuild pay for the whole dependency tree again.
+fn commonjs_payload(
+    module_path: &Path,
+    module_path_string: &str,
+    source: &str,
+    identity: &str,
+) -> Result<kiln_module_graph::ModulePayload, kiln_module_graph::ModuleGraphError> {
+    type Compiled = Arc<(String, kiln_module_graph::ModulePayload)>;
+    static COMPILED: OnceLock<Mutex<HashMap<(String, String), Compiled>>> = OnceLock::new();
+    if !crate::server::serving() {
+        return compile_commonjs_payload(module_path, module_path_string, source, identity);
+    }
+    let compiled = COMPILED.get_or_init(Default::default);
+    let key = (module_path_string.to_owned(), identity.to_owned());
+    let held = compiled
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .cloned();
+    if let Some(held) = held
+        && held.0 == source
+    {
+        return Ok(held.1.clone());
+    }
+    let payload = compile_commonjs_payload(module_path, module_path_string, source, identity)?;
+    compiled
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, Arc::new((source.to_owned(), payload.clone())));
+    Ok(payload)
+}
+
+fn compile_commonjs_payload(
+    module_path: &Path,
+    module_path_string: &str,
+    source: &str,
+    identity: &str,
+) -> Result<kiln_module_graph::ModulePayload, kiln_module_graph::ModuleGraphError> {
+    let (mut hir, static_requires) =
+        kiln_frontend_oxc::parse_commonjs_with_requires(module_path_string, source);
+    hir.module_id = identity.into();
+    if hir.has_static_module_syntax() {
+        return Err(kiln_module_graph::ModuleGraphError::CjsStaticModuleSyntax {
+            path: module_path.to_path_buf(),
+            diagnostics: kiln_ir::cjs_static_module_syntax_diagnostics(&hir),
+        });
+    }
+    let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
+        kiln_module_graph::ModuleGraphError::Compile {
+            path: module_path.to_path_buf(),
+            diagnostics,
+        }
+    })?;
+    program.dependencies = static_requires;
+    Ok(kiln_module_graph::ModulePayload::Program(program))
+}
+
+type PreparedPayload =
+    Result<kiln_module_graph::ModulePayload, kiln_module_graph::ModuleGraphError>;
+
+/// Compute ahead, on several threads, the payloads a graph walk will ask for one module at a
+/// time: the IR of each synchronized source module, through the engine, and the program of each
+/// CommonJS one, returned by path. Each module is classified as the pinned resolver classifies it
+/// -- by its extension, then by its pinned Node format. A module the walk asks for as something
+/// else, or does not reach, is computed for nothing; one it reaches that this missed is computed
+/// when asked, as before.
+/// The Node module formats the client pinned.
+fn node_formats(
+    resolutions: Option<&ResolutionMap>,
+) -> Vec<(PathBuf, kiln_module_resolver::NodeModuleFormat)> {
+    resolutions
+        .into_iter()
+        .flat_map(|map| &map.node_formats)
+        .map(|format| {
+            (
+                PathBuf::from(&format.path),
+                match format.format {
+                    kiln_proto::NodeModuleFormat::EsModule => {
+                        kiln_module_resolver::NodeModuleFormat::EsModule
+                    }
+                    kiln_proto::NodeModuleFormat::CommonJs => {
+                        kiln_module_resolver::NodeModuleFormat::CommonJs
+                    }
+                },
+            )
+        })
+        .collect()
+}
+
+/// The graph modules a walk would compile as ES modules and those it would load as CommonJS, as
+/// [`prepare_payloads`] classifies them.
+type PayloadModules = (
+    Vec<(kiln_db::FileId, String)>,
+    Vec<(PathBuf, String, String, String)>,
+);
+
+fn payload_modules<E: QueryEngine>(
+    engine: &mut E,
+    project_root: &str,
+    formats: &[(PathBuf, kiln_module_resolver::NodeModuleFormat)],
+) -> PayloadModules {
+    let formats: HashMap<&Path, kiln_module_resolver::NodeModuleFormat> = formats
+        .iter()
+        .map(|(path, format)| (path.as_path(), *format))
+        .collect();
+    let (mut modules, mut commonjs) = (Vec::new(), Vec::new());
+    for (file, path) in engine.source_files() {
+        let module_path = Path::new(&path);
+        let is_commonjs = match module_path.extension().and_then(|e| e.to_str()) {
+            Some("mjs" | "mts") => false,
+            Some("cjs" | "cts") => true,
+            Some("js" | "jsx" | "ts" | "tsx") => {
+                formats.get(module_path) == Some(&kiln_module_resolver::NodeModuleFormat::CommonJs)
+            }
+            _ => continue,
+        };
+        let identity =
+            kiln_module_graph::graph_module_identity(Path::new(project_root), module_path);
+        if is_commonjs {
+            if let Some(source) = engine.source(file) {
+                commonjs.push((
+                    PathBuf::from(&path),
+                    path.clone(),
+                    source.to_owned(),
+                    identity,
+                ));
+            }
+        } else {
+            modules.push((file, identity));
+        }
+    }
+    (modules, commonjs)
+}
+
+/// Compile, on several threads, the ES modules among the project's JavaScript, whose programs
+/// do not wait for type facts: meant to run while a source check does.
+fn prepare_javascript_irs<E: QueryEngine>(
+    engine: &mut E,
+    project_root: &str,
+    resolutions: Option<&ResolutionMap>,
+) {
+    let formats = node_formats(resolutions);
+    let paths: HashMap<kiln_db::FileId, String> = engine.source_files().into_iter().collect();
+    let (modules, _) = payload_modules(engine, project_root, &formats);
+    let javascript: Vec<(kiln_db::FileId, String)> = modules
+        .into_iter()
+        .filter(|(file, _)| {
+            paths.get(file).is_some_and(|path| {
+                [".js", ".mjs", ".jsx"]
+                    .iter()
+                    .any(|extension| path.ends_with(extension))
+            })
+        })
+        .collect();
+    engine.prepare_module_irs(&javascript);
+}
+
+fn prepare_payloads<E: QueryEngine>(
+    engine: &mut E,
+    project_root: &str,
+    formats: &[(PathBuf, kiln_module_resolver::NodeModuleFormat)],
+) -> HashMap<PathBuf, PreparedPayload> {
+    let (modules, commonjs) = payload_modules(engine, project_root, formats);
+    engine.prepare_module_irs(&modules);
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |cores| cores.get())
+        .min(8)
+        .min(commonjs.len());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let prepared = commonjs
+        .iter()
+        .map(|_| Mutex::new(None))
+        .collect::<Vec<Mutex<Option<PreparedPayload>>>>();
+    let work = || {
+        loop {
+            let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some((module_path, path, source, identity)) = commonjs.get(at) else {
+                break;
+            };
+            // A panic is left for the walk's own request to report.
+            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                commonjs_payload(module_path, path, source, identity)
+            }));
+            if let Ok(payload) = payload {
+                *prepared[at]
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = Some(payload);
+            }
+        }
+    };
+    if threads > 0 {
+        std::thread::scope(|scope| {
+            for _ in 1..threads {
+                let spawned = std::thread::Builder::new()
+                    .name("kiln-commonjs".into())
+                    .stack_size(crate::SERVE_STACK_BYTES)
+                    .spawn_scoped(scope, work);
+                if spawned.is_err() {
+                    break;
+                }
+            }
+            work();
+        });
+    }
+    commonjs
+        .into_iter()
+        .zip(prepared)
+        .filter_map(|((module_path, ..), payload)| {
+            Some((
+                module_path,
+                payload
+                    .into_inner()
+                    .unwrap_or_else(|poison| poison.into_inner())?,
+            ))
+        })
+        .collect()
 }
 
 fn module_payload<E: QueryEngine>(
@@ -1741,23 +1966,7 @@ fn module_payload<E: QueryEngine>(
     }
     if source_kind == kiln_module_graph::ModuleSource::CommonJs {
         let source = engine.source(module_file).expect("source checked above");
-        let (mut hir, static_requires) =
-            kiln_frontend_oxc::parse_commonjs_with_requires(module_path_string, source);
-        hir.module_id = identity.clone().into();
-        if hir.has_static_module_syntax() {
-            return Err(kiln_module_graph::ModuleGraphError::CjsStaticModuleSyntax {
-                path: module_path.to_path_buf(),
-                diagnostics: kiln_ir::cjs_static_module_syntax_diagnostics(&hir),
-            });
-        }
-        let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
-            kiln_module_graph::ModuleGraphError::Compile {
-                path: module_path.to_path_buf(),
-                diagnostics,
-            }
-        })?;
-        program.dependencies = static_requires;
-        return Ok(kiln_module_graph::ModulePayload::Program(program));
+        return commonjs_payload(module_path, module_path_string, source, &identity);
     }
     engine
         .module_ir_with_identity(module_file, &identity)
@@ -3052,8 +3261,29 @@ pub(crate) fn ensure_canonical_source<E: QueryEngine>(
     };
     let canonical_file = engine.intern(entry_string);
 
+    // Canonicalizing is a `readlink` per path component, and every active source was examined on
+    // every request. A path that names an existing file other than the entry's cannot canonicalize
+    // to the entry, so one `stat` rules out nearly all of them first; only a path that does not
+    // exist, or that is the entry's file, takes the full resolution.
+    #[cfg(unix)]
+    let entry_identity = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(entry)
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()))
+    };
     let mut aliases = Vec::new();
     for (file, path) in engine.source_files() {
+        #[cfg(unix)]
+        if let Some(entry_identity) = entry_identity {
+            use std::os::unix::fs::MetadataExt;
+            let candidate = Path::new(project_root).join(&path);
+            if let Ok(metadata) = std::fs::metadata(&candidate)
+                && (metadata.dev(), metadata.ino()) != entry_identity
+            {
+                continue;
+            }
+        }
         if resolve_source_path(&path, project_root).as_deref() != Some(entry) {
             continue;
         }

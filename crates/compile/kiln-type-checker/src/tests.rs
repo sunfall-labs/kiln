@@ -1043,3 +1043,77 @@ fn any_parameter_does_not_become_a_numeric_bytecode_contract() {
     assert_eq!(compiled.program.code, original_code);
     assert_eq!(compiled.program.constants, original_constants);
 }
+
+/// `KILN_LOWER_BENCH=<iterations> cargo test --release -p kiln-type-checker -- --ignored lower_bench`
+#[test]
+#[ignore]
+fn lower_bench() {
+    use crate::engine::{atom::Interner, session::Session};
+    let source = crate::STANDARD_LIBRARIES
+        .iter()
+        .find(|(name, _)| *name == "lib.es5.d.ts")
+        .unwrap()
+        .1;
+    let module = kiln_frontend_oxc::parse_authored("/l/lib.es5.d.ts", source);
+    let iterations: u32 = std::env::var("KILN_LOWER_BENCH")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(20);
+    let session = Session::new();
+    let atoms = Interner::new_in(&session);
+    let started = std::time::Instant::now();
+    for _ in 0..iterations {
+        let (file, _) = crate::lower::Lower::new(&module, &atoms).finish(session.arena(), &session);
+        std::hint::black_box(&file);
+    }
+    eprintln!(
+        "lower lib.es5.d.ts: {:?} each",
+        started.elapsed() / iterations
+    );
+}
+
+/// A source with an adapter gap the checker reports: a compiler capability expression appended
+/// to its authored body, as `checker_marks_unrepresentable_generated_capability_expressions_incomplete`
+/// builds one.
+fn with_gap(snapshot: &mut SourceSnapshot, path: &str, source: &str) {
+    let mut module = kiln_frontend_oxc::parse_static_typescript(
+        path,
+        source,
+        kiln_frontend_oxc::StaticTypescriptPolicy::PreserveAuthoredSource,
+    );
+    let span = kiln_hir::Span::new(0, 1);
+    module.type_syntax.body.push(kiln_hir::Statement {
+        kind: kiln_hir::StatementKind::Expression(kiln_hir::Expression {
+            kind: kiln_hir::ExpressionKind::GlobalObject,
+            span,
+        }),
+        span,
+    });
+    snapshot.modules.insert(path.into(), Arc::new(module));
+}
+
+#[test]
+fn a_gap_leaves_the_files_that_do_not_reach_it_complete() {
+    let (main, leaf) = ("/project/main.ts", "/project/leaf.ts");
+    let main_source = "import { leaf } from './leaf';\nexport const value = leaf;";
+    let (mut snapshot, roots) =
+        snapshot_with(&[(main, main_source), (leaf, "export const leaf = 1;")]);
+    with_gap(&mut snapshot, main, main_source);
+    let result = check_snapshot_with_options(&snapshot, &roots, &options());
+    assert!(!result.complete);
+    assert!(result.covers(main) && result.covers(leaf));
+    assert!(result.is_complete_for(leaf), "{:?}", result.files);
+    assert!(!result.is_complete_for(main), "{:?}", result.files);
+}
+
+#[test]
+fn a_gap_in_a_script_leaves_no_file_complete() {
+    let (script, leaf) = ("/project/script.ts", "/project/leaf.ts");
+    let script_source = "const scriptValue = 1;";
+    let (mut snapshot, roots) =
+        snapshot_with(&[(script, script_source), (leaf, "export const leaf = 1;")]);
+    with_gap(&mut snapshot, script, script_source);
+    let result = check_snapshot_with_options(&snapshot, &roots, &options());
+    assert!(!result.complete);
+    assert!(!result.is_complete_for(leaf), "{:?}", result.files);
+}

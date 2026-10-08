@@ -33,6 +33,14 @@ use error::{Error, Result};
 use oneshot::OneShot;
 
 fn main() {
+    // glibc grows each thread's heap by what the allocation asks for and no more, with an
+    // `mprotect` and the arena locked each time. A check allocates on every core at once, and a
+    // 64 MiB pad took a 240-file project's one-shot check from 840 ms to 740.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: `mallopt` only sets a malloc parameter, before any thread exists.
+    unsafe {
+        libc::mallopt(libc::M_TOP_PAD, 64 << 20);
+    }
     let code = match run() {
         Ok(code) => code,
         // Downstream of a `| head`, a closed pipe is how a run normally ends.
@@ -444,14 +452,30 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             explain_parallel,
         } => {
             let node = auto_node(node);
+            // An in-process engine starts with no declaration libraries parsed; parse them while
+            // the project is read. A daemon keeps its own from the first check.
+            if one_shot && sources::is_typescript(&path) {
+                kiln_daemon::prewarm_source_checker();
+            }
+            // What a one-shot check compiles dies with it, so nothing reads type facts.
+            if one_shot && explain_parallel.is_none() {
+                kiln_daemon::without_type_facts();
+            }
             let mut backend = open(one_shot, &socket)?;
-            report(commands::check_explaining(
+            let checked = report(commands::check_explaining(
                 backend.as_mut(),
                 &path,
                 &root,
                 node,
                 explain_parallel,
-            )?)
+            )?);
+            // The process exits as soon as this returns. A one-shot engine owns nothing but
+            // memory, and taking apart the database and the checker's results one allocation at
+            // a time cost a measured 4-5 ms of a 50 ms check.
+            if one_shot {
+                std::mem::forget(backend);
+            }
+            checked
         }
         Command::Test {
             path,
