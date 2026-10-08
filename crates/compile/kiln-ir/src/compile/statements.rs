@@ -1594,7 +1594,17 @@ impl super::Compiler {
                 self.without_completion(|compiler| compiler.statements(&body));
                 self.scopes.pop().expect("finalizer scope was just pushed");
             }
-            Cleanup::CloseIterator { binding } => self.emit_iterator_close(&binding.clone()),
+            Cleanup::CloseIterator {
+                binding,
+                awaiting,
+                span,
+            } => {
+                if *awaiting {
+                    self.emit_async_iterator_close(&binding.clone(), *span, false);
+                } else {
+                    self.emit_iterator_close(&binding.clone());
+                }
+            }
             Cleanup::DisposeResources(slots) => self.emit_disposals(&slots.clone()),
         }
     }
@@ -1722,6 +1732,35 @@ impl super::Compiler {
         self.code.push(Instruction::Pop);
         self.code.push(Instruction::Pop);
         self.patch_jump(done);
+    }
+
+    /// `AsyncIteratorClose` for a `for await` loop. Its `return()` promise must be awaited so
+    /// cleanup finishes before the abrupt completion leaves the loop. When closing for a throw,
+    /// the original exception wins over a throwing/rejected `return()` and its result need not be
+    /// checked for being an object.
+    pub(super) fn emit_async_iterator_close(
+        &mut self,
+        binding: &str,
+        span: Span,
+        preserve_throw: bool,
+    ) {
+        let guard = preserve_throw.then(|| self.emit_jump(Instruction::PushHandler(0)));
+        let absent = self.emit_iterator_return(binding, span);
+        self.code.push(Instruction::Await);
+        if !preserve_throw {
+            self.require_object("Async iterator result of `return` is not an object");
+        }
+        self.code.push(Instruction::Pop);
+        self.patch_jump(absent);
+
+        if let Some(guard) = guard {
+            self.code.push(Instruction::PopHandler);
+            let closed = self.emit_jump(Instruction::Jump(0));
+            self.patch_jump(guard);
+            // The awaited close failed; preserve the exception that was already on the stack.
+            self.code.push(Instruction::Pop);
+            self.patch_jump(closed);
+        }
     }
 
     /// Run every cleanup between here and `depth`, innermost first.
@@ -2016,6 +2055,8 @@ impl super::Compiler {
         // landing pads below, which is why the loop's own context is recorded *above* it.
         self.finalizers.push(Cleanup::CloseIterator {
             binding: iterator_binding.clone(),
+            awaiting,
+            span,
         });
         self.handler_depth += 1;
         self.loops.push(LoopContext {
@@ -2049,12 +2090,16 @@ impl super::Compiler {
                 self.patch_jump_to(jump, break_pad);
             }
             self.code.push(Instruction::PopHandler);
-            self.emit_iterator_close(&iterator_binding);
+            if awaiting {
+                self.emit_async_iterator_close(&iterator_binding, span, false);
+            } else {
+                self.emit_iterator_close(&iterator_binding);
+            }
             let leave = self.emit_jump(Instruction::Jump(0));
-            self.emit_catch_pad(handler_jump, &iterator_binding);
+            self.emit_catch_pad(handler_jump, &iterator_binding, awaiting, span);
             self.patch_jump(leave);
         } else {
-            self.emit_catch_pad(handler_jump, &iterator_binding);
+            self.emit_catch_pad(handler_jump, &iterator_binding, awaiting, span);
         }
         self.patch_jump(normal_exit);
         self.scopes.pop().expect("loop scope was just pushed");
@@ -2062,9 +2107,19 @@ impl super::Compiler {
 
     /// The landing pad an exception thrown inside a `for-of` body reaches: close the iterator,
     /// then let the exception carry on outwards. Entering it has already popped the handler.
-    pub(super) fn emit_catch_pad(&mut self, handler_jump: usize, binding: &str) {
+    pub(super) fn emit_catch_pad(
+        &mut self,
+        handler_jump: usize,
+        binding: &str,
+        awaiting: bool,
+        span: Span,
+    ) {
         self.patch_jump(handler_jump);
-        self.emit_iterator_close(binding);
+        if awaiting {
+            self.emit_async_iterator_close(binding, span, true);
+        } else {
+            self.emit_iterator_close(binding);
+        }
         self.code.push(Instruction::Throw);
     }
 
