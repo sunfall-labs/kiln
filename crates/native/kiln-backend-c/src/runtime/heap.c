@@ -5726,7 +5726,7 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
         const kiln_closure *closure;
         if (block->size < sizeof *frame || frame->queue_count > frame->queue_capacity ||
             (frame->queue_count != 0 &&
-             (frame->queue_promises == NULL || frame->queue_sent == NULL)))
+             (frame->queue_promises == NULL || frame->queue_sent == NULL || frame->queue_methods == NULL)))
             return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
         if (kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->properties) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->prototype) ||
@@ -5734,13 +5734,15 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->receiver) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->promise) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->sent) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->async_return_value) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->delegate) ||
             kiln_c99_graph_in_batch(heap, chunks, count, frame->locals) ||
             kiln_c99_graph_in_batch(heap, chunks, count, frame->stack) ||
             kiln_c99_graph_in_batch(heap, chunks, count, frame->handlers) ||
             kiln_c99_graph_in_batch(heap, chunks, count, frame->handler_stack) ||
             kiln_c99_graph_in_batch(heap, chunks, count, frame->queue_promises) ||
-            kiln_c99_graph_in_batch(heap, chunks, count, frame->queue_sent))
+            kiln_c99_graph_in_batch(heap, chunks, count, frame->queue_sent) ||
+            kiln_c99_graph_in_batch(heap, chunks, count, frame->queue_methods))
             return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
         if (frame->function.tag != KILN_VALUE_FUNCTION)
             return KILN_C99_GRAPH_OUTSIDE_KIND_UNENUMERATED;
@@ -5758,8 +5760,9 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
                 return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
         }
         for (index = 0; index < frame->queue_count; ++index) {
-            if (kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->queue_promises[index]) ||
-                kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->queue_sent[index]))
+            size_t slot = (frame->queue_head + index) % frame->queue_capacity;
+            if (kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->queue_promises[slot]) ||
+                kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->queue_sent[slot]))
                 return KILN_C99_GRAPH_OUTSIDE_EDGE_ALIAS;
         }
         return KILN_C99_GRAPH_ROOTS_UNENUMERATED;
@@ -8388,6 +8391,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_value(heap, &frame->receiver);
         kiln_c99_gc_mark_value(heap, &frame->promise);
         kiln_c99_gc_mark_value(heap, &frame->sent);
+        kiln_c99_gc_mark_value(heap, &frame->async_return_value);
         kiln_c99_gc_mark_value(heap, &frame->delegate);
         if (frame->function.tag == KILN_VALUE_FUNCTION) {
             const kiln_closure *closure = (const kiln_closure *)(uintptr_t)frame->function.bits;
@@ -8397,8 +8401,12 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
             kiln_c99_gc_mark_vals(heap, frame->stack, frame->sp);
         }
         if (frame->queue_promises != NULL) {
-            kiln_c99_gc_mark_values(heap, frame->queue_promises, frame->queue_count);
-            kiln_c99_gc_mark_values(heap, frame->queue_sent, frame->queue_count);
+            size_t index;
+            for (index = 0; index < frame->queue_count; ++index) {
+                size_t slot = (frame->queue_head + index) % frame->queue_capacity;
+                kiln_c99_gc_mark_value(heap, &frame->queue_promises[slot]);
+                kiln_c99_gc_mark_value(heap, &frame->queue_sent[slot]);
+            }
         }
         break;
     }
@@ -8738,6 +8746,7 @@ static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
         free(frame->handler_stack);
         free(frame->queue_promises);
         free(frame->queue_sent);
+        free(frame->queue_methods);
         break;
     }
     case KILN_GC_PROMISE: {

@@ -1138,9 +1138,19 @@
                 KILN_C99_REFUSE("a generator method on a receiver that is not a generator");
             }
             frame = kiln_c99_generator_of(receiver);
-            if (frame->running) {
+            if (frame->running && !frame->async_generator) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Generator is already running");
+            }
+            if (frame->async_generator) {
+                kiln_value step_promise;
+                status = kiln_c99_new_promise(&step_promise);
+                if (status != KILN_C99_OK) return status;
+                *result = step_promise;
+                return kiln_c99_async_generator_request(
+                    host, receiver, step_promise,
+                    argc > 0 ? args[0] : kiln_c99_undefined(),
+                    KILN_C99_METHOD_GENERATOR_THROW, depth, thrown);
             }
             if (frame->delegate.tag != KILN_VALUE_UNDEFINED && !frame->async_generator) {
                 kiln_value thrown_val = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -1187,57 +1197,18 @@
             frame = kiln_c99_generator_of(receiver);
             /* One frame, and it is on the C stack: resuming it from inside itself would overwrite
              * the locals the running body is standing on. The language says so by name. */
-            if (frame->running) {
+            if (frame->running && !frame->async_generator) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Generator is already running");
             }
             if (frame->async_generator) {
                 kiln_value step_promise;
                 status = kiln_c99_new_promise(&step_promise);
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
+                if (status != KILN_C99_OK) return status;
                 *result = step_promise;
-                kiln_value sent_val = argc > 0 ? args[0] : kiln_c99_undefined();
-                if (frame->done) {
-                    return kiln_c99_async_generator_settle(
-                        host, step_promise,
-                        code == KILN_C99_METHOD_GENERATOR_RETURN ? sent_val : kiln_c99_undefined(),
-                        1, depth, thrown);
-                }
-                if (code == KILN_C99_METHOD_GENERATOR_RETURN) {
-                    if (frame->handler_top != 0 && !frame->done) {
-                        frame->raising = 1;
-                        kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_undefined());
-                        closure = kiln_c99_closure_of(frame->function);
-                        frame->running = 1;
-                        kiln_val vproduced = KILN_VAL_UNDEFINED;
-                        (void)kiln_c99_invoke_closure_body(
-                            host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
-                        produced = kiln_val_to_boundary(vproduced);
-                        frame->running = 0;
-                    }
-                    frame->done = 1;
-                    return kiln_c99_async_generator_settle(host, step_promise, sent_val, 1, depth, thrown);
-                }
-                if (frame->queue_executing) {
-                    if (frame->queue_count >= frame->queue_capacity) {
-                        size_t new_cap = frame->queue_capacity == 0 ? 4 : frame->queue_capacity * 2;
-                        kiln_c99_heap_store_pointer(frame, &frame->queue_promises, (kiln_value *)realloc(frame->queue_promises, new_cap * sizeof(kiln_value)));
-                        kiln_c99_heap_store_pointer(frame, &frame->queue_sent, (kiln_value *)realloc(frame->queue_sent, new_cap * sizeof(kiln_value)));
-                        frame->queue_capacity = new_cap;
-                        /* The frame owns memory outside its block now (`KILN_GC_FINALIZED_AT_ALLOC`). */
-                        kiln_c99_gc_note_finalizable(frame);
-                    }
-                    kiln_c99_heap_store_value(frame, &frame->queue_promises[frame->queue_count], step_promise);
-                    kiln_c99_heap_store_value(frame, &frame->queue_sent[frame->queue_count], sent_val);
-                    frame->queue_count++;
-                    return KILN_C99_OK;
-                }
-                frame->queue_executing = 1;
-                kiln_c99_heap_store_value(frame, &frame->promise, step_promise);
-                return kiln_c99_async_generator_step(
-                    host, receiver, sent_val, 0, depth, thrown);
+                return kiln_c99_async_generator_request(
+                    host, receiver, step_promise,
+                    argc > 0 ? args[0] : kiln_c99_undefined(), code, depth, thrown);
             }
             if (code == KILN_C99_METHOD_GENERATOR_RETURN) {
                 if (frame->delegate.tag != KILN_VALUE_UNDEFINED && !frame->async_generator) {
