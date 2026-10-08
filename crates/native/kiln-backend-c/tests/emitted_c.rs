@@ -1223,7 +1223,11 @@ fn runtime_prelude_size() {
     // the additional ABI entries are private operations, not public C builtins.
     // String-wrapper own-slot construction and direct-call attribution bring the final
     // measured unit to 85,732 lines, still with no duplicated section or new public C builtin.
-    const CEILING_LINES: usize = 86_000;
+    // Reviewed 2026-10-07: async-generator FIFO request/return/throw/delegation kernels and
+    // the computed-string write helper extend existing runtime paths. The final unit is
+    // 86,522 lines; these are private runtime helpers, with no new builtin IDs or repeated
+    // runtime section.
+    const CEILING_LINES: usize = 87_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
