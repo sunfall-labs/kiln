@@ -3204,6 +3204,7 @@ fn capture_type_syntax(
             native_import_meta,
             result: HirTypeSyntax::default(),
             classified: HashSet::new(),
+            dotted: HashSet::new(),
         };
         return HirTypeSyntax {
             module_attributes,
@@ -3332,13 +3333,16 @@ fn capture_type_syntax(
         native_import_meta: Option<bool>,
         result: HirTypeSyntax,
         classified: HashSet<(u32, u32)>,
+        /// The inner namespaces of dotted names (`namespace A.B {}`), by start: `B` is exported
+        /// from `A` though nothing writes `export`.
+        dotted: HashSet<u32>,
     }
     impl Collector<'_> {
         fn is_exported(&self, span: oxc_span::Span) -> bool {
-            self.result
-                .exported_declarations
-                .iter()
-                .any(|declaration| declaration.start == span.start && declaration.end == span.end)
+            self.dotted.contains(&span.start)
+                || self.result.exported_declarations.iter().any(|declaration| {
+                    declaration.start == span.start && declaration.end == span.end
+                })
         }
 
         fn is_default_exported(&self, span: oxc_span::Span) -> bool {
@@ -5019,6 +5023,11 @@ fn capture_type_syntax(
             node: &oxc_ast::ast::TSNamespaceDeclaration<'a>,
         ) {
             let span = node.span;
+            if let oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) =
+                &node.body
+            {
+                self.dotted.insert(inner.span.start);
+            }
             self.result.declarations.push(HirTypeDeclaration {
                 name: Some(node.id.name.to_string()),
                 span: HirSpan::new(span.start, span.end),
@@ -5117,6 +5126,7 @@ fn capture_type_syntax(
             ..HirTypeSyntax::default()
         },
         classified: HashSet::new(),
+        dotted: HashSet::new(),
     };
     for comment in &program.comments {
         if comment.kind != oxc_ast::ast::CommentKind::Line {

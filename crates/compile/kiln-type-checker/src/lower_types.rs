@@ -180,7 +180,9 @@ impl<'a, 's> Lower<'a, 's> {
             if let Some(statement) = declaration.body.first() {
                 if let k::StatementKind::Variable { kind, declarations } = &statement.kind {
                     let mut flags = b::Flags::empty();
-                    if declaration.declared {
+                    // `NodeFlagsAmbient`: written `declare`, or inside a declared namespace or
+                    // module.
+                    if declaration.declared || self.in_ambient_declaration(declaration.span) {
                         flags |= b::Flags::AMBIENT;
                     }
                     if declaration.exported {
@@ -210,7 +212,8 @@ impl<'a, 's> Lower<'a, 's> {
             .as_deref()
             .map_or(Atom::NONE, |name| self.atom(name));
         let mut flags = b::Flags::empty();
-        if declaration.declared {
+        // `NodeFlagsAmbient`: written `declare`, or inside a declared namespace or module.
+        if declaration.declared || self.in_ambient_declaration(declaration.span) {
             flags |= b::Flags::AMBIENT;
         }
         if declaration.exported {
@@ -551,24 +554,39 @@ impl<'a, 's> Lower<'a, 's> {
             } => {
                 let name = self.name(names, t.span.start);
                 let args = self.ty_list(arguments);
+                // The entity after `typeof`, each name where it is written.
+                let source = self.module.source.as_bytes();
+                let skip = |mut at: usize, also: &[u8]| {
+                    while at < source.len()
+                        && (source[at].is_ascii_whitespace() || also.contains(&source[at]))
+                    {
+                        at += 1;
+                    }
+                    at
+                };
+                let mut at = skip(t.span.start as usize + "typeof".len(), b"");
+                let entity_start = at as u32;
                 let mut expr = b::ExprId::NONE;
                 for n in names {
                     let atom = self.atom(n);
-                    expr = if expr.is_none() {
-                        self.file
-                            .expr(b::ExprKind::Ident(atom), t.span.start, t.span.end)
+                    let (start, end) = (at as u32, (at + n.len()).min(source.len()) as u32);
+                    expr = if expr.is_none() && n == "this" {
+                        self.file.expr(b::ExprKind::This, start, end)
+                    } else if expr.is_none() {
+                        self.file.expr(b::ExprKind::Ident(atom), start, end)
                     } else {
                         self.file.expr(
                             b::ExprKind::Dot {
                                 obj: expr,
                                 name: atom,
-                                name_pos: t.span.start,
+                                name_pos: start,
                                 chain: b::Chain::No,
                             },
-                            t.span.start,
-                            t.span.end,
+                            entity_start,
+                            end,
                         )
-                    }
+                    };
+                    at = skip(end as usize, b".");
                 }
                 b::TypeNodeKind::Typeof {
                     name,
