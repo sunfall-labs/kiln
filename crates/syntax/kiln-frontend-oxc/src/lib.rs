@@ -355,7 +355,9 @@ fn parse_static_typescript_with<T>(
     }
     if !original_type.is_typescript() {
         let (mut module, side_data) = parse_buffer(source, original_type);
-        if !module.diagnostics.is_empty()
+        // Only what the parser rejected: an early error is JavaScript's own, and a file that has
+        // only those is read as JavaScript.
+        if module.diagnostics.iter().any(|it| !it.early)
             && let Some(type_syntax) = javascript_as_typescript(path, source, original_type)
         {
             module.type_syntax = type_syntax;
@@ -6016,7 +6018,6 @@ fn lower_parsed_in_context(
         diagnostics.push(Diagnostic {
             message: "dynamic source origin exceeds supported parser span bounds".into(),
             span: None,
-            code: None,
             early: false,
         });
     }
@@ -6481,14 +6482,6 @@ fn lower_ts_type(ts_type: &oxc_ast::ast::TSType<'_>) -> Option<HirTypeAnnotation
     }
 }
 
-/// The TypeScript code of a diagnostic Oxc raised for a TypeScript error.
-fn typescript_code(diagnostic: &OxcDiagnostic) -> Option<u32> {
-    let code = &diagnostic.code;
-    (code.scope.as_deref() == Some("TS"))
-        .then(|| code.number.as_deref()?.parse().ok())
-        .flatten()
-}
-
 /// Lower one Oxc diagnostic into HIR, preferring the span Oxc marked primary.
 ///
 /// Parser and semantic diagnostics carry the same label shape, so both go through here and a
@@ -6503,7 +6496,6 @@ fn lower_diagnostic(diagnostic: &OxcDiagnostic) -> Diagnostic {
     Diagnostic {
         message: diagnostic.to_string(),
         span: diagnostic_span,
-        code: typescript_code(diagnostic),
         early: false,
     }
 }
@@ -6853,7 +6845,6 @@ impl<'ast, 'source> Visit<'ast> for RawSurrogateRegExpVisitor<'source> {
                     message: "Invalid regular expression: escaped lone surrogate in Unicode mode"
                         .into(),
                     span: Some(HirSpan::new(literal.span.start, literal.span.end)),
-                    code: None,
                     early: true,
                 });
                 break;
