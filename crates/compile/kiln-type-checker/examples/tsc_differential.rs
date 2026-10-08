@@ -4,6 +4,7 @@
 //!
 //! `cargo run --release --example tsc_differential -- <out> <project>...`
 
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -130,38 +131,30 @@ fn main() {
     std::fs::create_dir_all(&out).unwrap();
     let projects: Vec<PathBuf> = args.map(PathBuf::from).collect();
     let libraries = Arc::new(Libraries::standard(kiln_frontend_oxc::parse_authored));
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let threads = std::env::var("CASE_THREADS")
-        .ok()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(8);
-    std::thread::scope(|scope| {
-        for _ in 0..threads {
-            std::thread::Builder::new()
-                .stack_size(1 << 30)
-                .spawn_scoped(scope, || {
-                    loop {
-                        let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(project) = projects.get(at) else {
-                            break;
-                        };
-                        let name = project.file_name().unwrap();
-                        let root = std::fs::canonicalize(project).unwrap();
-                        let started = std::time::Instant::now();
-                        let lines = std::panic::catch_unwind(|| check_project(&root, &libraries))
-                            .unwrap_or_else(|_| vec!["kiln: panic".to_owned()]);
-                        let elapsed = started.elapsed();
-                        if elapsed.as_secs() >= 5 {
-                            eprintln!("slow: {} {elapsed:?}", name.to_string_lossy());
-                        }
-                        let mut text = lines.join("\n");
-                        if !text.is_empty() {
-                            text.push('\n');
-                        }
-                        std::fs::write(out.join(name), text).unwrap();
-                    }
-                })
-                .unwrap();
-        }
+    // One project per worker, each checked as `kiln check` checks it; a deep case needs a deep
+    // stack.
+    let pool = kiln_jobs::pool(
+        "kiln-tsc-differential",
+        kiln_jobs::budget(usize::MAX),
+        Some(1 << 30),
+    )
+    .expect("differential thread pool");
+    pool.install(|| {
+        projects.par_iter().for_each(|project| {
+            let name = project.file_name().unwrap();
+            let root = std::fs::canonicalize(project).unwrap();
+            let started = std::time::Instant::now();
+            let lines = std::panic::catch_unwind(|| check_project(&root, &libraries))
+                .unwrap_or_else(|_| vec!["kiln: panic".to_owned()]);
+            let elapsed = started.elapsed();
+            if elapsed.as_secs() >= 5 {
+                eprintln!("slow: {} {elapsed:?}", name.to_string_lossy());
+            }
+            let mut text = lines.join("\n");
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            std::fs::write(out.join(name), text).unwrap();
+        });
     });
 }

@@ -113,10 +113,8 @@ def kiln_outputs(harness: Path, cache: Path, names: list) -> Path:
     sources = cache / "cases"
     out = cache / f"kiln-out-{os.getpid()}"
     shutil.rmtree(out, ignore_errors=True)
-    env = dict(os.environ, KILN_JOBS="1", CASE_THREADS=str(os.cpu_count() or 4))
     subprocess.run(
         [str(harness), str(out)] + [str(sources / name) for name in names],
-        env=env,
         check=True,
     )
     return out
