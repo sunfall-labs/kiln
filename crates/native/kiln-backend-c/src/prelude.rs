@@ -2606,6 +2606,10 @@ pub const SPECULATION_INVARIANTS: &[SpeculationInvariant] = &[
         name: "method_call_number",
         language_rule: "ECMA-262 §13.15.3 ApplyStringOrNumericBinaryOperator: an operand that is a Number takes the numeric branch; one that is not leaves for the generic clone after the call that answered it",
     },
+    SpeculationInvariant {
+        name: "call_return_number",
+        language_rule: "ECMA-262 §13.15.3 ApplyStringOrNumericBinaryOperator: an operand that is a Number takes the numeric branch; a call to a function declared to return number that answered anything else (the declaration is a guess, not a proof) leaves for the generic clone after that same call, which does not run again",
+    },
 ];
 
 pub const fn assert_speculation_invariants(rows: &[SpeculationInvariant]) -> usize {
@@ -2650,6 +2654,7 @@ const _: &SpeculationInvariant = lookup_speculation_invariant("loop_speculation_
 const _: &SpeculationInvariant = lookup_speculation_invariant("upvalue_array");
 const _: &SpeculationInvariant = lookup_speculation_invariant("parameter_array");
 const _: &SpeculationInvariant = lookup_speculation_invariant("method_call_number");
+const _: &SpeculationInvariant = lookup_speculation_invariant("call_return_number");
 
 /// A refusal in the emitted prelude names what it lacked, and an `undefined` answer names what
 /// proves the name absent.
