@@ -4,7 +4,19 @@ Goal: execute every pinned Effect test directly in kiln, prioritizing native, wi
 bundling sources. Bun supplies the direct-TypeScript performance comparison; the official
 Node/Vitest inventory and per-case outcomes establish correctness and runner fidelity.
 
-## Current checkpoint, 2026-10-07
+## Current checkpoint, 2026-10-08
+
+The goal remains incomplete. GitHub and localhost sockets are reachable again. Remote main was fetched and verified at `d43e10ae`, an ancestor of local milestone `f0eefa7e`; publication waits for the required gate. The earlier DNS and EPERM failures are retained as historical evidence.
+
+The [complete interpreter survey](full-interpreter-322-20261008/) completed every original file and all 11,019 canonical records: 10,907 passed, 67 failed, 45 skipped. Every failing ID is retained. This is a failed survey, not acceptance. No assertion, case mode or deadline was relaxed.
+
+Shared native property lookup now preserves the original receiver through accessors, fresh-key prototype chains and replacement builtin parents. The receiver matrix passed normally, with allocation stress, and at 1, 2 and 16 concurrent realms. Reviewed private ABI and size checks passed 2/2; the size guard remains 87,000 lines. These representative checks do not establish whole-suite acceptance.
+
+The fresh full native run selected all 322 files, then stopped at the disk guard after Array (146/146) and ArrayNaNIndex (8/8) passed. The other 320 files remain unverified. Its producer confirmed child cleanup and unchanged inputs. Disk space recovered afterward; a complete rerun is prepared.
+
+The routine gate is running on the clean integration milestone. Complete final-source native/interpreter replays, every remaining original-deadline failure, checksum-matched Bun benchmarks and successful main publication remain required.
+
+## Historical checkpoint, 2026-10-07
 
 The goal remains incomplete. The last verified public main is `d43e10ae`; current
 local milestones have not been published because `git push origin HEAD:main`
