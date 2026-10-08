@@ -3306,6 +3306,41 @@ mod dead_phi_tests {
             "ordinary and delegate completion edges"
         );
         assert!(exit.operations.iter().any(|(_, op)| matches!(op, GraphOp::Phi { inputs } if inputs.len() == exit.predecessors.len())));
+
+        // Neither half of the delegation metadata is meaningful alone. Reject malformed
+        // transformed graphs before the native emitter can reach its invariant assertion.
+        for remove_wrapped in [true, false] {
+            let mut malformed = graph.clone();
+            let suspension = malformed
+                .blocks
+                .iter_mut()
+                .find(|block| {
+                    matches!(
+                        block.terminator,
+                        Terminator::Suspend {
+                            delegate: Some(_),
+                            ..
+                        }
+                    )
+                })
+                .expect("delegated suspension");
+            if let Terminator::Suspend {
+                delegate,
+                delegate_wrapped,
+                ..
+            } = &mut suspension.terminator
+            {
+                if remove_wrapped {
+                    *delegate_wrapped = None;
+                } else {
+                    *delegate = None;
+                }
+            }
+            assert!(matches!(
+                verify_function_graph(&malformed),
+                Err(crate::VerifierError::InvalidTerminator { .. })
+            ));
+        }
     }
 
     #[test]

@@ -188,8 +188,18 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                 }
             }
             Terminator::Suspend {
-                resume, delegate, ..
+                resume,
+                delegate,
+                delegate_wrapped,
+                ..
             } => {
+                if delegate.is_some() != delegate_wrapped.is_some() {
+                    return Err(VerifierError::InvalidTerminator {
+                        block: block.id,
+                        detail: "delegate iterator and wrapping flag must be present together"
+                            .into(),
+                    });
+                }
                 // These are synthetic edges: the body returns, and a later call re-enters at the
                 // target through the dispatch switch. The graph still records them so resume
                 // phis have complete inputs; the emitter implements the edge with frame loads,

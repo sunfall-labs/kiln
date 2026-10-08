@@ -202,6 +202,7 @@ fn uses(graph: &FunctionGraph) -> HashMap<ValueId, Vec<Use<'_>>> {
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 let mut named = vec![*value];
@@ -209,6 +210,7 @@ fn uses(graph: &FunctionGraph) -> HashMap<ValueId, Vec<Use<'_>>> {
                 if let Some((delegated, _, _)) = delegate {
                     named.push(*delegated);
                 }
+                named.extend(delegate_wrapped.iter().copied());
                 named
             }
             Terminator::Jump(_) | Terminator::Return(None) | Terminator::Unreachable => Vec::new(),
