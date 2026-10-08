@@ -176,7 +176,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     &target,
                     Value::Undefined,
                     Value::Undefined,
-                    Sink::AsyncGeneratorReturn(generator.clone(), request.step),
+                    Sink::AsyncGeneratorReturn(generator.clone(), Rc::clone(&request.step)),
                     false,
                 );
                 Ok(())
