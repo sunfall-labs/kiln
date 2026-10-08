@@ -14,6 +14,7 @@ impl<'a, 's> Lower<'a, 's> {
         b::Span<b::ParamId>,
         b::TypeNodeId,
         bool,
+        Option<u32>,
     ) {
         let sites = &self.module.type_syntax.signatures;
         // The executable function of a method or an accessor spans the whole definition
@@ -138,7 +139,8 @@ impl<'a, 's> Lower<'a, 's> {
                 self.annotation(function.span, |site| matches!(site, k::TypeSite::Return))
             });
         let has_body = signature.as_ref().is_none_or(|site| site.has_body);
-        (type_params, params, ret, has_body)
+        let body_start = signature.as_ref().and_then(|site| site.body_start);
+        (type_params, params, ret, has_body, body_start)
     }
 
     pub(super) fn call_type_arguments(&mut self, span: k::Span) -> b::IdList<b::TypeNodeId> {
@@ -990,7 +992,7 @@ impl<'a, 's> Lower<'a, 's> {
         self.file.add_members(&members)
     }
     pub(super) fn function(&mut self, f: &k::Function) -> b::FnId {
-        let (type_params, params, ret, has_body) = self.function_type_parts(f);
+        let (type_params, params, ret, has_body, body_start) = self.function_type_parts(f);
         let (this_param, params) = self.file.split_this_parameter(params);
         let body = if has_body {
             b::FnBody::Block(self.statements(&f.body))
@@ -1004,7 +1006,7 @@ impl<'a, 's> Lower<'a, 's> {
         if f.generator {
             flags |= b::Flags::GENERATOR
         }
-        self.file.add_fn(b::Func {
+        let function = self.file.add_fn(b::Func {
             kind: if f.arrow {
                 b::FnKind::Arrow
             } else {
@@ -1023,7 +1025,12 @@ impl<'a, 's> Lower<'a, 's> {
             body,
             anchor: f.span.start,
             start: f.span.start,
-        })
+        });
+        // `Part::Body` starts at the `{` that the function's body is written with.
+        if let (b::FnBody::Block(_), Some(open)) = (self.file[function].body, body_start) {
+            self.file.body_starts.push((function, open));
+        }
+        function
     }
     /// `node.Loc.Pos()` is the node's full start: the end of the previous token, so that the
     /// range covers the leading trivia (where `checkJSDocComment` finds a node's JSDoc). Kiln's
@@ -1097,7 +1104,9 @@ impl<'a, 's> Lower<'a, 's> {
             while at < text.len() && is_word(text[at]) {
                 at += 1;
             }
-            let preceded_by_dot = start > 0 && text[start - 1] == b'.';
+            // `.eval` is a property name, `...eval` is not.
+            let preceded_by_dot =
+                start > 0 && text[start - 1] == b'.' && !text[..start].ends_with(b"...");
             if !preceded_by_dot && WORDS.contains(&&text[start..at]) {
                 self.file.keyword_identifier_positions.push(start as u32);
             }
@@ -1117,6 +1126,25 @@ impl<'a, 's> Lower<'a, 's> {
                 .find(|site| site.owner_span.end == end && site.owner_span.start <= pos)
                 .map_or(pos, |site| site.owner_span.start);
             let modifiers = self.written_node_modifiers(start, end, &decorators);
+            // `parseParameterEx`: a parameter with an accessibility modifier, `readonly` or
+            // `override` is a parameter property wherever it is written, and the checker
+            // reports the ones outside a constructor with a body (2369).
+            const PROPERTY_MODIFIERS: b::Flags = b::Flags::PUBLIC
+                .union(b::Flags::PRIVATE)
+                .union(b::Flags::PROTECTED)
+                .union(b::Flags::READONLY)
+                .union(b::Flags::OVERRIDE);
+            let seen =
+                modifiers
+                    .iter()
+                    .fold(b::Flags::empty(), |seen, modifier| match modifier.kind {
+                        b::ModifierKind::Keyword(flag) => seen | flag,
+                        _ => seen,
+                    });
+            if seen.intersects(PROPERTY_MODIFIERS) {
+                self.file.params[index].flags |= b::Flags::PARAMETER_PROPERTY
+                    | seen & (PROPERTY_MODIFIERS | b::Flags::ABSTRACT | b::Flags::STATIC);
+            }
             let list = self.file.add_modifiers(&modifiers);
             let param = b::ParamId::from(index as u32);
             self.file.set_param_modifiers(param, list);

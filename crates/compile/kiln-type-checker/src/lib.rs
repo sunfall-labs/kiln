@@ -13,6 +13,7 @@ mod lower_jsdoc;
 mod lower_modules;
 mod lower_types;
 mod lower_values;
+mod parser_errors;
 mod plan;
 mod snapshot;
 mod support;
@@ -22,7 +23,7 @@ pub use snapshot::{
     SourceType, TypeClass, TypeRole, check, project_roots,
 };
 /// Cache identity for the checker algorithms and owned-syntax adapter.
-pub const CHECKER_VERSION: &str = "bun-43a42a836b/kiln-owned-v5";
+pub const CHECKER_VERSION: &str = "bun-43a42a836b/kiln-owned-v6";
 
 #[cfg(test)]
 mod tests;

@@ -66,6 +66,9 @@ pub struct TypeSyntax {
     pub invalid_references: Vec<Span>,
     /// The value of a `resolution-mode="…"` that is neither `import` nor `require` (1453), by span.
     pub invalid_resolution_modes: Vec<Span>,
+    /// What TypeScript reports in a JavaScript file that is written in TypeScript (TS8xxx),
+    /// from the tree that TypeScript's grammar read it as, in source order.
+    pub javascript_errors: Vec<TypeJavaScriptError>,
     /// `export {}` statements, which name nothing and so are in no export list, by span. One
     /// makes a declaration file export only what it says (`setExportContextFlag`).
     pub empty_exports: Vec<Span>,
@@ -243,6 +246,19 @@ pub enum TypeResolutionMode {
     Require,
 }
 
+/// A construct that a JavaScript file may not contain: TypeScript's `checkJSSyntax`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeJavaScriptError {
+    /// Where it starts.
+    pub start: u32,
+    /// Where it ends; 0 for the end of the token at `start`.
+    pub end: u32,
+    /// The code of the message: 8002 to 8038.
+    pub code: u32,
+    /// The message's argument, if it takes one: the declaration or modifier it names.
+    pub argument: Option<&'static str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeImportEquals {
     pub name: String,
@@ -292,6 +308,8 @@ pub struct FunctionSignatureSite {
     pub owner_span: Span,
     pub signature: TypeSignature,
     pub has_body: bool,
+    /// Where the `{` of the body is, if the body is a block.
+    pub body_start: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

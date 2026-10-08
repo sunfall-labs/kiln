@@ -5,6 +5,7 @@
 //! types or arena lifetimes into the query database, interpreter, or backends.
 
 mod dce_guard;
+mod javascript_syntax;
 mod jsdoc;
 
 use std::{
@@ -355,8 +356,19 @@ fn parse_static_typescript_with<T>(
     original_type: SourceType,
     parse_buffer: impl FnOnce(&str, SourceType) -> (Module, T),
 ) -> (Module, T) {
-    if policy == StaticTypescriptPolicy::PreserveAuthoredSource || !original_type.is_typescript() {
+    if policy == StaticTypescriptPolicy::PreserveAuthoredSource {
         return parse_buffer(source, original_type);
+    }
+    if !original_type.is_typescript() {
+        let (mut module, side_data) = parse_buffer(source, original_type);
+        // Only what the parser rejected: an early error is JavaScript's own, and a file that has
+        // only those is read as JavaScript.
+        if module.diagnostics.iter().any(|it| !it.early)
+            && let Some(type_syntax) = javascript_as_typescript(path, source, original_type)
+        {
+            module.type_syntax = type_syntax;
+        }
+        return (module, side_data);
     }
     match transform_static_typescript(path, source, original_type) {
         Ok((generated_source, provenance, type_syntax)) => {
@@ -378,6 +390,9 @@ fn parse_static_typescript_with<T>(
             if module.diagnostics.is_empty() {
                 module.diagnostics.extend(diagnostics);
             }
+            if let Some(type_syntax) = recovered_type_syntax(path, source, original_type) {
+                module.type_syntax = type_syntax;
+            }
             (module, side_data)
         }
     }
@@ -394,6 +409,85 @@ fn map_static_diagnostics_to_original(module: &mut Module, provenance: &StaticSo
             }
         }
     }
+}
+
+/// The authored module of an already parsed source, as the checker reads it: the type syntax
+/// that executable HIR erases, with the module itself beside it in `original_module`.
+fn authored_type_syntax(
+    path: &str,
+    source: &str,
+    source_type: SourceType,
+    parsed: &oxc_parser::ParserReturn<'_>,
+) -> HirTypeSyntax {
+    let mut type_syntax = capture_type_syntax(Some(path), source, &parsed.program, None);
+    (
+        type_syntax.body,
+        type_syntax.jsx,
+        type_syntax.deferred_imports,
+        type_syntax.for_in_bindings,
+    ) = capture_original_body(Some(path), source, parsed, None);
+    retain_erased_declarations(&mut type_syntax);
+    let mut original_module = lower_parsed_in_context(
+        Some(path),
+        parsed,
+        source,
+        source_type,
+        None,
+        None,
+        None,
+        None,
+    );
+    original_module.type_syntax = type_syntax.clone();
+    type_syntax.original_module = Some(Arc::new(original_module));
+    type_syntax
+}
+
+/// The authored module of a source the parser reported errors in but recovered from, which the
+/// checker reads: it reports the grammar errors TypeScript reports itself, and the rest of the
+/// program's errors, from the tree the parser kept. `None` when the parser kept nothing.
+fn recovered_type_syntax(
+    path: &str,
+    source: &str,
+    source_type: SourceType,
+) -> Option<HirTypeSyntax> {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+    (!parsed.panicked).then(|| authored_type_syntax(path, source, source_type, &parsed))
+}
+
+/// The authored module of a JavaScript file the parser rejected but TypeScript's grammar
+/// accepts, which the checker reads: TypeScript parses every JavaScript file as TypeScript with
+/// JSX and reports what a JavaScript file may not contain (TS8xxx) while checking the rest. The
+/// module keeps the kind of the file it is. `None` when it does not parse as TypeScript either.
+fn javascript_as_typescript(
+    path: &str,
+    source: &str,
+    source_type: SourceType,
+) -> Option<HirTypeSyntax> {
+    let allocator = Allocator::default();
+    let typescript = source_type.with_typescript(true).with_jsx(true);
+    let parsed = Parser::new(&allocator, source, typescript)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
+        return None;
+    }
+    let mut type_syntax = authored_type_syntax(path, source, typescript, &parsed);
+    let errors = javascript_syntax::errors(&parsed.program, source);
+    let kind = source_kind(source_type);
+    let original = Arc::get_mut(type_syntax.original_module.as_mut()?)?;
+    original.source_kind = kind;
+    original.type_syntax.javascript_errors = errors.clone();
+    type_syntax.javascript_errors = errors;
+    Some(type_syntax)
 }
 
 fn transform_static_typescript(
@@ -414,26 +508,7 @@ fn transform_static_typescript(
 
     // Preserve the authored declaration tree for the checker while the executable HIR is built
     // from transformed JavaScript. This uses the original parser result before TS erasure.
-    let mut type_syntax = capture_type_syntax(Some(path), source, &parsed.program, None);
-    (
-        type_syntax.body,
-        type_syntax.jsx,
-        type_syntax.deferred_imports,
-        type_syntax.for_in_bindings,
-    ) = capture_original_body(Some(path), source, &parsed, None);
-    retain_erased_declarations(&mut type_syntax);
-    let mut original_module = lower_parsed_in_context(
-        Some(path),
-        &parsed,
-        source,
-        source_type,
-        None,
-        None,
-        None,
-        None,
-    );
-    original_module.type_syntax = type_syntax.clone();
-    type_syntax.original_module = Some(Arc::new(original_module));
+    let type_syntax = authored_type_syntax(path, source, source_type, &parsed);
 
     // Capture authored value-import requests before Oxc removes imports used only by types or
     // erased as unused values. The graph uses these solely to retain resolver-approved runtime
@@ -4589,6 +4664,7 @@ fn capture_type_syntax(
                     owner_span: HirSpan::new(node.span.start, node.span.end),
                     signature,
                     has_body: node.body.is_some(),
+                    body_start: node.body.as_ref().map(|body| body.span.start),
                 });
             if node.body.is_none() {
                 let span = node.span;
@@ -4746,6 +4822,12 @@ fn capture_type_syntax(
                         signature_return,
                     ),
                     has_body: true,
+                    body_start: match &node.body {
+                        oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => {
+                            Some(body.span.start)
+                        }
+                        _ => None,
+                    },
                 });
             if let Some(annotation) = node.return_type.as_deref() {
                 let ty_span = annotation.type_annotation.span();
@@ -10644,6 +10726,32 @@ mod tests {
 
     fn parse_authored_ts(path: &str, source: &str) -> Module {
         parse_static_typescript(path, source, StaticTypescriptPolicy::PreserveAuthoredSource)
+    }
+
+    fn javascript_errors(source: &str) -> Vec<(u32, u32, u32, Option<&'static str>)> {
+        let module = parse("/a.js", source);
+        module
+            .type_syntax
+            .original_module
+            .as_deref()
+            .unwrap_or(&module)
+            .type_syntax
+            .javascript_errors
+            .iter()
+            .map(|e| (e.start, e.end, e.code, e.argument))
+            .collect()
+    }
+
+    #[test]
+    fn a_javascript_file_in_typescript_reports_what_only_typescript_has() {
+        assert_eq!(
+            javascript_errors("class C implements D {}\nenum E {}\n"),
+            vec![(8, 20, 8005, None), (29, 0, 8006, Some("enum"))]
+        );
+        assert_eq!(
+            javascript_errors("const x: number = 1;\n"),
+            vec![(9, 15, 8010, None)]
+        );
     }
 
     #[test]

@@ -2259,6 +2259,7 @@ mod tests {
                         return_type: None,
                     },
                     has_body: true,
+                    body_start: None,
                 }];
             }
             module
