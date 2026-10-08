@@ -489,14 +489,35 @@ impl Lower<'_, '_> {
                 },
                 mode,
             });
+            // The import clause is what is written between `import` and `from`; a side-effect
+            // import has none.
+            let clause_start = crate::engine::check::spans::skip_trivia(
+                self.module.source.as_bytes(),
+                span.start as usize + "import".len(),
+            )
+            .min(span.end as usize);
+            let clause_end = {
+                let written = &self.module.source.as_bytes()[clause_start..span.end as usize];
+                let specifier = written
+                    .iter()
+                    .position(|&byte| byte == b'"' || byte == b'\'')
+                    .unwrap_or(written.len());
+                match written[..specifier]
+                    .windows(4)
+                    .rposition(|word| word == b"from")
+                {
+                    Some(from) => clause_start + written[..from].trim_ascii_end().len(),
+                    None => clause_start,
+                }
+            };
             let id = self.file.add_import(b::Import {
                 spec,
                 default,
                 default_pos,
                 namespace,
                 namespace_pos,
-                clause_start: span.start,
-                clause_end: span.end,
+                clause_start: clause_start as u32,
+                clause_end: clause_end as u32,
                 namespace_start: namespace_pos,
                 named,
                 has_named_imports,

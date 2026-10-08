@@ -293,6 +293,18 @@ impl<'a, 's> Lower<'a, 's> {
         }
     }
 
+    /// The operand of the `...element` at `element`.
+    fn after_dots(&self, element: k::Span) -> k::Span {
+        let source = self.module.source.as_bytes();
+        let start = match source.get(element.start as usize..element.start as usize + 3) {
+            Some(b"...") => {
+                crate::engine::check::spans::skip_trivia(source, element.start as usize + 3)
+            }
+            _ => element.start as usize,
+        };
+        k::Span::new((start as u32).min(element.end), element.end)
+    }
+
     /// The rest element of the pattern at `pattern`: from its last `...` to the last token before
     /// the closing bracket, without a trailing comma, which the checker reports (1013).
     fn rest_span(&self, pattern: k::Span) -> k::Span {
@@ -1209,6 +1221,13 @@ impl<'a, 's> Lower<'a, 's> {
                 }
                 b::ExprKind::Object(self.file.add_props(&props))
             }
+            // A template without substitutions is a string, as the parser makes it.
+            E::Template {
+                quasis,
+                expressions,
+            } if expressions.is_empty() && quasis.len() == 1 => {
+                b::ExprKind::String(self.atom_units(&quasis[0]))
+            }
             E::Template {
                 quasis,
                 expressions,
@@ -1630,7 +1649,7 @@ impl<'a, 's> Lower<'a, 's> {
                     .collect();
                 if let Some(rest) = rest {
                     let at = self.rest_span(span);
-                    let id = self.pattern_target(rest, at);
+                    let id = self.pattern_target(rest, self.after_dots(at));
                     ids.push(self.file.expr(b::ExprKind::Spread(id), at.start, at.end));
                 }
                 let list = self.file.list(&ids);
@@ -1677,7 +1696,7 @@ impl<'a, 's> Lower<'a, 's> {
                 }
                 if let Some(rest) = rest {
                     let at = self.rest_span(span);
-                    let value = self.pattern_target(rest, at);
+                    let value = self.pattern_target(rest, self.after_dots(at));
                     props.push(b::Prop {
                         kind: b::PropKind::Spread,
                         key: b::PropKey::None,
@@ -2514,7 +2533,9 @@ impl<'a, 's> Lower<'a, 's> {
     }
 
     fn class(&mut self, class: &k::Class) -> b::ClassId {
-        let name = class.name.as_deref().map_or(Atom::NONE, |n| self.atom(n));
+        let name = (class.name.as_deref())
+            .filter(|name| *name != k::DEFAULT_EXPORT_LOCAL)
+            .map_or(Atom::NONE, |n| self.atom(n));
         let site = self.class_site(class.span).cloned();
         let class_flags = site.as_ref().map_or_else(b::Flags::empty, |site| {
             let mut flags = b::Flags::empty();
@@ -2771,6 +2792,44 @@ impl<'a, 's> Lower<'a, 's> {
                 }
             }
         }
+        // `declare x: T;` has no executable counterpart.
+        if let Some(site) = &site {
+            for member in site
+                .members
+                .iter()
+                .filter(|member| member.kind == k::TypeClassMemberKind::Field)
+            {
+                let lowered = class.initialisers.iter().any(|init| {
+                    matches!(init, k::ClassInitialiser::Field(field) if field.span == member.span)
+                });
+                if lowered {
+                    continue;
+                }
+                let written = self.module.source.get(member.span.start as usize..);
+                if !written.is_some_and(|text| text.starts_with("declare")) {
+                    continue;
+                }
+                let ty = (self.module.type_syntax.annotations.iter())
+                    .find(|annotation| {
+                        annotation.owner_span == member.span
+                            && matches!(annotation.site, k::TypeSite::ClassField { .. })
+                    })
+                    .cloned()
+                    .map_or(b::TypeNodeId::NONE, |annotation| self.ty(&annotation.ty));
+                members.push(b::Member {
+                    kind: b::MemberKind::Property,
+                    key: self.class_site_key(member),
+                    flags: class_member_flags(Some(member), false) | b::Flags::AMBIENT,
+                    ty,
+                    init: b::ExprId::NONE,
+                    func: b::FnId::NONE,
+                    name_pos: self.name_pos(member.span, None),
+                    start: member.span.start,
+                    loc: Self::loc(member.span),
+                    modifiers: b::Span::EMPTY,
+                });
+            }
+        }
         if let Some(site) = &site {
             for index in site
                 .members
@@ -2835,6 +2894,15 @@ impl<'a, 's> Lower<'a, 's> {
             let modifiers = self.written_node_modifiers(start, end, &decorators);
             member.modifiers = self.file.add_modifiers(&modifiers);
             member_decorators.extend(decorators.into_iter().map(|(_, e)| (index, e)));
+        }
+        // `func(.., member.flags, ..)`: a method, an accessor or a constructor has the modifiers
+        // of its member.
+        for member in &members {
+            if member.func != b::FnId::NONE {
+                let inherited = member.flags
+                    - (b::Flags::CONST | b::Flags::EXPORT | b::Flags::DEFAULT | b::Flags::ASYNC);
+                self.file[member.func].flags |= inherited;
+            }
         }
         let members = self.file.add_members(&members);
         for (index, e) in member_decorators {

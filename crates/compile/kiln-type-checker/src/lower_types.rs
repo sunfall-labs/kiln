@@ -1010,7 +1010,12 @@ impl<'a, 's> Lower<'a, 's> {
                 b::FnKind::Expr
             },
             flags,
-            name: f.name.as_deref().map_or(Atom::NONE, |n| self.atom(n)),
+            // `export default function () {}` has no name; the frontend calls it `*default*`.
+            name: f
+                .name
+                .as_deref()
+                .filter(|name| *name != k::DEFAULT_EXPORT_LOCAL)
+                .map_or(Atom::NONE, |n| self.atom(n)),
             name_pos: match f.name.as_deref() {
                 Some(name) => self.name_pos(f.span, Some(name)),
                 None => f.span.start,
