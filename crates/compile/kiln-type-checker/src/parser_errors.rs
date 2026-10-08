@@ -116,17 +116,52 @@ pub(crate) fn typescript_error(diagnostic: &Diagnostic, source: &str) -> Option<
             end: u32::MAX,
         });
     }
+    // `parseTypeArgumentsOfExpression`: the type arguments, which end the expression Oxc reports.
+    if message == "An instantiation expression cannot be followed by a property access."
+        && written.ends_with('>')
+    {
+        let mut depth = 0usize;
+        let open = written.char_indices().rev().find_map(|(at, c)| {
+            match c {
+                '>' => depth += 1,
+                '<' => depth -= 1,
+                _ => {}
+            }
+            (c == '<' && depth == 0).then_some(at)
+        })?;
+        return Some(TypeScriptError {
+            kind: DiagnosticKind::Parse,
+            code: 1477,
+            args: Vec::new(),
+            start: start + open as u32,
+            end,
+        });
+    }
     // `checkGrammarForInOrForOfStatement`
     let for_in_or_of = |what: &str| {
         message
             .strip_prefix("Only a single declaration is allowed in a `for...")
             .filter(|rest| rest.starts_with(what))
     };
-    if for_in_or_of("in").is_some() {
-        return Some(error(DiagnosticKind::Grammar, 1091, Vec::new()));
-    }
-    if for_in_or_of("of").is_some() {
-        return Some(error(DiagnosticKind::Grammar, 1188, Vec::new()));
+    if let Some(code) = for_in_or_of("in")
+        .map(|_| 1091)
+        .or_else(|| for_in_or_of("of").map(|_| 1188))
+    {
+        // `grammarErrorOnFirstToken(variableList.declarations[1], ..)`
+        let comma = top_level_comma(written)?;
+        let rest = &written[comma + 1..];
+        let first = comma + 1 + (rest.len() - rest.trim_start().len());
+        let token = written[first..]
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+            .filter(|&at| at > 0)
+            .unwrap_or_else(|| written[first..].chars().next().map_or(0, char::len_utf8));
+        return Some(TypeScriptError {
+            kind: DiagnosticKind::Grammar,
+            code,
+            args: Vec::new(),
+            start: start + first as u32,
+            end: start + (first + token) as u32,
+        });
     }
     if message == "for-in loop variable declaration may not have an initializer" {
         return Some(error(DiagnosticKind::Grammar, 1189, Vec::new()));
@@ -213,4 +248,26 @@ fn matches_template(template: &str, text: &str) -> Option<Vec<String>> {
         text = &text[end..];
     }
     (text == template).then_some(args)
+}
+
+/// Where the first comma is that is not inside brackets, braces, parentheses or a string.
+fn top_level_comma(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut chars = text.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match (quote, c) {
+            (Some(_), '\\') => {
+                chars.next();
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"' | '`') => quote = Some(c),
+            (None, '(' | '[' | '{') => depth += 1,
+            (None, ')' | ']' | '}') => depth = depth.saturating_sub(1),
+            (None, ',') if depth == 0 => return Some(at),
+            _ => {}
+        }
+    }
+    None
 }

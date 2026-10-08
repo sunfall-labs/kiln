@@ -1073,7 +1073,9 @@ impl<'a, 's> Lower<'a, 's> {
             while at < text.len() && is_word(text[at]) {
                 at += 1;
             }
-            let preceded_by_dot = start > 0 && text[start - 1] == b'.';
+            // `.eval` is a property name, `...eval` is not.
+            let preceded_by_dot =
+                start > 0 && text[start - 1] == b'.' && !text[..start].ends_with(b"...");
             if !preceded_by_dot && WORDS.contains(&&text[start..at]) {
                 self.file.keyword_identifier_positions.push(start as u32);
             }

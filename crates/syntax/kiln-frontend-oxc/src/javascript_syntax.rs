@@ -245,7 +245,8 @@ impl<'a> Visit<'a> for JavaScriptSyntax<'_> {
     }
 
     fn visit_ts_import_equals_declaration(&mut self, it: &TSImportEqualsDeclaration<'a>) {
-        self.at(it.span, 8002);
+        let start = self.statement_start(it.span);
+        self.error(start, it.span.end, 8002, None);
         walk::walk_ts_import_equals_declaration(self, it);
     }
 
