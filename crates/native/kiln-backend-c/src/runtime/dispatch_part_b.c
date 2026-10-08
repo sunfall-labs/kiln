@@ -1133,7 +1133,6 @@
             return KILN_C99_OK;
         case KILN_C99_METHOD_GENERATOR_THROW: {
             kiln_generator *frame;
-            kiln_closure *closure;
             if (receiver.tag != KILN_VALUE_GENERATOR) {
                 KILN_C99_REFUSE("a generator method on a receiver that is not a generator");
             }
@@ -1156,48 +1155,10 @@
                 kiln_value thrown_val = argc > 0 ? args[0] : kiln_c99_undefined();
                 return kiln_c99_generator_delegate_throw(host, frame, thrown_val, result, depth, thrown);
             }
-            /* A suspended body with a handler over the suspension gets the value thrown *at*
-             * the `yield`, so its `catch` or `finally` runs; it may yield again, finish, or
-             * let the throw out. A body that has not started, is done, or has nothing to
-             * catch with, is finished and the throw goes straight to the caller. */
-            if (frame->started && !frame->done && frame->handler_top != 0 && !frame->async_generator) {
-                kiln_val vproduced = KILN_VAL_UNDEFINED;
-                frame->raising = 1;
-                kiln_c99_heap_store_value(frame, &frame->sent, argc > 0 ? args[0] : kiln_c99_undefined());
-                closure = kiln_c99_closure_of(frame->function);
-                frame->running = 1;
-                status = kiln_c99_invoke_closure_body(
-                    host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
-                frame->running = 0;
-                frame->raising = 0;
-                if (status == KILN_C99_YIELDED) {
-                    return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 0, result, depth, thrown);
-                }
-                frame->done = 1;
-                {
-                    kiln_value completion;
-                    if (kiln_c99_generator_resolve_return(frame, status,
-                                                           kiln_val_to_boundary(vproduced),
-                                                           thrown, &completion)) {
-                        return kiln_c99_generator_step(host, completion, 1, result, depth,
-                                                       thrown);
-                    }
-                }
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 1, result, depth, thrown);
-            }
-            frame->done = 1;
-            if (frame->return_pending) {
-                frame->return_pending = 0;
-                kiln_c99_heap_store_value(frame, &frame->return_value,
-                                          kiln_c99_undefined());
-            }
-            if (thrown != NULL) {
-                *thrown = argc > 0 ? args[0] : kiln_c99_undefined();
-            }
-            return KILN_C99_THROWN;
+            /* Injecting a throw at a suspension uses the same handler and delegated-yield
+             * result handling as an error from the active delegate. */
+            return kiln_c99_generator_raise(
+                host, frame, argc > 0 ? args[0] : kiln_c99_undefined(), result, depth, thrown);
         }
         case KILN_C99_METHOD_GENERATOR_NEXT:
         case KILN_C99_METHOD_GENERATOR_RETURN: {

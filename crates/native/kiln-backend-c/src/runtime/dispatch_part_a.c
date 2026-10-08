@@ -1370,7 +1370,7 @@ static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln
     kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
     frame->delegate_exit = 0;
     frame->delegate_wrapped = 0;
-    if (frame->handler_top != 0 && !frame->done && !frame->async_generator) {
+    if (frame->started && frame->handler_top != 0 && !frame->done && !frame->async_generator) {
         kiln_val vproduced = KILN_VAL_UNDEFINED;
         frame->raising = 1;
         kiln_c99_heap_store_value(frame, &frame->sent, error);
