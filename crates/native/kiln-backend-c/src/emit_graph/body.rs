@@ -1105,6 +1105,112 @@ fn await_resolve_fusion_arg(
     Some(args[0])
 }
 
+fn emit_resume_value_restore(
+    output: &mut String,
+    value: ValueId,
+    source: &str,
+    numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
+    live_numbers: &HashSet<ValueId>,
+    live_ints: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
+) {
+    writeln!(output, "        v{} = {source};", value.0).unwrap();
+    if live_numbers.contains(&value) && numbers.contains(&value) {
+        writeln!(
+            output,
+            "        if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{0}))) memcpy(&d{0}, &v{0}, sizeof(d{0})); else d{0} = kiln_c99_as_number(kiln_val_to_boundary(v{0}));",
+            value.0
+        )
+        .unwrap();
+    } else if live_ints.contains(&value) && ints.contains(&value) {
+        writeln!(
+            output,
+            "        {{ double tmp; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{0}))) memcpy(&tmp, &v{0}, sizeof(tmp)); else tmp = kiln_c99_as_number(kiln_val_to_boundary(v{0})); i{0} = (int64_t)tmp; }}",
+            value.0
+        )
+        .unwrap();
+    }
+    if booleans.contains(&value) {
+        writeln!(
+            output,
+            "        b{} = (v{} == KILN_VAL_TRUE);",
+            value.0, value.0
+        )
+        .unwrap();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_resume_exception_path(
+    output: &mut String,
+    graph: &FunctionGraph,
+    resume_block: BlockId,
+    handler: Option<BlockId>,
+    spilled: &[ValueId],
+    phis: &[u32],
+    numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
+    live_numbers: &HashSet<ValueId>,
+    live_ints: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
+    indexed_values: bool,
+    boxed: Option<&HashSet<ValueId>>,
+    landing_unwind: &str,
+) {
+    writeln!(output, "    if (frame->raising) {{").unwrap();
+    for (i, value) in spilled.iter().enumerate() {
+        emit_resume_value_restore(
+            output,
+            *value,
+            &format!("frame->stack[{i}]"),
+            numbers,
+            ints,
+            live_numbers,
+            live_ints,
+            booleans,
+        );
+    }
+    for (i, phi) in phis.iter().enumerate() {
+        let source = if i < spilled.len() {
+            format!("frame->stack[{i}]")
+        } else {
+            "kiln_val_from_boundary(frame->sent)".to_owned()
+        };
+        emit_resume_value_restore(
+            output,
+            ValueId(*phi),
+            &source,
+            numbers,
+            ints,
+            live_numbers,
+            live_ints,
+            booleans,
+        );
+    }
+    if let Some(handler) = handler {
+        let handler_phis: HashSet<ValueId> = graph
+            .block(handler)
+            .into_iter()
+            .flat_map(|handler_block| handler_block.operations.iter())
+            .filter_map(|(value, op)| matches!(op, GraphOp::Phi { .. }).then_some(*value))
+            .collect();
+        emit_phi_assignments(
+            output,
+            graph,
+            resume_block,
+            handler,
+            numbers,
+            ints,
+            booleans,
+            indexed_values,
+            &handler_phis,
+            boxed,
+        );
+    }
+    writeln!(output, "        *thrown = frame->sent; {landing_unwind} }}").unwrap();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_block_sequence(
     output: &mut String,
@@ -1349,11 +1455,26 @@ fn emit_block_sequence(
                     "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0; frame->delegate_wrapped = 0;"
                 )
                 .unwrap();
-                writeln!(
+                // A throw injected while this frame is suspended takes the exceptional edge
+                // from the resumed block. Restore both the saved pre-suspend SSA values and
+                // the resume phis before assigning the handler edge: handler phis can consume
+                // either form, and the C locals from the previous invocation no longer exist.
+                emit_resume_exception_path(
                     output,
-                    "    if (frame->raising) {{ *thrown = frame->sent; {landing_unwind} }}"
-                )
-                .unwrap();
+                    graph,
+                    block.id,
+                    block.exception_handler,
+                    spilled,
+                    &phis,
+                    numbers,
+                    ints,
+                    live_numbers,
+                    live_ints,
+                    booleans,
+                    plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
+                    boxed.as_ref(),
+                    &landing_unwind,
+                );
                 for (i, phi) in phis.iter().enumerate() {
                     if i < spilled.len() {
                         writeln!(output, "    v{phi} = frame->stack[{i}];").unwrap();
@@ -1386,11 +1507,22 @@ fn emit_block_sequence(
                     "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0; frame->delegate_wrapped = 0;"
                 )
                 .unwrap();
-                writeln!(
+                emit_resume_exception_path(
                     output,
-                    "    if (frame->raising) {{ *thrown = frame->sent; {landing_unwind} }}"
-                )
-                .unwrap();
+                    graph,
+                    block.id,
+                    block.exception_handler,
+                    spilled,
+                    &phis,
+                    numbers,
+                    ints,
+                    live_numbers,
+                    live_ints,
+                    booleans,
+                    plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
+                    boxed.as_ref(),
+                    &landing_unwind,
+                );
                 for (i, phi) in phis.iter().enumerate() {
                     if i < spilled.len() {
                         writeln!(output, "    v{phi} = frame->stack[{i}];").unwrap();
@@ -4104,7 +4236,10 @@ fn typed_receiver_row_safe(
 
 #[cfg(test)]
 mod tests {
-    use super::{index_large_ssa_values, retain_used_context, suspended_local_clear_slots};
+    use super::{
+        emit_resume_exception_path, index_large_ssa_values, retain_used_context,
+        suspended_local_clear_slots,
+    };
     use crate::BYTECODE_VERSION;
     use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, SiteId, Terminator, ValueId};
     use kiln_graph::suspended_local_liveness;
@@ -4420,6 +4555,57 @@ mod tests {
         ];
         let live = suspended_local_liveness(&graph, &generator_proto(2), &empty_program());
         assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([0])));
+    }
+
+    #[test]
+    fn raising_resume_restores_spills_and_moves_handler_phis_before_unwind() {
+        let mut graph = FunctionGraph::new(None, 0, 21);
+        graph.blocks = vec![
+            block(
+                1,
+                vec![(11, GraphOp::Phi { inputs: Vec::new() })],
+                Terminator::Return(None),
+                vec![2],
+                Some(2),
+            ),
+            block(
+                2,
+                vec![(
+                    20,
+                    GraphOp::Phi {
+                        inputs: vec![(BlockId(1), ValueId(10))],
+                    },
+                )],
+                Terminator::Return(None),
+                Vec::new(),
+                None,
+            ),
+        ];
+        let mut output = String::new();
+        emit_resume_exception_path(
+            &mut output,
+            &graph,
+            BlockId(1),
+            Some(BlockId(2)),
+            &[ValueId(10)],
+            &[11],
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            false,
+            None,
+            "goto kiln_block_2;",
+        );
+
+        let spill = output.find("v10 = frame->stack[0]").unwrap();
+        let resume_phi = output.find("v11 = frame->stack[0]").unwrap();
+        let handler_phi = output.find("v20 = phi_t0").unwrap();
+        let unwind = output
+            .find("*thrown = frame->sent; goto kiln_block_2;")
+            .unwrap();
+        assert!(spill < resume_phi && resume_phi < handler_phi && handler_phi < unwind);
     }
 
     #[test]
