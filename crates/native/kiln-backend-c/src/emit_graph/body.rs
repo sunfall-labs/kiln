@@ -3766,6 +3766,7 @@ fn emit_terminator(
             awaiting,
             delegate,
             delegate_wrapped,
+            ..
         } => {
             let mut spill = String::new();
             for (i, v) in spilled.iter().enumerate() {
@@ -4176,6 +4177,7 @@ mod tests {
             pc: 1,
             awaiting: false,
             delegate: None,
+            delegate_wrapped: None,
         }
     }
 

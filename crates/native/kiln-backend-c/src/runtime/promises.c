@@ -597,7 +597,6 @@ static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *t
     int status;
     if (task->continuation) {
         if (task->continuation == 2) {
-            kiln_generator *frame = kiln_c99_generator_of(task->handler);
             if (task->rejected) {
                 status = kiln_c99_async_generator_step(host, task->handler, task->argument,
                                                        1, 0, thrown);
