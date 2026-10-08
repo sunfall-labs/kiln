@@ -14,11 +14,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let requests = state
                 .async_requests
                 .get_or_insert_with(|| Box::new(AsyncGeneratorRequests::default()));
+            requests.pending.push_back(request);
             if requests.current.is_none() {
-                requests.current = Some(request);
+                requests.current = requests.pending.pop_front();
+                requests.current_started = false;
                 true
             } else {
-                requests.pending.push_back(request);
                 false
             }
         };
@@ -33,41 +34,74 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         generator: &Rc<GeneratorData>,
     ) -> Result<(), ExecutionError> {
-        let should_drain = {
+        enum StartMode {
+            Drain,
+            Reentrant(AsyncGeneratorRequest),
+            None,
+        }
+        let mode = {
             let mut state = generator.borrow_mut();
             let Some(requests) = state.async_requests.as_mut() else {
                 return Ok(());
             };
-            if requests.draining || requests.current.is_none() {
-                false
+            if requests.current.is_none() {
+                requests.current = requests.pending.pop_front();
+                requests.current_started = false;
+            }
+            if requests.current.is_none() || requests.current_started {
+                StartMode::None
+            } else if requests.draining {
+                if requests.resolving > 0 {
+                    requests.current_started = true;
+                    let request = requests.current.as_ref().expect("checked above");
+                    StartMode::Reentrant(AsyncGeneratorRequest {
+                        kind: request.kind,
+                        value: request.value.clone(),
+                        step: Rc::clone(&request.step),
+                    })
+                } else {
+                    StartMode::None
+                }
             } else {
                 requests.draining = true;
-                true
+                requests.current_started = true;
+                StartMode::Drain
             }
         };
-        if !should_drain {
-            return Ok(());
+        match mode {
+            StartMode::None => return Ok(()),
+            StartMode::Reentrant(request) => {
+                return self.start_current_async_generator_request(generator, &request);
+            }
+            StartMode::Drain => {}
         }
 
         loop {
-            let request = generator
-                .borrow()
-                .async_requests
-                .as_ref()
-                .and_then(|requests| requests.current.as_ref())
-                .map(|request| AsyncGeneratorRequest {
-                    kind: request.kind,
-                    value: request.value.clone(),
-                    step: Rc::clone(&request.step),
-                });
-            let Some(request) = request else {
-                generator
-                    .borrow_mut()
+            let request = {
+                let mut state = generator.borrow_mut();
+                let requests = state
                     .async_requests
                     .as_mut()
-                    .expect("request state remains installed while draining")
-                    .draining = false;
-                return Ok(());
+                    .expect("request state remains installed while draining");
+                if requests.current.is_none() {
+                    requests.current = requests.pending.pop_front();
+                    requests.current_started = false;
+                }
+                let Some(current) = requests.current.as_ref() else {
+                    requests.draining = false;
+                    return Ok(());
+                };
+                if requests.current_started {
+                    // A reentrant call already handed this item to the generator body.
+                    requests.draining = false;
+                    return Ok(());
+                }
+                requests.current_started = true;
+                AsyncGeneratorRequest {
+                    kind: current.kind,
+                    value: current.value.clone(),
+                    step: Rc::clone(&current.step),
+                }
             };
 
             let started = self.start_current_async_generator_request(generator, &request);
@@ -93,12 +127,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 requests.draining = false;
                 return Ok(());
             }
-            if requests.current.is_none() {
-                requests.draining = false;
-                return Ok(());
-            }
-            // It completed synchronously and finish_async_generator_request advanced `current`.
-            // Continue in this loop instead of recursively starting the next queued request.
+            // The request completed synchronously. `current` may be empty, in which case the
+            // next pending request is promoted by the next loop iteration. A request activated
+            // reentrantly during result resolution is already marked started and is left alone.
         }
     }
 
@@ -163,11 +194,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         step: &Rc<PromiseData>,
         outcome: Settled,
     ) -> Result<(), ExecutionError> {
-        match &outcome {
-            Settled::Fulfilled(value) => self.resolve_promise(step, value.clone()),
-            Settled::Rejected(_) => self.settle(step, &outcome),
-        }
-        let next = {
+        {
             let mut state = generator.borrow_mut();
             let Some(requests) = state.async_requests.as_mut() else {
                 return Ok(());
@@ -178,10 +205,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .as_ref()
                     .is_some_and(|current| Rc::ptr_eq(&current.step, step))
             );
-            requests.current = requests.pending.pop_front();
-            requests.current.is_some()
+            // AsyncGeneratorCompleteStep removes the completed request before calling its
+            // promise's resolve function. That resolve may run a user `then` getter which
+            // reentrantly enqueues and starts the next request.
+            requests.current = None;
+            requests.current_started = false;
+            requests.resolving += 1;
+        }
+        match &outcome {
+            Settled::Fulfilled(value) => self.resolve_promise(step, value.clone()),
+            Settled::Rejected(_) => self.settle(step, &outcome),
+        }
+        let draining = {
+            let mut state = generator.borrow_mut();
+            let Some(requests) = state.async_requests.as_mut() else {
+                return Ok(());
+            };
+            debug_assert!(requests.resolving > 0);
+            requests.resolving -= 1;
+            requests.draining
         };
-        if next {
+        if !draining {
             self.start_async_generator_request(generator)?;
         }
         Ok(())

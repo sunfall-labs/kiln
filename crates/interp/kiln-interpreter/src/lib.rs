@@ -761,9 +761,14 @@ pub struct GeneratorState {
 pub(crate) struct AsyncGeneratorRequests {
     pub(crate) current: Option<AsyncGeneratorRequest>,
     pub(crate) pending: std::collections::VecDeque<AsyncGeneratorRequest>,
+    /// The current item has been handed to the generator body and is still waiting to complete.
+    pub(crate) current_started: bool,
     /// `start_async_generator_request` is draining requests that completed synchronously. A
     /// completion during that drain only advances `current`; the outer loop starts it next.
     pub(crate) draining: bool,
+    /// Promise resolution may invoke a user `then` getter. Requests enqueued reentrantly from
+    /// that getter must be allowed to resume the next ready item before resolution returns.
+    pub(crate) resolving: usize,
 }
 
 #[derive(Debug)]

@@ -134,12 +134,89 @@ async function fulfilledStepUsesPromiseResolution() {
   }
 }
 
+async function resultResolutionAllowsReentrantNext() {
+  const events = [];
+  let queued;
+  async function* values() {
+    const sent = yield "first";
+    events.push(`resume:${sent}`);
+    yield sent;
+    return "done";
+  }
+  const iterator = values();
+  Object.defineProperty(Object.prototype, "then", {
+    configurable: true,
+    get() {
+      if (this.value === "first" && this.done === false) {
+        events.push("getter:start");
+        queued = iterator.next("second");
+        events.push("getter:end");
+      }
+      return undefined;
+    },
+  });
+  try {
+    const first = await iterator.next();
+    events.push(`first:${first.value}`);
+    const second = await queued;
+    events.push(`second:${second.value}`);
+    const last = await iterator.next();
+    events.push(`last:${last.value}`);
+  } finally {
+    delete Object.prototype.then;
+  }
+  check(events.join("|") ===
+    "getter:start|resume:second|getter:end|first:first|second:second|last:done",
+    "a reentrant next starts after the completed request is dequeued and before then returns");
+}
+
+async function resultResolutionStartsOldestQueuedRequest() {
+  const events = [];
+  let third;
+  async function* values() {
+    const sent = yield "first";
+    events.push(`resume:${sent}`);
+    const last = yield sent;
+    events.push(`resume:${last}`);
+    return last;
+  }
+  const iterator = values();
+  Object.defineProperty(Object.prototype, "then", {
+    configurable: true,
+    get() {
+      if (this.value === "first" && this.done === false) {
+        events.push("getter:start");
+        third = iterator.next("third");
+        events.push("getter:end");
+      }
+      return undefined;
+    },
+  });
+  try {
+    const firstPromise = iterator.next();
+    const secondPromise = iterator.next("second");
+    const first = await firstPromise;
+    events.push(`first:${first.value}`);
+    const second = await secondPromise;
+    events.push(`second:${second.value}`);
+    const last = await third;
+    events.push(`last:${last.value}`);
+  } finally {
+    delete Object.prototype.then;
+  }
+  check(events.join("|") ===
+    "getter:start|resume:second|getter:end|resume:third|first:first|second:second|last:third",
+    "reentrant next activates the oldest queued request without overtaking it");
+}
+
 async function main() {
   await queuedAcrossAwait();
   await queuedAcrossYieldStar();
   await queuedAbruptRequests();
   await queuedSynchronousCompletionsDrainIteratively();
   await fulfilledStepUsesPromiseResolution();
+  await resultResolutionAllowsReentrantNext();
+  await resultResolutionStartsOldestQueuedRequest();
   console.log("async-generator request queue passes");
 }
 
