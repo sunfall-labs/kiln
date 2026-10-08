@@ -3098,20 +3098,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let (
             closure,
             locals,
-            saved_stack,
-            saved_handlers,
+            mut saved_stack,
+            mut saved_handlers,
             instruction_pointer,
             this_value,
             new_target,
             arguments,
             started,
         ) = {
-            let state = generator.borrow();
+            // `running` was set before entering this body, so no second resumption can observe
+            // these temporarily empty saved registers. Moving them avoids cloning every local,
+            // operand, and handler tuple at each `next()`. The active VM frame and stack become
+            // the generator's roots until the suspension path moves them back below.
+            let mut state = generator.borrow_mut();
             (
                 Rc::clone(&state.closure),
-                state.locals.clone(),
-                state.stack.clone(),
-                state.handlers.clone(),
+                std::mem::take(&mut state.locals),
+                std::mem::take(&mut state.stack),
+                std::mem::take(&mut state.handlers),
                 state.instruction,
                 state.this_value.clone(),
                 state.new_target.clone(),
@@ -3165,9 +3169,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .as_ref()
             .is_some_and(|closure| closure.has_mapped_arguments());
         self.instruction = instruction_pointer;
-        self.stack.extend(saved_stack);
+        // Keep the saved vector's capacity for the next resumption. Once the caller's stack has
+        // reached its high-water mark, appending and draining the generator segment can reuse
+        // both buffers without cloning its values or allocating a fresh segment each time.
+        self.stack.append(&mut saved_stack);
         // Re-base the generator's handlers onto wherever its stack landed this time.
-        for (target, frame_offset, stack_offset) in saved_handlers {
+        for (target, frame_offset, stack_offset) in saved_handlers.drain(..) {
             self.handlers.push(Handler {
                 target,
                 frame_depth: depth + 1 + frame_offset,
@@ -3260,26 +3267,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
         if self.suspended {
             // Take back the handlers belonging to the generator, as offsets.
-            let mut retained = Vec::new();
+            saved_handlers.clear();
             while self
                 .handlers
                 .last()
                 .is_some_and(|handler| handler.frame_depth > depth)
             {
                 let handler = self.handlers.pop().expect("checked by the loop condition");
-                retained.push((
+                saved_handlers.push((
                     handler.target,
                     handler.frame_depth - depth - 1,
                     handler.stack_height.saturating_sub(stack_base),
                 ));
             }
-            retained.reverse();
+            saved_handlers.reverse();
 
             let mut state = generator.borrow_mut();
             state.locals = std::mem::take(&mut self.locals);
             state.instruction = self.instruction;
-            state.stack = self.stack.split_off(stack_base);
-            state.handlers = retained;
+            saved_stack.clear();
+            saved_stack.extend(self.stack.drain(stack_base..));
+            state.stack = saved_stack;
+            state.handlers = saved_handlers;
             state.started = true;
             state.awaiting = self.suspended_awaiting;
             state.delegate = self.suspended_delegate.take();

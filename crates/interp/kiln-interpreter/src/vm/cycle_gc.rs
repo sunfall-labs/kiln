@@ -1679,6 +1679,146 @@ mod tests {
     }
 
     #[test]
+    fn running_generator_vectors_remain_roots_and_return_to_suspended_state() {
+        let mut host = TestHost;
+        let (mut vm, base_program) = test_vm(&mut host);
+        let program = Rc::new(Program {
+            functions: vec![kiln_ir::FunctionProto {
+                inferred_name: None,
+                span: kiln_ir::Span::default(),
+                prologue_end: 0,
+                asynchronous: false,
+                name: None,
+                arrow: false,
+                generator: true,
+                async_generator: false,
+                is_method: false,
+                is_class: false,
+                parameter_count: 0,
+                declared_length: 0,
+                mapped_arguments: false,
+                local_count: 1,
+                code: vec![
+                    Instruction::PushHandler(6),
+                    Instruction::LoadLocal(0),
+                    Instruction::Pop,
+                    Instruction::Yield,
+                    Instruction::PopHandler,
+                    Instruction::Return,
+                    Instruction::LoadLocal(0),
+                    Instruction::Yield,
+                    Instruction::Return,
+                ],
+                upvalues: Vec::new(),
+                type_annotations: None,
+            }],
+            ..(*base_program).clone()
+        });
+        let closure = Rc::new(Closure {
+            program: Rc::clone(&program),
+            function: 0,
+            strictness: Rc::new(Strictness::sloppy(&program)),
+            module_path: None,
+            module_generation: 0,
+            module_generation_owner: RefCell::new(None),
+            name: None,
+            inferred_name: None,
+            upvalues: Vec::new(),
+            realm: RealmId::PRIMARY,
+            arguments_length_only: false,
+            captured_arguments: None,
+            captured_new_target: None,
+            captured_this: None,
+            prototype: RefCell::new(None),
+            properties: RefCell::new(ObjectData::default()),
+        });
+        vm.stack.push(Value::Undefined);
+        let Value::Generator(generator) = vm
+            .build_generator(&closure, 0, 0, Value::Undefined, Value::Undefined)
+            .expect("generator construction succeeds")
+        else {
+            unreachable!();
+        };
+
+        let local = tracked_object(ObjectData::default());
+        let local_weak = Rc::downgrade(&local);
+        let saved_operand = tracked_object(ObjectData::default());
+        let saved_operand_weak = Rc::downgrade(&saved_operand);
+        {
+            let mut state = generator.state.borrow_mut();
+            state.locals[0] = Value::Object(Rc::clone(&local));
+            state.stack.push(Value::Object(Rc::clone(&saved_operand)));
+        }
+        drop(local);
+        drop(saved_operand);
+        vm.stack.push(Value::Number(99.0));
+
+        // The outermost run collects before its first opcode. At that point the saved vectors
+        // have been moved into the active VM frame/stack, so both values must still be roots.
+        {
+            let module_map = vm.gc_module_map();
+            let mut module_map = module_map.borrow_mut();
+            module_map.gc_cycle_candidate_allocations = 4096;
+            module_map.gc_cycle_candidate_threshold = 4096;
+        }
+        let (yielded, done) = vm
+            .resume_generator(&generator, Value::Undefined, 0)
+            .expect("generator resumes through its yield");
+        assert!(!done);
+        assert!(
+            local_weak.upgrade().is_some(),
+            "active local remains rooted"
+        );
+        let expected_operand = saved_operand_weak
+            .upgrade()
+            .expect("saved operand remains rooted during collection");
+        let Value::Object(yielded) = yielded else {
+            panic!("generator yields its saved operand");
+        };
+        assert!(Rc::ptr_eq(&yielded, &expected_operand));
+        assert_eq!(vm.stack, [Value::Number(99.0)], "caller stack is restored");
+        assert_eq!(
+            vm.gc_module_map().borrow().gc_cycle_candidate_allocations,
+            0,
+            "the first outermost opcode boundary performed the requested collection"
+        );
+
+        {
+            let state = generator.state.borrow();
+            assert!(state.started);
+            assert!(state.stack.is_empty());
+            assert_eq!(
+                state.handlers,
+                [(6, 0, 1)],
+                "handler is moved back as offsets"
+            );
+            let Value::Object(restored_local) = &state.locals[0] else {
+                panic!("active local is moved back into suspended generator state");
+            };
+            assert!(Rc::ptr_eq(
+                restored_local,
+                &local_weak
+                    .upgrade()
+                    .expect("suspended local remains rooted")
+            ));
+        }
+
+        let (caught_yield, done) = vm
+            .resume_generator_with(&generator, Resume::Throw(Value::Number(7.0)), 0)
+            .expect("suspended handler is restored and catches the injected throw");
+        assert!(!done);
+        let Value::Object(caught_yield) = caught_yield else {
+            panic!("restored handler resumes at its target");
+        };
+        assert!(Rc::ptr_eq(
+            &caught_yield,
+            &local_weak
+                .upgrade()
+                .expect("local survives handler resumption")
+        ));
+    }
+
+    #[test]
     fn async_disposal_promise_edges_reclaim_dead_target_and_preserve_external_owner() {
         let mut host = TestHost;
         let (mut vm, program) = test_vm(&mut host);
