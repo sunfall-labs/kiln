@@ -691,6 +691,11 @@ static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value ge
     kiln_generator *frame = kiln_c99_generator_of(generator);
     int status;
     frame->queue_executing = 1;
+    kiln_c99_gc_keep_alive(frame);
+    if (kiln_c99_is_reference(sent))
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)sent.bits);
+    if (promise.tag == KILN_VALUE_PROMISE)
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)promise.bits);
     kiln_c99_heap_store_value(frame, &frame->promise, promise);
     frame->async_request_kind = request_kind == KILN_C99_ASYNC_REQUEST_RETURN_READY
                                     ? KILN_C99_ASYNC_REQUEST_RETURN
@@ -912,6 +917,9 @@ static int kiln_c99_async_generator_finish_yield(kiln_host *host, kiln_value gen
      * reenter the generator, so expose the queued head only at this exact boundary. */
     frame->queue_executing = 0;
     status = kiln_c99_settle(step, shaped, 0);
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)generator.bits);
+    if (step.tag == KILN_VALUE_PROMISE)
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)step.bits);
     if (status != KILN_C99_OK) return status;
     /* Let a request made by the result's synchronous `then` getter activate the ready head.
      * If it did not, activate that same FIFO head after settlement returns. */
