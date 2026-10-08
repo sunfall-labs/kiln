@@ -206,7 +206,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?
                 } else {
-                    self.resume_generator_with(&generator, Resume::Throw(thrown), instruction)?
+                    self.resume_generator_throw(&generator, thrown, instruction)?
                 };
                 if generator.borrow().delegate.is_some() && !done {
                     Ok(Some(value))

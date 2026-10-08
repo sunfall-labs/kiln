@@ -3055,6 +3055,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// A public throw can finish an earlier return after its finally catches the injected
+    /// exception. Catch the internal completion here before an enclosing async host sees it.
+    pub(crate) fn resume_generator_throw(
+        &mut self,
+        generator: &Rc<GeneratorData>,
+        thrown: Value,
+        instruction: usize,
+    ) -> Result<(Value, bool), ExecutionError> {
+        match self.resume_catching(generator, Resume::Throw(thrown), instruction)? {
+            Ok(result) => Ok(result),
+            Err(thrown) => {
+                self.caught = Some(thrown);
+                Err(ExecutionError::ThrownAcrossNative)
+            }
+        }
+    }
+
     /// Resume a generator, optionally by throwing the `.return()` signal into it.
     pub(crate) fn resume_generator_with(
         &mut self,

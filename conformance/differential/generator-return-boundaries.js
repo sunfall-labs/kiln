@@ -42,3 +42,23 @@ try {
 } catch (error) {
   console.log("completed-throw", error === thrown);
 }
+
+async function insideAsyncHost() {
+  for (const yieldAgain of [false, true]) {
+    const iterator = caughtThrow(yieldAgain);
+    iterator.next();
+    iterator.return(payload);
+    const handled = iterator.throw("handled");
+    const result = yieldAgain ? iterator.next() : handled;
+    console.log("async-caught", yieldAgain, result.value === payload, result.done);
+  }
+  const iterator = body();
+  iterator.next();
+  try {
+    iterator.throw(thrown);
+  } catch (error) {
+    console.log("async-throw", error === thrown);
+  }
+  console.log("async-host-completed");
+}
+insideAsyncHost().catch(error => { throw error; });
