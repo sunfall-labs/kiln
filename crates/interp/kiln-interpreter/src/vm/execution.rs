@@ -3063,7 +3063,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
         if generator.borrow().done {
-            return Ok((Value::Undefined, true));
+            // A completed iterator still answers a return request with its supplied value.
+            return Ok((
+                match resume {
+                    Resume::Return(value) => value,
+                    Resume::Send(_) | Resume::Throw(_) => Value::Undefined,
+                },
+                true,
+            ));
         }
         // Resuming a generator from inside its own body is a TypeError. Letting it through
         // recursed until the *Rust* stack overflowed, and a stack overflow aborts the process
@@ -3192,6 +3199,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.suspended = false;
         self.suspended_delegate = None;
         let outcome = if raising {
+            // A throw caught inside a suspended finally can finish an earlier return. Its
+            // payload belongs to that return, rather than to the value just thrown into yield.
+            // Capture it before completing the generator clears its suspended state.
+            let return_completion = match &resume {
+                Resume::Return(value) => value.clone(),
+                Resume::Throw(_) => generator
+                    .borrow()
+                    .returning
+                    .clone()
+                    .unwrap_or(Value::Undefined),
+                Resume::Send(_) => unreachable!("checked by `raising`"),
+            };
             // Throwing at the suspension point runs every `finally` between there and the top of
             // the generator, then arrives as `GeneratorReturned`.
             let raised = match &resume {
@@ -3215,7 +3234,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.truncate(stack_base);
                     self.restore_caller_frame();
                     generator.borrow_mut().complete();
-                    return Ok((sent.clone(), true));
+                    return Ok((return_completion, true));
                 }
                 // The same ending, reached the other way: the innermost handler belongs to
                 // whoever called `return`, so `unwind` refused to jump to it and sent the signal
@@ -3230,7 +3249,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.truncate(stack_base);
                     self.restore_caller_frame();
                     generator.borrow_mut().complete();
-                    return Ok((sent.clone(), true));
+                    return Ok((return_completion, true));
                 }
                 // Any other abrupt completion leaves the body for good. The specification
                 // sets the generator to `completed` before it propagates the throw, so a later
