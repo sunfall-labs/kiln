@@ -14,6 +14,8 @@ Shared native property lookup now preserves the original receiver through access
 
 The fresh full native run selected all 322 files, then stopped at the disk guard after Array (146/146) and ArrayNaNIndex (8/8) passed. The other 320 files remain unverified. Its producer confirmed child cleanup and unchanged inputs. The [portable partial-run archive](full-native-322-partial-20261008/) retains the compressed report, raw logs, exact 154 case records, pins and verified cleanup evidence; native binaries were excluded. Disk space recovered afterward; a complete rerun is prepared.
 
+The eight `HttpClient` interpreter cases that failed as `ServeError` in the restricted full run were replayed in isolation after localhost access was restored; all eight passed with Node/Vitest modes and outcomes matching. The [focused replay archive](httpclient-vm-replay-unrestricted-20261008/) preserves the exact IDs and hashes. This one-file result does not change the full 322-file interpreter totals or establish full-suite acceptance.
+
 The routine gate is running on the clean integration milestone. Complete final-source native/interpreter replays, every remaining original-deadline failure, checksum-matched Bun benchmarks and successful main publication remain required.
 
 ## Historical checkpoint, 2026-10-07
