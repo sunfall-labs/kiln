@@ -12,10 +12,11 @@ pub mod source_types;
 pub mod type_syntax;
 pub use type_syntax::JsDocTypeKind;
 pub use type_syntax::{
-    AmbientModuleItems, BindingIdentifierSite, EnumMember, EnumMemberNameKind, ForInBindingSite,
-    FunctionSignatureSite, JsxAttributeSite, JsxChildSite, JsxSite, Modifier as TypeModifier,
-    NameSite, TupleElement as TypeTupleElement, TypeAccessibility, TypeAnnotationSite,
-    TypeClassMemberKind, TypeClassMemberSite, TypeClassSite, TypeDeclaration, TypeDeclarationKind,
+    AmbientModuleItems, AssignmentElementSite, AssignmentPatternSite, BindingIdentifierSite,
+    CatchSite, EnumMember, EnumMemberNameKind, ForInBindingSite, FunctionSignatureSite,
+    JsxAttributeSite, JsxChildSite, JsxSite, Modifier as TypeModifier, NameSite,
+    TupleElement as TypeTupleElement, TypeAccessibility, TypeAnnotationSite, TypeClassMemberKind,
+    TypeClassMemberSite, TypeClassSite, TypeCommentDirective, TypeDeclaration, TypeDeclarationKind,
     TypeDecoratorOwner, TypeDecoratorSite, TypeExportAssignment, TypeExpr, TypeExprKind,
     TypeExpressionWrapperKind, TypeExpressionWrapperSite, TypeImportEquals,
     TypeImportEqualsReference, TypeInstantiationKind, TypeInstantiationSite, TypeJavaScriptError,

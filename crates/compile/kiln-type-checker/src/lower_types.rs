@@ -394,7 +394,13 @@ impl<'a, 's> Lower<'a, 's> {
                 };
                 let module = self.file.add_module(b::Module {
                     name: module_name,
-                    name_pos: self.name_pos(declaration.span, declaration.name.as_deref()),
+                    name_pos: self.name_pos(
+                        declaration.span,
+                        match declaration.global {
+                            true => Some("global"),
+                            false => declaration.name.as_deref(),
+                        },
+                    ),
                     flags,
                     body,
                     has_body,
@@ -729,7 +735,13 @@ impl<'a, 's> Lower<'a, 's> {
             T::Object(members) => b::TypeNodeKind::Object(self.members(members)),
             T::Function(sig) => b::TypeNodeKind::Fn(self.signature(sig, b::FnKind::FunctionType)),
             T::Constructor(sig) => {
-                b::TypeNodeKind::Fn(self.signature(sig, b::FnKind::ConstructorType))
+                let func = self.signature(sig, b::FnKind::ConstructorType);
+                // `abstract new () => T`
+                let written = self.module.source.get(sig.span.start as usize..);
+                if written.is_some_and(|text| text.starts_with("abstract")) {
+                    self.file[func].flags |= b::Flags::ABSTRACT;
+                }
+                b::TypeNodeKind::Fn(func)
             }
             T::Unsupported { syntax } | T::Raw { syntax } => {
                 self.error(t.span, format!("type syntax: {syntax}"));
@@ -995,7 +1007,17 @@ impl<'a, 's> Lower<'a, 's> {
         let (type_params, params, ret, has_body, body_start) = self.function_type_parts(f);
         let (this_param, params) = self.file.split_this_parameter(params);
         let body = if has_body {
-            b::FnBody::Block(self.statements(&f.body))
+            // `x => e` is lowered as the `return e` it means, with the span of the whole arrow:
+            // a braced body's `return` is always inside the arrow.
+            match f.body.as_slice() {
+                [
+                    k::Statement {
+                        kind: k::StatementKind::Return(Some(value)),
+                        span,
+                    },
+                ] if f.arrow && *span == f.span => b::FnBody::Expr(self.expr(value)),
+                _ => b::FnBody::Block(self.statements(&f.body)),
+            }
         } else {
             b::FnBody::None
         };
@@ -1013,7 +1035,12 @@ impl<'a, 's> Lower<'a, 's> {
                 b::FnKind::Expr
             },
             flags,
-            name: f.name.as_deref().map_or(Atom::NONE, |n| self.atom(n)),
+            // `export default function () {}` has no name; the frontend calls it `*default*`.
+            name: f
+                .name
+                .as_deref()
+                .filter(|name| *name != k::DEFAULT_EXPORT_LOCAL)
+                .map_or(Atom::NONE, |n| self.atom(n)),
             name_pos: match f.name.as_deref() {
                 Some(name) => self.name_pos(f.span, Some(name)),
                 None => f.span.start,
@@ -1234,6 +1261,38 @@ impl<'a, 's> Lower<'a, 's> {
                     Some(k::TypeResolutionMode::Require) => b::ResolutionMode::Require,
                 },
             ));
+        }
+        self.file.check_directive = self.module.type_syntax.check_directive;
+        self.file.comment_directives = self
+            .module
+            .type_syntax
+            .comment_directives
+            .iter()
+            .map(|it| b::CommentDirective {
+                start: it.start,
+                end: it.end,
+                kind: match it.expect_error {
+                    true => b::CommentDirectiveKind::ExpectError,
+                    false => b::CommentDirectiveKind::Ignore,
+                },
+            })
+            .collect();
+        // Only read for files that can contain JSX.
+        if matches!(
+            self.module.source_kind,
+            k::SourceKind::Tsx | k::SourceKind::Jsx
+        ) {
+            let pragmas = &self.module.type_syntax.jsx_pragmas;
+            let intern = |this: &Self, text: &Option<String>| match text {
+                Some(text) => this.atom(text),
+                None => Atom::NONE,
+            };
+            self.file.jsx_pragmas = b::JsxPragmas {
+                classic: pragmas.classic,
+                factory: intern(&self, &pragmas.factory),
+                fragment_factory: intern(&self, &pragmas.fragment_factory),
+                import_source: intern(&self, &pragmas.import_source),
+            };
         }
         self.parameter_modifiers();
         self.keyword_identifier_positions();

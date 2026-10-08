@@ -23,6 +23,45 @@ pub struct TypeDecoratorSite {
     pub expression: crate::Expression,
 }
 
+/// An array or object destructuring assignment target and where its elements are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignmentPatternSite {
+    pub span: Span,
+    /// In source order, holes included for an array; not the rest element.
+    pub elements: Vec<AssignmentElementSite>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssignmentElementSite {
+    /// The element with its default: `a = 1`, `y: z = 1`.
+    pub span: Span,
+    /// What is assigned to, without the default.
+    pub target: Span,
+    /// The name of an object property: `y` of `y: z`, or the shorthand.
+    pub key: Option<Span>,
+}
+
+/// The parameter of a `catch` clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatchSite {
+    /// The `try` statement.
+    pub try_span: Span,
+    /// The binding, without its annotation.
+    pub param_span: Span,
+    /// `catch (e: T)`: where `T` is, and what it is.
+    pub annotation: Option<(Span, TypeExpr)>,
+}
+
+/// A `@ts-ignore` or `@ts-expect-error` comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeCommentDirective {
+    /// For a `/* */` comment, the start of its last line.
+    pub start: u32,
+    pub end: u32,
+    /// `@ts-expect-error` rather than `@ts-ignore`.
+    pub expect_error: bool,
+}
+
 /// Rich, parser-independent type syntax belonging to one module.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeSyntax {
@@ -106,6 +145,18 @@ pub struct TypeSyntax {
     /// Triple-slash references retained from the parser's comment table.
     pub references: Vec<TypeReferenceDirective>,
     pub no_default_lib: bool,
+    /// The elements of each destructuring assignment target (`[a, b] = xs`, `({ x, y: z } = o)`),
+    /// which executable HIR patterns have no spans for. Sorted by `span`.
+    pub assignment_patterns: Vec<AssignmentPatternSite>,
+    /// The `catch (param)` of each `try`, which executable HIR reduces to a name (a pattern is
+    /// destructured by its first statement).
+    pub catches: Vec<CatchSite>,
+    /// `// @ts-ignore` and `// @ts-expect-error` comments, in source order
+    /// (`processCommentDirective`).
+    pub comment_directives: Vec<TypeCommentDirective>,
+    /// `// @ts-check` (`Some(true)`) or `// @ts-nocheck` (`Some(false)`) before the first token;
+    /// the last one wins.
+    pub check_directive: Option<bool>,
     /// TypeScript executable HIR lowered before TS erasure, JSX lowering, or DCE.
     /// JavaScript uses Module::body without duplicating its executable tree.
     pub body: Vec<crate::Statement>,
@@ -415,6 +466,8 @@ pub struct TypeClassSite {
     pub default_exported: bool,
     pub type_parameters: Vec<TypeParameter>,
     pub extends: Option<TypeExpr>,
+    /// The `extends` expression when it is not a plain or dotted name: `extends mixin(A, B)`.
+    pub extends_expression: Option<Box<crate::Expression>>,
     pub implements: Vec<TypeExpr>,
     pub abstract_: bool,
     pub declared: bool,

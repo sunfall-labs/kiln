@@ -179,7 +179,9 @@ impl<'a, 's> Lower<'a, 's> {
                         // its default or its identifier does; a nested pattern has no span here.
                         let end = match &prop.value {
                             k::Pattern::WithDefault { default, .. } => Some(default.span.end),
-                            k::Pattern::Identifier(_) => Some(self.file[value].end),
+                            k::Pattern::Identifier(_)
+                            | k::Pattern::Object { .. }
+                            | k::Pattern::Array { .. } => Some(self.file[value].end),
                             _ => None,
                         };
                         // Of the names whose owner ends there, the property's own starts first: a
@@ -227,12 +229,25 @@ impl<'a, 's> Lower<'a, 's> {
                             Some(k::Pattern::WithDefault { default, .. }) => self.expr(default),
                             _ => b::ExprId::NONE,
                         };
+                        // `BindingElement.Pos()` and `.End()`: a name or a nested pattern has the
+                        // span of its own, and a default ends the element.
+                        let (start, end) = match element {
+                            Some(k::Pattern::WithDefault { default, .. }) => {
+                                (self.file[pat].pos, default.span.end)
+                            }
+                            Some(
+                                k::Pattern::Identifier(_)
+                                | k::Pattern::Object { .. }
+                                | k::Pattern::Array { .. },
+                            ) => (self.file[pat].pos, self.file[pat].end),
+                            _ => (span.start, span.end),
+                        };
                         b::PatElem {
                             pat,
                             default,
                             is_rest: false,
-                            start: span.start,
-                            end: span.end,
+                            start,
+                            end,
                         }
                     })
                     .collect();
@@ -278,6 +293,18 @@ impl<'a, 's> Lower<'a, 's> {
         }
     }
 
+    /// The operand of the `...element` at `element`.
+    fn after_dots(&self, element: k::Span) -> k::Span {
+        let source = self.module.source.as_bytes();
+        let start = match source.get(element.start as usize..element.start as usize + 3) {
+            Some(b"...") => {
+                crate::engine::check::spans::skip_trivia(source, element.start as usize + 3)
+            }
+            _ => element.start as usize,
+        };
+        k::Span::new((start as u32).min(element.end), element.end)
+    }
+
     /// The rest element of the pattern at `pattern`: from its last `...` to the last token before
     /// the closing bracket, without a trailing comma, which the checker reports (1013).
     fn rest_span(&self, pattern: k::Span) -> k::Span {
@@ -311,8 +338,25 @@ impl<'a, 's> Lower<'a, 's> {
     pub(super) fn key(&mut self, key: &k::ObjectKey) -> b::PropKey {
         match key {
             k::ObjectKey::Static(text) => b::PropKey::Name(self.atom_units(text)),
-            k::ObjectKey::Computed(expr) => b::PropKey::Computed(self.expr(expr)),
+            k::ObjectKey::Computed(expr) => {
+                let id = self.expr(expr);
+                self.computed_key(id)
+            }
             k::ObjectKey::Private(name) => b::PropKey::Private(self.private_atom(name)),
+        }
+    }
+
+    /// `["a"]` is `a`, and `[0]` is `0`; `["a" as T]` and `[("a")]` are evaluated
+    /// (`IsDynamicName`).
+    fn computed_key(&mut self, id: b::ExprId) -> b::PropKey {
+        let parenthesized = self.file.parens.iter().any(|paren| paren.0 == id);
+        match self.file[id].kind {
+            b::ExprKind::String(name) if !parenthesized => b::PropKey::Name(name),
+            b::ExprKind::Number(n) if !parenthesized => {
+                let text = crate::engine::atom::number_to_string(self.file.numbers[n as usize]);
+                b::PropKey::Name(self.atoms.intern(&text))
+            }
+            _ => b::PropKey::Computed(id),
         }
     }
 
@@ -362,6 +406,16 @@ impl<'a, 's> Lower<'a, 's> {
                 k::Literal::String(text) => b::ExprKind::String(self.atom_units(text)),
                 k::Literal::BigInt(digits) => b::ExprKind::BigInt(self.atom(digits)),
             },
+            // The frontend stores through `super.x` in a destructuring target as `this.x`.
+            E::This
+                if self
+                    .module
+                    .source
+                    .get(span.start as usize..span.end as usize)
+                    .is_some_and(|text| text == "super") =>
+            {
+                b::ExprKind::Super
+            }
             E::This => b::ExprKind::This,
             E::InlineLiteralEval {
                 callee, argument, ..
@@ -486,11 +540,17 @@ impl<'a, 's> Lower<'a, 's> {
                 target,
                 value,
             } => {
-                let target_id = self.file.expr(
-                    b::ExprKind::Ident(self.atom(target)),
-                    span.start,
-                    span.start + target.len() as u32,
-                );
+                // `(x) = 1`: the executable assignment starts at the parenthesis.
+                let source = self.module.source.as_bytes();
+                let mut start = span.start as usize;
+                while source.get(start) == Some(&b'(') {
+                    start = crate::engine::check::spans::skip_trivia(source, start + 1);
+                }
+                let at = k::Span::new(start as u32, (start + target.len()) as u32);
+                let target_id =
+                    self.file
+                        .expr(b::ExprKind::Ident(self.atom(target)), at.start, at.end);
+                let target_id = self.wrapped(target_id, at);
                 let value = self.expr(value);
                 b::ExprKind::Assign {
                     op: assign(*operator),
@@ -919,10 +979,18 @@ impl<'a, 's> Lower<'a, 's> {
                 prefix,
                 target,
             } => {
-                let (start, end) = self.update_operand(span, *prefix);
-                let operand = self
-                    .file
-                    .expr(b::ExprKind::Ident(self.atom(target)), start, end);
+                // `++((x))`: the operand is the name, inside whatever parentheses are around it.
+                let (mut start, _) = self.update_operand(span, *prefix);
+                let source = self.module.source.as_bytes();
+                while source.get(start as usize) == Some(&b'(') {
+                    start =
+                        crate::engine::check::spans::skip_trivia(source, start as usize + 1) as u32;
+                }
+                let at = k::Span::new(start, start + target.len() as u32);
+                let operand =
+                    self.file
+                        .expr(b::ExprKind::Ident(self.atom(target)), at.start, at.end);
+                let operand = self.wrapped(operand, at);
                 b::ExprKind::Unary {
                     op: match (*increment, *prefix) {
                         (true, true) => b::UnOp::PreInc,
@@ -1077,7 +1145,8 @@ impl<'a, 's> Lower<'a, 's> {
                             span.end,
                         );
                     }
-                    return value;
+                    // Not past `wrapped`: `[(a, b)]` is parenthesized.
+                    return self.wrapped(value, span);
                 }
             }
             E::Object { members } => {
@@ -1191,6 +1260,13 @@ impl<'a, 's> Lower<'a, 's> {
                 }
                 b::ExprKind::Object(props)
             }
+            // A template without substitutions is a string, as the parser makes it.
+            E::Template {
+                quasis,
+                expressions,
+            } if expressions.is_empty() && quasis.len() == 1 => {
+                b::ExprKind::String(self.atom_units(&quasis[0]))
+            }
             E::Template {
                 quasis,
                 expressions,
@@ -1221,6 +1297,9 @@ impl<'a, 's> Lower<'a, 's> {
                     }
                 }
             }
+            // The `super` of a destructuring target, `[super.a] = xs`: executable HIR has no
+            // expression for a lone `super`.
+            E::Unsupported { feature } if feature == "super expression" => b::ExprKind::Super,
             // `a={}`: an attribute without an expression, which the checker reports itself.
             E::Unsupported { feature } if feature == "empty JSX expression" => b::ExprKind::Missing,
             E::Unsupported { feature } if feature == "import.meta" => b::ExprKind::ImportMeta,
@@ -1491,6 +1570,25 @@ impl<'a, 's> Lower<'a, 's> {
     }
 
     fn pattern_target(&mut self, pattern: &k::Pattern, span: k::Span) -> b::ExprId {
+        self.pattern_target_with(pattern, span, span)
+    }
+
+    /// The elements of the destructuring assignment target at `span`, if the frontend saw one.
+    fn assignment_pattern(&self, span: k::Span) -> Option<&'a k::AssignmentPatternSite> {
+        let sites = &self.module.type_syntax.assignment_patterns;
+        let at =
+            sites.partition_point(|site| (site.span.start, site.span.end) < (span.start, span.end));
+        sites.get(at).filter(|site| site.span == span)
+    }
+
+    /// `pattern`, written as `span`; `target` is what a default is assigned to, which is `span`
+    /// without the default (`a = 1`).
+    fn pattern_target_with(
+        &mut self,
+        pattern: &k::Pattern,
+        span: k::Span,
+        target: k::Span,
+    ) -> b::ExprId {
         let span = match pattern {
             k::Pattern::Object { .. } | k::Pattern::Array { .. } => self.pattern_span(span),
             _ => span,
@@ -1543,7 +1641,7 @@ impl<'a, 's> Lower<'a, 's> {
                 )
             }
             k::Pattern::WithDefault { inner, default } => {
-                let target = self.pattern_target(inner, span);
+                let target = self.pattern_target(inner, target);
                 let value = self.expr(default);
                 self.file.expr(
                     b::ExprKind::Assign {
@@ -1556,16 +1654,30 @@ impl<'a, 's> Lower<'a, 's> {
                 )
             }
             k::Pattern::Array { elements, rest } => {
+                let site = self.assignment_pattern(span);
                 let mut ids: Vec<_> = elements
                     .iter()
-                    .map(|item| match item {
-                        Some(item) => self.pattern_target(item, span),
-                        None => self.file.expr(b::ExprKind::Missing, span.start, span.end),
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let at = site.and_then(|site| site.elements.get(i));
+                        match item {
+                            Some(item) => match at {
+                                Some(at) => self.pattern_target_with(item, at.span, at.target),
+                                None => self.pattern_target(item, span),
+                            },
+                            None => match at {
+                                Some(at) => {
+                                    self.file
+                                        .expr(b::ExprKind::Missing, at.span.start, at.span.end)
+                                }
+                                None => self.file.expr(b::ExprKind::Missing, span.start, span.end),
+                            },
+                        }
                     })
                     .collect();
                 if let Some(rest) = rest {
                     let at = self.rest_span(span);
-                    let id = self.pattern_target(rest, at);
+                    let id = self.pattern_target(rest, self.after_dots(at));
                     ids.push(self.file.expr(b::ExprKind::Spread(id), at.start, at.end));
                 }
                 let list = self.file.list(&ids);
@@ -1574,26 +1686,45 @@ impl<'a, 's> Lower<'a, 's> {
             }
             k::Pattern::Object { properties, rest } => {
                 let mut props = Vec::with_capacity(properties.len() + usize::from(rest.is_some()));
-                for p in properties {
+                let site = self.assignment_pattern(span);
+                for (i, p) in properties.iter().enumerate() {
                     let key = match &p.key {
                         k::PatternKey::Static(s) => b::PropKey::Name(self.atom_units(s)),
                         k::PatternKey::Computed(e) => b::PropKey::Computed(self.expr(e)),
                     };
-                    let value = self.pattern_target(&p.value, span);
+                    let at = site.and_then(|site| site.elements.get(i));
+                    let value = match at {
+                        // `y: z = 1` assigns from `z`; the property starts at `y`.
+                        Some(at) => self.pattern_target_with(
+                            &p.value,
+                            k::Span::new(at.target.start, at.span.end),
+                            at.target,
+                        ),
+                        None => self.pattern_target(&p.value, span),
+                    };
+                    let (whole, pos) = match at {
+                        Some(at) => (at.span, at.key.map_or(at.span.start, |key| key.start)),
+                        None => (span, span.start),
+                    };
+                    // `{ x }` and `{ x = 1 }`: the name is the target.
+                    let shorthand = at.is_some_and(|at| at.key == Some(at.target));
                     props.push(b::Prop {
-                        kind: b::PropKind::Init,
+                        kind: match shorthand {
+                            true => b::PropKind::Shorthand,
+                            false => b::PropKind::Init,
+                        },
                         key,
                         name_kind: b::NameKind::Identifier,
                         value,
-                        pos: span.start,
-                        start: span.start,
-                        end: span.end,
+                        pos,
+                        start: whole.start,
+                        end: whole.end,
                         postfix_token: 0,
                     });
                 }
                 if let Some(rest) = rest {
                     let at = self.rest_span(span);
-                    let value = self.pattern_target(rest, at);
+                    let value = self.pattern_target(rest, self.after_dots(at));
                     props.push(b::Prop {
                         kind: b::PropKind::Spread,
                         key: b::PropKey::None,
@@ -1709,6 +1840,40 @@ impl<'a, 's> Lower<'a, 's> {
         self.file.stmt(b::StmtKind::Block(list), pos)
     }
 
+    /// The head of `for (x in o)` and `for (x of o)`, which the frontend desugars to a hidden
+    /// binding and, as the first statement of the body, the assignment of it to `x`. Bun's HIR has
+    /// the target itself as the head, which is where the checker reports about it: `body` is that
+    /// block, and the result is the target as an expression statement and the loop's own body.
+    fn assigning_head<'b>(&mut self, body: &'b k::Statement) -> (b::StmtId, &'b k::Statement) {
+        let k::StatementKind::Block(statements) = &body.kind else {
+            unreachable!("an assigning loop body is a block");
+        };
+        let [assignment, body] = statements.as_slice() else {
+            unreachable!("an assigning loop body has the assignment and the body");
+        };
+        let k::StatementKind::Expression(assignment) = &assignment.kind else {
+            unreachable!("the first statement assigns");
+        };
+        let span = assignment.span;
+        let mut assigned = self.expr(assignment);
+        // The assignment has the span of its target, and so the target's assertions.
+        while let b::ExprKind::NonNull(inner)
+        | b::ExprKind::AsConst(inner)
+        | b::ExprKind::As { expr: inner, .. }
+        | b::ExprKind::Satisfies { expr: inner, .. } = self.file[assigned].kind
+        {
+            assigned = inner;
+        }
+        let b::ExprKind::Assign { target, .. } = self.file[assigned].kind else {
+            unreachable!("the head assigns to its target");
+        };
+        // The assignment has the span of its target, so what is written around the one is
+        // written around the other: `for ((x) of xs)`.
+        let target = self.wrapped(target, span);
+        let pos = self.file[target].pos;
+        (self.file.stmt(b::StmtKind::Expr(target), pos), body)
+    }
+
     pub(super) fn statement(&mut self, statement: &k::Statement) -> b::StmtId {
         if let Some(lowered) = self.import_equals_at(statement.span) {
             return lowered;
@@ -1811,6 +1976,34 @@ impl<'a, 's> Lower<'a, 's> {
                 }
             }
             S::ForIn {
+                name, object, body, ..
+            } if name.starts_with("%forin")
+                && !(self.module.type_syntax.for_in_bindings.iter())
+                    .any(|site| site.span == statement.span) =>
+            {
+                let (left, body) = self.assigning_head(body);
+                let expr = self.expr(object);
+                let body = self.statement(body);
+                b::StmtKind::ForIn { left, expr, body }
+            }
+            S::ForOf {
+                pattern: k::Pattern::Identifier(name),
+                iterable,
+                body,
+                awaiting,
+                ..
+            } if name.starts_with("%forof") => {
+                let (left, body) = self.assigning_head(body);
+                let expr = self.expr(iterable);
+                let body = self.statement(body);
+                b::StmtKind::ForOf {
+                    left,
+                    expr,
+                    body,
+                    is_await: *awaiting,
+                }
+            }
+            S::ForIn {
                 kind,
                 name,
                 object,
@@ -1876,21 +2069,49 @@ impl<'a, 's> Lower<'a, 's> {
                 cases,
             } => {
                 let expr = self.expr(discriminant);
-                let cases: Vec<_> = cases
-                    .iter()
-                    .map(|case| b::Case {
+                // A clause starts at its `case` or `default` and, with no statements, ends at its
+                // `:`. The source between two clauses says where.
+                let source = self.module.source.as_bytes();
+                let mut previous_end = discriminant.span.end as usize;
+                let mut lowered = Vec::with_capacity(cases.len());
+                for case in cases {
+                    let keyword: &[u8] = if case.test.is_some() {
+                        b"case"
+                    } else {
+                        b"default"
+                    };
+                    let window_end = match (&case.test, case.body.first()) {
+                        (Some(test), _) => test.span.start as usize,
+                        (None, Some(first)) => first.span.start as usize,
+                        (None, None) => statement.span.end as usize,
+                    };
+                    let window =
+                        &source[previous_end.min(window_end)..window_end.min(source.len())];
+                    let pos = window
+                        .windows(keyword.len())
+                        .rposition(|word| word == keyword)
+                        .map_or(statement.span.start, |at| (previous_end + at) as u32);
+                    let after = case
+                        .test
+                        .as_ref()
+                        .map_or(pos as usize + keyword.len(), |test| test.span.end as usize);
+                    let colon = source
+                        .get(after..)
+                        .and_then(|rest| rest.iter().position(|&byte| byte == b':'))
+                        .map_or(after, |at| after + at + 1);
+                    let end = case.body.last().map_or(colon as u32, |s| s.span.end);
+                    previous_end = end as usize;
+                    lowered.push(b::Case {
                         test: case
                             .test
                             .as_ref()
                             .map_or(b::ExprId::NONE, |test| self.expr(test)),
                         body: self.statements(&case.body),
-                        pos: case
-                            .test
-                            .as_ref()
-                            .map_or(statement.span.start, |test| test.span.start),
-                        end: case.body.last().map_or(statement.span.end, |s| s.span.end),
-                    })
-                    .collect();
+                        pos,
+                        end,
+                    });
+                }
+                let cases = lowered;
                 b::StmtKind::Switch {
                     expr,
                     cases: self.file.add_cases(&cases),
@@ -1912,22 +2133,74 @@ impl<'a, 's> Lower<'a, 's> {
             } => {
                 let block = self.block(block, statement.span.start);
                 let (param, handler) = if let Some(handler) = handler {
-                    let param = handler.binding.as_ref().map_or(b::VarDeclId::NONE, |name| {
-                        let pat = self.file.pat(
-                            b::PatKind::Ident(self.atom(name)),
-                            statement.span.start,
-                            statement.span.end,
-                        );
-                        self.file.add_var_decl(b::VarDecl {
-                            pat,
-                            ty: b::TypeNodeId::NONE,
-                            init: b::ExprId::NONE,
-                            kind: b::VarKind::Let,
-                            flags: b::Flags::empty(),
-                            loc: Self::loc(statement.span),
-                        })
-                    });
-                    (param, self.block(&handler.body, statement.span.start))
+                    let site = self
+                        .module
+                        .type_syntax
+                        .catches
+                        .iter()
+                        .find(|site| site.try_span == statement.span);
+                    let mut body = handler.body.as_slice();
+                    let param = match site {
+                        Some(site) => {
+                            // `catch ({ message })` is a hidden name and, first in the block, the
+                            // declaration that takes the thrown value apart.
+                            let destructured = match body.split_first() {
+                                Some((first, rest))
+                                    if handler
+                                        .binding
+                                        .as_deref()
+                                        .is_some_and(|name| name.starts_with("%catch")) =>
+                                {
+                                    body = rest;
+                                    match &first.kind {
+                                        k::StatementKind::Variable { declarations, .. } => {
+                                            declarations.first().map(|it| &it.pattern)
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            };
+                            let at = site.param_span;
+                            let pat = match (destructured, handler.binding.as_deref()) {
+                                (Some(pattern), _) => self.pattern(pattern, at),
+                                (None, Some(name)) => self.file.pat(
+                                    b::PatKind::Ident(self.atom(name)),
+                                    at.start,
+                                    at.end,
+                                ),
+                                (None, None) => unreachable!("a catch site has a parameter"),
+                            };
+                            let ty = match &site.annotation {
+                                Some((_, ty)) => self.ty(&ty.clone()),
+                                None => b::TypeNodeId::NONE,
+                            };
+                            self.file.add_var_decl(b::VarDecl {
+                                pat,
+                                ty,
+                                init: b::ExprId::NONE,
+                                kind: b::VarKind::Let,
+                                flags: b::Flags::empty(),
+                                loc: Self::loc(at),
+                            })
+                        }
+                        None => handler.binding.as_ref().map_or(b::VarDeclId::NONE, |name| {
+                            let pat = self.file.pat(
+                                b::PatKind::Ident(self.atom(name)),
+                                statement.span.start,
+                                statement.span.end,
+                            );
+                            self.file.add_var_decl(b::VarDecl {
+                                pat,
+                                ty: b::TypeNodeId::NONE,
+                                init: b::ExprId::NONE,
+                                kind: b::VarKind::Let,
+                                flags: b::Flags::empty(),
+                                loc: Self::loc(statement.span),
+                            })
+                        }),
+                    };
+                    (param, self.block(body, statement.span.start))
                 } else {
                     (b::VarDeclId::NONE, b::StmtId::NONE)
                 };
@@ -2012,9 +2285,11 @@ impl<'a, 's> Lower<'a, 's> {
             flags |= b::Flags::ABSTRACT;
         }
         let type_params = self.type_parameters(&site.type_parameters);
-        let extends = site.extends.as_ref().map_or(b::ExprId::NONE, |heritage| {
-            self.class_heritage_expr(heritage)
-        });
+        let extends = match (&site.extends_expression, &site.extends) {
+            (Some(expression), _) => self.expr(expression),
+            (None, Some(heritage)) => self.class_heritage_expr(heritage),
+            (None, None) => b::ExprId::NONE,
+        };
         let extends_args = site
             .extends
             .as_ref()
@@ -2302,11 +2577,7 @@ impl<'a, 's> Lower<'a, 's> {
         Some(b::Member {
             kind: b::MemberKind::IndexSignature,
             key: b::PropKey::None,
-            flags: if member.readonly {
-                b::Flags::READONLY
-            } else {
-                b::Flags::empty()
-            },
+            flags: class_member_flags(Some(member), false),
             ty: ret,
             init: b::ExprId::NONE,
             func,
@@ -2318,7 +2589,9 @@ impl<'a, 's> Lower<'a, 's> {
     }
 
     fn class(&mut self, class: &k::Class) -> b::ClassId {
-        let name = class.name.as_deref().map_or(Atom::NONE, |n| self.atom(n));
+        let name = (class.name.as_deref())
+            .filter(|name| *name != k::DEFAULT_EXPORT_LOCAL)
+            .map_or(Atom::NONE, |n| self.atom(n));
         let site = self.class_site(class.span).cloned();
         let class_flags = site.as_ref().map_or_else(b::Flags::empty, |site| {
             let mut flags = b::Flags::empty();

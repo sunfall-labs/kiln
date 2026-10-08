@@ -516,7 +516,7 @@ impl Lower<'_, '_> {
                 match &i.imported {
                     k::ImportName::Default => {
                         default = self.atom(&i.local);
-                        default_pos = i.span.start
+                        default_pos = self.binding_span(&i.local, i.span).start
                     }
                     k::ImportName::Namespace => {
                         namespace = self.atom(&i.local);

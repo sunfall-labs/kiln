@@ -4481,6 +4481,18 @@ fn capture_type_syntax(
                 default_exported: self.is_default_exported(node.span),
                 type_parameters: self.parameters(node.type_parameters.as_deref()),
                 extends,
+                extends_expression: node.heritage.as_ref().and_then(|heritage| {
+                    self.heritage_name_parts(&heritage.expression)
+                        .is_none()
+                        .then(|| {
+                            let mut lowerer = Lowerer::new(
+                                self.source,
+                                self.path.as_deref(),
+                                self.native_import_meta,
+                            );
+                            Box::new(lowerer.expression(&heritage.expression))
+                        })
+                }),
                 implements,
                 abstract_: node.r#abstract,
                 declared: node.declare,
@@ -4769,20 +4781,6 @@ fn capture_type_syntax(
             (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
             walk::walk_object_pattern(self, node);
         }
-        fn visit_array_assignment_target(
-            &mut self,
-            node: &oxc_ast::ast::ArrayAssignmentTarget<'a>,
-        ) {
-            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
-            walk::walk_array_assignment_target(self, node);
-        }
-        fn visit_object_assignment_target(
-            &mut self,
-            node: &oxc_ast::ast::ObjectAssignmentTarget<'a>,
-        ) {
-            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
-            walk::walk_object_assignment_target(self, node);
-        }
         fn visit_export_named_declaration(
             &mut self,
             node: &oxc_ast::ast::ExportNamedDeclaration<'a>,
@@ -4951,6 +4949,109 @@ fn capture_type_syntax(
             });
             walk::walk_ts_as_expression(self, node);
         }
+        fn visit_array_assignment_target(
+            &mut self,
+            node: &oxc_ast::ast::ArrayAssignmentTarget<'a>,
+        ) {
+            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
+            use oxc_ast::ast::AssignmentTargetMaybeDefault as Maybe;
+            let elements = node
+                .elements
+                .iter()
+                .map(|element| match element {
+                    // A hole: nothing is assigned.
+                    None => kiln_hir::AssignmentElementSite {
+                        span: HirSpan::new(node.span.start, node.span.start),
+                        target: HirSpan::new(node.span.start, node.span.start),
+                        key: None,
+                    },
+                    Some(element) => {
+                        let (whole, target) = match element {
+                            Maybe::AssignmentTargetWithDefault(it) => (it.span, it.binding.span()),
+                            other => (other.span(), other.span()),
+                        };
+                        kiln_hir::AssignmentElementSite {
+                            span: HirSpan::new(whole.start, whole.end),
+                            target: HirSpan::new(target.start, target.end),
+                            key: None,
+                        }
+                    }
+                })
+                .collect();
+            self.result
+                .assignment_patterns
+                .push(kiln_hir::AssignmentPatternSite {
+                    span: HirSpan::new(node.span.start, node.span.end),
+                    elements,
+                });
+            walk::walk_array_assignment_target(self, node);
+        }
+        fn visit_object_assignment_target(
+            &mut self,
+            node: &oxc_ast::ast::ObjectAssignmentTarget<'a>,
+        ) {
+            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
+            use oxc_ast::ast::{
+                AssignmentTargetMaybeDefault as Maybe, AssignmentTargetProperty as Property,
+            };
+            let elements = node
+                .properties
+                .iter()
+                .map(|property| match property {
+                    Property::AssignmentTargetPropertyIdentifier(it) => {
+                        let binding = it.binding.span;
+                        kiln_hir::AssignmentElementSite {
+                            span: HirSpan::new(it.span.start, it.span.end),
+                            target: HirSpan::new(binding.start, binding.end),
+                            key: Some(HirSpan::new(binding.start, binding.end)),
+                        }
+                    }
+                    Property::AssignmentTargetPropertyProperty(it) => {
+                        let target = match &it.binding {
+                            Maybe::AssignmentTargetWithDefault(with) => with.binding.span(),
+                            other => other.span(),
+                        };
+                        let key = it.name.span();
+                        kiln_hir::AssignmentElementSite {
+                            span: HirSpan::new(it.span.start, it.span.end),
+                            target: HirSpan::new(target.start, target.end),
+                            key: Some(HirSpan::new(key.start, key.end)),
+                        }
+                    }
+                })
+                .collect();
+            self.result
+                .assignment_patterns
+                .push(kiln_hir::AssignmentPatternSite {
+                    span: HirSpan::new(node.span.start, node.span.end),
+                    elements,
+                });
+            walk::walk_object_assignment_target(self, node);
+        }
+        fn visit_try_statement(&mut self, node: &oxc_ast::ast::TryStatement<'a>) {
+            if let Some(param) = node
+                .handler
+                .as_ref()
+                .and_then(|clause| clause.param.as_ref())
+            {
+                let pattern = param.pattern.span();
+                let annotation = param.type_annotation.as_deref().map(|annotation| {
+                    let ty = annotation.type_annotation.span();
+                    self.classified
+                        .insert((annotation.span.start, annotation.span.end));
+                    (
+                        HirSpan::new(ty.start, ty.end),
+                        self.convert(&annotation.type_annotation),
+                    )
+                });
+                self.result.catches.push(kiln_hir::CatchSite {
+                    try_span: HirSpan::new(node.span.start, node.span.end),
+                    param_span: HirSpan::new(pattern.start, pattern.end),
+                    annotation,
+                });
+            }
+            walk::walk_try_statement(self, node);
+        }
         fn visit_ts_satisfies_expression(
             &mut self,
             node: &oxc_ast::ast::TSSatisfiesExpression<'a>,
@@ -4966,6 +5067,17 @@ fn capture_type_syntax(
             walk::walk_ts_satisfies_expression(self, node);
         }
         fn visit_ts_type_assertion(&mut self, node: &oxc_ast::ast::TSTypeAssertion<'a>) {
+            if self.raw(node.type_annotation.span()).trim() == "const" {
+                self.result
+                    .expression_wrappers
+                    .push(kiln_hir::TypeExpressionWrapperSite {
+                        owner_span: HirSpan::new(node.span.start, node.span.end),
+                        operand_span: self.operand_span(&node.expression),
+                        kind: kiln_hir::TypeExpressionWrapperKind::AsConst,
+                    });
+                walk::walk_ts_type_assertion(self, node);
+                return;
+            }
             let span = node.type_annotation.span();
             self.result.annotations.push(HirTypeAnnotationSite {
                 site: HirTypeSite::AsExpression,
@@ -4988,6 +5100,43 @@ fn capture_type_syntax(
                     kind: kiln_hir::TypeExpressionWrapperKind::Parenthesized,
                 });
             walk::walk_parenthesized_expression(self, node);
+        }
+        /// Oxc's cover grammar drops the parentheses of a simple assignment target: `(x) = 1`,
+        /// `for ((x) of xs)`. They are written around the target and nothing else could be, so
+        /// the source says how many.
+        fn visit_simple_assignment_target(
+            &mut self,
+            node: &oxc_ast::ast::SimpleAssignmentTarget<'a>,
+        ) {
+            let span = node.span();
+            let source = self.source.as_bytes();
+            let (mut start, mut end) = (span.start as usize, span.end as usize);
+            loop {
+                let before = source[..start].trim_ascii_end();
+                let after = source[end..].trim_ascii_start();
+                if !before.ends_with(b"(") || !after.starts_with(b")") {
+                    break;
+                }
+                start = before.len() - 1;
+                end = source.len() - after.len() + 1;
+                let owner_span = HirSpan::new(start as u32, end as u32);
+                if self
+                    .result
+                    .expression_wrappers
+                    .iter()
+                    .any(|site| site.owner_span == owner_span)
+                {
+                    break;
+                }
+                self.result
+                    .expression_wrappers
+                    .push(kiln_hir::TypeExpressionWrapperSite {
+                        owner_span,
+                        operand_span: HirSpan::new(span.start, span.end),
+                        kind: kiln_hir::TypeExpressionWrapperKind::Parenthesized,
+                    });
+            }
+            walk::walk_simple_assignment_target(self, node);
         }
         fn visit_ts_non_null_expression(&mut self, node: &oxc_ast::ast::TSNonNullExpression<'a>) {
             self.result
@@ -5205,6 +5354,11 @@ fn capture_type_syntax(
         }
         fn visit_ts_global_declaration(&mut self, node: &oxc_ast::ast::TSGlobalDeclaration<'a>) {
             let span = node.span;
+            self.result.names.push(kiln_hir::NameSite {
+                owner_end: span.end,
+                name: "global".to_owned(),
+                start: node.global_span.start,
+            });
             let mut lowerer =
                 Lowerer::new(self.source, self.path.as_deref(), self.native_import_meta);
             let body = lowerer.statements(&node.body.body);
@@ -5255,7 +5409,15 @@ fn capture_type_syntax(
         jsx_pragmas(&raw, &mut collector.result.jsx_pragmas);
     }
     for comment in &program.comments {
-        if comment.kind != oxc_ast::ast::CommentKind::Line {
+        let text = collector.raw(comment.span);
+        let block = comment.kind != oxc_ast::ast::CommentKind::Line;
+        if let Some(directive) = comment_directive(&text, comment.span.start, block) {
+            collector.result.comment_directives.push(directive);
+        }
+        if !block && comment.span.end <= first_token {
+            check_directive(&text, &mut collector.result.check_directive);
+        }
+        if block {
             continue;
         }
         let raw = collector.raw(comment.span);
@@ -5371,6 +5533,10 @@ fn capture_type_syntax(
                 });
         }
     }
+    collector
+        .result
+        .assignment_patterns
+        .sort_by_key(|site| (site.span.start, site.span.end));
     collector
         .result
         .annotations
@@ -7540,8 +7706,9 @@ impl Lowerer<'_, '_> {
                         kind: HirExpressionKind::Identifier(hidden.clone()),
                         span: statement_span,
                     };
+                    let target_span = HirSpan::new(target.span().start, target.span().end);
                     let assignment =
-                        self.assign_to(target, HirAssignmentOperator::Assign, step, statement_span);
+                        self.assign_to(target, HirAssignmentOperator::Assign, step, target_span);
                     return Some(HirStatement {
                         kind: HirStatementKind::ForOf {
                             kind: HirVariableKind::Let,
@@ -7606,11 +7773,12 @@ impl Lowerer<'_, '_> {
                             kind: HirExpressionKind::Identifier(hidden.clone()),
                             span: statement_span,
                         };
+                        let target_span = HirSpan::new(target.span().start, target.span().end);
                         let assignment = self.assign_to(
                             target,
                             HirAssignmentOperator::Assign,
                             step,
-                            statement_span,
+                            target_span,
                         );
                         return Some(HirStatement {
                             kind: HirStatementKind::ForIn {
@@ -9050,7 +9218,8 @@ impl Lowerer<'_, '_> {
                 Some(kiln_hir::Pattern::Computed {
                     object: Box::new(HirExpression {
                         kind: HirExpressionKind::This,
-                        span: span(member.span),
+                        // The `super` itself, which is how the checker knows it was one.
+                        span: span(member.object.span()),
                     }),
                     property: Box::new(self.expression(&member.expression)),
                 })
@@ -9069,7 +9238,8 @@ impl Lowerer<'_, '_> {
                 Some(kiln_hir::Pattern::Member {
                     object: Box::new(HirExpression {
                         kind: HirExpressionKind::This,
-                        span: span(member.span),
+                        // The `super` itself, which is how the checker knows it was one.
+                        span: span(member.object.span()),
                     }),
                     property: member.property.name.to_string().into(),
                 })
@@ -9974,6 +10144,70 @@ fn lower_import_name(name: &ImportImportName<'_>) -> ImportName {
 }
 
 /// Every `@d` of `program` with the class, member or parameter it decorates, in source order.
+/// `processCommentDirective` for the comment `text` at `at`: `// @ts-ignore` and
+/// `// @ts-expect-error`, of a `/* */` comment its last line only.
+fn comment_directive(text: &str, at: u32, block: bool) -> Option<kiln_hir::TypeCommentDirective> {
+    let bytes = text.as_bytes();
+    let skip = |mut pos: usize, set: &[u8]| {
+        while pos < bytes.len() && set.contains(&bytes[pos]) {
+            pos += 1;
+        }
+        pos
+    };
+    let (start, pos) = if block {
+        // The last line of the comment, from after its last line break.
+        let line = text
+            .char_indices()
+            .filter(|(_, c)| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+            .last()
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        (line, skip(skip(line, b" \t"), b"/*"))
+    } else {
+        (0, skip(2, b"/"))
+    };
+    let pos = skip(pos, b" \t");
+    if bytes.get(pos) != Some(&b'@') {
+        return None;
+    }
+    let expect_error = if bytes[pos + 1..].starts_with(b"ts-expect-error") {
+        true
+    } else if bytes[pos + 1..].starts_with(b"ts-ignore") {
+        false
+    } else {
+        return None;
+    };
+    Some(kiln_hir::TypeCommentDirective {
+        start: at + start as u32,
+        end: at + text.len() as u32,
+        expect_error,
+    })
+}
+
+/// `// @ts-check` and `// @ts-nocheck`: the last of either wins.
+fn check_directive(text: &str, directive: &mut Option<bool>) {
+    let bytes = text.as_bytes();
+    let mut pos = 2;
+    if bytes.get(pos) == Some(&b'/') {
+        pos += 1;
+    }
+    while matches!(bytes.get(pos), Some(b' ' | b'\t')) {
+        pos += 1;
+    }
+    if bytes.get(pos) != Some(&b'@') {
+        return;
+    }
+    let rest = &bytes[pos + 1..];
+    let len = rest
+        .iter()
+        .take_while(|c| c.is_ascii_alphabetic() || **c == b'-')
+        .count();
+    if rest[..len].eq_ignore_ascii_case(b"ts-check") {
+        *directive = Some(true);
+    } else if rest[..len].eq_ignore_ascii_case(b"ts-nocheck") {
+        *directive = Some(false);
+    }
+}
+
 fn decorator_sites(
     source: &str,
     path: Option<&str>,

@@ -271,9 +271,19 @@ impl<'a, 's> Lower<'a, 's> {
     /// `keyof { 0: 1 }` is `0`, `keyof { "0": 1 }` is `"0"`). Executable HIR keeps only the
     /// key's value, so the source text decides, as Bun's `Mark::StringLiteralName` does.
     pub(super) fn literal_name_kind(&self, pos: u32) -> b::NameKind {
-        match self.module.source.as_bytes().get(pos as usize) {
+        let source = self.module.source.as_bytes();
+        match source.get(pos as usize) {
             Some(b'"' | b'\'') => b::NameKind::StringLiteral,
             Some(b'0'..=b'9' | b'.') => b::NameKind::NumericLiteral,
+            // `["a"]` and `[0]`: a name that was written in brackets.
+            Some(b'[') => {
+                let inside = crate::engine::check::spans::skip_trivia(source, pos as usize + 1);
+                match source.get(inside) {
+                    Some(b'"' | b'\'') => b::NameKind::ComputedString,
+                    Some(b'0'..=b'9' | b'.') => b::NameKind::ComputedNumber,
+                    _ => b::NameKind::Identifier,
+                }
+            }
             _ => b::NameKind::Identifier,
         }
     }
@@ -285,6 +295,8 @@ impl<'a, 's> Lower<'a, 's> {
         match self.literal_name_kind(member.name_pos) {
             b::NameKind::StringLiteral => b::Flags::LITERAL_NAME | b::Flags::STRING_NAME,
             b::NameKind::NumericLiteral => b::Flags::LITERAL_NAME,
+            b::NameKind::ComputedString => b::Flags::COMPUTED_NAME | b::Flags::STRING_NAME,
+            b::NameKind::ComputedNumber => b::Flags::COMPUTED_NAME,
             _ => b::Flags::empty(),
         }
     }
