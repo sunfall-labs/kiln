@@ -18,6 +18,16 @@ if (isMainThread) {
 	view.set([513, 1027]);
 	const copied = new Uint8Array([1, 2, 3]);
 	const { port1, port2 } = new MessageChannel();
+	worker.on('message', (message) => {
+		if (message?.kind === 'ready') {
+			// Worker console output is forwarded across realms asynchronously. Report the transferred
+			// bytes on the parent thread, then let the worker answer the already-posted port payload.
+			console.log('initial', message.bytes.join(','));
+			worker.postMessage({ kind: 'start-port' });
+		} else {
+			console.log('worker says', message);
+		}
+	});
 	try {
 		worker.postMessage({ fn() {} , buffer }, [buffer]);
 	} catch (error) {
@@ -31,14 +41,15 @@ if (isMainThread) {
 		port1.postMessage('second');
 		port1.postMessage('third');
 	});
-	worker.on('message', (message) => console.log('worker says', message));
 	worker.on('exit', (code) => {
 		console.log('exit', code);
 		port1.close();
 	});
 } else {
-	console.log('initial', Array.from(new Uint8Array(workerData.initial)).join(','));
-	parentPort.once('message', ({ view, copied, port }) => {
+	parentPort.postMessage({ kind: 'ready', bytes: Array.from(new Uint8Array(workerData.initial)) });
+	let pendingMessage;
+	let readyToSendPort = false;
+	const handleMessage = ({ view, copied, port }) => {
 		const lines = [
 			`view ${view.constructor.name} ${view.byteOffset} ${Array.from(view).join(',')} of ${view.buffer.byteLength}`,
 			`copied ${Array.from(copied).join(',')}`,
@@ -50,5 +61,21 @@ if (isMainThread) {
 			parentPort.postMessage(`${first} then ${JSON.stringify(next)} then ${receiveMessageOnPort(port)}`);
 			port.close();
 		});
-	});
+	};
+	const receiveMessage = (message) => {
+		if (message?.kind === 'start-port') {
+			readyToSendPort = true;
+			if (pendingMessage) {
+				parentPort.off('message', receiveMessage);
+				handleMessage(pendingMessage);
+			}
+		} else {
+			pendingMessage = message;
+			if (readyToSendPort) {
+				parentPort.off('message', receiveMessage);
+				handleMessage(message);
+			}
+		}
+	};
+	parentPort.on('message', receiveMessage);
 }
