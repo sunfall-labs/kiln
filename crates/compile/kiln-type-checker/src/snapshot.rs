@@ -366,56 +366,8 @@ impl Host for SnapshotHost<'_> {
             .or_else(library)
             .or_else(unparsed);
         if let Some(module) = module.as_ref() {
-            let source_module = module
-                .type_syntax
-                .original_module
-                .as_deref()
-                .unwrap_or(module);
-            // Owned parser diagnostics remain authoritative. Checking a recovered AST
-            // must neither erase them nor publish specialization facts as complete.
-            if source_module.panicked || !source_module.diagnostics.is_empty() {
-                let mut errors = self.unsupported.lock().unwrap();
-                errors.extend(source_module.diagnostics.iter().map(|diagnostic| {
-                    SourceDiagnostic {
-                        path: Some(name.clone()),
-                        span: diagnostic.span,
-                        code: None,
-                        message: diagnostic.message.clone(),
-                    }
-                }));
-                if source_module.panicked && source_module.diagnostics.is_empty() {
-                    errors.push(SourceDiagnostic {
-                        path: Some(name.clone()),
-                        span: None,
-                        code: None,
-                        message: "source parser could not recover a complete module".into(),
-                    });
-                }
-            }
-            // The loader's arena belongs to this session. Its lifetime is narrowed to the parse call.
-            let (mut file, unsupported) =
-                Lower::new(source_module, atoms).finish(arena, atoms.session());
-            if is_declaration_file_name(&name) {
-                file.kind = hir::FileKind::Declaration;
-            } else if matches!(
-                source_module.source_kind,
-                kiln_hir::SourceKind::Tsx | kiln_hir::SourceKind::Jsx
-            ) {
-                file.kind = hir::FileKind::Tsx;
-            }
-            self.unsupported
-                .lock()
-                .unwrap()
-                .extend(
-                    unsupported
-                        .into_iter()
-                        .map(|(span, message)| SourceDiagnostic {
-                            path: Some(name.clone()),
-                            span: Some(span),
-                            code: None,
-                            message: format!("checker adapter does not cover {message}"),
-                        }),
-                );
+            let (file, unsupported) = lower_module(module, &name, arena, atoms);
+            self.unsupported.lock().unwrap().extend(unsupported);
             file
         } else {
             self.unsupported.lock().unwrap().push(SourceDiagnostic {
@@ -760,162 +712,252 @@ fn push_config_errors(
     }
 }
 
+/// The checker's file for `module`, the oxc frontend's parse of the file at `name`, and what the
+/// checker cannot be trusted with in it: the parser's own diagnostics, which have no TypeScript
+/// code, and whatever the adapter does not cover. Each makes a result incomplete.
+pub(crate) fn lower_module<'s>(
+    module: &Module,
+    name: &str,
+    arena: &'s Arena,
+    atoms: &Interner<'s>,
+) -> (hir::File<'s>, Vec<SourceDiagnostic>) {
+    let source_module = module
+        .type_syntax
+        .original_module
+        .as_deref()
+        .unwrap_or(module);
+    let mut errors = Vec::new();
+    // Owned parser diagnostics remain authoritative. Checking a recovered AST must neither erase
+    // them nor publish specialization facts as complete.
+    if source_module.panicked || !source_module.diagnostics.is_empty() {
+        errors.extend(
+            source_module
+                .diagnostics
+                .iter()
+                .map(|diagnostic| SourceDiagnostic {
+                    path: Some(name.to_owned()),
+                    span: diagnostic.span,
+                    code: None,
+                    message: diagnostic.message.clone(),
+                }),
+        );
+        if source_module.panicked && source_module.diagnostics.is_empty() {
+            errors.push(SourceDiagnostic {
+                path: Some(name.to_owned()),
+                span: None,
+                code: None,
+                message: "source parser could not recover a complete module".into(),
+            });
+        }
+    }
+    // The loader's arena belongs to this session. Its lifetime is narrowed to the parse call.
+    let (mut file, unsupported) = Lower::new(source_module, atoms).finish(arena, atoms.session());
+    if is_declaration_file_name(name) {
+        file.kind = hir::FileKind::Declaration;
+    } else if matches!(
+        source_module.source_kind,
+        kiln_hir::SourceKind::Tsx | kiln_hir::SourceKind::Jsx
+    ) {
+        file.kind = hir::FileKind::Tsx;
+    }
+    errors.extend(
+        unsupported
+            .into_iter()
+            .map(|(span, message)| SourceDiagnostic {
+                path: Some(name.to_owned()),
+                span: Some(span),
+                code: None,
+                message: format!("checker adapter does not cover {message}"),
+            }),
+    );
+    (file, errors)
+}
+
 fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions) -> CheckResult {
     let session = Session::new();
     let host = SnapshotHost::new(snapshot);
-    let mut config_errors = Vec::new();
-    let mut opts = if let Some(path) = &options.config_path {
+    let root_files: Vec<Vec<u8>> = roots.iter().map(|p| p.as_bytes().to_vec()).collect();
+    let mut project = if let Some(path) = &options.config_path {
         let project =
             crate::engine::config::load_overriding(&host, &session, path.as_bytes(), &|_| {
                 Vec::new()
             });
         match project {
-            Ok(project) => {
-                config_errors = project.errors;
-                project.options
-            }
+            Ok(project) => project,
             // `tsc`: the file cannot be read (TS5083), and nothing is checked.
             Err(errors) => return unreadable_config(errors, options),
         }
     } else {
-        let mut opts = Options::default();
-        opts.base_dir = options.current_directory.as_bytes().to_vec();
-        opts.strict_null_checks = options.strict;
-        opts.strict_function_types = options.strict;
-        opts.no_implicit_any = options.strict;
-        opts.strict_bind_call_apply = options.strict;
-        opts.strict_property_initialization = options.strict;
-        opts.use_unknown_in_catch_variables = options.strict;
-        opts.no_implicit_this = options.strict;
-        opts.strict_builtin_iterator_return = options.strict;
-        opts.no_unchecked_indexed_access = options.no_unchecked_indexed_access;
-        opts.allow_importing_ts_extensions = true;
-        opts.target = crate::engine::resolve::ScriptTarget::ESNext;
-        opts.module = crate::engine::resolve::ModuleKind::Preserve;
-        // Preserve uses bundler resolution, including package exports/imports.
-        // Options::default alone does not derive the module-dependent flags.
-        opts.resolve_package_json_exports = true;
-        opts.resolve_package_json_imports = true;
-        opts.resolve_json_module = true;
-        opts.skip_lib_check = true;
-        opts.skip_default_lib_check = true;
-        opts.no_lib = options.libraries.is_empty();
-        opts.libs = options
-            .libraries
-            .iter()
-            .map(|path| path.as_bytes().to_vec())
-            .collect();
-        opts
+        let mut project = crate::engine::config::without_config(
+            &host,
+            options.current_directory.as_bytes(),
+            Json::Object(Vec::new()),
+            root_files.clone(),
+        );
+        project.options = {
+            let mut opts = Options::default();
+            opts.base_dir = options.current_directory.as_bytes().to_vec();
+            opts.strict_null_checks = options.strict;
+            opts.strict_function_types = options.strict;
+            opts.no_implicit_any = options.strict;
+            opts.strict_bind_call_apply = options.strict;
+            opts.strict_property_initialization = options.strict;
+            opts.use_unknown_in_catch_variables = options.strict;
+            opts.no_implicit_this = options.strict;
+            opts.strict_builtin_iterator_return = options.strict;
+            opts.no_unchecked_indexed_access = options.no_unchecked_indexed_access;
+            opts.allow_importing_ts_extensions = true;
+            opts.target = crate::engine::resolve::ScriptTarget::ESNext;
+            opts.module = crate::engine::resolve::ModuleKind::Preserve;
+            // Preserve uses bundler resolution, including package exports/imports.
+            // Options::default alone does not derive the module-dependent flags.
+            opts.resolve_package_json_exports = true;
+            opts.resolve_package_json_imports = true;
+            opts.resolve_json_module = true;
+            opts.skip_lib_check = true;
+            opts.skip_default_lib_check = true;
+            opts.no_lib = options.libraries.is_empty();
+            opts.libs = options
+                .libraries
+                .iter()
+                .map(|path| path.as_bytes().to_vec())
+                .collect();
+            opts
+        };
+        project
     };
-    opts.current_directory = options.current_directory.as_bytes().to_vec();
-    opts.no_emit = true;
-    opts.lib_dir = LIBRARY_DIRECTORY.as_bytes().to_vec();
-    let roots: Vec<_> = roots.iter().map(|p| p.as_bytes().to_vec()).collect();
-    let files = session
-        .arena()
-        .alloc(Files::load(&session, &host, opts, &roots));
-    let program = Program::new(&session, files);
-    let mut result = CheckResult {
-        checker_identity: format!("{}:{options:?}", crate::CHECKER_VERSION),
-        complete: true,
+    let configuration_valid = project.errors.is_empty();
+    project.options.current_directory = options.current_directory.as_bytes().to_vec();
+    project.options.no_emit = true;
+    project.options.lib_dir = LIBRARY_DIRECTORY.as_bytes().to_vec();
+    project.files = root_files;
+    // What only the checked program can answer: each source file's facts, which files are
+    // complete, and where the stack ran out.
+    #[derive(Default)]
+    struct Read {
+        types: Vec<SourceType>,
+        complete_files: Vec<(String, bool)>,
+        ran_out: bool,
+    }
+    let read: Mutex<Read> = Mutex::default();
+    let checked = |program: &Program<'_>, report: &crate::driver::Report| {
+        let files = program.files;
+        // The contracts of each source file, read from the published state by checkers outside
+        // the plan, whose own writes are dropped with them.
+        let sources: Vec<(FileId, String)> = files
+            .order
+            .iter()
+            .map(|&id| {
+                (
+                    id,
+                    String::from_utf8_lossy(files.module(id).file_name()).into_owned(),
+                )
+            })
+            .filter(|(_, path)| !path.starts_with(LIBRARY_DIRECTORY))
+            .collect();
+        let mut ran_out_in: Vec<FileId> = sources
+            .iter()
+            .filter(|(id, _)| {
+                report
+                    .incomplete
+                    .iter()
+                    .any(|path| path.as_slice() == files.module(*id).file_name())
+            })
+            .map(|&(id, _)| id)
+            .collect();
+        let (types, facts_ran_out) = source_facts(program, &sources, options, &host);
+        ran_out_in.extend(facts_ran_out);
+        let unsupported = host.unsupported.lock().unwrap();
+        let complete = complete_files(
+            files,
+            &sources,
+            &unsupported,
+            &ran_out_in,
+            configuration_valid,
+        );
+        *read.lock().unwrap() = Read {
+            types,
+            complete_files: complete,
+            ran_out: !ran_out_in.is_empty(),
+        };
+    };
+    let request = crate::driver::Request {
+        // Facts are read from the published state after the plan.
+        retains_everything: true,
+        checked: Some(&checked),
         ..Default::default()
     };
-    let configuration_valid = config_errors.is_empty();
-    push_config_errors(&mut result, config_errors, options);
-    // The donor driver's plan: steps of tasks, each task a checker of its own on some thread, and a
-    // barrier after each step that validates, links and publishes the tasks in task order. An
-    // invalid task's files are checked again in a later round of the same step.
-    let to_check: &[FileId] = files.order;
-    let bytes_of = |index: usize| files.module(to_check[index]).hir.source_len as usize;
-    // The identifiers of a file's expressions and its type nodes: each is a symbol to resolve or a
-    // type to compute (the donor's estimate).
-    let costs: Vec<usize> = to_check
-        .iter()
-        .map(|&file| {
-            let hir = &files.module(file).hir;
-            let identifiers = hir
-                .exprs
-                .iter()
-                .filter(|it| it.kind.tag() == hir::ExprTag::Ident)
-                .count();
-            identifiers + hir.types.len() + 1
+    let report = crate::driver::check_project(&host, project, &request);
+    let Read {
+        types,
+        complete_files,
+        ran_out,
+    } = read.into_inner().unwrap();
+    let mut result = CheckResult {
+        checker_identity: format!("{}:{options:?}", crate::CHECKER_VERSION),
+        types,
+        files: complete_files,
+        ..Default::default()
+    };
+    result.diagnostics = report
+        .diagnostics
+        .into_iter()
+        .map(|d| SourceDiagnostic {
+            path: (!d.path.is_empty()).then(|| String::from_utf8_lossy(&d.path).into_owned()),
+            span: (!d.has_undefined_range && !d.path.is_empty()).then(|| Span::new(d.start, d.end)),
+            code: Some(d.code),
+            message: String::from_utf8_lossy(&d.text).into_owned(),
         })
         .collect();
-    let cost_of = |index: usize| costs[index];
-    let plan = crate::plan::Plan::new(to_check.len(), &bytes_of, &cost_of);
-    let in_parallel = |count: usize, work: &(dyn Fn(usize) + Sync)| host.parallel(count, work);
-    struct Outcome<'s> {
-        finished: crate::engine::check::task::Finished<'s>,
-        checked: Vec<(FileId, crate::engine::check::errors::Checked)>,
-        /// The files in which the native stack ran out.
-        ran_out: Vec<FileId>,
-    }
-    let mut checked_files = Vec::new();
-    let mut ran_out_in: Vec<FileId> = Vec::new();
-    for (number, step) in plan.steps.iter().enumerate() {
-        let mut tasks = step.clone();
-        while !tasks.is_empty() {
-            let outcomes: Vec<Mutex<Option<Outcome>>> =
-                tasks.iter().map(|_| Mutex::new(None)).collect();
-            host.parallel(tasks.len(), &|index| {
-                let mut checker = program.checker();
-                checker.begin_stack_budget();
-                checker.begin_task(number as u32, index as u32, true);
-                let (mut checked, mut ran_out) = (Vec::new(), Vec::new());
-                for &file in &tasks[index] {
-                    let file = to_check[file];
-                    checked.push((file, checker.check_file(file)));
-                    if checker.take_ran_out_of_stack() {
-                        ran_out.push(file);
-                    }
-                }
-                let finished = checker.end_task();
-                *outcomes[index].lock().unwrap() = Some(Outcome {
-                    finished,
-                    checked,
-                    ran_out,
-                });
-            });
-            let outcomes: Vec<Outcome> = outcomes
-                .into_iter()
-                .map(|outcome| outcome.into_inner().unwrap().unwrap())
-                .collect();
-            let (mut finished, mut accepted) = (Vec::new(), Vec::new());
-            for outcome in outcomes {
-                finished.push(outcome.finished);
-                accepted.push((outcome.checked, outcome.ran_out));
-            }
-            let is_invalid = program.validate(&finished);
-            let mut invalid = Vec::new();
-            let mut at = is_invalid.iter();
-            finished.retain(|_| !*at.next().unwrap());
-            for ((checked, task_ran_out), (&is_invalid, task)) in
-                accepted.into_iter().zip(is_invalid.iter().zip(&tasks))
-            {
-                if is_invalid {
-                    invalid.extend(task.iter().copied());
-                } else {
-                    ran_out_in.extend(task_ran_out);
-                    checked_files.extend(checked);
-                }
-            }
-            program.link(&mut finished, &in_parallel);
-            program.publish(&mut finished, &in_parallel, false);
-            tasks = crate::plan::Plan::cut(invalid, &cost_of);
-        }
-    }
-    // The contracts of each source file, read from the published state by checkers outside the
-    // plan, whose own writes are dropped with them.
-    let sources: Vec<(FileId, String)> = to_check
+    let unsupported = host.unsupported.into_inner().unwrap();
+    result.complete = configuration_valid && unsupported.is_empty() && !ran_out;
+    // A parser error at the place of a checker error is the same error: TypeScript reports it
+    // from the checker's grammar checks, with a code. The result stays incomplete.
+    let coded: std::collections::HashSet<(&str, u32)> = result
+        .diagnostics
         .iter()
-        .map(|&id| {
-            (
-                id,
-                String::from_utf8_lossy(files.module(id).file_name()).into_owned(),
-            )
-        })
-        .filter(|(_, path)| !path.starts_with(LIBRARY_DIRECTORY))
+        .filter(|d| d.code.is_some())
+        .filter_map(|d| Some((d.path.as_deref()?, d.span?.start)))
         .collect();
+    let unsupported: Vec<_> = unsupported
+        .into_iter()
+        .filter(|d| {
+            d.code.is_some()
+                || !d
+                    .path
+                    .as_deref()
+                    .zip(d.span)
+                    .is_some_and(|(path, span)| coded.contains(&(path, span.start)))
+        })
+        .collect();
+    result.diagnostics.extend(unsupported);
+    if ran_out {
+        result.diagnostics.push(SourceDiagnostic {
+            path: None,
+            span: None,
+            code: None,
+            message: "source checker exhausted its stack budget".into(),
+        });
+    }
+    result
+        .types
+        .sort_by(|a, b| (&a.path, a.span).cmp(&(&b.path, b.span)));
+    result.diagnostics.sort_by(|a, b| {
+        (&a.path, a.span, a.code, &a.message).cmp(&(&b.path, b.span, b.code, &b.message))
+    });
+    result.diagnostics.dedup();
+    result
+}
+
+/// The facts of `sources` that `options` selects, and the files whose facts are incomplete
+/// because the stack ran out.
+fn source_facts(
+    program: &Program<'_>,
+    sources: &[(FileId, String)],
+    options: &CheckOptions,
+    host: &SnapshotHost<'_>,
+) -> (Vec<SourceType>, Vec<FileId>) {
+    let files = program.files;
     // A declaration file compiles to nothing, so its facts would go unread.
     let fact_sources: Vec<usize> = if options.facts == FactSelection::None {
         Vec::new()
@@ -977,95 +1019,18 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
         let ran_out = checker.take_ran_out_of_stack();
         *facts[index].lock().unwrap() = (types, ran_out);
     });
+    let (mut all, mut ran_out_in) = (Vec::new(), Vec::new());
     for (fact, &(id, _)) in facts
         .into_iter()
         .zip(fact_sources.iter().map(|&index| &sources[index]))
     {
         let (types, fact_ran_out) = fact.into_inner().unwrap();
-        result.types.extend(types);
+        all.extend(types);
         if fact_ran_out {
             ran_out_in.push(id);
         }
     }
-    let ran_out = !ran_out_in.is_empty();
-    // Diagnostics in program order, as a serial check reports them.
-    checked_files.sort_by_key(|&(id, _)| files.rank_of_file(id));
-    let checked_files: Vec<_> = checked_files
-        .into_iter()
-        .map(|(id, checked)| {
-            let path = String::from_utf8_lossy(files.module(id).file_name()).into_owned();
-            (id, path, checked)
-        })
-        .collect();
-    for (id, path, checked) in checked_files {
-        for d in program.finish_file(id, checked) {
-            result.diagnostics.push(SourceDiagnostic {
-                path: Some(path.clone()),
-                span: Some(Span::new(d.start, d.end)),
-                code: Some(d.code),
-                message: String::from_utf8_lossy(&d.text).into_owned(),
-            });
-        }
-    }
-    for (code, args) in program.global_errors() {
-        let mut text = Vec::new();
-        if let Some((_, template)) = crate::engine::messages::message(code) {
-            crate::engine::messages::format(&mut text, template, &args);
-        } else {
-            text.extend_from_slice(format!("Unknown TypeScript diagnostic TS{code}").as_bytes());
-        }
-        result.diagnostics.push(SourceDiagnostic {
-            path: None,
-            span: None,
-            code: Some(code),
-            message: String::from_utf8_lossy(&text).into_owned(),
-        });
-    }
-    let unsupported = host.unsupported.into_inner().unwrap();
-    result.complete = configuration_valid && unsupported.is_empty() && !ran_out;
-    result.files = complete_files(
-        files,
-        &sources,
-        &unsupported,
-        &ran_out_in,
-        configuration_valid,
-    );
-    // A parser error at the place of a checker error is the same error: TypeScript reports it
-    // from the checker's grammar checks, with a code. The result stays incomplete.
-    let coded: std::collections::HashSet<(&str, u32)> = result
-        .diagnostics
-        .iter()
-        .filter(|d| d.code.is_some())
-        .filter_map(|d| Some((d.path.as_deref()?, d.span?.start)))
-        .collect();
-    let unsupported: Vec<_> = unsupported
-        .into_iter()
-        .filter(|d| {
-            d.code.is_some()
-                || !d
-                    .path
-                    .as_deref()
-                    .zip(d.span)
-                    .is_some_and(|(path, span)| coded.contains(&(path, span.start)))
-        })
-        .collect();
-    result.diagnostics.extend(unsupported);
-    if ran_out {
-        result.diagnostics.push(SourceDiagnostic {
-            path: None,
-            span: None,
-            code: None,
-            message: "source checker exhausted its stack budget".into(),
-        });
-    }
-    result
-        .types
-        .sort_by(|a, b| (&a.path, a.span).cmp(&(&b.path, b.span)));
-    result.diagnostics.sort_by(|a, b| {
-        (&a.path, a.span, a.code, &a.message).cmp(&(&b.path, b.span, b.code, &b.message))
-    });
-    result.diagnostics.dedup();
-    result
+    (all, ran_out_in)
 }
 
 fn export_type(

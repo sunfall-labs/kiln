@@ -3,6 +3,9 @@
 //! Source types describe TypeScript's contract, not a proof of JavaScript runtime values.
 //! Optimizers must retain their guards or independently establish a Value Graph proof.
 #![feature(allocator_api)]
+#[cfg(feature = "baselines")]
+pub mod conformance;
+pub mod driver;
 mod engine;
 mod libraries;
 mod lower;

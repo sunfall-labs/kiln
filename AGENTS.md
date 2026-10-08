@@ -73,6 +73,8 @@ that assembly, in the repository, and `mise tasks` lists it beside the rest.
 | `mise run silent-undefined` | the expensive native-`undefined` class; several hundred compiles, not per-commit |
 | `mise run tsc-differential` | the source checker against `tsc` 7.0.2 on Bun's differential corpus; fails if a baseline case stops matching |
 | `mise run tsc-differential-update` | regenerate that baseline; deliberate, and the diff is the record |
+| `mise run ts-conformance` | TypeScript's own compiler and conformance tests through the source checker, graded against typescript-go's `.errors.txt`; fails if a test drops below its recorded level |
+| `mise run ts-conformance-update` | regenerate that baseline; deliberate, and the diff is the record |
 | `mise run facts` | check the committed whole-program facts baseline for benchmarks and bundles |
 | `mise run facts-update` | regenerate the facts baseline; deliberate, and the diff is the record |
 

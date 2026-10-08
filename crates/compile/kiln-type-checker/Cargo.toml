@@ -26,3 +26,7 @@ libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["e
 [dev-dependencies]
 kiln-frontend-oxc.workspace = true
 kiln-ir.workspace = true
+
+[[example]]
+name = "ts_conformance"
+required-features = ["baselines"]

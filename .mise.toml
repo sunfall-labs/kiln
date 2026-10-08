@@ -133,3 +133,11 @@ run = "./scripts/tsc_differential.py"
 [tasks.tsc-differential-update]
 description = "Regenerate the tsc differential baseline (deliberate: the diff is the record)"
 run = "./scripts/tsc_differential.py --update"
+
+[tasks.ts-conformance]
+description = "Run TypeScript's compiler and conformance tests through the source checker against typescript-go's baselines"
+run = "./scripts/ts_conformance.py"
+
+[tasks.ts-conformance-update]
+description = "Regenerate the TypeScript conformance baseline (deliberate: the diff is the record)"
+run = "./scripts/ts_conformance.py --update"
