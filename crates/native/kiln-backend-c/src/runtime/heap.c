@@ -5734,7 +5734,7 @@ static kiln_c99_graph_incoming_result kiln_c99_graph_outside_block(
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->receiver) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->promise) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->sent) ||
-            kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->async_return_value) ||
+            kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->return_value) ||
             kiln_c99_graph_value_in_batch(heap, chunks, count, &frame->delegate) ||
             kiln_c99_graph_in_batch(heap, chunks, count, frame->locals) ||
             kiln_c99_graph_in_batch(heap, chunks, count, frame->stack) ||
@@ -8391,7 +8391,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_value(heap, &frame->receiver);
         kiln_c99_gc_mark_value(heap, &frame->promise);
         kiln_c99_gc_mark_value(heap, &frame->sent);
-        kiln_c99_gc_mark_value(heap, &frame->async_return_value);
+        kiln_c99_gc_mark_value(heap, &frame->return_value);
         kiln_c99_gc_mark_value(heap, &frame->delegate);
         if (frame->function.tag == KILN_VALUE_FUNCTION) {
             const kiln_closure *closure = (const kiln_closure *)(uintptr_t)frame->function.bits;

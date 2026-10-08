@@ -1286,6 +1286,30 @@ static int kiln_c99_generator_step(kiln_host *host, kiln_value produced, int don
     return KILN_C99_OK;
 }
 
+/* A return completion stays on the suspended frame while finally blocks yield. All three
+ * resumption entries use this classifier so a nested throw, an explicit finalizer return, and
+ * the original RETURN_SIGNAL have the same precedence. A yielded body keeps the completion. */
+static int kiln_c99_generator_resolve_return(kiln_generator *frame, int status,
+                                             kiln_value produced, kiln_value *thrown,
+                                             kiln_value *completion) {
+    if (!frame->return_pending || status == KILN_C99_YIELDED) return 0;
+    if (status == KILN_C99_OK) {
+        *completion = produced;
+    } else if (status == KILN_C99_THROWN && thrown != NULL &&
+               kiln_val_from_boundary(*thrown) == KILN_VAL_RETURN_SIGNAL) {
+        *completion = frame->return_value;
+    } else {
+        frame->return_pending = 0;
+        kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
+        return 0;
+    }
+    frame->return_pending = 0;
+    if (kiln_c99_is_reference(*completion))
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)completion->bits);
+    kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
+    return 1;
+}
+
 static int kiln_c99_is_object(kiln_value val) {
     return val.tag != KILN_VALUE_UNDEFINED && val.tag != KILN_VALUE_NULL &&
            (kiln_c99_is_reference(val) || val.tag == KILN_VALUE_DATE);
@@ -1360,12 +1384,22 @@ static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln
             return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 0, result, depth, thrown);
         }
         frame->done = 1;
-        if (status != KILN_C99_OK) {
-            return status;
+        {
+            kiln_value completion;
+            if (kiln_c99_generator_resolve_return(frame, status,
+                                                   kiln_val_to_boundary(vproduced), thrown,
+                                                   &completion)) {
+                return kiln_c99_generator_step(host, completion, 1, result, depth, thrown);
+            }
         }
+        if (status != KILN_C99_OK) return status;
         return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 1, result, depth, thrown);
     }
     frame->done = 1;
+    if (frame->return_pending) {
+        frame->return_pending = 0;
+        kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
+    }
     if (thrown != NULL) {
         *thrown = error;
     }
@@ -1378,6 +1412,8 @@ static int kiln_c99_generator_close_with(kiln_host *host, kiln_generator *frame,
     frame->delegate_exit = 0;
     frame->delegate_wrapped = 0;
     if (frame->handler_top != 0 && !frame->done && !frame->async_generator) {
+        frame->return_pending = 1;
+        kiln_c99_heap_store_value(frame, &frame->return_value, return_val);
         frame->raising = 1;
         kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_return_signal());
         kiln_closure *closure = kiln_c99_closure_of(frame->function);
@@ -1391,11 +1427,24 @@ static int kiln_c99_generator_close_with(kiln_host *host, kiln_generator *frame,
             return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 0, result, depth, thrown);
         }
         frame->done = 1;
-        if (status != KILN_C99_OK && thrown != NULL && kiln_val_from_boundary(*thrown) != KILN_VAL_RETURN_SIGNAL) {
-            return status;
+        {
+            kiln_value completion;
+            if (kiln_c99_generator_resolve_return(frame, status,
+                                                   kiln_val_to_boundary(vproduced), thrown,
+                                                   &completion)) {
+                return_val = completion;
+            } else if (status != KILN_C99_OK) {
+                return status;
+            }
         }
     }
     frame->done = 1;
+    if (frame->return_pending) {
+        frame->return_pending = 0;
+        kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
+    }
+    if (kiln_c99_is_reference(return_val))
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)return_val.bits);
     return kiln_c99_generator_step(host, return_val, 1, result, depth, thrown);
 }
 

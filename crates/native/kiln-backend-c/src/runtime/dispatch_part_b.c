@@ -1174,12 +1174,26 @@
                     return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 0, result, depth, thrown);
                 }
                 frame->done = 1;
+                {
+                    kiln_value completion;
+                    if (kiln_c99_generator_resolve_return(frame, status,
+                                                           kiln_val_to_boundary(vproduced),
+                                                           thrown, &completion)) {
+                        return kiln_c99_generator_step(host, completion, 1, result, depth,
+                                                       thrown);
+                    }
+                }
                 if (status != KILN_C99_OK) {
                     return status;
                 }
                 return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 1, result, depth, thrown);
             }
             frame->done = 1;
+            if (frame->return_pending) {
+                frame->return_pending = 0;
+                kiln_c99_heap_store_value(frame, &frame->return_value,
+                                          kiln_c99_undefined());
+            }
             if (thrown != NULL) {
                 *thrown = argc > 0 ? args[0] : kiln_c99_undefined();
             }
@@ -1236,10 +1250,21 @@
                     frame->started = 1;
                     finished = 0;
                 } else if (status != KILN_C99_OK) {
+                    kiln_value completion;
                     frame->done = 1;
-                    return status;
+                    if (kiln_c99_generator_resolve_return(frame, status, produced,
+                                                           thrown, &completion)) {
+                        produced = completion;
+                        status = KILN_C99_OK;
+                    } else {
+                        return status;
+                    }
                 } else {
+                    kiln_value completion;
                     frame->done = 1;
+                    if (kiln_c99_generator_resolve_return(frame, status, produced,
+                                                           thrown, &completion))
+                        produced = completion;
                 }
             }
             if (status == KILN_C99_YIELDED && frame->delegate.tag != KILN_VALUE_UNDEFINED) {

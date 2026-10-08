@@ -3100,8 +3100,9 @@ typedef struct kiln_generator {
     uint8_t async_request_kind;
     uint8_t async_delegate_close;
     uint8_t async_delegate_result_done;
-    uint8_t async_return_pending;
-    kiln_value async_return_value;
+    /* A generator return completion survives yields in finally; async and sync frames share it. */
+    uint8_t return_pending;
+    kiln_value return_value;
     kiln_value delegate;
     size_t delegate_exit;
     uint8_t delegate_wrapped;

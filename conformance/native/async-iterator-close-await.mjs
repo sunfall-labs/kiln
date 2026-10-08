@@ -58,6 +58,57 @@ async function main() {
   }
   console.log(`finally-throw ${interruptCleanup.value}/${interruptCleanup.done} ${interruptedWith}`);
 
+  function* returnSurvivesCaughtThrow() {
+    try {
+      yield "body";
+    } finally {
+      try {
+        yield "cleanup";
+        yield "pause";
+      } catch (error) {
+        yield "caught:" + error.message;
+      }
+    }
+  }
+  const caught = returnSurvivesCaughtThrow();
+  caught.next();
+  const caughtCleanup = caught.return("original");
+  const caughtThrow = caught.throw(new Error("injected"));
+  const caughtReturn = caught.next();
+  console.log(`finally-caught-throw ${caughtCleanup.value}/${caughtCleanup.done} ${caughtThrow.value}/${caughtThrow.done} ${caughtReturn.value}/${caughtReturn.done}`);
+
+  function* returnCompletesAfterCaughtThrow() {
+    try {
+      yield "body";
+    } finally {
+      try {
+        yield "cleanup";
+      } catch (_) {
+        // Catching the injected throw lets the suspended return completion continue.
+      }
+    }
+  }
+  const caughtToCompletion = returnCompletesAfterCaughtThrow();
+  caughtToCompletion.next();
+  const caughtToCompletionCleanup = caughtToCompletion.return("original");
+  const caughtToCompletionResult = caughtToCompletion.throw(new Error("injected"));
+  console.log(`finally-caught-throw-complete ${caughtToCompletionCleanup.value}/${caughtToCompletionCleanup.done} ${caughtToCompletionResult.value}/${caughtToCompletionResult.done}`);
+
+  function* returnKeepsObjectAcrossFinally() {
+    try {
+      yield "body";
+    } finally {
+      yield "cleanup";
+      // Allocate after the caller has dropped its only reference to the return payload.
+      for (let i = 0; i < 64; i++) ({ value: [i, { nested: true }] });
+    }
+  }
+  const rooted = returnKeepsObjectAcrossFinally();
+  rooted.next();
+  const rootedCleanup = rooted.return({ marker: "held" });
+  const rootedResult = rooted.next();
+  console.log(`finally-return-root ${rootedCleanup.value}/${rootedCleanup.done} ${rootedResult.value.marker}/${rootedResult.done}`);
+
   function* returnReplacedByReturn() {
     try {
       yield "body";

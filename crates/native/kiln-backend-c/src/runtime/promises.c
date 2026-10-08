@@ -850,13 +850,13 @@ static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value ge
         }
     }
     if (request_kind == KILN_C99_ASYNC_REQUEST_THROW) {
-        frame->async_return_pending = 0;
-        kiln_c99_heap_store_value(frame, &frame->async_return_value, kiln_c99_undefined());
+        frame->return_pending = 0;
+        kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
         return kiln_c99_async_generator_step(host, generator, sent, 1, depth, thrown);
     }
     if (request_kind == KILN_C99_ASYNC_REQUEST_RETURN) {
-        frame->async_return_pending = 1;
-        kiln_c99_heap_store_value(frame, &frame->async_return_value, sent);
+        frame->return_pending = 1;
+        kiln_c99_heap_store_value(frame, &frame->return_value, sent);
         if (frame->handler_top != 0) {
             kiln_closure *closure = kiln_c99_closure_of(frame->function);
             kiln_val produced = KILN_VAL_UNDEFINED;
@@ -878,18 +878,18 @@ static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value ge
             if (status == KILN_C99_THROWN) {
                 frame->done = 1;
                 if (kiln_val_from_boundary(*thrown) == KILN_VAL_RETURN_SIGNAL) {
-                    kiln_value return_value = frame->async_return_value;
-                    frame->async_return_pending = 0;
+                    kiln_value return_value = frame->return_value;
+                    frame->return_pending = 0;
                     if (kiln_c99_is_reference(return_value))
                         kiln_c99_gc_keep_alive((const void *)(uintptr_t)return_value.bits);
-                    kiln_c99_heap_store_value(frame, &frame->async_return_value,
+                    kiln_c99_heap_store_value(frame, &frame->return_value,
                                               kiln_c99_undefined());
                     return kiln_c99_async_generator_finish_closed(host, frame, promise,
                                                                    return_value, 0, depth,
                                                                    thrown);
                 } else {
-                    frame->async_return_pending = 0;
-                    kiln_c99_heap_store_value(frame, &frame->async_return_value,
+                    frame->return_pending = 0;
+                    kiln_c99_heap_store_value(frame, &frame->return_value,
                                               kiln_c99_undefined());
                     return kiln_c99_async_generator_finish_closed(host, frame, promise, *thrown,
                                                                    1, depth, thrown);
@@ -899,10 +899,10 @@ static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value ge
             sent = kiln_val_to_boundary(produced);
         }
         frame->done = 1;
-        frame->async_return_pending = 0;
+        frame->return_pending = 0;
         if (kiln_c99_is_reference(sent))
             kiln_c99_gc_keep_alive((const void *)(uintptr_t)sent.bits);
-        kiln_c99_heap_store_value(frame, &frame->async_return_value, kiln_c99_undefined());
+        kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
         return kiln_c99_async_generator_finish_closed(host, frame, promise, sent, 0, depth,
                                                        thrown);
     }
@@ -1028,8 +1028,8 @@ static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *t
                  * completion at the suspended yield. The body may catch it; otherwise the
                  * request rejects and closes the generator. A closed generator has no body to
                  * resume, but the return request's awaited operand still rejects its promise. */
-                frame->async_return_pending = 0;
-                kiln_c99_heap_store_value(frame, &frame->async_return_value,
+                frame->return_pending = 0;
+                kiln_c99_heap_store_value(frame, &frame->return_value,
                                           kiln_c99_undefined());
                 if (!frame->done) {
                     /* A rejected return operand becomes a throw completion at the suspended
@@ -1430,18 +1430,18 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
     }
     if (status == KILN_C99_THROWN) {
         frame->done = 1;
-        if (frame->async_return_pending &&
+        if (frame->return_pending &&
             kiln_val_from_boundary(*thrown) == KILN_VAL_RETURN_SIGNAL) {
-            kiln_value return_value = frame->async_return_value;
-            frame->async_return_pending = 0;
+            kiln_value return_value = frame->return_value;
+            frame->return_pending = 0;
             if (kiln_c99_is_reference(return_value))
                 kiln_c99_gc_keep_alive((const void *)(uintptr_t)return_value.bits);
-            kiln_c99_heap_store_value(frame, &frame->async_return_value, kiln_c99_undefined());
+            kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
             return kiln_c99_async_generator_finish_closed(host, frame, step, return_value, 0,
                                                            depth, thrown);
         } else {
-            frame->async_return_pending = 0;
-            kiln_c99_heap_store_value(frame, &frame->async_return_value, kiln_c99_undefined());
+            frame->return_pending = 0;
+            kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
             return kiln_c99_async_generator_finish_closed(host, frame, step, *thrown, 1, depth,
                                                            thrown);
         }
@@ -1451,9 +1451,9 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
         return status;
     }
     frame->done = 1;
-    if (frame->async_return_pending) {
-        frame->async_return_pending = 0;
-        kiln_c99_heap_store_value(frame, &frame->async_return_value, kiln_c99_undefined());
+    if (frame->return_pending) {
+        frame->return_pending = 0;
+        kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
     }
     return kiln_c99_async_generator_finish_closed(host, frame, step, produced, 0, depth, thrown);
 }
