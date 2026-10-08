@@ -1010,7 +1010,18 @@ impl<'a, 's> Lower<'a, 's> {
                 loc.pos = skip_trivia_back(text, loc.pos as usize) as u32;
             }
         };
-        file.stmts.iter_mut().for_each(|it| widen(&mut it.loc));
+        // A declaration's node starts at its first modifier: `export function f();`.
+        let modifiers = &file.modifiers;
+        file.stmts.iter_mut().for_each(|it| {
+            let first = (it.modifiers.iter()).map(|m| modifiers[m.idx()].pos).min();
+            if let Some(first) = first
+                && first < it.loc.pos
+                && it.loc.end != 0
+            {
+                it.loc.pos = first;
+            }
+            widen(&mut it.loc)
+        });
         file.var_decls.iter_mut().for_each(|it| widen(&mut it.loc));
         file.enum_members
             .iter_mut()
