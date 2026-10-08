@@ -478,6 +478,7 @@ fn dce_release_graph(
         let Ok(mut program) = kiln_ir::compile_module(&hir) else {
             continue;
         };
+        carry_type_annotations(&node.program, &mut program);
 
         let mut imports = Vec::new();
         for mut import in program.imports {
@@ -524,6 +525,34 @@ fn dce_release_graph(
         // failure. An unfamiliar export/re-export shape keeps the already
         // reduced graph and its original slot numbering.
         Err(_) => (graph.clone(), demand.clone()),
+    }
+}
+
+/// Carry each function's type annotations -- the checker's source contracts among them -- from
+/// the program a reparse replaces into the one that replaces it. The reparse compiles the module's
+/// source again, and the source has no annotations of its own: a TypeScript module's executable
+/// source is its generated JavaScript, and its contracts were attached to the first compilation
+/// from the checker's facts. DCE preserves AST byte spans, so a surviving function has the span it
+/// had.
+fn carry_type_annotations(
+    previous: &kiln_ir::ModuleProgram,
+    reparsed: &mut kiln_ir::ModuleProgram,
+) {
+    let annotated: BTreeMap<_, _> = previous
+        .program
+        .functions
+        .iter()
+        .filter_map(|proto| Some((proto.span, proto.type_annotations.as_ref()?)))
+        .collect();
+    if annotated.is_empty() {
+        return;
+    }
+    for proto in &mut reparsed.program.functions {
+        if proto.type_annotations.is_none()
+            && let Some(annotations) = annotated.get(&proto.span)
+        {
+            proto.type_annotations = Some((*annotations).clone());
+        }
     }
 }
 
@@ -625,6 +654,7 @@ fn native_import_meta_reparse(
         let Ok(mut program) = kiln_ir::compile_module(&hir) else {
             continue;
         };
+        carry_type_annotations(&node.program, &mut program);
 
         let reparsed_names = program
             .exports
