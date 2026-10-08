@@ -6,9 +6,7 @@ mod scan;
 mod tags;
 mod types;
 
-use kiln_hir::jsdoc::{
-    CommentRange, JsDocComment, JsDocDiagnostic, JsDocDiagnosticKind, JsDocSyntax,
-};
+use kiln_hir::jsdoc::{CommentRange, JsDocComment, JsDocFunctionContext, JsDocSyntax};
 
 /// `isJSDocLikeText`
 fn is_jsdoc_like(comment: &str) -> bool {
@@ -20,8 +18,13 @@ fn is_jsdoc_like(comment: &str) -> bool {
 pub(crate) fn parse_comments(
     source: &str,
     ranges: impl IntoIterator<Item = (u32, u32)>,
+    mut functions: Vec<JsDocFunctionContext>,
 ) -> JsDocSyntax {
-    let mut syntax = JsDocSyntax::default();
+    functions.sort_by_key(|function| (function.start, function.end));
+    let mut syntax = JsDocSyntax {
+        functions,
+        ..JsDocSyntax::default()
+    };
     for (start, end) in ranges {
         let (start, end) = (start as usize, (end as usize).min(source.len()));
         let Some(comment) = source.get(start..end) else {
@@ -45,7 +48,20 @@ pub(crate) fn parse_comments(
         {
             continue;
         }
-        let read = tags::Reader::read(source, start, end);
+        // `withJSDoc`: in the [Await] and [Yield] contexts of its place. Only the names of an
+        // `@import` tag depend on them.
+        let context = if comment.contains("@import") {
+            let around = syntax
+                .functions
+                .iter()
+                .filter(|f| (f.start as usize..f.end as usize).contains(&start));
+            around
+                .max_by_key(|f| f.start)
+                .map_or((false, false), |f| (f.is_async, f.is_generator))
+        } else {
+            (false, false)
+        };
+        let read = tags::Reader::read(source, start, end, context);
         syntax.asterisks.extend(read.asterisks);
         syntax.docs.push(JsDocComment {
             start: start as u32,
@@ -58,9 +74,6 @@ pub(crate) fn parse_comments(
     syntax.asterisks.dedup();
     syntax
 }
-
-#[allow(dead_code)]
-fn _unused(_: JsDocDiagnostic, _: JsDocDiagnosticKind) {}
 
 #[cfg(test)]
 mod tests;

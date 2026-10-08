@@ -179,11 +179,14 @@ pub(super) struct Read {
 
 impl<'a> Reader<'a> {
     /// `parseJSDocComment` for the comment from `start` to `end` of `source`.
-    pub fn read(source: &'a str, start: usize, end: usize) -> Read {
+    pub fn read(source: &'a str, start: usize, end: usize, context: (bool, bool)) -> Read {
         let text = &source[..end - 2];
+        let mut types = TypeParser::new(text, start + 3, false);
+        types.await_context = context.0;
+        types.yield_context = context.1;
         let mut reader = Reader {
             text,
-            types: TypeParser::new(text, start + 3, false),
+            types,
             token: Token::Unknown,
             full_start: start + 3,
             start: start + 3,
@@ -578,6 +581,8 @@ impl<'a> Reader<'a> {
     /// `isIdentifier`, of the word `word`.
     fn is_identifier(&self, word: &str) -> bool {
         !super::scan::Scanner::is_reserved_word(word)
+            && !(word == "await" && self.types.await_context)
+            && !(word == "yield" && self.types.yield_context)
     }
 
     /// `parseImportTag`, starting at the token after the tag name.
@@ -660,8 +665,11 @@ impl<'a> Reader<'a> {
             self.types.next_token();
         } else if self.types.s.tok == Tok::Eof || self.types.s.newline_before {
             self.types.error_at_current_token(1109);
-        } else {
+        } else if import.has_clause || self.types.s.tok != Tok::Ident {
             self.types.error_at_current_token(1141);
+            self.types.next_token();
+        } else {
+            // `await from "./b"`, where `await` is no name: an expression.
             self.types.next_token();
         }
         if self.types.is_word_token("with") || self.types.is_word_token("assert") {

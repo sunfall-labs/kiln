@@ -267,6 +267,15 @@ pub struct CommentRange {
     pub see_or_link: bool,
 }
 
+/// A function of the file, for the `[Await]` and `[Yield]` contexts of the comments inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsDocFunctionContext {
+    pub start: u32,
+    pub end: u32,
+    pub is_async: bool,
+    pub is_generator: bool,
+}
+
 /// The comments of a JavaScript file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JsDocSyntax {
@@ -277,6 +286,8 @@ pub struct JsDocSyntax {
     /// `TokenFlagsPrecedingJSDocLeadingAsterisks`: the `*` at the start of a line of a type in a
     /// JSDoc comment, which the scanner passed over as trivia of the next token. Sorted.
     pub asterisks: Vec<u32>,
+    /// The functions of the file, by start.
+    pub functions: Vec<JsDocFunctionContext>,
 }
 
 impl JsDocSyntax {

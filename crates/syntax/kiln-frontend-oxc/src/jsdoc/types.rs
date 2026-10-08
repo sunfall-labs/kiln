@@ -33,6 +33,9 @@ pub(super) struct TypeParser<'a> {
     pub diagnostics: Vec<JsDocDiagnostic>,
     contexts: Vec<Ctx>,
     disallow_conditional: bool,
+    /// `inAwaitContext`, `inYieldContext`
+    pub await_context: bool,
+    pub yield_context: bool,
 }
 
 pub(super) struct Mark {
@@ -73,6 +76,8 @@ impl<'a> TypeParser<'a> {
             diagnostics: Vec::new(),
             contexts: Vec::new(),
             disallow_conditional: false,
+            await_context: false,
+            yield_context: false,
         }
     }
 
@@ -98,7 +103,10 @@ impl<'a> TypeParser<'a> {
 
     /// `isIdentifier`
     fn is_identifier(&self) -> bool {
-        self.tok() == Tok::Ident && (self.s.has_escape || !Scanner::is_reserved_word(&self.s.value))
+        self.tok() == Tok::Ident
+            && (self.s.has_escape || !Scanner::is_reserved_word(&self.s.value))
+            && !(self.await_context && self.s.value == "await")
+            && !(self.yield_context && self.s.value == "yield")
     }
 
     fn pos(&self) -> usize {

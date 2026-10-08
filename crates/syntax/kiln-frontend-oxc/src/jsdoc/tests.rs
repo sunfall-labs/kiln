@@ -13,7 +13,7 @@ fn parse(source: &str) -> JsDocSyntax {
         ranges.push((start as u32, end as u32));
         at = end;
     }
-    parse_comments(source, ranges)
+    parse_comments(source, ranges, Vec::new())
 }
 
 #[test]

@@ -3218,6 +3218,87 @@ fn capture_type_syntax(
                 walk::walk_parenthesized_expression(self, node);
             }
         }
+        // Where declarations' names start, which executable HIR does not record.
+        struct Names<'c>(Collector<'c>);
+        impl<'a> Visit<'a> for Names<'_> {
+            fn enter_node(&mut self, kind: oxc_ast::AstKind<'a>) {
+                self.0.enter_node(kind);
+            }
+            fn visit_binding_identifier(&mut self, node: &oxc_ast::ast::BindingIdentifier<'a>) {
+                self.0.visit_binding_identifier(node);
+            }
+            fn visit_array_pattern(&mut self, node: &oxc_ast::ast::ArrayPattern<'a>) {
+                self.0
+                    .result
+                    .binding_patterns
+                    .push(HirSpan::new(node.span.start, node.span.end));
+                walk::walk_array_pattern(self, node);
+            }
+            fn visit_object_pattern(&mut self, node: &oxc_ast::ast::ObjectPattern<'a>) {
+                self.0
+                    .result
+                    .binding_patterns
+                    .push(HirSpan::new(node.span.start, node.span.end));
+                walk::walk_object_pattern(self, node);
+            }
+            fn visit_array_assignment_target(
+                &mut self,
+                node: &oxc_ast::ast::ArrayAssignmentTarget<'a>,
+            ) {
+                self.0
+                    .result
+                    .binding_patterns
+                    .push(HirSpan::new(node.span.start, node.span.end));
+                walk::walk_array_assignment_target(self, node);
+            }
+            fn visit_object_assignment_target(
+                &mut self,
+                node: &oxc_ast::ast::ObjectAssignmentTarget<'a>,
+            ) {
+                self.0
+                    .result
+                    .binding_patterns
+                    .push(HirSpan::new(node.span.start, node.span.end));
+                walk::walk_object_assignment_target(self, node);
+            }
+        }
+        let mut names = Names(Collector {
+            source,
+            path: path.map(str::to_owned),
+            native_import_meta,
+            result: HirTypeSyntax::default(),
+            classified: HashSet::new(),
+            dotted: HashSet::new(),
+        });
+        names.visit_program(program);
+        // The functions, whose contexts a comment inside is read in.
+        struct Functions(Vec<kiln_hir::jsdoc::JsDocFunctionContext>);
+        impl<'a> Visit<'a> for Functions {
+            fn visit_function(
+                &mut self,
+                node: &oxc_ast::ast::Function<'a>,
+                flags: oxc_semantic::ScopeFlags,
+            ) {
+                self.0.push(kiln_hir::jsdoc::JsDocFunctionContext {
+                    start: node.span.start,
+                    end: node.span.end,
+                    is_async: node.r#async,
+                    is_generator: node.generator,
+                });
+                walk::walk_function(self, node, flags);
+            }
+            fn visit_arrow_function_expression(&mut self, node: &ArrowFunctionExpression<'a>) {
+                self.0.push(kiln_hir::jsdoc::JsDocFunctionContext {
+                    start: node.span.start,
+                    end: node.span.end,
+                    is_async: node.r#async,
+                    is_generator: false,
+                });
+                walk::walk_arrow_function_expression(self, node);
+            }
+        }
+        let mut functions = Functions(Vec::new());
+        functions.visit_program(program);
         let mut parentheses = Parentheses(Vec::new());
         parentheses.visit_program(program);
         parentheses
@@ -3226,12 +3307,16 @@ fn capture_type_syntax(
         return HirTypeSyntax {
             module_attributes,
             expression_wrappers: parentheses.0,
+            names: names.0.result.names,
+            binding_identifiers: names.0.result.binding_identifiers,
+            binding_patterns: names.0.result.binding_patterns,
             jsdoc: jsdoc::parse_comments(
                 source,
                 program
                     .comments
                     .iter()
                     .map(|comment| (comment.span.start, comment.span.end)),
+                functions.0,
             ),
             ..HirTypeSyntax::default()
         };
