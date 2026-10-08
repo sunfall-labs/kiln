@@ -4653,6 +4653,28 @@ fn capture_type_syntax(
         // would otherwise lose the statement -- and with it the module's export shape. The
         // expression is lowered exactly as an enum initializer is: a fresh lowerer over the
         // authored source, so its spans address the text the checker reads.
+        fn visit_array_pattern(&mut self, node: &oxc_ast::ast::ArrayPattern<'a>) {
+            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
+            walk::walk_array_pattern(self, node);
+        }
+        fn visit_object_pattern(&mut self, node: &oxc_ast::ast::ObjectPattern<'a>) {
+            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
+            walk::walk_object_pattern(self, node);
+        }
+        fn visit_array_assignment_target(
+            &mut self,
+            node: &oxc_ast::ast::ArrayAssignmentTarget<'a>,
+        ) {
+            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
+            walk::walk_array_assignment_target(self, node);
+        }
+        fn visit_object_assignment_target(
+            &mut self,
+            node: &oxc_ast::ast::ObjectAssignmentTarget<'a>,
+        ) {
+            (self.result.binding_patterns).push(HirSpan::new(node.span.start, node.span.end));
+            walk::walk_object_assignment_target(self, node);
+        }
         fn visit_export_named_declaration(
             &mut self,
             node: &oxc_ast::ast::ExportNamedDeclaration<'a>,

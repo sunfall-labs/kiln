@@ -22,6 +22,8 @@ pub(crate) struct Lower<'a, 's> {
     /// as TypeScript emits it, with a `this.x = x` statement of the parameter's span in the body;
     /// the checker reads the parameter, and that statement is not in the source.
     pub(super) parameter_properties: rustc_hash::FxHashSet<k::Span>,
+    /// The binding patterns already given to a pattern node; see `Lower::pattern_span`.
+    pub(super) used_patterns: rustc_hash::FxHashSet<u32>,
     /// The `import x = ...` declarations lowered so far, by start.
     pub(super) lowered_import_equals: rustc_hash::FxHashSet<u32>,
     /// Indexes of the sidecar lists, which lowering would otherwise search once per node.
@@ -180,6 +182,7 @@ impl<'a, 's> Lower<'a, 's> {
             .collect();
         Self {
             parameter_properties,
+            used_patterns: rustc_hash::FxHashSet::default(),
             file,
             module,
             atoms,

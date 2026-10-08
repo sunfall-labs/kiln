@@ -2246,6 +2246,7 @@ pub fn run(suite: &Suite, setup: &Setup) -> Vec<Outcome> {
                                     let dir = format!("{out}/{}", suite.name);
                                     let path = format!("{dir}/{configured}.errors.txt");
                                     write_file_to_look_at(&path, ours.as_bytes());
+                                    write_file_to_look_at(&format!("{path}.expected"), expected.as_bytes());
                                 }
                                 let note = if level == Level::Differs {
                                     let (a, b) = (heads(top_of(&ours)), heads(top_of(&expected)));

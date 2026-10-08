@@ -131,10 +131,10 @@ impl<'a, 's> Lower<'a, 's> {
     }
 
     pub(super) fn pattern(&mut self, p: &k::Pattern, span: k::Span) -> b::PatId {
-        let span = if let k::Pattern::Identifier(name) = p {
-            self.binding_span(name, span)
-        } else {
-            span
+        let span = match p {
+            k::Pattern::Identifier(name) => self.binding_span(name, span),
+            k::Pattern::Object { .. } | k::Pattern::Array { .. } => self.pattern_span(span),
+            _ => span,
         };
         let kind = match p {
             k::Pattern::Identifier(name) => b::PatKind::Ident(self.atom(name)),
@@ -177,16 +177,17 @@ impl<'a, 's> Lower<'a, 's> {
                     })
                     .collect();
                 if let Some(rest) = rest {
-                    let value = self.pattern(rest, span);
+                    let at = self.rest_span(span);
+                    let value = self.pattern(rest, at);
                     props.push(b::PatProp {
                         key: b::PropKey::None,
                         name_kind: b::NameKind::Identifier,
                         value,
                         default: b::ExprId::NONE,
                         is_rest: true,
-                        pos: span.start,
-                        key_pos: span.start,
-                        end: span.end,
+                        pos: at.start,
+                        key_pos: at.start,
+                        end: at.end,
                     });
                 }
                 b::PatKind::Object(self.file.add_pat_props(&props))
@@ -213,13 +214,14 @@ impl<'a, 's> Lower<'a, 's> {
                     })
                     .collect();
                 if let Some(rest) = rest {
-                    let pat = self.pattern(rest, span);
+                    let at = self.rest_span(span);
+                    let pat = self.pattern(rest, at);
                     elems.push(b::PatElem {
                         pat,
                         default: b::ExprId::NONE,
                         is_rest: true,
-                        start: span.start,
-                        end: span.end,
+                        start: at.start,
+                        end: at.end,
                     });
                 }
                 b::PatKind::Array(self.file.add_pat_elems(&elems))
@@ -232,6 +234,44 @@ impl<'a, 's> Lower<'a, 's> {
             }
         };
         self.file.pat(kind, span.start, span.end)
+    }
+
+    /// The span of the array or object pattern that is next within `within`: patterns are lowered
+    /// in source order, so it is the first recorded one there that no pattern node has yet.
+    fn pattern_span(&mut self, within: k::Span) -> k::Span {
+        let patterns = &self.module.type_syntax.binding_patterns;
+        let first = patterns.partition_point(|p| p.start < within.start);
+        let found = patterns[first..]
+            .iter()
+            .take_while(|p| p.start < within.end)
+            .find(|p| p.end <= within.end && !self.used_patterns.contains(&p.start))
+            .copied();
+        match found {
+            Some(span) => {
+                self.used_patterns.insert(span.start);
+                span
+            }
+            None => within,
+        }
+    }
+
+    /// The rest element of the pattern at `pattern`: from its last `...` to the last token before
+    /// the closing bracket, without a trailing comma, which the checker reports (1013).
+    fn rest_span(&self, pattern: k::Span) -> k::Span {
+        let source = self.module.source.as_bytes();
+        let text = &source[pattern.start as usize..pattern.end as usize];
+        let Some(dots) = text.windows(3).rposition(|it| it == b"...") else {
+            return pattern;
+        };
+        let inner = text[..text.len().saturating_sub(1)].trim_ascii_end();
+        let inner = inner.strip_suffix(b",").unwrap_or(inner).trim_ascii_end();
+        if inner.len() <= dots {
+            return pattern;
+        }
+        k::Span::new(
+            pattern.start + dots as u32,
+            pattern.start + inner.len() as u32,
+        )
     }
 
     /// The name of `#name`, which keeps its `#` as the checker spells it (`PRIVATE_NAME_PREFIX`,
@@ -765,7 +805,16 @@ impl<'a, 's> Lower<'a, 's> {
                 let target = match property.as_ref() {
                     k::ObjectKey::Static(name) => {
                         let obj = self.expr(object);
-                        let name_pos = span.end.saturating_sub(name.len() as u32);
+                        // The name is the last thing of the member, before any `)` around it.
+                        let source = self.module.source.as_bytes();
+                        let written = name.to_lossy_string();
+                        let within = &source[object.span.end as usize..span.end as usize];
+                        let name_pos = (within.windows(written.len().max(1)))
+                            .rposition(|it| it == written.as_bytes())
+                            .map_or(span.end.saturating_sub(written.len() as u32), |at| {
+                                object.span.end + at as u32
+                            });
+                        let end = name_pos + written.len() as u32;
                         let name = self.atom_units(name);
                         self.file.expr(
                             b::ExprKind::Dot {
@@ -775,12 +824,17 @@ impl<'a, 's> Lower<'a, 's> {
                                 chain: b::Chain::No,
                             },
                             object.span.start,
-                            span.end,
+                            end,
                         )
                     }
                     k::ObjectKey::Computed(key) => {
                         let obj = self.expr(object);
                         let index = self.expr(key);
+                        // Through the `]` that closes the key.
+                        let source = self.module.source.as_bytes();
+                        let end = (source[key.span.end as usize..span.end as usize].iter())
+                            .position(|&byte| byte == b']')
+                            .map_or(span.end, |at| key.span.end + at as u32 + 1);
                         self.file.expr(
                             b::ExprKind::Index {
                                 obj,
@@ -788,7 +842,7 @@ impl<'a, 's> Lower<'a, 's> {
                                 chain: b::Chain::No,
                             },
                             object.span.start,
-                            span.end,
+                            end,
                         )
                     }
                     k::ObjectKey::Private(name) => {
@@ -821,9 +875,10 @@ impl<'a, 's> Lower<'a, 's> {
                 prefix,
                 target,
             } => {
-                let operand =
-                    self.file
-                        .expr(b::ExprKind::Ident(self.atom(target)), span.start, span.end);
+                let (start, end) = self.update_operand(span, *prefix);
+                let operand = self
+                    .file
+                    .expr(b::ExprKind::Ident(self.atom(target)), start, end);
                 b::ExprKind::Unary {
                     op: match (*increment, *prefix) {
                         (true, true) => b::UnOp::PreInc,
@@ -845,14 +900,7 @@ impl<'a, 's> Lower<'a, 's> {
                         let obj = self.expr(object);
                         let atom = self.atom_units(name);
                         // `a.b++` ends with its operator.
-                        let end = match *prefix {
-                            true => span.end,
-                            false => {
-                                let source = self.module.source.as_bytes();
-                                let before = &source[..span.end.saturating_sub(2) as usize];
-                                before.trim_ascii_end().len() as u32
-                            }
-                        };
+                        let end = self.update_operand(span, *prefix).1;
                         let name_pos = end.saturating_sub(name.len() as u32);
                         self.file.expr(
                             b::ExprKind::Dot {
@@ -868,6 +916,7 @@ impl<'a, 's> Lower<'a, 's> {
                     k::ObjectKey::Computed(key) => {
                         let obj = self.expr(object);
                         let index = self.expr(key);
+                        let end = self.update_operand(span, *prefix).1;
                         self.file.expr(
                             b::ExprKind::Index {
                                 obj,
@@ -875,7 +924,7 @@ impl<'a, 's> Lower<'a, 's> {
                                 chain: b::Chain::No,
                             },
                             object.span.start,
-                            span.end,
+                            end,
                         )
                     }
                     k::ObjectKey::Private(name) => {
@@ -1355,6 +1404,10 @@ impl<'a, 's> Lower<'a, 's> {
     }
 
     fn pattern_target(&mut self, pattern: &k::Pattern, span: k::Span) -> b::ExprId {
+        let span = match pattern {
+            k::Pattern::Object { .. } | k::Pattern::Array { .. } => self.pattern_span(span),
+            _ => span,
+        };
         match pattern {
             k::Pattern::Identifier(name) => {
                 self.file
@@ -1424,11 +1477,9 @@ impl<'a, 's> Lower<'a, 's> {
                     })
                     .collect();
                 if let Some(rest) = rest {
-                    let id = self.pattern_target(rest, span);
-                    ids.push(
-                        self.file
-                            .expr(b::ExprKind::Spread(id), span.start, span.end),
-                    );
+                    let at = self.rest_span(span);
+                    let id = self.pattern_target(rest, at);
+                    ids.push(self.file.expr(b::ExprKind::Spread(id), at.start, at.end));
                 }
                 let list = self.file.list(&ids);
                 self.file
@@ -1454,15 +1505,16 @@ impl<'a, 's> Lower<'a, 's> {
                     });
                 }
                 if let Some(rest) = rest {
-                    let value = self.pattern_target(rest, span);
+                    let at = self.rest_span(span);
+                    let value = self.pattern_target(rest, at);
                     props.push(b::Prop {
                         kind: b::PropKind::Spread,
                         key: b::PropKey::None,
                         name_kind: b::NameKind::Identifier,
                         value,
-                        pos: span.start,
-                        start: span.start,
-                        end: span.end,
+                        pos: at.start,
+                        start: at.start,
+                        end: at.end,
                         postfix_token: 0,
                     });
                 }
@@ -1481,6 +1533,23 @@ impl<'a, 's> Lower<'a, 's> {
             }
         }
         self.file.list(&ids)
+    }
+
+    /// The operand of the update expression at `span`: what is left of it without its `++` or
+    /// `--` and the space beside them.
+    fn update_operand(&self, span: k::Span, prefix: bool) -> (u32, u32) {
+        let source = self.module.source.as_bytes();
+        let (start, end) = (span.start as usize, span.end as usize);
+        match prefix {
+            true => {
+                let rest = &source[(start + 2).min(end)..end];
+                ((end - rest.trim_ascii_start().len()) as u32, span.end)
+            }
+            false => {
+                let before = &source[start..end.saturating_sub(2).max(start)];
+                (span.start, (start + before.trim_ascii_end().len()) as u32)
+            }
+        }
     }
 
     /// The `this.x = x` the frontend adds for the parameter property `x`; see
