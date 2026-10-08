@@ -260,7 +260,8 @@ print('KILN_EFFECT ' + json.dumps({"kind":"summary", "discovered":1, "passed":1,
         source_test.write_text('// pinned-fixture stand-in\n')
 
         for label, build_flag, expected_build_jobs in (
-                ('default', [], '1'), ('override', ['--build-jobs', '4'], '4')):
+                ('default', [], '1'), ('override', ['--build-jobs', '4'], '4'),
+                ('hash-only', ['--hash-only-native-artifacts'], '1')):
             with self.subTest(label=label):
                 workspace = self.root / (label + '-workspace')
                 workspace.mkdir()
@@ -298,6 +299,17 @@ print('KILN_EFFECT ' + json.dumps({"kind":"summary", "discovered":1, "passed":1,
                 self.assertEqual(report['runtime_jobs'], 1)
                 self.assertEqual(report['resource_policy']['native_build_jobs'], int(expected_build_jobs))
                 self.assertEqual(report['resource_policy']['runtime_jobs'], 1)
+                native = report['files'][0]['engines']['native']
+                self.assertTrue(native['complete'])
+                binary = out / 'X' / 'native.bin'
+                if args.hash_only_native_artifacts:
+                    self.assertEqual(native['native_binary_integrity'],
+                                     'verified_before_and_after_execution')
+                    self.assertEqual(native['native_artifact_retention']['status'], 'deleted')
+                    self.assertFalse(binary.exists())
+                    self.assertEqual(len(native['binary_sha256']), 64)
+                else:
+                    self.assertTrue(binary.is_file())
 
     def test_cache_gc_uses_first_writable_shared_layer_and_same_gc_root(self):
         workspace = self.root / 'workspace'

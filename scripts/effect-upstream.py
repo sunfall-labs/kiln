@@ -1226,9 +1226,6 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
                             'identity_after': None,
                             'identity_error': identity_error,
                         }
-                        if identity_before is not None:
-                            envelope['binary_sha256'] = identity_before['sha256']
-                            envelope['binary_size_bytes'] = identity_before['size_bytes']
                     cmd = [*limiter, str(binary)]
                 log = directory / (engine + '.log')
                 envelope = execute(cmd, workspace, log, args.timeout, args.runtime_jobs,
