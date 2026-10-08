@@ -1215,22 +1215,13 @@
                     kiln_value sent_val = argc > 0 ? args[0] : kiln_c99_undefined();
                     return kiln_c99_generator_delegate_return(host, frame, sent_val, result, depth, thrown);
                 }
-                if (frame->handler_top != 0 && !frame->done) {
-                    frame->raising = 1;
-                    kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_return_signal());
-                    closure = kiln_c99_closure_of(frame->function);
-                    frame->running = 1;
-                    kiln_val vproduced = KILN_VAL_UNDEFINED;
-                    int status = kiln_c99_invoke_closure_body(
-                        host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
-                    produced = kiln_val_to_boundary(vproduced);
-                    frame->running = 0;
-                    if (status != KILN_C99_OK && thrown != NULL && kiln_val_from_boundary(*thrown) != KILN_VAL_RETURN_SIGNAL) {
-                        return status;
-                    }
-                }
-                frame->done = 1;
-                produced = argc > 0 ? args[0] : kiln_c99_undefined();
+                /* Closing a suspended body and forwarding return through its finally blocks is
+                 * the same operation used when a delegated iterator returns. In particular, a
+                 * finally block may itself yield: the helper leaves the frame resumable and the
+                 * pending return completes when the body is stepped again. Keeping a separate
+                 * copy here incorrectly marked that frame done on its first cleanup yield. */
+                return kiln_c99_generator_close_with(
+                    host, frame, argc > 0 ? args[0] : kiln_c99_undefined(), result, depth, thrown);
             } else if (!frame->done) {
                 kiln_c99_heap_store_value(frame, &frame->sent, argc > 0 ? args[0] : kiln_c99_undefined());
                 frame->raising = 0;
