@@ -1381,7 +1381,7 @@ static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln
         frame->running = 0;
         frame->raising = 0;
         if (status == KILN_C99_YIELDED) {
-            if (frame->delegate_wrapped) {
+            if (frame->delegate.tag != KILN_VALUE_UNDEFINED) {
                 *result = kiln_val_to_boundary(vproduced);
                 return KILN_C99_OK;
             }
@@ -1431,7 +1431,7 @@ static int kiln_c99_generator_close_with(kiln_host *host, kiln_generator *frame,
             /* A delegated suspension already carries the iterator result object. Return it as-is;
              * wrapping it here would expose `{ value: { value, done }, done: false }` while a
              * finally block is suspended at `yield*`. */
-            if (frame->delegate_wrapped) {
+            if (frame->delegate.tag != KILN_VALUE_UNDEFINED) {
                 *result = kiln_val_to_boundary(vproduced);
                 return KILN_C99_OK;
             }
@@ -1578,7 +1578,7 @@ static int kiln_c99_generator_delegate_throw(kiln_host *host, kiln_generator *fr
         if (status == KILN_C99_YIELDED) {
             frame->started = 1;
             finished = 0;
-            if (frame->delegate_wrapped) {
+            if (frame->delegate.tag != KILN_VALUE_UNDEFINED) {
                 *result = produced;
                 return KILN_C99_OK;
             }
