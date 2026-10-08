@@ -14,12 +14,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let requests = state
                 .async_requests
                 .get_or_insert_with(|| Box::new(AsyncGeneratorRequests::default()));
-            requests.pending.push_back(request);
             if requests.current.is_none() {
-                requests.current = requests.pending.pop_front();
+                if requests.pending.is_empty() {
+                    requests.current = Some(request);
+                } else {
+                    requests.pending.push_back(request);
+                    requests.current = requests.pending.pop_front();
+                }
                 requests.current_started = false;
                 true
             } else {
+                requests.pending.push_back(request);
                 false
             }
         };
@@ -64,7 +69,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             } else {
                 requests.draining = true;
-                requests.current_started = true;
                 StartMode::Drain
             }
         };
