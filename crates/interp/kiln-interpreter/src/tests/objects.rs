@@ -1,6 +1,68 @@
 use super::*;
 
 #[test]
+fn null_prototype_objects_do_not_inherit_object_prototype_presence() {
+    let intrinsics = Intrinsics::default();
+    let object_prototype = Value::Native(
+        Native::PrototypeOf(PrototypeTable::Object),
+        RealmId::PRIMARY,
+    );
+    intrinsics.install_key(
+        &object_prototype,
+        PropertyKeyRef::Utf8("value"),
+        Property::Value(Value::Number(1.0)),
+        Attributes::DEFAULT,
+    );
+
+    let mut null_prototype = ObjectData::default();
+    null_prototype.set_prototype(Value::Null);
+    let null_prototype = Value::Object(tracked_object(null_prototype));
+
+    let mut null_terminated_parent = ObjectData::default();
+    null_terminated_parent.set_prototype(Value::Null);
+    let mut child_of_null_terminated_parent = ObjectData::default();
+    child_of_null_terminated_parent
+        .set_prototype(Value::Object(tracked_object(null_terminated_parent)));
+    let child_of_null_terminated_parent =
+        Value::Object(tracked_object(child_of_null_terminated_parent));
+
+    let ordinary = Value::Object(tracked_object(ObjectData::default()));
+
+    assert!(!has_property_ascii(&intrinsics, &null_prototype, "value"));
+    assert!(!has_property_ascii(
+        &intrinsics,
+        &child_of_null_terminated_parent,
+        "value"
+    ));
+    assert!(has_property_ascii(&intrinsics, &ordinary, "value"));
+    assert!(!has_property_ascii(
+        &intrinsics,
+        &null_prototype,
+        "constructor"
+    ));
+    assert!(!has_property_ascii(
+        &intrinsics,
+        &child_of_null_terminated_parent,
+        "constructor"
+    ));
+    assert!(has_property_ascii(&intrinsics, &ordinary, "constructor"));
+}
+
+#[test]
+fn null_prototype_objects_keep_own_properties_visible_to_has_property() {
+    let intrinsics = Intrinsics::default();
+    let mut data = ObjectData::default();
+    data.set_prototype(Value::Null);
+    data.set("value", Value::Number(7.0));
+    data.set("constructor", Value::Boolean(false));
+    let object = Value::Object(tracked_object(data));
+
+    assert!(has_property_ascii(&intrinsics, &object, "value"));
+    assert!(has_property_ascii(&intrinsics, &object, "constructor"));
+    assert!(!has_property_ascii(&intrinsics, &object, "toString"));
+}
+
+#[test]
 fn strict_symbol_writes_check_the_symbol_descriptor() {
     let program = no_program();
     let mut host = TestHost {
