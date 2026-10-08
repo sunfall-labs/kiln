@@ -3199,17 +3199,33 @@ fn capture_type_syntax(
 ) -> HirTypeSyntax {
     let module_attributes = capture_module_attributes(source, program);
     if !program.source_type.is_typescript() {
-        let collector = Collector {
-            source,
-            path: path.map(str::to_owned),
-            native_import_meta,
-            result: HirTypeSyntax::default(),
-            classified: HashSet::new(),
-            dotted: HashSet::new(),
-        };
+        // The parentheses of a JavaScript file, where a JSDoc comment casts.
+        struct Parentheses(Vec<kiln_hir::TypeExpressionWrapperSite>);
+        impl<'a> Visit<'a> for Parentheses {
+            fn visit_parenthesized_expression(
+                &mut self,
+                node: &oxc_ast::ast::ParenthesizedExpression<'a>,
+            ) {
+                let mut inner = &node.expression;
+                while let Expression::ParenthesizedExpression(parenthesized) = inner {
+                    inner = &parenthesized.expression;
+                }
+                self.0.push(kiln_hir::TypeExpressionWrapperSite {
+                    owner_span: HirSpan::new(node.span.start, node.span.end),
+                    operand_span: HirSpan::new(inner.span().start, inner.span().end),
+                    kind: kiln_hir::TypeExpressionWrapperKind::Parenthesized,
+                });
+                walk::walk_parenthesized_expression(self, node);
+            }
+        }
+        let mut parentheses = Parentheses(Vec::new());
+        parentheses.visit_program(program);
+        parentheses
+            .0
+            .sort_by_key(|site| (site.owner_span.start, site.owner_span.end));
         return HirTypeSyntax {
             module_attributes,
-            annotations: jsdoc_variable_types(&collector, program),
+            expression_wrappers: parentheses.0,
             jsdoc: jsdoc::parse_comments(
                 source,
                 program
@@ -3219,121 +3235,6 @@ fn capture_type_syntax(
             ),
             ..HirTypeSyntax::default()
         };
-    }
-    /// `reparseJSDoc` for the one tag that a JavaScript file needs most: `@type {T}` on a
-    /// variable statement annotates its first declaration as `: T` would (Bun's
-    /// `reparse_type_tag`, `Host::VariableStatement`). Only a one-line type that is also
-    /// TypeScript syntax is read; JSDoc-only forms (`?T`, `*`, `function(..)`) are left for a
-    /// port of Bun's `jsdoc.rs`. The type is parsed from a copy of the source that blanks all but
-    /// `let _:` before it, so its spans are those of the comment.
-    fn jsdoc_variable_types(
-        collector: &Collector<'_>,
-        program: &oxc_ast::ast::Program<'_>,
-    ) -> Vec<HirTypeAnnotationSite> {
-        struct Statements(Vec<(u32, oxc_span::Span, Option<String>)>);
-        impl<'a> Visit<'a> for Statements {
-            fn visit_variable_declaration(&mut self, node: &oxc_ast::ast::VariableDeclaration<'a>) {
-                if let Some(first) = node.declarations.first()
-                    && first.type_annotation.is_none()
-                {
-                    let name = match &first.id {
-                        oxc_ast::ast::BindingPattern::BindingIdentifier(id) => {
-                            Some(id.name.to_string())
-                        }
-                        _ => None,
-                    };
-                    self.0.push((node.span.start, first.span, name));
-                }
-                walk::walk_variable_declaration(self, node);
-            }
-        }
-        let source = collector.source;
-        let mut statements = Statements(Vec::new());
-        statements.visit_program(program);
-        let mut sites = Vec::new();
-        for (start, declarator, name) in statements.0 {
-            // The last JSDoc comment before the statement (`GetJSDocCommentRanges`).
-            let Some(comment) = program.comments.iter().rev().find(|comment| {
-                comment.is_leading()
-                    && comment.attached_to == start
-                    && source[comment.span.start as usize..].starts_with("/**")
-            }) else {
-                continue;
-            };
-            let Some((type_start, type_end)) = jsdoc_type_tag(source, comment.span) else {
-                continue;
-            };
-            let mut snippet = vec![b' '; source.len()];
-            snippet[type_start - 6..type_start].copy_from_slice(b"let _:");
-            snippet[type_start..type_end].copy_from_slice(&source.as_bytes()[type_start..type_end]);
-            snippet[type_end] = b';';
-            let Ok(snippet) = String::from_utf8(snippet) else {
-                continue;
-            };
-            let allocator = Allocator::default();
-            let parsed = Parser::new(&allocator, &snippet, SourceType::ts()).parse();
-            if !parsed.diagnostics.is_empty() {
-                continue;
-            }
-            let Some(oxc_ast::ast::Statement::VariableDeclaration(parsed)) =
-                parsed.program.body.first()
-            else {
-                continue;
-            };
-            let Some(annotation) = parsed
-                .declarations
-                .first()
-                .and_then(|declaration| declaration.type_annotation.as_deref())
-            else {
-                continue;
-            };
-            let ty_span = annotation.type_annotation.span();
-            sites.push(HirTypeAnnotationSite {
-                site: HirTypeSite::Variable { name },
-                owner_span: HirSpan::new(declarator.start, declarator.end),
-                span: HirSpan::new(ty_span.start, ty_span.end),
-                operand_span: None,
-                ty: collector.convert(&annotation.type_annotation),
-            });
-        }
-        sites
-    }
-    /// The text between the braces of the first `@type {..}` tag of the comment at `comment`, as
-    /// offsets into `source`. `None` for a type that spans lines, whose `*`s are not type syntax.
-    fn jsdoc_type_tag(source: &str, comment: oxc_span::Span) -> Option<(usize, usize)> {
-        let start = comment.start as usize;
-        let text = source.get(start..comment.end as usize)?;
-        let mut from = 0;
-        let at = loop {
-            let at = from + text[from..].find("@type")?;
-            from = at + "@type".len();
-            if !text[from..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
-                break from;
-            }
-        };
-        let rest = &text[at..];
-        let open = rest.find(|c: char| !matches!(c, ' ' | '\t'))?;
-        if !rest[open..].starts_with('{') {
-            return None;
-        }
-        let mut depth = 0usize;
-        for (offset, c) in rest[open..].char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' if depth == 1 => {
-                    let (type_start, type_end) = (at + open + 1, at + open + offset);
-                    let inner = &text[type_start..type_end];
-                    if inner.contains(['\n', '\r']) || inner.trim().is_empty() {
-                        return None;
-                    }
-                    return Some((start + type_start, start + type_end));
-                }
-                '}' => depth -= 1,
-                '\n' | '\r' => return None,
-                _ => {}
-            }
-        }
-        None
     }
     struct Collector<'s> {
         source: &'s str,

@@ -99,16 +99,8 @@ fn is_line_break(c: char) -> bool {
 fn is_space(c: char) -> bool {
     matches!(
         c,
-        ' ' | '\t'
-            | '\u{0B}'
-            | '\u{0C}'
-            | '\u{A0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200B}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-            | '\u{FEFF}'
+        ' ' | '\t' | '\u{0B}' | '\u{0C}' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200B}' | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
     )
 }
 
@@ -515,7 +507,8 @@ impl<'a> Scanner<'a> {
             'u' => {
                 if let Some((decoded, len)) = self.escape_at(at) {
                     let mut buf = [0u16; 2];
-                    self.cooked.extend_from_slice(decoded.encode_utf16(&mut buf));
+                    self.cooked
+                        .extend_from_slice(decoded.encode_utf16(&mut buf));
                     return at + len;
                 }
                 if let Some(hex) = self.text.get(after..after + 4)

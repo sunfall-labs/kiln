@@ -40,6 +40,8 @@ pub(crate) struct Lower<'a, 's> {
     pub(super) containers: Vec<(k::Span, bool)>,
     /// `type_syntax.exported_declarations` starts, by end.
     pub(super) export_wrapped_by_end: rustc_hash::FxHashMap<u32, smallvec::SmallVec<[u32; 1]>>,
+    /// What the reparser of the JSDoc tags has built and not yet put in a place.
+    pub(super) jsdoc_state: crate::lower_jsdoc::JsDocState,
 }
 
 /// A source-level wrapper that executable HIR erased: an index into the site list it came from.
@@ -219,6 +221,7 @@ impl<'a, 's> Lower<'a, 's> {
             exported_declarations_by_end,
             containers,
             export_wrapped_by_end,
+            jsdoc_state: crate::lower_jsdoc::JsDocState::new(module.type_syntax.jsdoc.docs.len()),
         }
     }
     /// `node.Name().Pos()` of the declaration, member or property that ends at `owner.end`: the

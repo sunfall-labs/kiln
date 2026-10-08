@@ -284,7 +284,12 @@ impl<'a> TypeParser<'a> {
         }
         let imported = property_name.clone().unwrap_or_else(|| name.clone());
         // A string name is no binding.
-        let is_string = self.s.text.as_bytes().get(name.start as usize).is_some_and(|&b| b == b'"' || b == b'\'');
+        let is_string = self
+            .s
+            .text
+            .as_bytes()
+            .get(name.start as usize)
+            .is_some_and(|&b| b == b'"' || b == b'\'');
         if name.text.is_empty() || is_string {
             return Some(None);
         }
@@ -337,11 +342,9 @@ impl<'a> TypeParser<'a> {
 
     /// `parseErrorAtPosition`: not another error at the position of the last.
     pub(super) fn error_at(&mut self, start: usize, len: usize, code: u32, args: &[&str]) {
-        if self
-            .diagnostics
-            .last()
-            .is_some_and(|last| last.kind == JsDocDiagnosticKind::Parse && last.start as usize == start)
-        {
+        if self.diagnostics.last().is_some_and(|last| {
+            last.kind == JsDocDiagnosticKind::Parse && last.start as usize == start
+        }) {
             return;
         }
         self.diagnostics.push(JsDocDiagnostic {
@@ -516,14 +519,20 @@ impl<'a> TypeParser<'a> {
     fn is_list_element(&mut self, kind: Ctx) -> bool {
         match kind {
             Ctx::TypeMembers => self.look_ahead(Self::is_type_member_start),
-            Ctx::TupleElementTypes => self.tok() == Tok::OpenBracket || self.is_start_of_type(false),
+            Ctx::TupleElementTypes => {
+                self.tok() == Tok::OpenBracket || self.is_start_of_type(false)
+            }
             Ctx::TypeParameters => {
                 self.is_identifier()
-                    || self.word().is_some_and(|word| matches!(word, "const" | "in" | "out"))
+                    || self
+                        .word()
+                        .is_some_and(|word| matches!(word, "const" | "in" | "out"))
             }
             Ctx::TypeArguments => self.tok() == Tok::Comma || self.is_start_of_type(false),
             Ctx::Parameters => self.is_start_of_parameter(false),
-            Ctx::ImportAttributes | Ctx::ImportSpecifiers => matches!(self.tok(), Tok::Ident | Tok::Str),
+            Ctx::ImportAttributes | Ctx::ImportSpecifiers => {
+                matches!(self.tok(), Tok::Ident | Tok::Str)
+            }
         }
     }
 
@@ -556,7 +565,11 @@ impl<'a> TypeParser<'a> {
     }
 
     /// `parseList`
-    fn parse_list<T>(&mut self, kind: Ctx, mut parse: impl FnMut(&mut Self) -> Option<T>) -> Vec<T> {
+    fn parse_list<T>(
+        &mut self,
+        kind: Ctx,
+        mut parse: impl FnMut(&mut Self) -> Option<T>,
+    ) -> Vec<T> {
         self.contexts.push(kind);
         let mut list = Vec::new();
         while !self.is_list_terminator(kind) {
@@ -674,7 +687,9 @@ impl<'a> TypeParser<'a> {
         }
         let start = self.pos();
         let ty = self.parse_union_type_or_higher();
-        if !self.disallow_conditional && !self.s.newline_before && self.parse_optional_word("extends")
+        if !self.disallow_conditional
+            && !self.s.newline_before
+            && self.parse_optional_word("extends")
         {
             // The type following `extends` is not permitted to be another conditional type.
             let outer = std::mem::replace(&mut self.disallow_conditional, true);
@@ -712,7 +727,9 @@ impl<'a> TypeParser<'a> {
         if self.tok() == Tok::Lt {
             return true;
         }
-        if self.tok() == Tok::OpenParen && self.look_ahead(Self::is_unambiguously_start_of_function_type) {
+        if self.tok() == Tok::OpenParen
+            && self.look_ahead(Self::is_unambiguously_start_of_function_type)
+        {
             return true;
         }
         self.is_word("new")
@@ -732,7 +749,10 @@ impl<'a> TypeParser<'a> {
         }
         if self.skip_parameter_start() {
             // We successfully skipped modifiers (if any) and an identifier or binding pattern.
-            if matches!(self.tok(), Tok::Colon | Tok::Comma | Tok::Question | Tok::Eq) {
+            if matches!(
+                self.tok(),
+                Tok::Colon | Tok::Comma | Tok::Question | Tok::Eq
+            ) {
                 return true;
             }
             if self.tok() == Tok::CloseParen {
@@ -822,7 +842,8 @@ impl<'a> TypeParser<'a> {
                     })
             }
             Tok::OpenParen => {
-                !in_start_of_parameter && self.look_ahead(Self::is_start_of_parenthesized_or_function_type)
+                !in_start_of_parameter
+                    && self.look_ahead(Self::is_start_of_parenthesized_or_function_type)
             }
             Tok::Ident => match self.word() {
                 Some(
@@ -840,7 +861,9 @@ impl<'a> TypeParser<'a> {
 
     fn is_start_of_parenthesized_or_function_type(&mut self) -> bool {
         self.next_token();
-        self.tok() == Tok::CloseParen || self.is_start_of_parameter(false) || self.is_start_of_type(false)
+        self.tok() == Tok::CloseParen
+            || self.is_start_of_parameter(false)
+            || self.is_start_of_type(false)
     }
 
     /// `parseFunctionOrConstructorType`
@@ -937,7 +960,10 @@ impl<'a> TypeParser<'a> {
     }
 
     /// `parseFunctionOrConstructorTypeToError`
-    fn parse_function_or_constructor_type_to_error(&mut self, is_in_union: bool) -> Option<TypeExpr> {
+    fn parse_function_or_constructor_type_to_error(
+        &mut self,
+        is_in_union: bool,
+    ) -> Option<TypeExpr> {
         // The function type after `|` or `&` needs parentheses.
         if self.is_start_of_function_or_constructor_type() {
             let ty = self.parse_function_or_constructor_type();
@@ -1640,7 +1666,10 @@ impl<'a> TypeParser<'a> {
 
     /// `isTypeMemberStart`
     fn is_type_member_start(&mut self) -> bool {
-        if matches!(self.tok(), Tok::OpenParen | Tok::Lt) || self.is_word("get") || self.is_word("set") {
+        if matches!(self.tok(), Tok::OpenParen | Tok::Lt)
+            || self.is_word("get")
+            || self.is_word("set")
+        {
             return true;
         }
         let mut is_identifier_token = false;
@@ -1669,7 +1698,10 @@ impl<'a> TypeParser<'a> {
     }
 
     fn is_literal_property_name(&self) -> bool {
-        matches!(self.tok(), Tok::Ident | Tok::Str | Tok::Number | Tok::BigInt)
+        matches!(
+            self.tok(),
+            Tok::Ident | Tok::Str | Tok::Number | Tok::BigInt
+        )
     }
 
     /// `parseTypeMemberSemicolon`
@@ -1703,7 +1735,12 @@ impl<'a> TypeParser<'a> {
                 // `canFollowModifier`
                 matches!(
                     this.tok(),
-                    Tok::Ident | Tok::Str | Tok::Number | Tok::BigInt | Tok::OpenBracket | Tok::OpenBrace
+                    Tok::Ident
+                        | Tok::Str
+                        | Tok::Number
+                        | Tok::BigInt
+                        | Tok::OpenBracket
+                        | Tok::OpenBrace
                         | Tok::Star
                         | Tok::DotDotDot
                         | Tok::PrivateIdent
@@ -1788,7 +1825,9 @@ impl<'a> TypeParser<'a> {
     }
 
     /// `parseBracketedList(Parameters, parseParameter, [, ])`
-    fn parse_bracketed_parameters(&mut self) -> (Vec<TypeSignatureParameter>, Option<TypeSignatureParameter>) {
+    fn parse_bracketed_parameters(
+        &mut self,
+    ) -> (Vec<TypeSignatureParameter>, Option<TypeSignatureParameter>) {
         let mut parameters = Vec::new();
         if self.expect(Tok::OpenBracket) {
             parameters = self.parse_delimited_list(Ctx::Parameters, false, Self::parse_parameter);
@@ -1900,7 +1939,11 @@ impl<'a> TypeParser<'a> {
             Tok::PrivateIdent => {
                 let name = self.s.value.clone();
                 self.next_token();
-                (Some(name.clone()), Some(kiln_hir::ObjectKey::Private(name)), at)
+                (
+                    Some(name.clone()),
+                    Some(kiln_hir::ObjectKey::Private(name)),
+                    at,
+                )
             }
             Tok::OpenBracket => {
                 // A computed property name: `[expression]`. Only its extent is read.
@@ -1925,7 +1968,11 @@ impl<'a> TypeParser<'a> {
     }
 
     /// `parsePropertyOrMethodSignature`
-    fn parse_property_or_method_signature(&mut self, start: usize, readonly: bool) -> Option<TypeMember> {
+    fn parse_property_or_method_signature(
+        &mut self,
+        start: usize,
+        readonly: bool,
+    ) -> Option<TypeMember> {
         let (name, key, _) = self.parse_property_name();
         let optional = self.parse_optional(Tok::Question);
         if matches!(self.tok(), Tok::OpenParen | Tok::Lt) {
@@ -2063,13 +2110,17 @@ impl<'a> TypeParser<'a> {
     }
 
     /// `parseParameters`: the parameters, and the `this` parameter that is among them.
-    fn parse_parameters(&mut self) -> (Vec<TypeSignatureParameter>, Option<TypeSignatureParameter>) {
+    fn parse_parameters(
+        &mut self,
+    ) -> (Vec<TypeSignatureParameter>, Option<TypeSignatureParameter>) {
         if !self.expect(Tok::OpenParen) {
             return (Vec::new(), None);
         }
-        let mut parameters = self.parse_delimited_list(Ctx::Parameters, false, Self::parse_parameter);
+        let mut parameters =
+            self.parse_delimited_list(Ctx::Parameters, false, Self::parse_parameter);
         self.expect(Tok::CloseParen);
-        let this = (parameters.first().and_then(|p| p.name.as_deref()) == Some("this")).then(|| parameters.remove(0));
+        let this = (parameters.first().and_then(|p| p.name.as_deref()) == Some("this"))
+            .then(|| parameters.remove(0));
         (parameters, this)
     }
 
@@ -2102,18 +2153,19 @@ impl<'a> TypeParser<'a> {
             });
         }
         let rest = self.parse_optional(Tok::DotDotDot);
-        let (name, pattern, pattern_span) = if matches!(self.tok(), Tok::OpenBracket | Tok::OpenBrace) {
-            let at = self.pos();
-            self.skip_binding_pattern();
-            (None, None, Span::new(at as u32, self.end() as u32))
-        } else {
-            let (name, name_start, name_end) = self.parse_identifier();
-            (
-                Some(name.clone()),
-                Some(Box::new(kiln_hir::Pattern::Identifier(name))),
-                Span::new(name_start as u32, name_end as u32),
-            )
-        };
+        let (name, pattern, pattern_span) =
+            if matches!(self.tok(), Tok::OpenBracket | Tok::OpenBrace) {
+                let at = self.pos();
+                self.skip_binding_pattern();
+                (None, None, Span::new(at as u32, self.end() as u32))
+            } else {
+                let (name, name_start, name_end) = self.parse_identifier();
+                (
+                    Some(name.clone()),
+                    Some(Box::new(kiln_hir::Pattern::Identifier(name))),
+                    Span::new(name_start as u32, name_end as u32),
+                )
+            };
         let optional = self.parse_optional(Tok::Question);
         let ty = self.parse_optional_type_annotation();
         let mut has_default = false;
@@ -2186,5 +2238,9 @@ fn bigint_text(text: &str) -> String {
         }
     }
     let digits = lower.trim_start_matches('0');
-    if digits.is_empty() { "0".to_owned() } else { digits.to_owned() }
+    if digits.is_empty() {
+        "0".to_owned()
+    } else {
+        digits.to_owned()
+    }
 }

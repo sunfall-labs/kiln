@@ -117,6 +117,19 @@ impl<'a, 's> Lower<'a, 's> {
             });
         }
         let params = self.file.add_params(&params);
+        // `parseParameterEx`
+        if self.has_jsdoc() {
+            for param in params.iter() {
+                let (pos, end) = (self.file[param].pos, self.file[param].loc.end);
+                // `parseSimpleArrowFunctionExpression`: the `x` of `x => x` has no comments of
+                // its own.
+                let rest = self.module.source.get(end as usize..).unwrap_or("");
+                if function.arrow && rest.trim_start().starts_with("=>") {
+                    continue;
+                }
+                self.with_jsdoc(pos, true, &mut crate::lower_jsdoc::Host::Parameter(param));
+            }
+        }
         let ret = signature
             .as_ref()
             .and_then(|site| site.signature.return_type.as_ref())
@@ -548,6 +561,20 @@ impl<'a, 's> Lower<'a, 's> {
                 b::TypeNodeKind::IndexedAccess { obj, index }
             }
             T::Parenthesized(ty) => return self.ty(ty),
+            T::JsDoc {
+                kind,
+                is_postfix,
+                ty,
+            } => b::TypeNodeKind::JSDoc {
+                ty: self.ty(ty),
+                kind: match kind {
+                    k::JsDocTypeKind::Nullable => b::JSDocTypeKind::Nullable,
+                    k::JsDocTypeKind::NonNullable => b::JSDocTypeKind::NonNullable,
+                    k::JsDocTypeKind::Optional => b::JSDocTypeKind::Optional,
+                    k::JsDocTypeKind::Variadic => b::JSDocTypeKind::Variadic,
+                },
+                is_postfix: *is_postfix,
+            },
             T::Typeof {
                 name: names,
                 arguments,
@@ -1012,7 +1039,11 @@ impl<'a, 's> Lower<'a, 's> {
         };
         // A declaration's node starts at its first modifier: `export function f();`.
         let modifiers = &file.modifiers;
-        file.stmts.iter_mut().for_each(|it| {
+        let reparsed = &self.jsdoc_state.reparsed_statements;
+        file.stmts.iter_mut().enumerate().for_each(|(index, it)| {
+            if reparsed.contains(&(index as u32)) {
+                return;
+            }
             let first = (it.modifiers.iter()).map(|m| modifiers[m.idx()].pos).min();
             if let Some(first) = first
                 && first < it.loc.pos
@@ -1106,10 +1137,19 @@ impl<'a, 's> Lower<'a, 's> {
             k::SourceKind::JavaScript | k::SourceKind::Jsx => &self.module.body,
             k::SourceKind::TypeScript | k::SourceKind::Tsx => &self.module.type_syntax.body,
         };
-        let mut body: Vec<(u32, b::StmtId)> = source_body
-            .iter()
-            .map(|s| (s.span.start, self.statement(s)))
-            .collect();
+        let mut body: Vec<(u32, b::StmtId)> = Vec::new();
+        for statement in source_body {
+            let id = self.statement(statement);
+            // Statements synthesized from JSDoc tags precede the statement they are on.
+            let reparsed = std::mem::take(&mut self.jsdoc_state.reparsed);
+            body.extend(reparsed.into_iter().map(|r| (statement.span.start, r)));
+            body.push((statement.span.start, id));
+        }
+        // `parseSourceFileWorker`: the end of the file has comments as well.
+        let end_of_file = self.module.source.len() as u32;
+        self.with_jsdoc(end_of_file, false, &mut crate::lower_jsdoc::Host::Other);
+        let reparsed = std::mem::take(&mut self.jsdoc_state.reparsed);
+        body.extend(reparsed.into_iter().map(|r| (end_of_file, r)));
         body.extend(self.module_items());
         body.sort_by_key(|(pos, _)| *pos);
         let ids: Vec<_> = body.into_iter().map(|(_, stmt)| stmt).collect();
@@ -1156,6 +1196,7 @@ impl<'a, 's> Lower<'a, 's> {
             .specifier_uses
             .sort_by_key(|specifier| specifier.pos);
         self.widen_locs_to_full_start();
+        self.finish_jsdoc();
         let (mut file, _) = self.file.into_arena(arena, session);
         file.finish_nodes();
         (file, self.unsupported)

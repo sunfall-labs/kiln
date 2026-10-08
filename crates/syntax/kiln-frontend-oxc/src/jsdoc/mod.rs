@@ -6,7 +6,9 @@ mod scan;
 mod tags;
 mod types;
 
-use kiln_hir::jsdoc::{CommentRange, JsDocComment, JsDocDiagnostic, JsDocDiagnosticKind, JsDocSyntax};
+use kiln_hir::jsdoc::{
+    CommentRange, JsDocComment, JsDocDiagnostic, JsDocDiagnosticKind, JsDocSyntax,
+};
 
 /// `isJSDocLikeText`
 fn is_jsdoc_like(comment: &str) -> bool {

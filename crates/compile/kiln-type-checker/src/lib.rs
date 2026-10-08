@@ -9,6 +9,7 @@ pub mod driver;
 mod engine;
 mod libraries;
 mod lower;
+mod lower_jsdoc;
 mod lower_modules;
 mod lower_types;
 mod lower_values;

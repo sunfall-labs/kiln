@@ -63,16 +63,8 @@ fn is_line_break(c: char) -> bool {
 fn is_white_space_single_line(c: char) -> bool {
     matches!(
         c,
-        ' ' | '\t'
-            | '\u{0B}'
-            | '\u{0C}'
-            | '\u{A0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200B}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-            | '\u{FEFF}'
+        ' ' | '\t' | '\u{0B}' | '\u{0C}' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200B}' | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
     )
 }
 
@@ -417,7 +409,11 @@ impl<'a> Reader<'a> {
 
     /// `CanFollowJSDocAt`
     fn can_follow_at(&self) -> bool {
-        match self.text.get(self.end..).and_then(|rest| rest.chars().next()) {
+        match self
+            .text
+            .get(self.end..)
+            .and_then(|rest| rest.chars().next())
+        {
             None => true,
             Some(c) => is_identifier_start(c) || is_white_space_single_line(c) || is_line_break(c),
         }
@@ -829,7 +825,13 @@ impl<'a> Reader<'a> {
 
     /// `parseTrailingTagComments` for the tag that starts at `start`. `indent_text`: the length of
     /// that text.
-    fn trailing_tag_comments(&mut self, start: usize, end: usize, mut margin: usize, indent_text: usize) -> bool {
+    fn trailing_tag_comments(
+        &mut self,
+        start: usize,
+        end: usize,
+        mut margin: usize,
+        indent_text: usize,
+    ) -> bool {
         if indent_text == 0 {
             margin += end.saturating_sub(start);
         }
@@ -934,7 +936,10 @@ impl<'a> Reader<'a> {
         self.token == Token::OpenBrace
             && self.next_jsdoc() == Token::At
             && self.next_jsdoc() == Token::Word
-            && matches!(self.token_value().as_str(), "link" | "linkcode" | "linkplain")
+            && matches!(
+                self.token_value().as_str(),
+                "link" | "linkcode" | "linkplain"
+            )
     }
 
     /// `parseJSDocLink`, up to the `}`, the line break or the end that closes it. False: there is
@@ -981,7 +986,8 @@ impl<'a> Reader<'a> {
     /// is reported, and the token is not consumed.
     fn link_identifier(&mut self, allows_reserved_words: bool) {
         let is_word = self.token == Token::Word && !self.is_at_private_identifier();
-        let is_reserved_word = is_word && super::scan::Scanner::is_reserved_word(&self.token_value());
+        let is_reserved_word =
+            is_word && super::scan::Scanner::is_reserved_word(&self.token_value());
         if is_word && (allows_reserved_words || !is_reserved_word) {
             self.next_token();
         } else if self.token == Token::EndOfFile {
@@ -1164,7 +1170,11 @@ impl<'a> Reader<'a> {
         }
         // A name in backquotes is not legal JSDoc, but occurs in the wild.
         let is_backquoted = self.eat_jsdoc(Token::Backtick);
-        let name = self.entity_name(if target == PARAMETER { None } else { Some(1003) });
+        let name = self.entity_name(if target == PARAMETER {
+            None
+        } else {
+            Some(1003)
+        });
         if is_backquoted {
             self.expect(Token::Backtick);
         }
@@ -1180,7 +1190,13 @@ impl<'a> Reader<'a> {
     }
 
     /// `parseParameterOrPropertyTag`
-    fn parameter_or_property_tag(&mut self, start: usize, tag_name: JsDocName, target: u8, indent: usize) -> JsDocTag {
+    fn parameter_or_property_tag(
+        &mut self,
+        start: usize,
+        tag_name: JsDocName,
+        target: u8,
+        indent: usize,
+    ) -> JsDocTag {
         let mut ty = self.try_type_expression();
         let mut is_name_first = ty.is_none();
         self.skip_whitespace_or_asterisk();
@@ -1282,7 +1298,13 @@ impl<'a> Reader<'a> {
     }
 
     /// `parseThisTag`
-    fn this_tag(&mut self, start: usize, name: JsDocName, margin: usize, indent_text: usize) -> JsDocTag {
+    fn this_tag(
+        &mut self,
+        start: usize,
+        name: JsDocName,
+        margin: usize,
+        indent_text: usize,
+    ) -> JsDocTag {
         let ty = self.type_expression(true);
         self.skip_whitespace();
         self.trailing_comments(start, margin, indent_text);
@@ -1333,7 +1355,10 @@ impl<'a> Reader<'a> {
             // `getInnermostNameOfJSDocNamespace`: after a last dot, the name of the namespace
             // once more.
             if self.token != Token::Word {
-                name = namespaces.last().cloned().unwrap_or_else(|| JsDocName::missing(0));
+                name = namespaces
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| JsDocName::missing(0));
                 break;
             }
             name = self.identifier_name(None);
@@ -1342,13 +1367,21 @@ impl<'a> Reader<'a> {
     }
 
     /// `parseTypedefTag`
-    fn typedef_tag(&mut self, start: usize, tag_name: &JsDocName, indent: usize, indent_text: usize) -> JsDocTagKind {
+    fn typedef_tag(
+        &mut self,
+        start: usize,
+        tag_name: &JsDocName,
+        indent: usize,
+        indent_text: usize,
+    ) -> JsDocTagKind {
         let written = self.try_type_expression();
         self.skip_whitespace_or_asterisk();
         let name = self.declared_name();
         self.skip_whitespace();
         let has_comment = self.tag_comments(indent, None);
-        let mut ty = written.clone().map_or(JsDocTagType::None, JsDocTagType::Expr);
+        let mut ty = written
+            .clone()
+            .map_or(JsDocTagType::None, JsDocTagType::Expr);
         if written.is_none() || self.is_object_or_object_array(&written) {
             let mut has_children = false;
             let mut child_type: Option<JsDocTypeExpr> = None;
@@ -1452,7 +1485,12 @@ impl<'a> Reader<'a> {
 
     /// `parseChildParameterOrPropertyTag`. `name`: the name of the parent tag the child must belong
     /// to.
-    fn child_tag(&mut self, target: u8, indent: usize, name: Option<&[JsDocName]>) -> Option<JsDocTag> {
+    fn child_tag(
+        &mut self,
+        target: u8,
+        indent: usize,
+        name: Option<&[JsDocName]>,
+    ) -> Option<JsDocTag> {
         let mut can_parse_tag = true;
         let mut seen_asterisk = false;
         loop {
@@ -1461,7 +1499,8 @@ impl<'a> Reader<'a> {
                     if can_parse_tag && self.can_follow_at() {
                         let child = self.try_child_tag(target, indent)?;
                         if let Some(name) = name
-                            && let JsDocTagKind::Param(property) | JsDocTagKind::Property(property) = &child.kind
+                            && let JsDocTagKind::Param(property) | JsDocTagKind::Property(property) =
+                                &child.kind
                             && !is_part_of(&property.name, name)
                         {
                             return None;
@@ -1518,8 +1557,10 @@ impl<'a> Reader<'a> {
                 "const" => (Some(JsDocTypeParameterModifier::Const), true),
                 "in" => (Some(JsDocTypeParameterModifier::In), true),
                 "out" => (Some(JsDocTypeParameterModifier::Out), true),
-                "abstract" | "accessor" | "async" | "declare" | "default" | "export" | "override"
-                | "private" | "protected" | "public" | "readonly" | "static" => (None, true),
+                "abstract" | "accessor" | "async" | "declare" | "default" | "export"
+                | "override" | "private" | "protected" | "public" | "readonly" | "static" => {
+                    (None, true)
+                }
                 _ => (None, false),
             };
             if !is_listed {
@@ -1578,7 +1619,13 @@ impl<'a> Reader<'a> {
     }
 
     /// `parseTemplateTag`
-    fn template_tag(&mut self, start: usize, name: JsDocName, indent: usize, indent_text: usize) -> JsDocTag {
+    fn template_tag(
+        &mut self,
+        start: usize,
+        name: JsDocName,
+        indent: usize,
+        indent_text: usize,
+    ) -> JsDocTag {
         let constraint = (self.token == Token::OpenBrace).then(|| self.type_expression(false));
         // `parseTemplateTagTypeParameters`
         let mut params = Vec::new();

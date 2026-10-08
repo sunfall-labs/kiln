@@ -424,8 +424,24 @@ impl<'a, 's> Lower<'a, 's> {
                     chain: b::Chain::No,
                 }
             }
-            E::Function(function) => b::ExprKind::Fn(self.function(function)),
-            E::Class(class) => b::ExprKind::Class(self.class(class)),
+            E::Function(function) => {
+                let func = self.function(function);
+                self.with_jsdoc(
+                    span.start,
+                    true,
+                    &mut crate::lower_jsdoc::Host::Function(func),
+                );
+                b::ExprKind::Fn(func)
+            }
+            E::Class(class) => {
+                let class = self.class(class);
+                self.with_jsdoc(
+                    span.start,
+                    false,
+                    &mut crate::lower_jsdoc::Host::Class(class),
+                );
+                b::ExprKind::Class(class)
+            }
             E::Unary { operator, argument } => {
                 let operand = self.expr(argument);
                 let op = match operator {
@@ -1062,6 +1078,7 @@ impl<'a, 's> Lower<'a, 's> {
                 }
             }
             E::Object { members } => {
+                self.jsdoc_state.object_literals_around += 1;
                 let mut props = Vec::with_capacity(members.len());
                 for member in members {
                     match member {
@@ -1147,7 +1164,29 @@ impl<'a, 's> Lower<'a, 's> {
                         prop.name_kind = self.literal_name_kind(prop.pos);
                     }
                 }
-                b::ExprKind::Object(self.file.add_props(&props))
+                // `parseObjectLiteralElement`
+                let mut types = Vec::new();
+                if self.has_jsdoc() {
+                    for (index, prop) in props.iter_mut().enumerate() {
+                        let mut host =
+                            crate::lower_jsdoc::Host::Property(*prop, b::TypeNodeId::NONE);
+                        self.with_jsdoc(prop.start, false, &mut host);
+                        if let crate::lower_jsdoc::Host::Property(documented, ty) = host {
+                            *prop = documented;
+                            if ty.is_some() {
+                                types.push((index, ty));
+                            }
+                        }
+                    }
+                }
+                self.jsdoc_state.object_literals_around -= 1;
+                let props = self.file.add_props(&props);
+                for (index, ty) in types {
+                    self.file
+                        .jsdoc_types
+                        .push((b::JsDocTypeOwner::Prop(props.at(index)), ty));
+                }
+                b::ExprKind::Object(props)
             }
             E::Template {
                 quasis,
@@ -1256,6 +1295,12 @@ impl<'a, 's> Lower<'a, 's> {
                             (owner, b::ExprKind::AsConst(expression))
                         }
                         k::TypeExpressionWrapperKind::Parenthesized => {
+                            // `parseParenthesizedExpression`: a JSDoc cast.
+                            let mut host = crate::lower_jsdoc::Host::Parenthesized(expression);
+                            self.with_jsdoc(owner.start, true, &mut host);
+                            if let crate::lower_jsdoc::Host::Parenthesized(inside) = host {
+                                expression = inside;
+                            }
                             self.file.parens.push((expression, owner.start, owner.end));
                             continue;
                         }
@@ -1565,11 +1610,19 @@ impl<'a, 's> Lower<'a, 's> {
 
     pub(super) fn statements(&mut self, statements: &[k::Statement]) -> b::IdList<b::StmtId> {
         let mut ids = Vec::with_capacity(statements.len());
+        // `parseListIndex`: statements synthesized from JSDoc tags while a statement was parsed
+        // are inserted before it.
+        let outer = std::mem::take(&mut self.jsdoc_state.reparsed);
+        let context = std::mem::replace(&mut self.jsdoc_state.is_in_appropriate_context, false);
         for statement in statements {
             if !self.is_parameter_property_assignment(statement) {
-                ids.push(self.statement(statement));
+                let id = self.statement(statement);
+                ids.append(&mut self.jsdoc_state.reparsed);
+                ids.push(id);
             }
         }
+        self.jsdoc_state.reparsed = outer;
+        self.jsdoc_state.is_in_appropriate_context = context;
         self.file.list(&ids)
     }
 
@@ -1636,7 +1689,15 @@ impl<'a, 's> Lower<'a, 's> {
                 }
             })
             .collect();
-        self.file.add_var_decls(&vars)
+        let decls = self.file.add_var_decls(&vars);
+        // `parseVariableDeclarationWorker`
+        if self.has_jsdoc() {
+            for (id, decl) in decls.iter().zip(declarations) {
+                let mut host = crate::lower_jsdoc::Host::VariableDeclaration(id);
+                self.with_jsdoc(decl.span.start, true, &mut host);
+            }
+        }
+        decls
     }
 
     pub(super) fn block(&mut self, statements: &[k::Statement], pos: u32) -> b::StmtId {
@@ -1890,6 +1951,9 @@ impl<'a, 's> Lower<'a, 's> {
         };
         let id = self.file.stmt(kind, statement.span.start);
         self.file[id].loc = Self::loc(statement.span);
+        if self.has_jsdoc() {
+            self.statement_jsdoc(statement, id);
+        }
         // Executable HIR drops `export` from a declaration (the module record carries it), but
         // the grammar reads it from the statement's modifiers: 1046 in a declaration file.
         match kind {
@@ -2551,7 +2615,9 @@ impl<'a, 's> Lower<'a, 's> {
         // `node.Modifiers()` of each member, from its first token: the executable span of a
         // static member starts past `static`, the class site's does not.
         let mut member_decorators = Vec::new();
+        let mut member_starts = Vec::with_capacity(members.len());
         for (index, member) in members.iter_mut().enumerate() {
+            member_starts.push(member.start);
             // `static {}` is a block, not a member with a `static` modifier.
             if member.kind == b::MemberKind::StaticBlock {
                 continue;
@@ -2566,6 +2632,19 @@ impl<'a, 's> Lower<'a, 's> {
             let modifiers = self.written_node_modifiers(start, end, &decorators);
             member.modifiers = self.file.add_modifiers(&modifiers);
             member_decorators.extend(decorators.into_iter().map(|(_, e)| (index, e)));
+            member_starts[index] = start;
+        }
+        // `parseClassElement`
+        if self.has_jsdoc() && member_decorators.is_empty() {
+            let mut documented = Vec::with_capacity(members.len());
+            for (member, start) in members.into_iter().zip(member_starts) {
+                // The members made from `@overload` tags precede their host.
+                let member = self.member_jsdoc(member, start);
+                documented.append(&mut self.jsdoc_state.reparsed_members);
+                documented.push(member);
+            }
+            members = documented;
+            self.semicolon_elements_jsdoc(class.span, &members);
         }
         let members = self.file.add_members(&members);
         for (index, e) in member_decorators {
