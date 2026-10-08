@@ -502,6 +502,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 return Ok(());
             }
+            Sink::AsyncGeneratorReturnActive(generator, step) => {
+                let (generator, step) = (Rc::clone(generator), Rc::clone(step));
+                return match outcome {
+                    Settled::Fulfilled(value) => {
+                        self.drive_async_generator(&generator, &step, Resume::Return(value))
+                    }
+                    Settled::Rejected(reason) => {
+                        // Await rejection is thrown at the suspended yield, so the generator's
+                        // own catch/finally handlers receive it. An uncaught rejection completes
+                        // the body before the request promise is rejected.
+                        self.drive_async_generator(&generator, &step, Resume::Throw(reason))
+                    }
+                };
+            }
             Sink::ModuleAwait(state) => {
                 let state = Rc::clone(state);
                 return self.resume_module_body(&state, outcome);

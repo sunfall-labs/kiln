@@ -800,7 +800,8 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
                     // omitted; the resulting unexplained strong refs conservatively retain the
                     // children instead of counting one shared edge once per reaction.
                     Sink::AsyncDisposal(_) | Sink::ModuleAwait(_) => {}
-                    Sink::AsyncGeneratorReturn(generator, promise) => {
+                    Sink::AsyncGeneratorReturn(generator, promise)
+                    | Sink::AsyncGeneratorReturnActive(generator, promise) => {
                         values.push(Value::Generator(Rc::clone(generator)));
                         values.push(Value::Promise(Rc::clone(promise)))
                     }

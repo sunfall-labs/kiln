@@ -152,11 +152,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 &request.step,
                 Resume::Send(request.value.clone()),
             ),
-            AsyncGeneratorRequestKind::Return if started && !done => self.drive_async_generator(
-                generator,
-                &request.step,
-                Resume::Return(request.value.clone()),
-            ),
+            AsyncGeneratorRequestKind::Return if started && !done => {
+                // AsyncGeneratorResumeNext awaits the return completion's value before it
+                // injects that completion into the suspended body. A rejection is thrown into
+                // the suspended body so its catch/finally handlers can observe it.
+                let target = match request.value.clone() {
+                    Value::Promise(inner) => inner,
+                    other => {
+                        let pending = PromiseState::pending();
+                        self.resolve_promise(&pending, other);
+                        pending
+                    }
+                };
+                self.react(
+                    &target,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::AsyncGeneratorReturnActive(generator.clone(), Rc::clone(&request.step)),
+                    false,
+                );
+                Ok(())
+            }
             AsyncGeneratorRequestKind::Throw if started && !done => self.drive_async_generator(
                 generator,
                 &request.step,
@@ -579,5 +595,238 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod return_operand_tests {
+    use super::*;
+
+    struct NullHost;
+
+    impl HostOps for NullHost {
+        fn call(
+            &mut self,
+            _operation: HostOp,
+            _arguments: &[HostValue],
+        ) -> Result<HostValue, kiln_host_abi::HostError> {
+            Ok(HostValue::Undefined)
+        }
+    }
+
+    fn generator_program(code: Vec<Instruction>, local_count: u32) -> Program {
+        Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
+            constants: vec![
+                Constant::String("first".to_owned().into()),
+                Constant::String("second".to_owned().into()),
+                Constant::String("caught".to_owned().into()),
+                Constant::String("after-catch".to_owned().into()),
+            ],
+            code: Vec::new(),
+            local_count: 0,
+            functions: vec![kiln_ir::FunctionProto {
+                inferred_name: None,
+                span: kiln_ir::Span::default(),
+                prologue_end: 0,
+                asynchronous: true,
+                name: Some("returnOperand".to_owned()),
+                arrow: false,
+                generator: true,
+                async_generator: true,
+                is_method: false,
+                is_class: false,
+                parameter_count: 0,
+                declared_length: 0,
+                mapped_arguments: false,
+                local_count,
+                code,
+                upvalues: Vec::new(),
+                type_annotations: None,
+            }],
+        }
+    }
+
+    fn vm_and_generator<'host>(
+        program: &Program,
+        host: &'host mut NullHost,
+    ) -> (Vm<'host, NullHost>, Rc<GeneratorData>) {
+        let program = Rc::new(program.clone());
+        let strictness = Rc::new(Strictness::sloppy(&program));
+        let mut vm = Vm::with_entropy_seed(
+            Rc::clone(&program),
+            strictness,
+            host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            &RealmCapabilities::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("test VM initializes");
+        let closure = vm.make_closure(0).expect("async generator closure");
+        let Value::Generator(generator) = vm
+            .call_value(&Value::Function(closure), Value::Undefined, Vec::new(), 0)
+            .expect("async generator call")
+        else {
+            panic!("async generator call returns a generator");
+        };
+        (vm, generator)
+    }
+
+    fn request(
+        vm: &mut Vm<'_, NullHost>,
+        generator: &Rc<GeneratorData>,
+        kind: AsyncGeneratorRequestKind,
+        value: Value,
+    ) -> Rc<PromiseData> {
+        let callback = match kind {
+            AsyncGeneratorRequestKind::Next => CallbackMethod::AsyncGeneratorNext,
+            AsyncGeneratorRequestKind::Return => CallbackMethod::AsyncGeneratorReturn,
+            AsyncGeneratorRequestKind::Throw => CallbackMethod::AsyncGeneratorThrow,
+        };
+        let Value::Promise(step) = vm
+            .call_value(
+                &Value::Callback(callback, RealmId::PRIMARY),
+                Value::Generator(Rc::clone(generator)),
+                vec![value],
+                0,
+            )
+            .expect("async generator request")
+        else {
+            panic!("async generator request returns a promise");
+        };
+        // This test observes settlement directly instead of installing a JS catch handler.
+        step.state.borrow_mut().handled = true;
+        step
+    }
+
+    fn rejected_promise(vm: &mut Vm<'_, NullHost>, reason: Value) -> Rc<PromiseData> {
+        let promise = PromiseState::pending();
+        vm.settle(&promise, &Settled::Rejected(reason));
+        promise
+    }
+
+    fn result_value(outcome: &Option<Settled>) -> Option<(Value, bool)> {
+        let Settled::Fulfilled(Value::Object(result)) = outcome.as_ref()? else {
+            return None;
+        };
+        let object = result.borrow();
+        let value = object.get_own("value")?.clone();
+        let done = matches!(object.get_own("done"), Some(Value::Boolean(true)));
+        Some((value, done))
+    }
+
+    #[test]
+    fn rejected_active_return_is_thrown_into_the_generator_body() {
+        let program = generator_program(
+            vec![
+                Instruction::Const(0),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::Const(1),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            0,
+        );
+        let mut host = NullHost;
+        let (mut vm, generator) = vm_and_generator(&program, &mut host);
+
+        let first = request(
+            &mut vm,
+            &generator,
+            AsyncGeneratorRequestKind::Next,
+            Value::Undefined,
+        );
+        vm.drain_microtask_jobs().expect("first yield settles");
+        assert!(matches!(
+            result_value(&first.state.borrow().settled),
+            Some((Value::String(value), false)) if value.to_lossy_string() == "first"
+        ));
+
+        let reason = Value::String("return-operand-rejected".to_owned().into());
+        let rejected = rejected_promise(&mut vm, reason.clone());
+        let returned = request(
+            &mut vm,
+            &generator,
+            AsyncGeneratorRequestKind::Return,
+            Value::Promise(rejected),
+        );
+        vm.drain_microtask_jobs()
+            .expect("rejected return is delivered");
+        assert_eq!(
+            returned.state.borrow().settled,
+            Some(Settled::Rejected(reason))
+        );
+
+        let next = request(
+            &mut vm,
+            &generator,
+            AsyncGeneratorRequestKind::Next,
+            Value::Undefined,
+        );
+        vm.drain_microtask_jobs()
+            .expect("closed generator answers next");
+        assert!(matches!(
+            result_value(&next.state.borrow().settled),
+            Some((Value::Undefined, true))
+        ));
+    }
+
+    #[test]
+    fn rejected_active_return_reaches_generator_catch_handler() {
+        let program = generator_program(
+            vec![
+                Instruction::PushHandler(10),
+                Instruction::Const(0),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::Const(1),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::PopHandler,
+                Instruction::Const(0),
+                Instruction::Return,
+                Instruction::StoreLocal(0),
+                Instruction::LoadLocal(0),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::Const(3),
+                Instruction::Return,
+            ],
+            1,
+        );
+        let mut host = NullHost;
+        let (mut vm, generator) = vm_and_generator(&program, &mut host);
+        let first = request(
+            &mut vm,
+            &generator,
+            AsyncGeneratorRequestKind::Next,
+            Value::Undefined,
+        );
+        vm.drain_microtask_jobs().expect("first yield settles");
+        assert!(first.state.borrow().settled.is_some());
+
+        let reason: kiln_string::StringUnits = "caught-return-rejection".to_owned().into();
+        let rejected = rejected_promise(&mut vm, Value::String(reason.clone()));
+        let returned = request(
+            &mut vm,
+            &generator,
+            AsyncGeneratorRequestKind::Return,
+            Value::Promise(rejected),
+        );
+        vm.drain_microtask_jobs()
+            .expect("generator catches rejected return value");
+        assert!(matches!(
+            result_value(&returned.state.borrow().settled),
+            Some((Value::String(value), false)) if value == reason
+        ));
     }
 }
