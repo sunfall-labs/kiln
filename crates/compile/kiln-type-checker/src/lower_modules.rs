@@ -268,6 +268,77 @@ impl Lower<'_, '_> {
         }
     }
 
+    /// Where the `*` of the `export * as ns from "m"` that `statement` spans is, and where `ns`
+    /// is (the `*` again for `export * from "m"`).
+    fn export_star_positions(&self, statement: k::Span) -> (u32, u32) {
+        let source = self.module.source.as_bytes();
+        let end = (statement.end as usize).min(source.len());
+        let trivia = |at: usize| skip_trivia(source, at, end);
+        let word = |at: usize| {
+            source[at.min(end)..end]
+                .iter()
+                .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_' || **b == b'$')
+                .count()
+        };
+        let mut at = trivia(statement.start as usize);
+        // `export` and an optional `type`, then `*`.
+        for _ in 0..2 {
+            if source.get(at) == Some(&b'*') {
+                break;
+            }
+            let length = word(at);
+            if length == 0 {
+                return (statement.start, statement.start);
+            }
+            at = trivia(at + length);
+        }
+        let star = at;
+        let after = trivia(star + 1);
+        if word(after) == 2 && source.get(after..after + 2) == Some(b"as") {
+            return (star as u32, trivia(after + 2) as u32);
+        }
+        (star as u32, star as u32)
+    }
+
+    /// `importClause.Pos()` and `importClause.End()` of the import declaration `statement`, whose
+    /// module specifier is at `specifier`: the token after `import`, and the end of the last
+    /// binding before `from`. A declaration without bindings has an empty clause at its specifier.
+    fn import_clause_range(
+        &self,
+        statement: k::Span,
+        specifier: u32,
+        has_bindings: bool,
+    ) -> (u32, u32) {
+        if !has_bindings {
+            return (specifier, specifier);
+        }
+        let source = self.module.source.as_bytes();
+        let end = (specifier as usize).min(source.len());
+        let start = skip_trivia(source, statement.start as usize + "import".len(), end);
+        // The last token before the specifier is `from`.
+        let mut clause_end = start;
+        let mut at = start;
+        while at < end {
+            at = skip_trivia(source, at, end);
+            if at >= end {
+                break;
+            }
+            let length = source[at..end]
+                .iter()
+                .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_' || **b == b'$')
+                .count();
+            if length == 4
+                && &source[at..at + 4] == b"from"
+                && skip_trivia(source, at + 4, end) >= end
+            {
+                break;
+            }
+            at += length.max(1);
+            clause_end = at;
+        }
+        (start as u32, clause_end as u32)
+    }
+
     /// Where the specifier of `import` starts (its `type`, or else its imported name), and where
     /// its imported name is: `x` of `x as y` and `"s"` of `"s" as y` come before the local name,
     /// which is all the module record keeps the span of.
@@ -489,19 +560,25 @@ impl Lower<'_, '_> {
                 },
                 mode,
             });
+            let specifier = self.specifier_pos(span, k::ModuleRequestKind::Import);
+            let (clause_start, clause_end) = self.import_clause_range(
+                span,
+                specifier,
+                default.is_some() || namespace.is_some() || has_named_imports,
+            );
             let id = self.file.add_import(b::Import {
                 spec,
                 default,
                 default_pos,
                 namespace,
                 namespace_pos,
-                clause_start: span.start,
-                clause_end: span.end,
+                clause_start,
+                clause_end,
                 namespace_start: namespace_pos,
                 named,
                 has_named_imports,
                 type_only,
-                is_deferred: false,
+                is_deferred: (self.module.type_syntax.deferred_import_declarations).contains(&span),
                 mode,
                 stmt: b::StmtId::NONE,
             });
@@ -653,8 +730,8 @@ impl Lower<'_, '_> {
                         alias: exported,
                         type_only: e.type_only,
                         mode,
-                        star_pos: e.span.start,
-                        alias_pos: e.span.start,
+                        star_pos: self.export_star_positions(e.statement_span).0,
+                        alias_pos: self.export_star_positions(e.statement_span).1,
                     }
                 }
                 k::ExportOrigin::ReExport {
@@ -697,6 +774,65 @@ impl Lower<'_, '_> {
             self.file[stmt].loc = Self::loc(e.statement_span);
             result.push((e.statement_span.start, stmt));
         }
+        // `export {} from "m"` names nothing, so the module record has no entry for it; the
+        // request for "m" is all that is left of it.
+        let mut empty: BTreeMap<k::Span, &k::RequestedModule> = BTreeMap::new();
+        for request in requested_modules {
+            for occurrence in &request.occurrences {
+                if occurrence.kind == k::ModuleRequestKind::Export
+                    && !exports
+                        .iter()
+                        .any(|e| e.statement_span == occurrence.statement_span)
+                {
+                    empty.insert(occurrence.statement_span, request);
+                }
+            }
+        }
+        for (span, request) in empty {
+            let spec = self.atom(&request.specifier);
+            let type_only = self.declaration_is_type_only(span, k::ModuleRequestKind::Export);
+            let mode = self.module_resolution_mode(span, type_only);
+            self.file.specifier_uses.push(b::SpecifierUse {
+                spec,
+                pos: self.specifier_pos(span, k::ModuleRequestKind::Export),
+                kind: b::SpecifierKind::Import,
+                mode,
+            });
+            let items = self.file.add_export_specs(&[]);
+            let kind = b::StmtKind::ExportNamed(self.file.add_export(b::Export {
+                spec,
+                has_module_specifier: true,
+                items,
+                type_only,
+                mode,
+                stmt: b::StmtId::NONE,
+            }));
+            let stmt = self.file.stmt(kind, span.start);
+            self.file[stmt].loc = Self::loc(span);
+            result.push((span.start, stmt));
+        }
         result
+    }
+}
+
+/// The first position at or after `at`, before `end`, that is not whitespace or a comment.
+fn skip_trivia(source: &[u8], mut at: usize, end: usize) -> usize {
+    loop {
+        match source.get(at..end) {
+            Some([b, ..]) if b.is_ascii_whitespace() => at += 1,
+            Some([b'/', b'/', ..]) => {
+                at += source[at..end]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .unwrap_or(end - at)
+            }
+            Some([b'/', b'*', ..]) => {
+                at += source[at + 2..end]
+                    .windows(2)
+                    .position(|w| w == b"*/")
+                    .map_or(end - at, |i| i + 4)
+            }
+            _ => return at,
+        }
     }
 }

@@ -706,7 +706,7 @@ impl<'a, 's> Lower<'a, 's> {
                 param.constraint = self.ty(constraint);
                 let param = self.file.add_type_param(param);
                 let name_ty = self.optional_ty(name_type.as_deref());
-                let ty = self.ty(value);
+                let ty = self.optional_ty(value.as_deref());
                 let modifier = |m: &k::TypeModifier| match m {
                     k::TypeModifier::None => b::MappedModifier::None,
                     k::TypeModifier::Add => b::MappedModifier::Add,
@@ -820,7 +820,7 @@ impl<'a, 's> Lower<'a, 's> {
         b::Param {
             pat,
             ty,
-            default: b::ExprId::NONE,
+            default: p.default.as_ref().map_or(b::ExprId::NONE, |d| self.expr(d)),
             flags,
             pos: p.span.start,
             loc: Self::loc(p.span),
@@ -877,7 +877,7 @@ impl<'a, 's> Lower<'a, 's> {
                 let mut func = b::FnId::NONE;
                 let kind = match &m.kind {
                     k::TypeMemberKind::Property(t) => {
-                        ty = self.ty(t);
+                        ty = t.as_ref().map_or(b::TypeNodeId::NONE, |t| self.ty(t));
                         b::MemberKind::Property
                     }
                     k::TypeMemberKind::Getter(t) => {
@@ -1160,6 +1160,33 @@ impl<'a, 's> Lower<'a, 's> {
                 b::DiagnosticKind::Parse,
                 (span.start, span.end),
                 1084,
+                &[],
+            ));
+            self.file.has_parse_diagnostics = true;
+        }
+        let pragmas = &self.module.type_syntax.jsx_pragmas;
+        if matches!(
+            self.module.source_kind,
+            k::SourceKind::Tsx | k::SourceKind::Jsx
+        ) {
+            let factory = pragmas.factory.as_deref().map(|text| self.atom(text));
+            let fragment_factory = pragmas
+                .fragment_factory
+                .as_deref()
+                .map(|text| self.atom(text));
+            let import_source = pragmas.import_source.as_deref().map(|text| self.atom(text));
+            self.file.jsx_pragmas = b::JsxPragmas {
+                classic: pragmas.classic,
+                factory: factory.unwrap_or(Atom::NONE),
+                fragment_factory: fragment_factory.unwrap_or(Atom::NONE),
+                import_source: import_source.unwrap_or(Atom::NONE),
+            };
+        }
+        for span in &self.module.type_syntax.invalid_resolution_modes {
+            self.file.diagnostics.push(b::Diagnostic::new(
+                b::DiagnosticKind::Parse,
+                (span.start, span.end),
+                1453,
                 &[],
             ));
             self.file.has_parse_diagnostics = true;

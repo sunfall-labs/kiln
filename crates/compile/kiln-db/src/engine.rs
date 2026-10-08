@@ -2218,7 +2218,7 @@ mod tests {
                     ty: None,
                     optional: false,
                     rest: false,
-                    has_default: false,
+                    default: None,
                 };
                 let function = kiln_hir::Function {
                     name: Some("echo".into()),

@@ -12,17 +12,17 @@ pub mod source_types;
 pub mod type_syntax;
 pub use type_syntax::JsDocTypeKind;
 pub use type_syntax::{
-    AmbientModuleItems, BindingIdentifierSite, EnumMember, EnumMemberNameKind,
+    AmbientModuleItems, BindingIdentifierSite, EnumMember, EnumMemberNameKind, ForInBindingSite,
     FunctionSignatureSite, JsxAttributeSite, JsxChildSite, JsxSite, Modifier as TypeModifier,
     NameSite, TupleElement as TypeTupleElement, TypeAccessibility, TypeAnnotationSite,
     TypeClassMemberKind, TypeClassMemberSite, TypeClassSite, TypeDeclaration, TypeDeclarationKind,
     TypeDecoratorOwner, TypeDecoratorSite, TypeExportAssignment, TypeExpr, TypeExprKind,
     TypeExpressionWrapperKind, TypeExpressionWrapperSite, TypeImportEquals,
-    TypeImportEqualsReference, TypeInstantiationKind, TypeInstantiationSite, TypeKeyword,
-    TypeLiteral, TypeMember, TypeMemberKind, TypeModuleAttribute, TypeModuleAttributeKeyKind,
-    TypeModuleAttributes, TypeModuleAttributesKeyword, TypeNamespaceExport, TypeOperator,
-    TypeParameter, TypeReferenceDirective, TypeReferenceKind, TypeResolutionMode, TypeSignature,
-    TypeSignatureParameter, TypeSite, TypeSyntax,
+    TypeImportEqualsReference, TypeInstantiationKind, TypeInstantiationSite, TypeJsxPragmas,
+    TypeKeyword, TypeLiteral, TypeMember, TypeMemberKind, TypeModuleAttribute,
+    TypeModuleAttributeKeyKind, TypeModuleAttributes, TypeModuleAttributesKeyword,
+    TypeNamespaceExport, TypeOperator, TypeParameter, TypeReferenceDirective, TypeReferenceKind,
+    TypeResolutionMode, TypeSignature, TypeSignatureParameter, TypeSite, TypeSyntax,
 };
 
 pub use kiln_string::StringUnits;

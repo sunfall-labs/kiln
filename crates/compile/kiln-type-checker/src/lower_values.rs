@@ -1054,6 +1054,9 @@ impl<'a, 's> Lower<'a, 's> {
                     args.push(self.expr(options));
                 }
                 let args = self.file.list(&args);
+                if self.module.type_syntax.deferred_imports.contains(&span) {
+                    self.file.deferred_import_calls.push((argument, span.end));
+                }
                 b::ExprKind::ImportCall { args }
             }
             E::Array { elements } => b::ExprKind::Array(self.args(elements, span)),
@@ -1220,6 +1223,7 @@ impl<'a, 's> Lower<'a, 's> {
             }
             // `a={}`: an attribute without an expression, which the checker reports itself.
             E::Unsupported { feature } if feature == "empty JSX expression" => b::ExprKind::Missing,
+            E::Unsupported { feature } if feature == "import.meta" => b::ExprKind::ImportMeta,
             E::Unsupported { feature } => {
                 self.error(span, feature.clone());
                 b::ExprKind::Missing
@@ -1812,11 +1816,16 @@ impl<'a, 's> Lower<'a, 's> {
                 object,
                 body,
             } => {
-                let pat = self.file.pat(
-                    b::PatKind::Ident(self.atom(name)),
-                    statement.span.start,
-                    statement.span.end,
-                );
+                let site = (self.module.type_syntax.for_in_bindings.iter())
+                    .find(|site| site.span == statement.span);
+                let pat = match site {
+                    Some(site) => self.pattern(&site.pattern, statement.span),
+                    None => self.file.pat(
+                        b::PatKind::Ident(self.atom(name)),
+                        statement.span.start,
+                        statement.span.end,
+                    ),
+                };
                 let var = b::VarDecl {
                     pat,
                     ty: b::TypeNodeId::NONE,
@@ -2367,6 +2376,8 @@ impl<'a, 's> Lower<'a, 's> {
             });
             let func = self.function(constructor);
             self.file[func].kind = b::FnKind::Constructor;
+            // `func(&f.func, fn_kind, member.flags, ..)`: a function has the flags of its member.
+            self.file[func].flags |= class_member_flags(member_site, false);
             // `constructor(public x)`: the binder declares the property from the parameter.
             if let Some(site) = &site {
                 for index in self.file[func].params.range() {
@@ -2412,6 +2423,7 @@ impl<'a, 's> Lower<'a, 's> {
             };
             let key = self.key(&method.key);
             self.file[func].name_pos = self.name_pos(method.span, None);
+            self.file[func].flags |= class_member_flags(member_site, method.is_static);
             members.push(b::Member {
                 kind: match method.kind {
                     k::MethodKind::Normal => b::MemberKind::Method,
@@ -2480,6 +2492,7 @@ impl<'a, 's> Lower<'a, 's> {
                     .as_deref()
                     .map_or(Atom::NONE, |name| self.atom(name));
                 self.file[func].name = member_name;
+                self.file[func].flags |= class_member_flags(Some(member), false);
                 self.file[func].name_pos = self.name_pos(member.span, None);
                 self.file[func].anchor = member.span.start;
                 self.file[func].start = member.span.start;
@@ -2494,7 +2507,11 @@ impl<'a, 's> Lower<'a, 's> {
                     ty: b::TypeNodeId::NONE,
                     init: b::ExprId::NONE,
                     func,
-                    name_pos: member.span.start,
+                    name_pos: if member_kind == b::MemberKind::Constructor {
+                        member.span.start
+                    } else {
+                        self.file[func].name_pos
+                    },
                     start: member.span.start,
                     loc: Self::loc(member.span),
                     modifiers: b::Span::EMPTY,
@@ -2811,6 +2828,9 @@ fn class_member_flags(site: Option<&k::TypeClassMemberSite>, static_fallback: bo
         }
         if site.abstract_ {
             flags |= b::Flags::ABSTRACT;
+        }
+        if site.declare {
+            flags |= b::Flags::AMBIENT;
         }
         if site.override_ {
             flags |= b::Flags::OVERRIDE;
