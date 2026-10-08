@@ -203,6 +203,11 @@ a region is never versioned more than once. The generic clone is bit-for-bit tod
 `KILN_SPECULATE=0` -- a sibling of `KILN_KEYS_CHECK` -- produces today's binary and the
 differential corpus can say whether the fast clone ever answers differently.
 
+`KILN_SOURCE_TYPES=0` is the matching switch for the type checker's facts: `apply_source_types`
+attaches nothing, so codegen sees the program as if the checker had produced no contracts. It
+exists to A/B one TypeScript source with and without its types
+(`scripts/typed-codegen.sh`, `docs/issues/type-directed-codegen/`).
+
 ### 3. NaN-boxing, finished
 
 ADR 0053 phase 3. Mechanical, large, and a prerequisite rather than a lever in its own right:

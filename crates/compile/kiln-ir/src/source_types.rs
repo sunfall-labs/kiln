@@ -22,6 +22,14 @@ fn coarse(class: &TypeClass) -> Option<TypeAnnotation> {
         _ => None,
     }
 }
+/// `KILN_SOURCE_TYPES=0` withholds every checker fact from codegen, so one program can be built
+/// with and without them (the A/B switch for type-directed code). With no facts attached,
+/// `source_types` stays unset, and the native build identity hashes absent and present facts
+/// differently (`kiln-backend-c/src/identity.rs`), so a build that receives them cannot share an
+/// artifact with one that does not.
+pub fn source_types_enabled() -> bool {
+    std::env::var("KILN_SOURCE_TYPES").as_deref() != Ok("0")
+}
 /// Attach resolved aliases and inferred source contracts to existing bytecode.
 /// The executable compiler remains the sole lowering path.
 pub fn apply_source_types(
@@ -31,7 +39,7 @@ pub fn apply_source_types(
     checker_identity: &str,
     program: &mut Program,
 ) {
-    if !checked.is_complete_for(path) {
+    if !source_types_enabled() || !checked.is_complete_for(path) {
         return;
     }
     // Index this module once. Large projects carry facts for many imported modules;
