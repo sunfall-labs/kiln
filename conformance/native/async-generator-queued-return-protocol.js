@@ -45,6 +45,18 @@ async function main() {
   const overrideDone = await overriding.next();
   output.push(`override:${overrideYield.value}/${overrideYield.done}:${overrideDone.value}/${overrideDone.done}`);
 
+  async function* immediateOverride() {
+    try {
+      yield "first";
+    } finally {
+      return "immediate-finally-return";
+    }
+  }
+  const immediate = immediateOverride();
+  await immediate.next();
+  const immediateDone = await immediate.return(Promise.resolve("requested-return"));
+  output.push(`immediate-override:${immediateDone.value}/${immediateDone.done}`);
+
   const rejectedSyncValue = new Error("wrapped-done-value-rejected");
   async function* wrappedDoneValue() {
     yield* {
