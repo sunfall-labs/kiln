@@ -49,6 +49,334 @@ fn native_graph_declares_runtime_module_host_abi_without_static_fs_or_dynamic_im
 }
 
 #[test]
+fn emitted_root_ranges_match_legacy_visitation_order_and_failure_behavior() {
+    use kiln_module_resolver::NodeRuntimeResolver;
+
+    let Some(toolchain) = Toolchain::discover().ok() else {
+        eprintln!("skipping emitted root-range C fixture: no C compiler found");
+        return;
+    };
+    let root = TestDirectory::new("kiln-native-graph-root-ranges");
+    fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+        .expect("write package metadata");
+    let entry = root.path.join("main.mjs");
+    fs::write(
+        &entry,
+        "import process from 'node:process'; import { base } from './base.mjs'; import { extra } from './extra.mjs'; import './empty.mjs'; void import('./extra.mjs'); console.log(base + extra + process.pid);",
+    )
+    .expect("write entry");
+    fs::write(root.path.join("base.mjs"), "export const base = 10;").expect("write base module");
+    fs::write(root.path.join("extra.mjs"), "export const extra = 20;").expect("write extra module");
+    fs::write(root.path.join("empty.mjs"), "").expect("write empty module");
+    let graph = ModuleGraph::build_node(
+        &entry,
+        NodeRuntimeResolver::new(&root.path).expect("Node resolver"),
+        |path: &Path| fs::read_to_string(path),
+        OxcFrontend,
+    )
+    .expect("build source/builtin graph");
+    assert!(
+        graph
+            .modules()
+            .any(|node| matches!(node.source, ModuleSource::NodeBuiltin(_)))
+    );
+    assert!(
+        graph
+            .modules()
+            .any(|node| node.source == ModuleSource::Source)
+    );
+    assert!(
+        graph.modules().any(|node| {
+            node.source == ModuleSource::Source
+                && native_graph_export_count(node) == 0
+                && node.program.imports.is_empty()
+        }),
+        "fixture must include a source module with zero imports and exports"
+    );
+
+    let modules = graph
+        .modules()
+        .map(|node| {
+            let logical = node
+                .path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("module");
+            let emitted = emit_native_graph_module(node, logical, &NativeRealmPolicy::default())
+                .expect("emit module metadata for graph root fixture");
+            (node, emitted)
+        })
+        .collect::<Vec<_>>();
+    let launcher =
+        super::super::graph::graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())
+            .expect("render actual graph instance layout");
+    let mut rendered_roots = String::new();
+    super::super::graph::render_graph_roots(&mut rendered_roots, &modules);
+    let roots_start = rendered_roots
+        .find("_Static_assert(offsetof(kiln_graph_module_state")
+        .expect("generated root range metadata");
+    let roots_end = rendered_roots[roots_start..]
+        .find("\nstatic void kiln_graph_gc_roots")
+        .map(|offset| roots_start + offset)
+        .expect("end of generated root visitor");
+    let roots = &rendered_roots[roots_start..roots_end];
+
+    fn typedef<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source
+            .find(&format!("typedef struct {name}"))
+            .unwrap_or_else(|| panic!("launcher is missing {name} typedef"));
+        let end_marker = format!("}} {name};");
+        let end = source[start..]
+            .find(&end_marker)
+            .map(|offset| start + offset + end_marker.len())
+            .unwrap_or_else(|| panic!("launcher has unterminated {name} typedef"));
+        &source[start..end]
+    }
+    let layout = [
+        "kiln_graph_launch",
+        "kiln_graph_require_context",
+        "kiln_graph_runtime_module",
+        "kiln_graph_unit_store",
+        "kiln_graph_module_state",
+        "kiln_graph_module_instance",
+    ]
+    .into_iter()
+    .map(|name| typedef(&launcher, name))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    let mut legacy = String::from(
+        "static int kiln_graph_gc_visit_roots_legacy(void *context, kiln_gc_visit_root_fn visit, void *visit_context) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    kiln_value generation_owner;\n    size_t index;\n    if (graph == NULL || graph->realm == NULL) return 0;\n    if (graph->runtime_module_generation != NULL && graph->runtime_module_generation != graph && graph->runtime_module_generation->host.module_owner != NULL) { generation_owner = (kiln_value){ .tag = 9, .flags = 0, .len = 0, .bits = (uint64_t)(uintptr_t)graph->runtime_module_generation->host.module_owner }; if (visit(visit_context, &generation_owner, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR; }\n",
+    );
+    for (index, (node, module)) in modules.iter().enumerate() {
+        let builtin = usize::from(matches!(node.source, ModuleSource::NodeBuiltin(_)));
+        let exports = native_graph_export_count(node);
+        writeln!(legacy, "    if (graph->is_builtin_graph == {builtin}) {{").unwrap();
+        if exports != 0 {
+            writeln!(legacy, "        for (index = 0; index < (size_t){exports}; ++index) if (visit(visit_context, &graph->instance->exports_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
+            if module.instantiation.is_some() {
+                writeln!(legacy, "        for (index = 0; index < (size_t){exports}; ++index) if (visit(visit_context, &graph->instance->cells_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
+            }
+        }
+        if !node.program.imports.is_empty() {
+            writeln!(legacy, "        for (index = 0; index < (size_t){}; ++index) if (visit(visit_context, &graph->instance->imports_{index}[index], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;", node.program.imports.len()).unwrap();
+        }
+        legacy.push_str("    }\n");
+    }
+    for (index, (node, _)) in modules.iter().enumerate() {
+        let builtin = usize::from(matches!(node.source, ModuleSource::NodeBuiltin(_)));
+        writeln!(legacy, "    if (graph->is_builtin_graph == {builtin} && visit(visit_context, &graph->instance->namespaces[{index}], KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
+    }
+    if modules
+        .iter()
+        .any(|(node, _)| node.program.program.has_dynamic_import())
+    {
+        legacy.push_str("    if (visit(visit_context, &graph->instance->opentui_namespace, KILN_GC_VISIT_VALUE) != 0 || visit(visit_context, &graph->instance->node_ffi_namespace, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n");
+    }
+    legacy.push_str("    { kiln_graph_unit_store *store; for (store = graph->instance->unit_stores; store != NULL; store = store->next) { size_t slot; for (slot = 0; slot < store->unit->val_count; ++slot) if (visit(visit_context, &store->values[slot], KILN_GC_VISIT_COMPACT) != 0) return KILN_C99_HOST_ERROR; } }\n    { kiln_graph_runtime_module *module; for (module = graph->realm->runtime_modules; module != NULL; module = module->next) if (module->generation == graph->instance->instance_id && (visit(visit_context, &module->namespace_value, KILN_GC_VISIT_VALUE) != 0 || visit(visit_context, &module->failure, KILN_GC_VISIT_VALUE) != 0)) return KILN_C99_HOST_ERROR; }\n    if (visit(visit_context, &graph->instance->result, KILN_GC_VISIT_VALUE) != 0 || visit(visit_context, &graph->instance->entry_result, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;\n");
+    for (index, (node, _)) in modules.iter().enumerate() {
+        // Legacy module-state rule is intentionally asymmetric: ordinary graphs visit every
+        // state; builtin graphs visit only builtin states, even when there are no builtins.
+        let source_state = !matches!(node.source, ModuleSource::NodeBuiltin(_));
+        for field in [
+            "result",
+            "active_promise",
+            "completion_promise",
+            "completion_resolve",
+            "completion_reject",
+        ] {
+            if source_state {
+                writeln!(legacy, "    if (!graph->is_builtin_graph && visit(visit_context, &graph->instance->module_states[{index}].{field}, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
+            } else {
+                writeln!(legacy, "    if (visit(visit_context, &graph->instance->module_states[{index}].{field}, KILN_GC_VISIT_VALUE) != 0) return KILN_C99_HOST_ERROR;").unwrap();
+            }
+        }
+    }
+    legacy.push_str("    return KILN_C99_OK;\n}\n");
+
+    let mut seed_values = String::new();
+    let mut identifier = 1000u64;
+    for (index, (node, module)) in modules.iter().enumerate() {
+        for field in [
+            "result",
+            "active_promise",
+            "completion_promise",
+            "completion_resolve",
+            "completion_reject",
+        ] {
+            writeln!(
+                seed_values,
+                "    set_value(&instance.module_states[{index}].{field}, {});",
+                identifier
+            )
+            .unwrap();
+            identifier += 1;
+        }
+        let exports = native_graph_export_count(node);
+        if exports != 0 {
+            for slot in 0..exports {
+                writeln!(
+                    seed_values,
+                    "    set_value(&instance.exports_{index}[{slot}], {});",
+                    identifier
+                )
+                .unwrap();
+                identifier += 1;
+            }
+            if module.instantiation.is_some() {
+                for slot in 0..exports {
+                    writeln!(
+                        seed_values,
+                        "    set_value(&instance.cells_{index}[{slot}], {});",
+                        identifier
+                    )
+                    .unwrap();
+                    identifier += 1;
+                }
+            }
+        }
+        for slot in 0..node.program.imports.len() {
+            writeln!(
+                seed_values,
+                "    set_value(&instance.imports_{index}[{slot}], {});",
+                identifier
+            )
+            .unwrap();
+            identifier += 1;
+        }
+    }
+    seed_values.push_str(
+        "    set_value(&instance.result, 10);\n    set_value(&instance.entry_result, 11);\n",
+    );
+    for index in 0..modules.len() {
+        writeln!(
+            seed_values,
+            "    set_value(&instance.namespaces[{index}], {});",
+            identifier
+        )
+        .unwrap();
+        identifier += 1;
+    }
+
+    let c_source = format!(
+        r#"
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+typedef struct kiln_value {{ int tag; int flags; uint32_t len; uint64_t bits; }} kiln_value;
+typedef kiln_value kiln_val;
+typedef struct kiln_c99_unit {{ size_t val_count; }} kiln_c99_unit;
+typedef struct kiln_graph_context kiln_graph_context;
+typedef struct kiln_graph_realm_state kiln_graph_realm_state;
+typedef struct kiln_host {{ void *module_owner; }} kiln_host;
+{layout}
+struct kiln_graph_realm_state {{ kiln_graph_context *current_graph; kiln_graph_runtime_module *runtime_modules; }};
+struct kiln_graph_context {{ kiln_host host; kiln_graph_realm_state *realm; kiln_graph_module_instance *instance; kiln_graph_context *runtime_module_generation; int is_builtin_graph; }};
+#define kiln_opentui_namespace (graph->instance->opentui_namespace)
+#define kiln_node_ffi_namespace (graph->instance->node_ffi_namespace)
+#define KILN_VALUE_OBJECT 9
+#define KILN_GC_VISIT_VALUE 1
+#define KILN_GC_VISIT_COMPACT 2
+#define KILN_C99_OK 0
+#define KILN_C99_HOST_ERROR -1
+typedef int (*kiln_gc_visit_root_fn)(void *, const void *, uint32_t);
+{roots}
+typedef struct record {{ const void *pointer; uint32_t kind; int tag; uint64_t bits; }} record;
+typedef struct recorder {{ record records[512]; size_t count; size_t fail_after; }} recorder;
+static int remember(void *opaque, const void *pointer, uint32_t kind) {{
+    recorder *out = (recorder *)opaque;
+    record *slot;
+    if (out->count >= 512) return 1;
+    slot = &out->records[out->count++];
+    slot->pointer = pointer; slot->kind = kind; slot->tag = 0; slot->bits = 0;
+    if (kind == KILN_GC_VISIT_VALUE) {{
+        const kiln_value *value = (const kiln_value *)pointer;
+        slot->tag = value->tag; slot->bits = value->bits;
+        if (value->bits == UINT64_C(0xfeed1234)) slot->pointer = NULL;
+    }}
+    return out->fail_after != 0 && out->count == out->fail_after;
+}}
+{legacy}
+static void set_value(kiln_value *value, uint64_t bits) {{ value->tag = KILN_VALUE_OBJECT; value->flags = 0; value->len = 0; value->bits = bits; }}
+static int equal(const recorder *left, const recorder *right) {{
+    size_t i;
+    if (left->count != right->count) return 0;
+    for (i = 0; i < left->count; ++i) {{
+        const record *a = &left->records[i], *b = &right->records[i];
+        if (a->pointer != b->pointer || a->kind != b->kind || a->tag != b->tag || a->bits != b->bits) return 0;
+    }}
+    return 1;
+}}
+int main(void) {{
+    kiln_graph_module_instance instance = {{0}};
+    kiln_graph_realm_state realm = {{0}};
+    kiln_graph_context graph = {{0}}, generation = {{0}};
+    kiln_graph_runtime_module old_module = {{0}}, current_module = {{0}};
+    kiln_c99_unit unit_a = {{3}}, unit_b = {{2}};
+    kiln_val compact_a[3] = {{{{0}}}}, compact_b[2] = {{{{0}}}};
+    kiln_graph_unit_store store_a = {{&unit_a, compact_a, NULL}}, store_b = {{&unit_b, compact_b, NULL}};
+    int mode;
+{seed_values}
+    set_value(&instance.opentui_namespace, 9001); set_value(&instance.node_ffi_namespace, 9002);
+    generation.host.module_owner = (void *)(uintptr_t)0xfeed1234;
+    set_value(&current_module.namespace_value, 7001); set_value(&current_module.failure, 7002);
+    current_module.generation = 77; current_module.next = &old_module;
+    set_value(&old_module.namespace_value, 8001); set_value(&old_module.failure, 8002);
+    old_module.generation = 78; old_module.next = NULL;
+    instance.instance_id = 77; instance.unit_stores = &store_a; store_a.next = &store_b;
+    realm.current_graph = &graph; realm.runtime_modules = &current_module;
+    graph.host.module_owner = (void *)(uintptr_t)0x1111; graph.realm = &realm;
+    graph.instance = &instance; graph.runtime_module_generation = &generation;
+    for (mode = 0; mode <= 1; ++mode) {{
+        recorder current = {{0}}, reference = {{0}};
+        int current_status, reference_status;
+        graph.is_builtin_graph = mode;
+        current_status = kiln_graph_gc_visit_roots(&graph, remember, &current);
+        reference_status = kiln_graph_gc_visit_roots_legacy(&graph, remember, &reference);
+        if (current_status != reference_status || current_status != KILN_C99_OK || !equal(&current, &reference)) return 10 + mode;
+        {{ size_t i, compact = 0; int owner = 0, old_generation = 0; for (i = 0; i < current.count; ++i) {{
+            compact += current.records[i].kind == KILN_GC_VISIT_COMPACT;
+            owner |= current.records[i].bits == UINT64_C(0xfeed1234);
+            owner |= current.records[i].bits == 9001 || current.records[i].bits == 9002;
+            old_generation |= current.records[i].bits == 8001 || current.records[i].bits == 8002;
+        }} if (compact != 5 || !owner || old_generation) return 20 + mode; }}
+        {{ size_t fail_after; for (fail_after = 1; fail_after <= current.count; ++fail_after) {{
+            current = (recorder){{.fail_after = fail_after}}; reference = (recorder){{.fail_after = fail_after}};
+            current_status = kiln_graph_gc_visit_roots(&graph, remember, &current);
+            reference_status = kiln_graph_gc_visit_roots_legacy(&graph, remember, &reference);
+            if (current_status != KILN_C99_HOST_ERROR || current_status != reference_status || current.count != fail_after || !equal(&current, &reference)) return 30 + mode;
+        }} }}
+    }}
+    puts("root ranges match legacy visitor");
+    return 0;
+}}
+"#
+    );
+    let source = root.path.join("root-ranges.c");
+    let object = root.path.join("root-ranges.o");
+    let executable = root.path.join("root-ranges");
+    fs::write(&source, c_source).expect("write generated root-range C fixture");
+    toolchain
+        .compile_c(&source, &object, &CompileOptions::default())
+        .expect("compile actual root-range metadata and legacy oracle");
+    toolchain
+        .link_executable(&[object], &executable, &LinkOptions::default())
+        .expect("link root-range C fixture");
+    let output = Command::new(&executable)
+        .output_when_launchable()
+        .expect("run root-range C fixture");
+    assert!(
+        output.status.success(),
+        "generated root-range visitor differed from legacy order: status={} stdout={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"root ranges match legacy visitor\n");
+}
+
+#[test]
 fn native_module_reset_keeps_old_namespace_and_closure_on_old_instance() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
