@@ -1,0 +1,7 @@
+# Hash opcode interval diagnostics
+
+The repaired emitter writes each complete JSON line through one locked write. The fresh diagnostic run retained all 25 original Hash case IDs and modes, one inventory boundary and 25 exact case boundaries, with no malformed rows or opcode-sum mismatches. All case intervals have zero identity/function/callsite overflow. Setup exceeded the bounded function/callsite counters; the raw supervisor therefore reports failed under its stricter all-row zero-overflow rule. The audit preserves that status and scopes usable evidence to complete case intervals. No rerun or count was relabeled as conformance acceptance.
+
+The instrumented run recorded 19 passes and 6 original-deadline failures, with unchanged assertions and budgets. Instrumentation adds substantial overhead; these outcomes are not an uninstrumented regression score. The HashMap persistent/in-place-edit law interval executed 249,053,317 IR instructions, with 4,000 entries in its rebuild-related functions. Periodic rows are cumulative and must not be added to case totals. Timed-out async work may cross marker boundaries; counts support hypotheses, not CPU-time or benchmark claims.
+
+Source 3158ce32 and frozen CLI SHA 316795c0d2c8e8e2f9dbc15745f918e951d0193ba50b421aa7fd6ce5d45faf78 were unchanged. The producer reaped its process group. Full raw logs, parsed rows, official report and original supervisor status are verified compressed archives. This diagnostic feature remains separate from production integration.
