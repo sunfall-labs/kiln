@@ -883,17 +883,18 @@ impl<'a, 's> Lower<'a, 's> {
                         value_type,
                     } => {
                         let param_name = self.atom(parameter);
-                        let pat =
-                            self.file
-                                .pat(b::PatKind::Ident(param_name), m.span.start, m.span.end);
+                        let at = self.index_parameter_span(m.span);
+                        let pat = self
+                            .file
+                            .pat(b::PatKind::Ident(param_name), at.start, at.end);
                         let key_ty = self.ty(key_type);
                         let param = self.file.add_params(&[b::Param {
                             pat,
                             ty: key_ty,
                             default: b::ExprId::NONE,
                             flags: b::Flags::empty(),
-                            pos: m.span.start,
-                            loc: Self::loc(m.span),
+                            pos: at.start,
+                            loc: Self::loc(at),
                         }]);
                         let ret = self.ty(value_type);
                         ty = ret;
@@ -1019,6 +1020,30 @@ impl<'a, 's> Lower<'a, 's> {
             .for_each(|it| widen(&mut it.loc));
     }
 
+    /// `node.Modifiers()` of each parameter: its decorators and modifier keywords. A parameter is
+    /// found by its end, the same for the parameter and its decorators' owner.
+    fn parameter_modifiers(&mut self) {
+        for index in 0..self.file.params.len() {
+            let (pos, end) = (self.file.params[index].pos, self.file.params[index].loc.end);
+            let decorators = self.decorator_exprs(k::TypeDecoratorOwner::Parameter, |span| {
+                span.end == end && span.start <= pos
+            });
+            let start = (self.module.type_syntax.decorators.iter())
+                .filter(|site| site.owner == k::TypeDecoratorOwner::Parameter)
+                .find(|site| site.owner_span.end == end && site.owner_span.start <= pos)
+                .map_or(pos, |site| site.owner_span.start);
+            let modifiers = self.written_node_modifiers(start, end, &decorators);
+            let list = self.file.add_modifiers(&modifiers);
+            let param = b::ParamId::from(index as u32);
+            self.file.set_param_modifiers(param, list);
+            for (_, e) in decorators {
+                self.file
+                    .decorators
+                    .push((b::DecoratorOwner::Param(param), e));
+            }
+        }
+    }
+
     pub fn finish(
         mut self,
         arena: &'s crate::engine::session::Arena,
@@ -1052,6 +1077,11 @@ impl<'a, 's> Lower<'a, 's> {
                 },
             ));
         }
+        self.parameter_modifiers();
+        // In source order.
+        let mut decorators = std::mem::take(&mut self.file.decorators);
+        decorators.sort_by_key(|&(_, e)| self.file[e].pos);
+        self.file.decorators = decorators;
         self.file
             .import_attributes
             .sort_by_key(|attributes| attributes.0);

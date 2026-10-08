@@ -7,6 +7,22 @@
 
 use crate::{Span, StringUnits};
 
+/// What a decorator decorates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeDecoratorOwner {
+    Class,
+    Member,
+    Parameter,
+}
+
+/// `@expression` and the node it decorates, by that node's span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeDecoratorSite {
+    pub owner: TypeDecoratorOwner,
+    pub owner_span: Span,
+    pub expression: crate::Expression,
+}
+
 /// Rich, parser-independent type syntax belonging to one module.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeSyntax {
@@ -42,6 +58,9 @@ pub struct TypeSyntax {
     /// `export = expression`, which executable HIR refuses as a statement. The checker lowers it
     /// to `ExportAssignment` from here.
     pub export_assignments: Vec<TypeExportAssignment>,
+    /// `@d` on a class, a class member or a parameter, with the expression of each, in source
+    /// order. Executable HIR has none.
+    pub decorators: Vec<TypeDecoratorSite>,
     /// `export {}` statements, which name nothing and so are in no export list, by span. One
     /// makes a declaration file export only what it says (`setExportContextFlag`).
     pub empty_exports: Vec<Span>,

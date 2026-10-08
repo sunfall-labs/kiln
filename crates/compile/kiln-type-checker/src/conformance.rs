@@ -440,14 +440,13 @@ impl Host for Virtual {
         atoms: &crate::engine::atom::Interner<'s>,
         options: &Options,
     ) -> crate::engine::hir::File<'s> {
-        let _ = options;
         let name = String::from_utf8_lossy(path).into_owned();
         if name.ends_with(".json") || name.ends_with(".jsonc") {
             return crate::support::json::parse_source_file(arena, atoms.session(), atoms, text);
         }
         let source = String::from_utf8_lossy(text);
         let module = (self.frontend)(&name, &source);
-        let lowered = crate::snapshot::lower_module(&module, &name, arena, atoms);
+        let lowered = crate::snapshot::lower_module(&module, &name, arena, atoms, options);
         self.unsupported.lock().unwrap().extend(lowered.unsupported);
         self.early.lock().unwrap().extend(lowered.early);
         lowered.file

@@ -14,12 +14,12 @@ pub use type_syntax::{
     FunctionSignatureSite, JsxAttributeSite, JsxChildSite, JsxSite, Modifier as TypeModifier,
     NameSite, TupleElement as TypeTupleElement, TypeAccessibility, TypeAnnotationSite,
     TypeClassMemberKind, TypeClassMemberSite, TypeClassSite, TypeDeclaration, TypeDeclarationKind,
-    TypeExportAssignment, TypeExpr, TypeExprKind, TypeExpressionWrapperKind,
-    TypeExpressionWrapperSite, TypeImportEquals, TypeImportEqualsReference, TypeInstantiationKind,
-    TypeInstantiationSite, TypeKeyword, TypeLiteral, TypeMember, TypeMemberKind,
-    TypeModuleAttribute, TypeModuleAttributeKeyKind, TypeModuleAttributes,
-    TypeModuleAttributesKeyword, TypeNamespaceExport, TypeOperator, TypeParameter,
-    TypeReferenceDirective, TypeReferenceKind, TypeResolutionMode, TypeSignature,
+    TypeDecoratorOwner, TypeDecoratorSite, TypeExportAssignment, TypeExpr, TypeExprKind,
+    TypeExpressionWrapperKind, TypeExpressionWrapperSite, TypeImportEquals,
+    TypeImportEqualsReference, TypeInstantiationKind, TypeInstantiationSite, TypeKeyword,
+    TypeLiteral, TypeMember, TypeMemberKind, TypeModuleAttribute, TypeModuleAttributeKeyKind,
+    TypeModuleAttributes, TypeModuleAttributesKeyword, TypeNamespaceExport, TypeOperator,
+    TypeParameter, TypeReferenceDirective, TypeReferenceKind, TypeResolutionMode, TypeSignature,
     TypeSignatureParameter, TypeSite, TypeSyntax,
 };
 

@@ -5182,6 +5182,7 @@ fn capture_type_syntax(
         }
     }
     collector.visit_program(program);
+    collector.result.decorators = decorator_sites(source, path, native_import_meta, program);
     // `bindNamespaceExportDeclaration` binds only a top-level `export as namespace`.
     for statement in &program.body {
         if let Statement::TSNamespaceExportDeclaration(declaration) = statement {
@@ -9695,6 +9696,83 @@ fn lower_import_name(name: &ImportImportName<'_>) -> ImportName {
         ImportImportName::NamespaceObject => ImportName::Namespace,
         ImportImportName::Default(_) => ImportName::Default,
     }
+}
+
+/// Every `@d` of `program` with the class, member or parameter it decorates, in source order.
+fn decorator_sites(
+    source: &str,
+    path: Option<&str>,
+    native_import_meta: Option<bool>,
+    program: &oxc_ast::ast::Program<'_>,
+) -> Vec<kiln_hir::TypeDecoratorSite> {
+    struct Sites<'a, 's> {
+        lowerer: Lowerer<'a, 's>,
+        sites: Vec<kiln_hir::TypeDecoratorSite>,
+    }
+    impl Sites<'_, '_> {
+        fn push(
+            &mut self,
+            owner: kiln_hir::TypeDecoratorOwner,
+            owner_span: oxc_span::Span,
+            decorators: &[oxc_ast::ast::Decorator<'_>],
+        ) {
+            for decorator in decorators {
+                self.sites.push(kiln_hir::TypeDecoratorSite {
+                    owner,
+                    owner_span: HirSpan::new(owner_span.start, owner_span.end),
+                    expression: self.lowerer.expression(&decorator.expression),
+                });
+            }
+        }
+    }
+    impl<'a> Visit<'a> for Sites<'_, '_> {
+        fn visit_class(&mut self, node: &oxc_ast::ast::Class<'a>) {
+            self.push(
+                kiln_hir::TypeDecoratorOwner::Class,
+                node.span,
+                &node.decorators,
+            );
+            walk::walk_class(self, node);
+        }
+        fn visit_method_definition(&mut self, node: &oxc_ast::ast::MethodDefinition<'a>) {
+            self.push(
+                kiln_hir::TypeDecoratorOwner::Member,
+                node.span,
+                &node.decorators,
+            );
+            walk::walk_method_definition(self, node);
+        }
+        fn visit_property_definition(&mut self, node: &oxc_ast::ast::PropertyDefinition<'a>) {
+            self.push(
+                kiln_hir::TypeDecoratorOwner::Member,
+                node.span,
+                &node.decorators,
+            );
+            walk::walk_property_definition(self, node);
+        }
+        fn visit_accessor_property(&mut self, node: &oxc_ast::ast::AccessorProperty<'a>) {
+            self.push(
+                kiln_hir::TypeDecoratorOwner::Member,
+                node.span,
+                &node.decorators,
+            );
+            walk::walk_accessor_property(self, node);
+        }
+        fn visit_formal_parameter(&mut self, node: &oxc_ast::ast::FormalParameter<'a>) {
+            self.push(
+                kiln_hir::TypeDecoratorOwner::Parameter,
+                node.span,
+                &node.decorators,
+            );
+            walk::walk_formal_parameter(self, node);
+        }
+    }
+    let mut sites = Sites {
+        lowerer: Lowerer::new(source, path, native_import_meta),
+        sites: Vec::new(),
+    };
+    sites.visit_program(program);
+    sites.sites
 }
 
 fn ambient_module_items(body: &[Statement<'_>], items: &mut kiln_hir::AmbientModuleItems) {

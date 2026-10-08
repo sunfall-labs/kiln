@@ -14,6 +14,11 @@ impl<'a, 's> Lower<'a, 's> {
         flags: b::Flags,
         pos: u32,
     ) -> b::Span<b::ModifierId> {
+        let modifiers = self.declaration_modifier_list(flags, pos);
+        self.file.add_modifiers(&modifiers)
+    }
+
+    pub(super) fn declaration_modifier_list(&self, flags: b::Flags, pos: u32) -> Vec<b::Modifier> {
         // Keep the canonical TypeScript modifier order: export precedes declare, and default
         // follows both. The checker validates this sequence and declaration emit uses it too.
         let written = self.written_modifiers(pos);
@@ -37,7 +42,7 @@ impl<'a, 's> Lower<'a, 's> {
                 .map_or(pos, |(_, at)| *at),
         })
         .collect::<Vec<_>>();
-        self.file.add_modifiers(&modifiers)
+        modifiers
     }
 
     /// The modifier keywords written around `pos`, a declaration's start: those just before it,
@@ -2105,24 +2110,45 @@ impl<'a, 's> Lower<'a, 's> {
         }
     }
 
+    /// The parameter of the index signature at `span`: inside its brackets.
+    pub(super) fn index_parameter_span(&self, span: k::Span) -> k::Span {
+        let text = self.module.source.as_bytes();
+        let Some(written) = text.get(span.start as usize..span.end as usize) else {
+            return span;
+        };
+        let (Some(open), Some(close)) = (
+            written.iter().position(|&b| b == b'['),
+            written.iter().position(|&b| b == b']'),
+        ) else {
+            return span;
+        };
+        if close <= open {
+            return span;
+        }
+        let inside = &written[open + 1..close];
+        let leading = inside.len() - inside.trim_ascii_start().len();
+        let start = span.start + (open + 1 + leading) as u32;
+        let end = span.start + (open + 1 + inside.trim_ascii_end().len()) as u32;
+        k::Span::new(start, end.max(start))
+    }
+
     fn class_index_member(&mut self, member: &k::TypeClassMemberSite) -> Option<b::Member> {
         let (Some(key_type), Some(value_type)) = (&member.key_type, &member.value_type) else {
             return None;
         };
         let param_name = self.atom(member.name.as_deref().unwrap_or("key"));
-        let pat = self.file.pat(
-            b::PatKind::Ident(param_name),
-            member.span.start,
-            member.span.end,
-        );
+        let at = self.index_parameter_span(member.span);
+        let pat = self
+            .file
+            .pat(b::PatKind::Ident(param_name), at.start, at.end);
         let key_ty = self.ty(key_type);
         let param = self.file.add_params(&[b::Param {
             pat,
             ty: key_ty,
             default: b::ExprId::NONE,
             flags: b::Flags::empty(),
-            pos: member.span.start,
-            loc: Self::loc(member.span),
+            pos: at.start,
+            loc: Self::loc(at),
         }]);
         let ret = self.ty(value_type);
         let func = self.file.add_fn(b::Func {
@@ -2456,9 +2482,43 @@ impl<'a, 's> Lower<'a, 's> {
         for member in &mut members {
             member.flags |= self.literal_name_flags(member);
         }
+        // `node.Modifiers()` of each member, from its first token: the executable span of a
+        // static member starts past `static`, the class site's does not.
+        let mut member_decorators = Vec::new();
+        for (index, member) in members.iter_mut().enumerate() {
+            // `static {}` is a block, not a member with a `static` modifier.
+            if member.kind == b::MemberKind::StaticBlock {
+                continue;
+            }
+            let end = member.loc.end;
+            let start = (site.as_ref())
+                .and_then(|site| site.members.iter().find(|it| it.span.end == end))
+                .map_or(member.start, |it| it.span.start.min(member.start));
+            let decorators = self.decorator_exprs(k::TypeDecoratorOwner::Member, |span| {
+                span.end == end && span.start <= member.start
+            });
+            let modifiers = self.written_node_modifiers(start, end, &decorators);
+            member.modifiers = self.file.add_modifiers(&modifiers);
+            member_decorators.extend(decorators.into_iter().map(|(_, e)| (index, e)));
+        }
         let members = self.file.add_members(&members);
-        let modifiers = self.declaration_modifiers(class_flags, class.span.start);
-        self.file.add_class(b::Class {
+        for (index, e) in member_decorators {
+            let member = b::MemberId::from(members.start + index as u32);
+            self.file
+                .decorators
+                .push((b::DecoratorOwner::Member(member), e));
+        }
+        let class_start = class.span.start;
+        let class_decorators = self.decorator_exprs(k::TypeDecoratorOwner::Class, |span| {
+            span.start == class_start
+        });
+        let mut modifiers =
+            self.written_node_modifiers(class_start, class.span.end, &class_decorators);
+        modifiers.retain(|it| matches!(it.kind, b::ModifierKind::Decorator(_)));
+        modifiers.extend(self.declaration_modifier_list(class_flags, class_start));
+        modifiers.sort_by_key(|it| it.pos);
+        let modifiers = self.file.add_modifiers(&modifiers);
+        let id = self.file.add_class(b::Class {
             name,
             name_pos: site.as_ref().map_or(class.span.start, |site| site.name_pos),
             flags: class_flags,
@@ -2471,7 +2531,124 @@ impl<'a, 's> Lower<'a, 's> {
             members,
             start: class.span.start,
             modifiers,
-        })
+        });
+        for (_, e) in class_decorators {
+            self.file.decorators.push((b::DecoratorOwner::Class(id), e));
+        }
+        id
+    }
+
+    /// The decorators of the node of `owner` whose span `is_owner` accepts, each lowered and
+    /// with the span of its expression, in source order.
+    pub(super) fn decorator_exprs(
+        &mut self,
+        owner: k::TypeDecoratorOwner,
+        is_owner: impl Fn(k::Span) -> bool,
+    ) -> Vec<(k::Span, b::ExprId)> {
+        let sites: Vec<k::Expression> = (self.module.type_syntax.decorators.iter())
+            .filter(|site| site.owner == owner && is_owner(site.owner_span))
+            .map(|site| site.expression.clone())
+            .collect();
+        sites
+            .iter()
+            .map(|expression| (expression.span, self.expr(expression)))
+            .collect()
+    }
+
+    /// `node.Modifiers()` written from `start`, before `end`: `decorators`, with the spans of their
+    /// expressions, and the modifier keywords, in source order. The keywords end at the first
+    /// token that cannot follow a modifier, so a method named `static` has none.
+    pub(super) fn written_node_modifiers(
+        &self,
+        start: u32,
+        end: u32,
+        decorators: &[(k::Span, b::ExprId)],
+    ) -> Vec<b::Modifier> {
+        const KEYWORDS: [(&str, b::Flags); 15] = [
+            ("abstract", b::Flags::ABSTRACT),
+            ("accessor", b::Flags::ACCESSOR),
+            ("async", b::Flags::ASYNC),
+            ("const", b::Flags::CONST),
+            ("declare", b::Flags::AMBIENT),
+            ("default", b::Flags::DEFAULT),
+            ("export", b::Flags::EXPORT),
+            ("in", b::Flags::IN),
+            ("out", b::Flags::OUT),
+            ("override", b::Flags::OVERRIDE),
+            ("private", b::Flags::PRIVATE),
+            ("protected", b::Flags::PROTECTED),
+            ("public", b::Flags::PUBLIC),
+            ("readonly", b::Flags::READONLY),
+            ("static", b::Flags::STATIC),
+        ];
+        let text = self.module.source.as_bytes();
+        let end = (end as usize).min(text.len());
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+        let skip_trivia = |mut at: usize| {
+            loop {
+                while at < end && text[at].is_ascii_whitespace() {
+                    at += 1;
+                }
+                if text[at.min(end)..end].starts_with(b"//") {
+                    while at < end && text[at] != b'\n' {
+                        at += 1;
+                    }
+                } else if text[at.min(end)..end].starts_with(b"/*") {
+                    at = (at + 2..end.saturating_sub(1))
+                        .find(|&i| &text[i..i + 2] == b"*/")
+                        .map_or(end, |i| i + 2);
+                } else {
+                    return at;
+                }
+            }
+        };
+        let mut modifiers = Vec::new();
+        let mut decorators = decorators.iter().peekable();
+        let mut at = start as usize;
+        loop {
+            at = skip_trivia(at);
+            if at >= end {
+                break;
+            }
+            if text[at] == b'@' {
+                let Some(&(span, e)) = decorators.next() else {
+                    break;
+                };
+                modifiers.push(b::Modifier {
+                    kind: b::ModifierKind::Decorator(e),
+                    pos: at as u32,
+                });
+                at = (span.end as usize).max(at + 1);
+                continue;
+            }
+            let mut word_end = at;
+            while word_end < end && is_word(text[word_end]) {
+                word_end += 1;
+            }
+            let Some(&(_, flag)) = KEYWORDS
+                .iter()
+                .find(|(word, _)| word.as_bytes() == &text[at..word_end])
+            else {
+                break;
+            };
+            // `canFollowModifier`
+            let next = skip_trivia(word_end);
+            let can_follow = next < end
+                && (is_word(text[next])
+                    || matches!(
+                        text[next],
+                        b'[' | b'{' | b'*' | b'#' | b'"' | b'\'' | b'@' | b'.'
+                    ));
+            if !can_follow || flag == b::Flags::STATIC && text[next] == b'{' {
+                break;
+            }
+            modifiers.push(b::Modifier {
+                kind: b::ModifierKind::Keyword(flag),
+                pos: at as u32,
+            });
+            at = word_end;
+        }
+        modifiers
     }
 }
 

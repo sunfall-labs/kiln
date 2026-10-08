@@ -333,7 +333,7 @@ impl Host for SnapshotHost<'_> {
         path: &[u8],
         text: &[u8],
         atoms: &Interner<'s>,
-        _: &Options,
+        options: &Options,
     ) -> hir::File<'s> {
         let name = String::from_utf8_lossy(path).into_owned();
         if name.ends_with(".json") || name.ends_with(".jsonc") {
@@ -356,7 +356,7 @@ impl Host for SnapshotHost<'_> {
             .or_else(library)
             .or_else(unparsed);
         if let Some(module) = module.as_ref() {
-            let lowered = lower_module(module, &name, arena, atoms);
+            let lowered = lower_module(module, &name, arena, atoms, options);
             self.unsupported.lock().unwrap().extend(lowered.unsupported);
             self.early.lock().unwrap().extend(lowered.early);
             let file = lowered.file;
@@ -721,6 +721,7 @@ pub(crate) fn lower_module<'s>(
     name: &str,
     arena: &'s Arena,
     atoms: &Interner<'s>,
+    options: &Options,
 ) -> Lowered<'s> {
     let source_module = module
         .type_syntax
@@ -754,6 +755,8 @@ pub(crate) fn lower_module<'s>(
     }
     // The loader's arena belongs to this session. Its lifetime is narrowed to the parse call.
     let (mut file, unsupported) = Lower::new(source_module, atoms).finish(arena, atoms.session());
+    // `experimentalDecorators` is a parser option in TypeScript.
+    file.legacy_decorators = options.experimental_decorators;
     if is_declaration_file_name(name) {
         file.kind = hir::FileKind::Declaration;
     } else if matches!(
