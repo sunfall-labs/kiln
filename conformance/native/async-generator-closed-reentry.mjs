@@ -107,9 +107,14 @@ async function checkClosedReturnThenableAndOlderQueuedRequest() {
   let resolveOperand;
   const operand = new Promise(resolve => { resolveOperand = resolve; });
   const outer = generator.return(operand);
+  const completionOrder = [];
   const older = generator.next();
+  older.then(() => { completionOrder.push('older'); });
   let nested;
-  const restore = installThenGetter(() => { nested = generator.next(); }, events);
+  const restore = installThenGetter(() => {
+    nested = generator.next();
+    nested.then(() => { completionOrder.push('nested'); });
+  }, events);
   resolveOperand(9);
   let outerResult;
   let olderResult;
@@ -130,6 +135,7 @@ async function checkClosedReturnThenableAndOlderQueuedRequest() {
   assertStep(outerResult, 9, true, 'closed awaited return');
   assertStep(olderResult, undefined, true, 'older queued request');
   assertStep(nestedResult, undefined, true, 'new reentrant request');
+  assertEvents(completionOrder, ['older', 'nested'], 'older request must complete before reentrant request');
 }
 
 async function checkReentrantReturnKeepsTheLane() {
