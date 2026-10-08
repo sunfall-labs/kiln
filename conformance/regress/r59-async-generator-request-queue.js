@@ -96,10 +96,50 @@ async function queuedAbruptRequests() {
     "a queued throw is delivered after the active request yields");
 }
 
+async function queuedSynchronousCompletionsDrainIteratively() {
+  const gate = barrier();
+  async function* completedAfterGate() {
+    await gate.promise;
+  }
+  const iterator = completedAfterGate();
+  const steps = [iterator.next()];
+  // These requests accumulate behind the initial await. Once the body completes, every queued
+  // next() is answered synchronously as done; draining them must not recurse once per request.
+  for (let index = 0; index < 4096; index++) steps.push(iterator.next());
+  gate.release();
+  const results = await Promise.all(steps);
+  check(results.length === 4097, "all queued requests receive a result");
+  for (const result of results) {
+    check(result.done === true && result.value === undefined,
+      "queued requests after completion resolve as done without recursion");
+  }
+}
+
+async function fulfilledStepUsesPromiseResolution() {
+  let thenReads = 0;
+  Object.defineProperty(Object.prototype, "then", {
+    configurable: true,
+    get() {
+      thenReads++;
+      return resolve => resolve("assimilated iterator result");
+    },
+  });
+  try {
+    async function* values() { yield "ordinary value"; }
+    const result = await values().next();
+    check(result === "assimilated iterator result" && thenReads === 1,
+      "fulfilling a step promise assimilates a thenable iterator-result object exactly once");
+  } finally {
+    delete Object.prototype.then;
+  }
+}
+
 async function main() {
   await queuedAcrossAwait();
   await queuedAcrossYieldStar();
   await queuedAbruptRequests();
+  await queuedSynchronousCompletionsDrainIteratively();
+  await fulfilledStepUsesPromiseResolution();
   console.log("async-generator request queue passes");
 }
 

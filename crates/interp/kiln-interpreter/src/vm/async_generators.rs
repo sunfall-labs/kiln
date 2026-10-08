@@ -33,36 +33,103 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         generator: &Rc<GeneratorData>,
     ) -> Result<(), ExecutionError> {
-        let Some(request) = generator
-            .borrow()
-            .async_requests
-            .as_ref()
-            .and_then(|requests| requests.current.as_ref())
-            .map(|request| AsyncGeneratorRequest {
-                kind: request.kind,
-                value: request.value.clone(),
-                step: Rc::clone(&request.step),
-            })
-        else {
-            return Ok(());
+        let should_drain = {
+            let mut state = generator.borrow_mut();
+            let Some(requests) = state.async_requests.as_mut() else {
+                return Ok(());
+            };
+            if requests.draining || requests.current.is_none() {
+                false
+            } else {
+                requests.draining = true;
+                true
+            }
         };
+        if !should_drain {
+            return Ok(());
+        }
+
+        loop {
+            let request = generator
+                .borrow()
+                .async_requests
+                .as_ref()
+                .and_then(|requests| requests.current.as_ref())
+                .map(|request| AsyncGeneratorRequest {
+                    kind: request.kind,
+                    value: request.value.clone(),
+                    step: Rc::clone(&request.step),
+                });
+            let Some(request) = request else {
+                generator
+                    .borrow_mut()
+                    .async_requests
+                    .as_mut()
+                    .expect("request state remains installed while draining")
+                    .draining = false;
+                return Ok(());
+            };
+
+            let started = self.start_current_async_generator_request(generator, &request);
+            if let Err(error) = started {
+                if let Some(requests) = generator.borrow_mut().async_requests.as_mut() {
+                    requests.draining = false;
+                }
+                return Err(error);
+            }
+
+            let mut state = generator.borrow_mut();
+            let requests = state
+                .async_requests
+                .as_mut()
+                .expect("request state remains installed while draining");
+            let still_current = requests
+                .current
+                .as_ref()
+                .is_some_and(|current| Rc::ptr_eq(&current.step, &request.step));
+            if still_current {
+                // The request suspended on a promise. Its eventual completion will restart the
+                // drain after this frame has unwound.
+                requests.draining = false;
+                return Ok(());
+            }
+            if requests.current.is_none() {
+                requests.draining = false;
+                return Ok(());
+            }
+            // It completed synchronously and finish_async_generator_request advanced `current`.
+            // Continue in this loop instead of recursively starting the next queued request.
+        }
+    }
+
+    fn start_current_async_generator_request(
+        &mut self,
+        generator: &Rc<GeneratorData>,
+        request: &AsyncGeneratorRequest,
+    ) -> Result<(), ExecutionError> {
         let (started, done) = {
             let state = generator.borrow();
             (state.started, state.done)
         };
         match request.kind {
-            AsyncGeneratorRequestKind::Next => {
-                self.drive_async_generator(generator, &request.step, Resume::Send(request.value))
-            }
-            AsyncGeneratorRequestKind::Return if started && !done => {
-                self.drive_async_generator(generator, &request.step, Resume::Return(request.value))
-            }
-            AsyncGeneratorRequestKind::Throw if started && !done => {
-                self.drive_async_generator(generator, &request.step, Resume::Throw(request.value))
-            }
+            AsyncGeneratorRequestKind::Next => self.drive_async_generator(
+                generator,
+                &request.step,
+                Resume::Send(request.value.clone()),
+            ),
+            AsyncGeneratorRequestKind::Return if started && !done => self.drive_async_generator(
+                generator,
+                &request.step,
+                Resume::Return(request.value.clone()),
+            ),
+            AsyncGeneratorRequestKind::Throw if started && !done => self.drive_async_generator(
+                generator,
+                &request.step,
+                Resume::Throw(request.value.clone()),
+            ),
             AsyncGeneratorRequestKind::Return => {
                 generator.borrow_mut().complete();
-                let target = match request.value {
+                let target = match request.value.clone() {
                     Value::Promise(inner) => inner,
                     other => {
                         let pending = PromiseState::pending();
@@ -84,7 +151,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.finish_async_generator_request(
                     generator,
                     &request.step,
-                    Settled::Rejected(request.value),
+                    Settled::Rejected(request.value.clone()),
                 )
             }
         }
@@ -96,7 +163,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         step: &Rc<PromiseData>,
         outcome: Settled,
     ) -> Result<(), ExecutionError> {
-        self.settle(step, &outcome);
+        match &outcome {
+            Settled::Fulfilled(value) => self.resolve_promise(step, value.clone()),
+            Settled::Rejected(_) => self.settle(step, &outcome),
+        }
         let next = {
             let mut state = generator.borrow_mut();
             let Some(requests) = state.async_requests.as_mut() else {

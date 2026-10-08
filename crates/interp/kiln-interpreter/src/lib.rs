@@ -761,6 +761,9 @@ pub struct GeneratorState {
 pub(crate) struct AsyncGeneratorRequests {
     pub(crate) current: Option<AsyncGeneratorRequest>,
     pub(crate) pending: std::collections::VecDeque<AsyncGeneratorRequest>,
+    /// `start_async_generator_request` is draining requests that completed synchronously. A
+    /// completion during that drain only advances `current`; the outer loop starts it next.
+    pub(crate) draining: bool,
 }
 
 #[derive(Debug)]
