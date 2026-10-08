@@ -1058,7 +1058,7 @@ pub(super) fn emit_set_computed(
     if ctx.plan.generic_only {
         writeln!(
             output,
-            "    {{ static kiln_c99_symbol_cell kiln_sym_site; int status; if (KILN_VAL_IS_SYMBOL(v{k})) {{ status = kiln_c99_val_write_symbol(host, v{o}, v{k}, v{val}, {strict}, depth, thrown, &kiln_sym_site); }} else {{ status = kiln_c99_val_write_element(host, v{o}, v{k}, v{val}, {strict}, depth, thrown); }} {check} {assign_v}}}{typed_sync}",
+            "    {{ static kiln_c99_symbol_cell kiln_key_site; int status; if (KILN_VAL_IS_SYMBOL(v{k})) {{ status = kiln_c99_val_write_symbol(host, v{o}, v{k}, v{val}, {strict}, depth, thrown, &kiln_key_site); }} else if (KILN_VAL_IS_STRING(v{k})) {{ status = kiln_c99_val_write_string_key(host, v{o}, v{k}, v{val}, {strict}, depth, thrown, &kiln_key_site); }} else {{ status = kiln_c99_val_write_element(host, v{o}, v{k}, v{val}, {strict}, depth, thrown); }} {check} {assign_v}}}{typed_sync}",
             o = object.0,
             k = key.0,
             val = value.0,
@@ -1136,14 +1136,33 @@ pub(super) fn emit_set_computed(
     } else {
         format!(" && KILN_VAL_IS_NUMBER(v{k})", k = key.0)
     };
+    let key_site_decl = if key_is_int {
+        String::new()
+    } else {
+        "static kiln_c99_symbol_cell kiln_key_site; ".to_string()
+    };
     // Realms issue 17: a symbol key writes through the shape and slot caches a named write uses.
     let symbol_body = if key_is_int {
         String::new()
     } else {
         format!(
             "if (!handled && KILN_VAL_IS_SYMBOL(v{k})) {{ \
-                static kiln_c99_symbol_cell kiln_sym_site; \
-                int status = kiln_c99_val_write_symbol(host, v{o}, v{k}, v{val}, {strict}, depth, thrown, &kiln_sym_site); \
+                int status = kiln_c99_val_write_symbol(host, v{o}, v{k}, v{val}, {strict}, depth, thrown, &kiln_key_site); \
+                {check} \
+                {assign_v}\
+                handled = 1; \
+            }} ",
+            k = key.0,
+            o = object.0,
+            val = value.0,
+        )
+    };
+    let string_body = if key_is_int {
+        String::new()
+    } else {
+        format!(
+            "if (!handled && KILN_VAL_IS_STRING(v{k})) {{ \
+                int status = kiln_c99_val_write_string_key(host, v{o}, v{k}, v{val}, {strict}, depth, thrown, &kiln_key_site); \
                 {check} \
                 {assign_v}\
                 handled = 1; \
@@ -1155,7 +1174,7 @@ pub(super) fn emit_set_computed(
     };
     writeln!(
                 output,
-                "    {{ int handled = 0; {vk_decl}\
+                "    {{ int handled = 0; {key_site_decl}{vk_decl}\
                 if (KILN_LIKELY((v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{number_guard})) {{ \
                     void *ptr = KILN_VAL_PTR(v{o}); \
                     uint32_t kind = kiln_c99_gc_payload_kind(ptr); \
@@ -1166,6 +1185,7 @@ pub(super) fn emit_set_computed(
                     }} \
                 }} \
                 {symbol_body}\
+                {string_body}\
                 if (!handled) {{ \
                     int status = kiln_c99_val_write_element(host, v{o}, {vk}, v{val}, {strict}, depth, thrown); \
                     {check} \
@@ -1174,12 +1194,14 @@ pub(super) fn emit_set_computed(
                 {typed_sync}",
                 o = object.0,
                 val = value.0,
+                key_site_decl = key_site_decl,
                 vk_decl = vk_decl,
                 vk = vk,
                 number_guard = number_guard,
                 array_body = array_body,
                 typed_body = typed_body,
                 symbol_body = symbol_body,
+                string_body = string_body,
                 check = check,
                 assign_v = assign_v,
                 typed_sync = typed_sync,

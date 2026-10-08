@@ -2089,6 +2089,99 @@ static int kiln_c99_val_write_symbol(kiln_host *host, kiln_val target, kiln_val 
     return kiln_c99_val_write_symbol_miss(host, target, key, value, strict, depth, thrown, cell);
 }
 
+/* `target[key] = value` for a normal computed string key. The hit is deliberately narrower
+ * than the existing named-write site: only a current own writable data slot on an ordinary
+ * shaped object. Index strings, internal keys, dictionaries and exotic receivers remain on the
+ * authoritative element-write path. The string is compared against the live shape-owned key
+ * before any intern lookup, so freshly allocated equal-content strings take the same hit. */
+int kiln_c99_val_write_string_key(kiln_host *host, kiln_val target, kiln_val key,
+                                  kiln_val value, int strict, int depth, kiln_value *thrown,
+                                  kiln_c99_symbol_cell *cell) {
+    const kiln_string *keystr;
+    kiln_object *object;
+    const kiln_c99_site *site;
+    uint32_t p;
+
+    if (!KILN_VAL_IS_STRING(key))
+        return kiln_c99_val_write_element(host, target, key, value, strict, depth, thrown);
+    keystr = (const kiln_string *)KILN_VAL_PTR(key);
+    if (keystr == NULL || kiln_c99_key_is_reserved(keystr) ||
+        kiln_c99_key_index_key(keystr) >= 0.0)
+        return kiln_c99_val_write_element(host, target, key, value, strict, depth, thrown);
+
+    object = kiln_c99_keyed_receiver(target);
+    if (object == NULL || object->shape == NULL || object->properties != NULL ||
+        object->sealed != NULL || object->frozen || object->module_namespace)
+        return kiln_c99_val_write_element(host, target, key, value, strict, depth, thrown);
+
+    site = KILN_C99_LOAD_ACQUIRE(cell);
+    if (site != NULL) {
+        const uint32_t count = kiln_c99_site_count(site);
+        for (p = 0; p < count; ++p) {
+            const kiln_c99_pic_entry *entry = &site->entries[p];
+            const kiln_shape *published_shape = kiln_c99_slot_key(&entry->shape);
+            uint32_t slot;
+            const kiln_string *shape_key;
+
+            /* As on the computed-read PIC, prove the shape is live before touching the
+             * realm-sensitive key word. A keyed write entry names an own slot, never a path. */
+            if (published_shape != object->shape || !entry->keyed || entry->key == NULL ||
+                entry->transition_to != NULL)
+                continue;
+            slot = entry->slot;
+            if (slot >= object->shape->property_count || slot >= object->slot_capacity ||
+                (object->shape->accessor_mask & (1u << slot)) != 0 ||
+                (object->shape->store_mask & (1u << slot)) != 0 ||
+                ((object->shape->double_slots_mask & (1u << slot)) != 0 &&
+                 !KILN_VAL_IS_NUMBER(value)))
+                continue;
+            shape_key = object->shape->keys[slot];
+            if (shape_key == NULL || entry->key != shape_key ||
+                kiln_c99_key_domain(shape_key) != kiln_c99_key_domain(keystr) ||
+                !kiln_string_equal(shape_key, keystr))
+                continue;
+
+            /* This is still an assignment to an object that may itself be a prototype. Keep
+             * the invalidation before the store, as in the ordinary write path. */
+            kiln_c99_prototype_touched(object);
+            kiln_c99_heap_store_val(object, &object->slots[slot], value);
+            return KILN_C99_OK;
+        }
+    }
+
+    /* Preserve ToPropertyKey/[[Set]], strict errors, inherited setters and all exotic behavior
+     * by letting the established path answer a miss. Learn only if that write left this receiver
+     * with a current own writable data slot for this exact string. */
+    {
+        int status = kiln_c99_val_write_element(host, target, key, value, strict, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+    }
+
+    object = kiln_c99_keyed_receiver(target);
+    if (object == NULL || object->shape == NULL || object->properties != NULL ||
+        object->sealed != NULL || object->frozen || object->module_namespace)
+        return KILN_C99_OK;
+    for (p = 0; p < object->shape->property_count; ++p) {
+        const kiln_string *shape_key = object->shape->keys[p];
+        kiln_c99_pic_entry remembered;
+        if (shape_key == NULL || kiln_c99_key_domain(shape_key) != kiln_c99_key_domain(keystr) ||
+            !kiln_string_equal(shape_key, keystr))
+            continue;
+        if (p >= object->slot_capacity || (object->shape->accessor_mask & (1u << p)) != 0 ||
+            (object->shape->store_mask & (1u << p)) != 0 ||
+            ((object->shape->double_slots_mask & (1u << p)) != 0 &&
+             !KILN_VAL_IS_NUMBER(value)))
+            return KILN_C99_OK;
+        memset(&remembered, 0, sizeof remembered);
+        remembered.shape = object->shape;
+        remembered.slot = p;
+        remembered.keyed = 1;
+        kiln_c99_key_site_remember(cell, &remembered, shape_key);
+        return KILN_C99_OK;
+    }
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_code, kiln_val receiver,
                                             const kiln_val *args, size_t argc, int depth,
                                             kiln_value *thrown, kiln_val *out) {
