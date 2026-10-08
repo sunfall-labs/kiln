@@ -1256,18 +1256,32 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
 static int kiln_c99_generator_step(kiln_host *host, kiln_value produced, int done, kiln_value *result,
                                    int depth, kiln_value *thrown) {
     kiln_value step;
+    kiln_property *slot;
     int status = kiln_c99_new_object(&step);
     if (status != KILN_C99_OK) {
         return status;
     }
-    status = kiln_c99_put(host, step, "value", 5, produced, depth, thrown);
-    if (status != KILN_C99_OK) {
-        return status;
-    }
-    status = kiln_c99_put(host, step, "done", 4, kiln_c99_boolean(done), depth, thrown);
-    if (status != KILN_C99_OK) {
-        return status;
-    }
+    (void)host;
+    (void)depth;
+    (void)thrown;
+    status = kiln_c99_own_slot(step, "value", 5, &slot);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_heap_store_value(kiln_c99_object_of(step), &slot->value, produced);
+    slot->accessor = 0;
+    slot->refused = 0;
+    slot->symbol_hidden = 0;
+    slot->enumerable = 1;
+    slot->writable = 1;
+    slot->configurable = 1;
+    status = kiln_c99_own_slot(step, "done", 4, &slot);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_heap_store_value(kiln_c99_object_of(step), &slot->value, kiln_c99_boolean(done));
+    slot->accessor = 0;
+    slot->refused = 0;
+    slot->symbol_hidden = 0;
+    slot->enumerable = 1;
+    slot->writable = 1;
+    slot->configurable = 1;
     *result = step;
     return KILN_C99_OK;
 }

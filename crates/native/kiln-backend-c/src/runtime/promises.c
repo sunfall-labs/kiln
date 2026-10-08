@@ -922,11 +922,7 @@ static int kiln_c99_async_generator_finish_yield(kiln_host *host, kiln_value gen
     kiln_generator *frame = kiln_c99_generator_of(generator);
     kiln_value step = frame->promise;
     kiln_value shaped;
-    int status = kiln_c99_new_object(&shaped);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(host, shaped, "value", 5, value, depth, thrown);
-    if (status == KILN_C99_OK)
-        status = kiln_c99_put(host, shaped, "done", 4, kiln_c99_boolean(0), depth, thrown);
+    int status = kiln_c99_generator_step(host, value, 0, &shaped, depth, thrown);
     if (status != KILN_C99_OK) return status;
     /* The shaped result is complete and rooted before resolving. A synchronous then getter may
      * reenter the generator, so expose the queued head only at this exact boundary. */
@@ -1354,13 +1350,7 @@ static int kiln_c99_arm_timer(uint64_t code, double delay, kiln_realm_work_fn ru
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
                                            int finished, int depth, kiln_value *thrown) {
     kiln_value shaped;
-    int status = kiln_c99_new_object(&shaped);
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_put(host, shaped, "value", 5, value, depth, thrown);
-    }
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_put(host, shaped, "done", 4, kiln_c99_boolean(finished), depth, thrown);
-    }
+    int status = kiln_c99_generator_step(host, value, finished, &shaped, depth, thrown);
     if (status != KILN_C99_OK) {
         return status;
     }
