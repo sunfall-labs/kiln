@@ -209,6 +209,34 @@ async function resultResolutionStartsOldestQueuedRequest() {
     "reentrant next activates the oldest queued request without overtaking it");
 }
 
+async function completedResultResolutionDoesNotRestartItsHead() {
+  const events = [];
+  let reentrant;
+  async function* completed() { return "done"; }
+  const iterator = completed();
+  Object.defineProperty(Object.prototype, "then", {
+    configurable: true,
+    get() {
+      if (this.value === "done" && this.done === true) {
+        events.push("getter:start");
+        reentrant = iterator.next();
+        events.push("getter:end");
+      }
+      return undefined;
+    },
+  });
+  try {
+    const first = await iterator.next();
+    events.push(`first:${first.value}`);
+    const last = await reentrant;
+    events.push(`last:${String(last.value)}:${last.done}`);
+  } finally {
+    delete Object.prototype.then;
+  }
+  check(events.join("|") === "getter:start|getter:end|first:done|last:undefined:true",
+    "a completed generator handles a next from its result resolver exactly once");
+}
+
 async function main() {
   await queuedAcrossAwait();
   await queuedAcrossYieldStar();
@@ -217,6 +245,7 @@ async function main() {
   await fulfilledStepUsesPromiseResolution();
   await resultResolutionAllowsReentrantNext();
   await resultResolutionStartsOldestQueuedRequest();
+  await completedResultResolutionDoesNotRestartItsHead();
   console.log("async-generator request queue passes");
 }
 
