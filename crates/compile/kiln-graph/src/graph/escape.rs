@@ -174,12 +174,14 @@ pub(super) fn escape_analysis_with(
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 live_values.insert(*value);
                 if let Some((iter, _, _)) = delegate {
                     live_values.insert(*iter);
                 }
+                live_values.extend(delegate_wrapped.iter().copied());
                 live_values.extend(spilled);
             }
             _ => {}
@@ -296,6 +298,7 @@ pub(super) fn escape_analysis_with(
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 if let Some(&root) = alias_to_root.get(value) {
@@ -303,6 +306,12 @@ pub(super) fn escape_analysis_with(
                 }
                 if let Some((iter, _, _)) = delegate
                     && let Some(&root) = alias_to_root.get(iter)
+                {
+                    escaped.insert(root);
+                }
+                if let Some(&root) = delegate_wrapped
+                    .as_ref()
+                    .and_then(|wrapped| alias_to_root.get(wrapped))
                 {
                     escaped.insert(root);
                 }

@@ -723,6 +723,9 @@ pub enum Terminator {
         pc: u32,
         awaiting: bool,
         delegate: Option<(ValueId, BlockId, u32)>,
+        /// `YieldStar`'s async-from-sync wrapper bit. Kept as an SSA operand because an async
+        /// generator awaits delegated values only for wrapped synchronous iterators.
+        delegate_wrapped: Option<ValueId>,
     },
     Unreachable,
 }
@@ -2041,6 +2044,7 @@ pub fn build_function_graph(
                         pc: pc as u32,
                         awaiting: matches!(inst, Instruction::Await),
                         delegate: None,
+                        delegate_wrapped: None,
                     };
                     successors.push(resume_block);
                     propagate_frame(
@@ -2056,7 +2060,7 @@ pub fn build_function_graph(
                 Instruction::YieldStar(target) => {
                     let value = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let iterator = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
-                    let _wrapped = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
+                    let wrapped = frame.stack.pop().unwrap_or_else(|| graph.alloc_value());
                     let spilled = frame.stack.clone();
                     let resume_block = pc_to_containing_block(pc + 1);
                     let exit_block = pc_to_containing_block(*target as usize);
@@ -2073,6 +2077,7 @@ pub fn build_function_graph(
                         pc: pc as u32,
                         awaiting: false,
                         delegate: Some((iterator, exit_block, *target)),
+                        delegate_wrapped: Some(wrapped),
                     };
                     successors.push(resume_block);
                     if exit_block != resume_block {
@@ -2693,11 +2698,15 @@ fn remap_graph_operands(graph: &mut FunctionGraph, map: impl Fn(ValueId) -> Valu
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 *value = map(*value);
                 if let Some((iter, _, _)) = delegate {
                     *iter = map(*iter);
+                }
+                if let Some(wrapped) = delegate_wrapped {
+                    *wrapped = map(*wrapped);
                 }
                 for value in spilled {
                     *value = map(*value);
@@ -2879,11 +2888,15 @@ fn map_graph_values(graph: &mut FunctionGraph, map: impl Fn(ValueId) -> ValueId)
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 *value = map(*value);
                 if let Some((iter, _, _)) = delegate {
                     *iter = map(*iter);
+                }
+                if let Some(wrapped) = delegate_wrapped {
+                    *wrapped = map(*wrapped);
                 }
                 for value in spilled {
                     *value = map(*value);
@@ -3012,11 +3025,15 @@ fn compact_value_ids(graph: &mut FunctionGraph) {
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 present[value.0 as usize] = true;
                 if let Some((iter, _, _)) = delegate {
                     present[iter.0 as usize] = true;
+                }
+                if let Some(wrapped) = delegate_wrapped {
+                    present[wrapped.0 as usize] = true;
                 }
                 for value in spilled {
                     present[value.0 as usize] = true;
@@ -3246,6 +3263,25 @@ mod dead_phi_tests {
         program.constants.push(Constant::Undefined);
         let graph = build_function_graph(&proto, &program).expect("delegate graph builds");
         verify_function_graph(&graph).expect("synthetic resume edges make phis complete");
+        let wrapped = graph
+            .blocks
+            .iter()
+            .find_map(|block| match &block.terminator {
+                Terminator::Suspend {
+                    delegate: Some(_),
+                    delegate_wrapped,
+                    ..
+                } => *delegate_wrapped,
+                _ => None,
+            });
+        let wrapped = wrapped.expect("delegate suspension retains its async-from-sync flag");
+        assert!(
+            graph
+                .blocks
+                .iter()
+                .flat_map(|block| &block.operations)
+                .any(|(value, _)| *value == wrapped)
+        );
         let resume_values: Vec<_> = graph
             .blocks
             .iter()
@@ -3533,6 +3569,7 @@ mod dead_phi_tests {
                     pc: 1,
                     awaiting: false,
                     delegate: None,
+                    delegate_wrapped: None,
                 },
                 predecessors: vec![],
                 successors: vec![BlockId(1)],
@@ -3840,6 +3877,7 @@ mod dead_phi_tests {
                     pc: 42,
                     awaiting: false,
                     delegate: None,
+                    delegate_wrapped: None,
                 },
                 predecessors: vec![BlockId(1)],
                 successors: vec![BlockId(1)],

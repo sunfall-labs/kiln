@@ -1003,6 +1003,7 @@ fn graph_value_use_counts(graph: &FunctionGraph) -> HashMap<ValueId, usize> {
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 *counts.entry(*value).or_insert(0) += 1;
@@ -1016,6 +1017,9 @@ fn graph_value_use_counts(graph: &FunctionGraph) -> HashMap<ValueId, usize> {
                 }
                 if let Some((iterator, _, _)) = delegate {
                     *counts.entry(*iterator).or_insert(0) += 1;
+                }
+                if let Some(wrapped) = delegate_wrapped {
+                    *counts.entry(*wrapped).or_insert(0) += 1;
                 }
             }
         }
@@ -1277,12 +1281,14 @@ fn emit_block_sequence(
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 used.insert(*value);
                 if let Some((iter, _, _)) = delegate {
                     used.insert(*iter);
                 }
+                used.extend(delegate_wrapped.iter().copied());
                 used.extend(spilled.iter().copied());
             }
             _ => {}
@@ -1340,7 +1346,7 @@ fn emit_block_sequence(
                 writeln!(output, "kiln_resume_{pc}:;").unwrap();
                 writeln!(
                     output,
-                    "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0;"
+                    "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0; frame->delegate_wrapped = 0;"
                 )
                 .unwrap();
                 writeln!(
@@ -1377,7 +1383,7 @@ fn emit_block_sequence(
                 writeln!(output, "kiln_resume_exit_{exit_pc}:;").unwrap();
                 writeln!(
                     output,
-                    "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0;"
+                    "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0; frame->delegate_wrapped = 0;"
                 )
                 .unwrap();
                 writeln!(
@@ -1632,6 +1638,7 @@ fn route_exits_through_boxing(
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 let mut uses = vec![*value];
@@ -1639,6 +1646,7 @@ fn route_exits_through_boxing(
                 if let Some((iter, _, _)) = delegate {
                     uses.push(*iter);
                 }
+                uses.extend(delegate_wrapped.iter().copied());
                 uses
             }
             _ => Vec::new(),
@@ -2664,12 +2672,14 @@ fn boxed_uses(
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 used.insert(*value);
                 if let Some((iter, _, _)) = delegate {
                     used.insert(*iter);
                 }
+                used.extend(delegate_wrapped.iter().copied());
                 used.extend(spilled.iter().copied());
             }
             _ => {}
@@ -3755,7 +3765,7 @@ fn emit_terminator(
             pc,
             awaiting,
             delegate,
-            ..
+            delegate_wrapped,
         } => {
             let mut spill = String::new();
             for (i, v) in spilled.iter().enumerate() {
@@ -3768,17 +3778,19 @@ fn emit_terminator(
             // here, but the runtime's `return()` and `throw()` read this to decide whether the
             // body has a `finally` or `catch` to run, and so whether to re-enter it at all.
             let covered = i32::from(current_block.exception_handler.is_some());
-            let delegate_set = match delegate {
-                Some((iter, _, exit_pc)) => {
+            let delegate_set = match (delegate, delegate_wrapped) {
+                (Some((iter, _, exit_pc)), Some(wrapped)) => {
                     format!(
-                        " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_val_to_boundary(v{})); frame->delegate_exit = {};",
+                        " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_val_to_boundary(v{})); frame->delegate_exit = {}; frame->delegate_wrapped = (uint8_t)kiln_c99_val_truthy(v{});",
                         iter.0,
-                        delegate_exit_id(*exit_pc)
+                        delegate_exit_id(*exit_pc),
+                        wrapped.0
                     )
                 }
-                None => {
-                    " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0;".to_string()
+                (None, None) => {
+                    " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0; frame->delegate_wrapped = 0;".to_string()
                 }
+                _ => unreachable!("delegated suspension must retain its wrapped flag"),
             };
             // The previous caller's sent value has already been consumed or copied into
             // live locals/spills. A new suspension waits for a new value; retaining the old

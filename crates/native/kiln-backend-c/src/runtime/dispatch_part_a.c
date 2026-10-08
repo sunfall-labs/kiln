@@ -1331,6 +1331,7 @@ static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln
                                     kiln_value *result, int depth, kiln_value *thrown) {
     kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
     frame->delegate_exit = 0;
+    frame->delegate_wrapped = 0;
     if (frame->handler_top != 0 && !frame->done && !frame->async_generator) {
         kiln_val vproduced = KILN_VAL_UNDEFINED;
         frame->raising = 1;
@@ -1361,6 +1362,7 @@ static int kiln_c99_generator_close_with(kiln_host *host, kiln_generator *frame,
                                          kiln_value *result, int depth, kiln_value *thrown) {
     kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
     frame->delegate_exit = 0;
+    frame->delegate_wrapped = 0;
     if (frame->handler_top != 0 && !frame->done && !frame->async_generator) {
         frame->raising = 1;
         kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_return_signal());
@@ -1488,6 +1490,7 @@ static int kiln_c99_generator_delegate_throw(kiln_host *host, kiln_generator *fr
         kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
         frame->resume = frame->delegate_exit;
         frame->delegate_exit = 0;
+        frame->delegate_wrapped = 0;
         frame->raising = 0;
         kiln_c99_heap_store_value(frame, &frame->sent, inner_val);
         kiln_closure *closure = kiln_c99_closure_of(frame->function);

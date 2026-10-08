@@ -235,6 +235,7 @@ impl<'program> ArgumentsAnalysis<'program> {
                     value,
                     spilled,
                     delegate,
+                    delegate_wrapped,
                     ..
                 } => {
                     terminator_uses.insert(*value);
@@ -242,6 +243,7 @@ impl<'program> ArgumentsAnalysis<'program> {
                     if let Some((iterator, _, _)) = delegate {
                         terminator_uses.insert(*iterator);
                     }
+                    terminator_uses.extend(delegate_wrapped.iter().copied());
                 }
                 Terminator::Jump(_) | Terminator::Return(None) | Terminator::Unreachable => {}
             }

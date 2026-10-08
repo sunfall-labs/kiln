@@ -25,6 +25,33 @@ async function main() {
   check(syncSecond.done === false && syncSecond.value === "sync completion",
     "sync delegate completion becomes the yield* expression result");
 
+  const promisedValue = Promise.resolve("async delegate value");
+  const asyncDelegate = {
+    [Symbol.asyncIterator]() { return this; },
+    async next() { return { value: promisedValue, done: false }; },
+  };
+  async function* asyncOuter() { yield* asyncDelegate; }
+  const asyncResult = await asyncOuter().next();
+  check(asyncResult.value === promisedValue,
+    "real async delegate yields its raw value promise without awaiting it");
+
+  let queuedCalls = 0;
+  const queuedDelegate = {
+    [Symbol.asyncIterator]() { return this; },
+    async next() {
+      queuedCalls++;
+      return { value: `queued ${queuedCalls}`, done: false };
+    },
+  };
+  async function* queuedOuter() { yield* queuedDelegate; }
+  const queuedIterator = queuedOuter();
+  const queuedFirst = queuedIterator.next();
+  const queuedSecond = queuedIterator.next();
+  const queuedResults = await Promise.all([queuedFirst, queuedSecond]);
+  check(queuedResults[0].value === "queued 1" && queuedResults[1].value === "queued 2" &&
+    queuedCalls === 2,
+    "direct async-delegate values drain queued next() calls in order");
+
   let valueReads = 0;
   const getterDelegate = {
     [Symbol.iterator]() { return this; },
@@ -45,8 +72,8 @@ async function main() {
 
   const getterError = new Error("delegated value getter");
   const throwingDelegate = {
-    [Symbol.iterator]() { return this; },
-    next() {
+    [Symbol.asyncIterator]() { return this; },
+    async next() {
       return {
         done: false,
         get value() { throw getterError; },
@@ -61,6 +88,27 @@ async function main() {
     rejected = error === getterError;
   }
   check(rejected, "delegated value getter failure rejects next() with the original error");
+
+  let caughtGetterError = false;
+  let finallyRuns = 0;
+  async function* catchingOuter() {
+    try {
+      yield* throwingDelegate;
+    } catch (error) {
+      caughtGetterError = error === getterError;
+      yield "caught delegated getter";
+    } finally {
+      finallyRuns++;
+    }
+  }
+  const catchingIterator = catchingOuter();
+  const caughtResult = await catchingIterator.next();
+  check(caughtResult.done === false && caughtResult.value === "caught delegated getter" &&
+    caughtGetterError && finallyRuns === 0,
+    "delegated value getter rejection resumes through the generator catch");
+  const caughtCompletion = await catchingIterator.next();
+  check(caughtCompletion.done === true && finallyRuns === 1,
+    "delegated value getter catch preserves later finally completion");
 
   console.log("async yield* value semantics pass");
 }

@@ -3097,6 +3097,7 @@ typedef struct kiln_generator {
     int queue_executing;
     kiln_value delegate;
     size_t delegate_exit;
+    uint8_t delegate_wrapped;
 } kiln_generator;
 
 /* The parts a civil date is made of. The realm has one zone and it is UTC (ADR 0015), so there

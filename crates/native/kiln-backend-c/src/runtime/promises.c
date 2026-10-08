@@ -553,6 +553,43 @@ static void kiln_c99_publish_turn_refusal(int status, kiln_value produced, kiln_
                   : kiln_c99_control_diagnostic();
 }
 
+static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
+                                           int finished, int depth, kiln_value *thrown);
+static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
+                                         int rejected, int depth, kiln_value *thrown);
+
+/* Finish one yielded value and release the async-generator queue in the same job. This is shared
+ * by awaited yields and direct async-delegate values so the latter do not gain an extra turn. */
+static int kiln_c99_async_generator_finish_yield(kiln_host *host, kiln_value generator,
+                                                 kiln_value value, int depth,
+                                                 kiln_value *thrown) {
+    kiln_generator *frame = kiln_c99_generator_of(generator);
+    kiln_value step = frame->promise;
+    int status = kiln_c99_async_generator_settle(host, step, value, 0, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    frame->queue_executing = 0;
+    if (frame->queue_count > 0) {
+        kiln_value next_p = frame->queue_promises[0];
+        kiln_value next_s = frame->queue_sent[0];
+        size_t idx;
+        frame->queue_count--;
+        for (idx = 0; idx < frame->queue_count; ++idx) {
+            kiln_c99_heap_store_value(frame, &frame->queue_promises[idx],
+                                      frame->queue_promises[idx + 1]);
+            kiln_c99_heap_store_value(frame, &frame->queue_sent[idx], frame->queue_sent[idx + 1]);
+        }
+        frame->queue_executing = 1;
+        kiln_c99_heap_store_value(frame, &frame->promise, next_p);
+        if (frame->done) {
+            frame->queue_executing = 0;
+            return kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, 0,
+                                                   thrown);
+        }
+        return kiln_c99_async_generator_step(host, generator, next_s, 0, 0, thrown);
+    }
+    return status;
+}
+
 /* Run one promise job. `task` is the drain's own copy, not a pointer into the ring: a handler
  * that enqueues can grow the array out from under it. */
 static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *thrown) {
@@ -568,28 +605,8 @@ static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *t
                 kiln_c99_publish_turn_refusal(status, kiln_c99_undefined(), thrown);
                 return status;
             }
-            kiln_value step = frame->promise;
-            status = kiln_c99_async_generator_settle(host, step, task->argument, 0, 0, thrown);
-            if (status != KILN_C99_OK) return status;
-            frame->queue_executing = 0;
-            if (frame->queue_count > 0) {
-                kiln_value next_p = frame->queue_promises[0];
-                kiln_value next_s = frame->queue_sent[0];
-                size_t idx;
-                frame->queue_count--;
-                for (idx = 0; idx < frame->queue_count; ++idx) {
-                    kiln_c99_heap_store_value(frame, &frame->queue_promises[idx], frame->queue_promises[idx + 1]);
-                    kiln_c99_heap_store_value(frame, &frame->queue_sent[idx], frame->queue_sent[idx + 1]);
-                }
-                frame->queue_executing = 1;
-                kiln_c99_heap_store_value(frame, &frame->promise, next_p);
-                if (frame->done) {
-                    frame->queue_executing = 0;
-                    return kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, 0, thrown);
-                }
-                return kiln_c99_async_generator_step(host, task->handler, next_s, 0, 0, thrown);
-            }
-            return status;
+            return kiln_c99_async_generator_finish_yield(host, task->handler, task->argument, 0,
+                                                        thrown);
         }
         /* An await's value arriving at its frame: step it where `@@resume` bound to it used to. */
         status = kiln_c99_generator_of(task->handler)->async_generator
@@ -954,9 +971,9 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
             return kiln_c99_await_suspend(host, generator, produced, 1, depth);
         }
         if (frame->delegate.tag != KILN_VALUE_UNDEFINED) {
-            /* YieldStar suspends with its iterator-result object. Async-generator yield* exposes
-             * only that result's value, then awaits it just like an ordinary async-generator
-             * yield. Read the value once here; the generated body already consumed `done`. */
+            /* YieldStar suspends with its iterator-result object. Async-from-sync delegation
+             * awaits the result's value; delegation to a real async iterator exposes its value
+             * without awaiting it. Read the value once here; the generated body consumed `done`. */
             kiln_value delegated_value = kiln_c99_undefined();
             kiln_value get_thrown = kiln_c99_undefined();
             int get_status = kiln_c99_get(host, produced, "value", 5, &delegated_value, depth,
@@ -967,10 +984,15 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
                  * next() synchronously or treating the error as a delegate.next() failure. */
                 kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
                 frame->delegate_exit = 0;
+                frame->delegate_wrapped = 0;
                 return kiln_c99_enqueue(generator, get_thrown, kiln_c99_undefined(), 1, 1);
             }
             if (get_status != KILN_C99_OK) return get_status;
-            produced = delegated_value;
+            if (frame->delegate_wrapped) {
+                return kiln_c99_await_suspend(host, generator, delegated_value, 2, depth);
+            }
+            return kiln_c99_async_generator_finish_yield(host, generator, delegated_value, depth,
+                                                        thrown);
         }
         return kiln_c99_await_suspend(host, generator, produced, 2, depth);
     }

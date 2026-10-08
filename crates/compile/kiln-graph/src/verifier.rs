@@ -408,11 +408,14 @@ pub fn verify_function_graph(graph: &FunctionGraph) -> Result<(), VerifierError>
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 let delegate_iter = delegate.as_ref().map(|(iter, _, _)| iter);
+                let wrapped = delegate_wrapped.as_ref();
                 for used in std::iter::once(value)
                     .chain(delegate_iter)
+                    .chain(wrapped)
                     .chain(spilled.iter())
                 {
                     let &(def_block, _) =

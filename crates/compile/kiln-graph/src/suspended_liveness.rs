@@ -439,6 +439,7 @@ mod tests {
             pc: 0,
             awaiting: false,
             delegate: None,
+            delegate_wrapped: None,
         }
     }
 
