@@ -194,7 +194,7 @@ def snapshot_provider(manifest_path, toolchain):
             'rust_target': manifest.get('rust_target')}
 
 
-def prepare_provider(explicit, kiln_source, out, timeout, runtime_jobs, memory_mb):
+def prepare_provider(explicit, kiln_source, out, timeout, build_jobs, memory_mb):
     candidates = [explicit, os.environ.get('KILN_NATIVE_PROVIDER_MANIFEST'),
                   os.environ.get('KILN_NATIVE_NUMBER_PROVIDER_MANIFEST')]
     supplied = next((Path(p) for p in candidates if p is not None), None)
@@ -211,7 +211,7 @@ def prepare_provider(explicit, kiln_source, out, timeout, runtime_jobs, memory_m
                    'mise', 'exec', '--', str(REPO / 'scripts/package-native-number-provider.sh'),
                    str(package)]
         preparation = execute(command, REPO, out / 'provider-preparation.log',
-                              max(300, timeout), runtime_jobs)
+                              max(300, timeout), build_jobs)
         if preparation['exit_code'] != 0:
             raise RuntimeError('provider preparation failed; see ' + preparation['log'])
         supplied = package / 'kiln-native-provider.json'
@@ -359,11 +359,11 @@ def entry_for(workspace, source, name):
     return entry
 
 
-def execute(args, cwd, log, timeout, runtime_jobs, extra_env=None):
+def execute(args, cwd, log, timeout, worker_jobs, extra_env=None):
     started = time.monotonic()
     timed_out = False
     with log.open('wb') as output:
-        process = subprocess.Popen(args, cwd=cwd, env={**os.environ, 'TZ': 'UTC', 'KILN_JOBS': str(runtime_jobs), 'RAYON_NUM_THREADS': str(runtime_jobs), **(extra_env or {})},
+        process = subprocess.Popen(args, cwd=cwd, env={**os.environ, 'TZ': 'UTC', 'KILN_JOBS': str(worker_jobs), 'RAYON_NUM_THREADS': str(worker_jobs), **(extra_env or {})},
                                    stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             code = process.wait(timeout=timeout)
@@ -878,8 +878,9 @@ def main():
         validate_node_vitest_policy()
     except ValueError as exc:
         parser.error(str(exc))
-    if args.jobs < 1 or args.timeout <= 0 or args.kiln_memory_mb < 1 or args.runtime_jobs < 1:
-        parser.error('jobs and timeout must be positive')
+    if (args.jobs < 1 or args.timeout <= 0 or args.kiln_memory_mb < 1 or args.runtime_jobs < 1 or
+            (args.build_jobs is not None and args.build_jobs < 1)):
+        parser.error('jobs, timeout, memory limit, and worker counts must be positive')
     workspace = args.workspace.resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     out = args.out.resolve()
@@ -937,6 +938,8 @@ def build_parser():
     parser.add_argument('--provider-manifest', type=Path, help='native provider to snapshot; defaults to an installed package or one built from this repository')
     parser.add_argument('--jobs', type=int, default=min(2, max(1, int(os.environ.get('KILN_JOBS', '2')))))
     parser.add_argument('--runtime-jobs', type=int, default=1, help='compiler/interpreter workers within each process')
+    parser.add_argument('--build-jobs', type=int,
+                        help='workers for native AOT and fallback provider builds (default: --runtime-jobs)')
     parser.add_argument('--native-profile', choices=['native-dev', 'native-release'], default='native-dev',
                         help='native compilation profile (recorded in the report; case timeouts are unchanged)')
     parser.add_argument('--compress-native-artifacts', action='store_true',
@@ -949,7 +952,8 @@ def build_parser():
 
 
 def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_sha, zstd):
-    provider = prepare_provider(args.provider_manifest, kiln_source, out, args.timeout, args.runtime_jobs, args.kiln_memory_mb) if 'native' in engines else None
+    native_build_jobs = (args.build_jobs if args.build_jobs is not None else args.runtime_jobs)
+    provider = prepare_provider(args.provider_manifest, kiln_source, out, args.timeout, native_build_jobs, args.kiln_memory_mb) if 'native' in engines else None
     native_env = native_resource_env(provider, workspace, args.cache_gc)
     with (workspace / '.runner.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -980,6 +984,8 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
                   'clock_policy': {e: 'wall' for e in engines},
                   'native_profile': args.native_profile if 'native' in engines else None,
                   'resource_policy': {
+                      'native_build_jobs': native_build_jobs if 'native' in engines else None,
+                      'runtime_jobs': args.runtime_jobs,
                       'compress_native_artifacts': bool(args.compress_native_artifacts),
                       'zstd': zstd,
                       'cache_gc': bool(args.cache_gc),
@@ -992,7 +998,8 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
                   'runner_sha256': digest(Path(__file__).resolve()),
                   'runner_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip(),
                   'deferred': len(PIN['files']) - len(selected), 'jobs': args.jobs,
-                  'kiln_memory_mb': args.kiln_memory_mb, 'timeout_s': args.timeout, 'runtime_jobs': args.runtime_jobs,
+                  'kiln_memory_mb': args.kiln_memory_mb, 'timeout_s': args.timeout,
+                  'runtime_jobs': args.runtime_jobs, 'native_build_jobs': native_build_jobs if 'native' in engines else None,
                   'harness_sha256': {p.name: digest(p) for p in HARNESS.iterdir() if p.is_file()},
                   'source_sha256': {n: digest(source / PIN['directory'] / (n + '.test.ts')) for n in selected},
                   'files': []}
@@ -1031,7 +1038,7 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
                         if specifier.startswith('.'):
                             specifier = str((source / PIN['directory'] / (name + '.test.ts')).parent.joinpath(specifier).resolve())
                         build_cmd.extend(['--include', specifier])
-                    build = execute(build_cmd, workspace, directory / 'native-build.log', args.timeout, args.runtime_jobs, native_env)
+                    build = execute(build_cmd, workspace, directory / 'native-build.log', args.timeout, native_build_jobs, native_env)
                     if build['exit_code'] != 0 or not binary.is_file():
                         envelope = {**build, 'build': build, 'inventory': None, 'cases': [],
                                     'summary': None, 'errors': [{'kind': 'runner_error', 'error': 'native build failed'}], 'complete': False}

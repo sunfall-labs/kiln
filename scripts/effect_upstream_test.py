@@ -1,6 +1,9 @@
 import importlib.util
 import copy
+import json
+import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -106,8 +109,82 @@ class NativeResourcePolicyTests(unittest.TestCase):
             '--out', str(self.root / 'out'), '--compress-native-artifacts', '--cache-gc'])
         self.assertFalse(defaults.compress_native_artifacts)
         self.assertFalse(defaults.cache_gc)
+        self.assertIsNone(defaults.build_jobs)
         self.assertTrue(enabled.compress_native_artifacts)
         self.assertTrue(enabled.cache_gc)
+
+    def test_native_build_job_override_preserves_runtime_worker_setting(self):
+        entry = self.root / 'entry.ts'
+        entry.write_text('')
+        fake_kiln = self.root / 'fake-kiln'
+        fake_kiln.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+trace = pathlib.Path(os.environ["BUILD_JOBS_TRACE"])
+def record(phase):
+    with trace.open("a") as out:
+        out.write(json.dumps({"phase": phase, "kiln_jobs": os.environ["KILN_JOBS"],
+                              "rayon_threads": os.environ["RAYON_NUM_THREADS"]}) + "\\n")
+if "build" in sys.argv:
+    record("native-build")
+    binary = pathlib.Path(sys.argv[sys.argv.index("--output") + 1])
+    binary.write_text("""#!/usr/bin/env python3
+import json, os, pathlib
+with pathlib.Path(os.environ["BUILD_JOBS_TRACE"]).open("a") as out:
+    out.write(json.dumps({"phase": "native-run", "kiln_jobs": os.environ["KILN_JOBS"],
+                          "rayon_threads": os.environ["RAYON_NUM_THREADS"]}) + "\\\\n")
+print('KILN_EFFECT ' + json.dumps({"kind":"inventory", "tests":[{"id":"X > case", "mode":"run"}]}))
+print('KILN_EFFECT ' + json.dumps({"kind":"case", "id":"X > case", "outcome":"pass"}))
+print('KILN_EFFECT ' + json.dumps({"kind":"summary", "discovered":1, "passed":1, "failed":0, "skipped":0}))
+""")
+    binary.chmod(0o755)
+    raise SystemExit(0)
+''')
+        fake_kiln.chmod(0o755)
+
+        source = self.root / 'source'
+        source_test = source / runner.PIN['directory'] / 'X.test.ts'
+        source_test.parent.mkdir(parents=True)
+        source_test.write_text('// pinned-fixture stand-in\n')
+
+        for label, build_flag, expected_build_jobs in (
+                ('default', [], '1'), ('override', ['--build-jobs', '4'], '4')):
+            with self.subTest(label=label):
+                workspace = self.root / (label + '-workspace')
+                workspace.mkdir()
+                out = self.root / (label + '-out')
+                trace = self.root / (label + '-trace.jsonl')
+                args = runner.build_parser().parse_args([
+                    '--workspace', str(workspace), '--out', str(out), '--engine', 'native',
+                    '--path', 'X', '--kiln', str(fake_kiln), '--runtime-jobs', '1', *build_flag])
+
+                def fake_check_output(command, **_kwargs):
+                    return 'fake version or source revision\n'
+
+                with mock.patch.dict(os.environ, {'BUILD_JOBS_TRACE': str(trace)}), \
+                     mock.patch.object(runner, 'prepare_provider', return_value={'manifest': '/fixture/provider.json'}), \
+                     mock.patch.object(runner, 'prepare', return_value=source), \
+                     mock.patch.object(runner, 'entry_for', return_value=entry), \
+                     mock.patch.object(runner, 'RUNTIME_TARGETS', {}), \
+                     mock.patch.object(runner, 'compare_node_vitest', return_value={
+                         'complete': True, 'matches_modes': True, 'matches_outcomes': True,
+                         'mapped_cases': 1, 'unmapped_cases': [], 'official_unmapped_cases': [],
+                         'mode_mismatches': [], 'outcome_mismatches': []}), \
+                     mock.patch.object(runner.subprocess, 'check_output', side_effect=fake_check_output):
+                    status = runner._run_suite(
+                        args, ['native'], ['X'], workspace, out, fake_kiln, fake_kiln, 'fake-kiln-sha', None)
+
+                self.assertEqual(status, 0)
+                observed = [json.loads(line) for line in trace.read_text().splitlines()]
+                self.assertEqual(observed, [
+                    {'phase': 'native-build', 'kiln_jobs': expected_build_jobs,
+                     'rayon_threads': expected_build_jobs},
+                    {'phase': 'native-run', 'kiln_jobs': '1', 'rayon_threads': '1'},
+                ])
+                report = json.loads((out / 'report.json').read_text())
+                self.assertEqual(report['native_build_jobs'], int(expected_build_jobs))
+                self.assertEqual(report['runtime_jobs'], 1)
+                self.assertEqual(report['resource_policy']['native_build_jobs'], int(expected_build_jobs))
+                self.assertEqual(report['resource_policy']['runtime_jobs'], 1)
 
     def test_cache_gc_uses_first_writable_shared_layer_and_same_gc_root(self):
         workspace = self.root / 'workspace'

@@ -1,0 +1,3 @@
+The Effect runner can now use `--build-jobs 4 --runtime-jobs 1` to bound compilation separately from timed execution. The default build count remains the runtime count. Native AOT and fallback provider builds use the build count; binary execution and cache GC use the runtime count. Reports retain both. Original case/hook deadlines and source assertions are unchanged.
+
+All 29 Python runner tests passed. The behavioral fixture invokes the actual suite runner and observes its build and runtime subprocess environments for both the default and override. An initial mock returned bytes where production requested text; its failed log is preserved alongside the corrected passing run. This evidence does not prove faster compilation or complete Effect acceptance.
