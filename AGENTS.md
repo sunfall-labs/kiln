@@ -71,6 +71,8 @@ that assembly, in the repository, and `mise tasks` lists it beside the rest.
 | `mise run gui-smoke` | kiln:gui against the real window system (macOS; needs a logged-in session) |
 | `mise run kiln-types` | `@kiln/types` matches the `kiln:` modules' sources; its usage test and the GUI examples type-check |
 | `mise run silent-undefined` | the expensive native-`undefined` class; several hundred compiles, not per-commit |
+| `mise run tsc-differential` | the source checker against `tsc` 7.0.2 on Bun's differential corpus; fails if a baseline case stops matching |
+| `mise run tsc-differential-update` | regenerate that baseline; deliberate, and the diff is the record |
 | `mise run facts` | check the committed whole-program facts baseline for benchmarks and bundles |
 | `mise run facts-update` | regenerate the facts baseline; deliberate, and the diff is the record |
 
