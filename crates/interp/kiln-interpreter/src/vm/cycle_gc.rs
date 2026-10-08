@@ -198,6 +198,7 @@ impl Owner {
                 state.arguments.clear();
                 state.returning = None;
                 state.delegate = None;
+                state.async_requests = None;
                 drop(state);
                 value.properties.replace(ObjectData::default());
             }
@@ -799,7 +800,8 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
                     // omitted; the resulting unexplained strong refs conservatively retain the
                     // children instead of counting one shared edge once per reaction.
                     Sink::AsyncDisposal(_) | Sink::ModuleAwait(_) => {}
-                    Sink::AsyncGeneratorReturn(promise) => {
+                    Sink::AsyncGeneratorReturn(generator, promise) => {
+                        values.push(Value::Generator(Rc::clone(generator)));
                         values.push(Value::Promise(Rc::clone(promise)))
                     }
                     Sink::AsyncGeneratorDelegateReturnMissing(generator, promise)
@@ -833,6 +835,12 @@ fn owner_children(owner: &Owner) -> Vec<Value> {
             values.push(state.new_target.clone());
             values.extend(state.returning.iter().cloned());
             values.extend(state.delegate.iter().map(|(value, _, _)| value.clone()));
+            if let Some(requests) = &state.async_requests {
+                for request in requests.current.iter().chain(requests.pending.iter()) {
+                    values.push(request.value.clone());
+                    values.push(Value::Promise(Rc::clone(&request.step)));
+                }
+            }
             drop(state);
             values.extend(object_children(&value.properties.borrow()));
         }

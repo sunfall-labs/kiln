@@ -1,6 +1,122 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    pub(super) fn enqueue_async_generator_request(
+        &mut self,
+        generator: &Rc<GeneratorData>,
+        kind: AsyncGeneratorRequestKind,
+        value: Value,
+        step: Rc<PromiseData>,
+    ) -> Result<(), ExecutionError> {
+        let request = AsyncGeneratorRequest { kind, value, step };
+        let start = {
+            let mut state = generator.borrow_mut();
+            let requests = state
+                .async_requests
+                .get_or_insert_with(|| Box::new(AsyncGeneratorRequests::default()));
+            if requests.current.is_none() {
+                requests.current = Some(request);
+                true
+            } else {
+                requests.pending.push_back(request);
+                false
+            }
+        };
+        if start {
+            self.start_async_generator_request(generator)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn start_async_generator_request(
+        &mut self,
+        generator: &Rc<GeneratorData>,
+    ) -> Result<(), ExecutionError> {
+        let Some(request) = generator
+            .borrow()
+            .async_requests
+            .as_ref()
+            .and_then(|requests| requests.current.as_ref())
+            .map(|request| AsyncGeneratorRequest {
+                kind: request.kind,
+                value: request.value.clone(),
+                step: Rc::clone(&request.step),
+            })
+        else {
+            return Ok(());
+        };
+        let (started, done) = {
+            let state = generator.borrow();
+            (state.started, state.done)
+        };
+        match request.kind {
+            AsyncGeneratorRequestKind::Next => {
+                self.drive_async_generator(generator, &request.step, Resume::Send(request.value))
+            }
+            AsyncGeneratorRequestKind::Return if started && !done => {
+                self.drive_async_generator(generator, &request.step, Resume::Return(request.value))
+            }
+            AsyncGeneratorRequestKind::Throw if started && !done => {
+                self.drive_async_generator(generator, &request.step, Resume::Throw(request.value))
+            }
+            AsyncGeneratorRequestKind::Return => {
+                generator.borrow_mut().complete();
+                let target = match request.value {
+                    Value::Promise(inner) => inner,
+                    other => {
+                        let pending = PromiseState::pending();
+                        self.resolve_promise(&pending, other);
+                        pending
+                    }
+                };
+                self.react(
+                    &target,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::AsyncGeneratorReturn(generator.clone(), request.step),
+                    false,
+                );
+                Ok(())
+            }
+            AsyncGeneratorRequestKind::Throw => {
+                generator.borrow_mut().complete();
+                self.finish_async_generator_request(
+                    generator,
+                    &request.step,
+                    Settled::Rejected(request.value),
+                )
+            }
+        }
+    }
+
+    pub(super) fn finish_async_generator_request(
+        &mut self,
+        generator: &Rc<GeneratorData>,
+        step: &Rc<PromiseData>,
+        outcome: Settled,
+    ) -> Result<(), ExecutionError> {
+        self.settle(step, &outcome);
+        let next = {
+            let mut state = generator.borrow_mut();
+            let Some(requests) = state.async_requests.as_mut() else {
+                return Ok(());
+            };
+            debug_assert!(
+                requests
+                    .current
+                    .as_ref()
+                    .is_some_and(|current| Rc::ptr_eq(&current.step, step))
+            );
+            requests.current = requests.pending.pop_front();
+            requests.current.is_some()
+        };
+        if next {
+            self.start_async_generator_request(generator)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn delegate_async_generator_return(
         &mut self,
         generator: &Rc<GeneratorData>,
@@ -238,14 +354,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // what the marker means, so that is what it does.
                 if matches!(thrown, Value::Native(Native::ReturnSignal, _)) {
                     let result = iteration_result(Value::Undefined, true);
-                    self.resolve_promise(step, result);
+                    self.finish_async_generator_request(
+                        generator,
+                        step,
+                        Settled::Fulfilled(result),
+                    )?;
                 } else {
-                    self.settle(step, &Settled::Rejected(thrown));
+                    self.finish_async_generator_request(
+                        generator,
+                        step,
+                        Settled::Rejected(thrown),
+                    )?;
                 }
             }
             Ok((value, true)) => {
                 let result = iteration_result(value, true);
-                self.resolve_promise(step, result);
+                self.finish_async_generator_request(generator, step, Settled::Fulfilled(result))?;
             }
             Ok((iterator_result, false))
                 if generator.borrow().delegate.is_some() && !generator.borrow().awaiting =>
@@ -290,7 +414,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     );
                 } else {
                     let result = iteration_result(value, false);
-                    self.resolve_promise(step, result);
+                    self.finish_async_generator_request(
+                        generator,
+                        step,
+                        Settled::Fulfilled(result),
+                    )?;
                 }
             }
             Ok((value, false)) if !generator.borrow().awaiting => {

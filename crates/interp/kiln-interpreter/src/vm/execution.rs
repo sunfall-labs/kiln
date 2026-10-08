@@ -2617,6 +2617,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 awaiting: false,
                 returning: None,
                 delegate: None,
+                async_requests: None,
             }),
         });
         let module_map = self.gc_module_map();

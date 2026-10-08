@@ -176,7 +176,7 @@ pub(super) enum Sink {
     ///
     /// The generator itself is not carried because there is nothing to resume -- it is already
     /// finished, and all that remains is to decide the step this `return()` promised.
-    AsyncGeneratorReturn(Rc<PromiseData>),
+    AsyncGeneratorReturn(Rc<GeneratorData>, Rc<PromiseData>),
     /// Awaiting the `return` argument when the delegate iterator has no `return` method.
     AsyncGeneratorDelegateReturnMissing(Rc<GeneratorData>, Rc<PromiseData>),
     /// Awaiting the result of calling `return()` to close the delegate when `throw()` is missing.

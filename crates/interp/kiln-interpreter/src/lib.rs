@@ -752,6 +752,29 @@ pub struct GeneratorState {
     /// When suspended at `YieldStar`, the active delegate iterator, the target instruction to resume
     /// at if `inner.throw()` completes with `done: true`, and whether the delegate is a wrapped synchronous iterator.
     delegate: Option<(Value, usize, bool)>,
+    /// Async-generator requests are serialized: only the first request may resume the body, and
+    /// the next request starts after the current request's result is settled.
+    async_requests: Option<Box<AsyncGeneratorRequests>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AsyncGeneratorRequests {
+    pub(crate) current: Option<AsyncGeneratorRequest>,
+    pub(crate) pending: std::collections::VecDeque<AsyncGeneratorRequest>,
+}
+
+#[derive(Debug)]
+pub(crate) struct AsyncGeneratorRequest {
+    pub(crate) kind: AsyncGeneratorRequestKind,
+    pub(crate) value: Value,
+    pub(crate) step: Rc<PromiseData>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum AsyncGeneratorRequestKind {
+    Next,
+    Return,
+    Throw,
 }
 
 impl GeneratorState {
