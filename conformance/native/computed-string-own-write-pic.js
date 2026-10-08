@@ -88,6 +88,41 @@ check(writeAt(changedPrototypeTarget, keyFrom(["sl", "ot"]), 82) === 82,
 check(changedPrototypeTarget.slot === 82 && prototypeSetterValue === 0,
   "prototype replacement does not redirect an existing own slot");
 
+const mutationKey = keyFrom(["mut", "a", "ble"]);
+let mutationSetterCalls = 0;
+const mutationPrototype = {};
+Object.defineProperty(mutationPrototype, mutationKey, {
+  configurable: true,
+  set(value) {
+    mutationSetterCalls++;
+    // Keep the computed key live while the setter allocates and changes the receiver shape.
+    let churn = null;
+    for (let index = 0; index < 96; index++) churn = { index, previous: churn };
+    Object.defineProperty(this, mutationKey, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value,
+    });
+    Object.defineProperty(this, "side", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: churn.index,
+    });
+    Object.setPrototypeOf(this, null);
+  },
+});
+const mutationTarget = Object.create(mutationPrototype);
+check(writeAt(mutationTarget, keyFrom(["mu", "table"]), 111) === 111,
+  "allocating inherited setter completes the first assignment");
+check(mutationSetterCalls === 1 && Object.hasOwn(mutationTarget, mutationKey) &&
+  mutationTarget[mutationKey] === 111 && mutationTarget.side === 95,
+  "post-set lookup observes the receiver's setter-mutated shape");
+check(writeAt(mutationTarget, keyFrom(["mutable"]), 112) === 112 &&
+  mutationTarget[mutationKey] === 112 && mutationSetterCalls === 1,
+  "learned slot remains valid after allocating setter and prototype mutation");
+
 const frozen = { slot: 0 };
 writeAt(frozen, keyFrom(["sl", "ot"]), 5);
 Object.freeze(frozen);
