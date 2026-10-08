@@ -955,6 +955,10 @@ impl<'a, 's> Lower<'a, 's> {
         let mut members = members;
         for member in &mut members {
             member.flags |= self.literal_name_flags(member);
+            // `1n() {}`: the checker reads a bigint name from its text, as TypeScript does.
+            if self.is_bigint_name_at(member.name_pos) {
+                member.key = b::PropKey::None;
+            }
         }
         self.file.add_members(&members)
     }

@@ -2033,6 +2033,10 @@ impl<'a, 's> Lower<'a, 's> {
         members.sort_by_key(|member| member.start);
         for member in &mut members {
             member.flags |= self.literal_name_flags(member);
+            // `1n() {}`: the checker reads a bigint name from its text, as TypeScript does.
+            if self.is_bigint_name_at(member.name_pos) {
+                member.key = b::PropKey::None;
+            }
         }
         let members = self.file.add_members(&members);
         let class_modifiers = self.declaration_modifiers(flags, span.start);
@@ -2108,6 +2112,20 @@ impl<'a, 's> Lower<'a, 's> {
         } else {
             b::PropKey::Name(self.atom(name))
         }
+    }
+
+    /// `IsBigIntLiteral` for the name written at `pos`: a number that ends in `n`.
+    pub(super) fn is_bigint_name_at(&self, pos: u32) -> bool {
+        let written = self
+            .module
+            .source
+            .as_bytes()
+            .get(pos as usize..)
+            .unwrap_or_default();
+        let end = (written.iter())
+            .position(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+            .unwrap_or(written.len());
+        written.first().is_some_and(u8::is_ascii_digit) && written[..end].ends_with(b"n")
     }
 
     /// The parameter of the index signature at `span`: inside its brackets.
@@ -2481,6 +2499,10 @@ impl<'a, 's> Lower<'a, 's> {
         members.sort_by_key(|member| member.start);
         for member in &mut members {
             member.flags |= self.literal_name_flags(member);
+            // `1n() {}`: the checker reads a bigint name from its text, as TypeScript does.
+            if self.is_bigint_name_at(member.name_pos) {
+                member.key = b::PropKey::None;
+            }
         }
         // `node.Modifiers()` of each member, from its first token: the executable span of a
         // static member starts past `static`, the class site's does not.

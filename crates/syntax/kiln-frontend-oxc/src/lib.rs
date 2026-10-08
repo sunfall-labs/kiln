@@ -4106,6 +4106,12 @@ fn capture_type_syntax(
                             .to_owned(),
                         n.span.start,
                     ),
+                    PropertyKey::BigIntLiteral(n) => (
+                        source
+                            .get(n.span.start as usize..n.span.end as usize)?
+                            .to_owned(),
+                        n.span.start,
+                    ),
                     _ => return None,
                 })
             };
