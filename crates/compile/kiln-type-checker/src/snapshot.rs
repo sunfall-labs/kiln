@@ -736,7 +736,7 @@ pub(crate) fn lower_module<'s>(
             let reported = SourceDiagnostic {
                 path: Some(name.to_owned()),
                 span: diagnostic.span,
-                code: None,
+                code: diagnostic.code,
                 message: diagnostic.message.clone(),
             };
             match diagnostic.early {

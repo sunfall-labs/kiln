@@ -1988,7 +1988,9 @@ pub fn run(suite: &Suite, setup: &Setup) -> Vec<Outcome> {
                 let mut found = Vec::new();
                     let base = base_name(path);
                     if SKIPPED.contains(&base)
-                        || setup.only.is_some_and(|only| !contains(path, only))
+                        || setup
+                            .only
+                            .is_some_and(|only| !only.split('|').any(|only| contains(path, only)))
                         || i % setup.every.max(1) != setup.first
                     {
                         return found;
@@ -2325,7 +2327,7 @@ impl Drop for Watched {
     }
 }
 
-/// `[--bundle=file] --lib=<dir> --testlib=<dir> [--only=substring] [--every=n [--first=i]] [--threads=n] [--report=file]
+/// `[--bundle=file] --lib=<dir> --testlib=<dir> [--only=substring[|substring]..] [--every=n [--first=i]] [--threads=n] [--report=file]
 /// [--out=dir] [--types-and-symbols] [--declarations] [--traces]
 /// <name>=<tests>=<baselines>=<file with the names of all the baselines> ..`
 ///

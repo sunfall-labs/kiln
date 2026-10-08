@@ -16,11 +16,11 @@ pub use type_syntax::{
     TypeClassMemberKind, TypeClassMemberSite, TypeClassSite, TypeDeclaration, TypeDeclarationKind,
     TypeDecoratorOwner, TypeDecoratorSite, TypeExportAssignment, TypeExpr, TypeExprKind,
     TypeExpressionWrapperKind, TypeExpressionWrapperSite, TypeImportEquals,
-    TypeImportEqualsReference, TypeInstantiationKind, TypeInstantiationSite, TypeKeyword,
-    TypeLiteral, TypeMember, TypeMemberKind, TypeModuleAttribute, TypeModuleAttributeKeyKind,
-    TypeModuleAttributes, TypeModuleAttributesKeyword, TypeNamespaceExport, TypeOperator,
-    TypeParameter, TypeReferenceDirective, TypeReferenceKind, TypeResolutionMode, TypeSignature,
-    TypeSignatureParameter, TypeSite, TypeSyntax,
+    TypeImportEqualsReference, TypeInstantiationKind, TypeInstantiationSite, TypeJavaScriptError,
+    TypeKeyword, TypeLiteral, TypeMember, TypeMemberKind, TypeModuleAttribute,
+    TypeModuleAttributeKeyKind, TypeModuleAttributes, TypeModuleAttributesKeyword,
+    TypeNamespaceExport, TypeOperator, TypeParameter, TypeReferenceDirective, TypeReferenceKind,
+    TypeResolutionMode, TypeSignature, TypeSignatureParameter, TypeSite, TypeSyntax,
 };
 
 pub use kiln_string::StringUnits;
@@ -59,6 +59,8 @@ pub enum SourceGoal {
 pub struct Diagnostic {
     pub message: String,
     pub span: Option<Span>,
+    /// The TypeScript diagnostic code the parser gave it, when it is one TypeScript has.
+    pub code: Option<u32>,
     /// An early error: the program parsed, and the ECMAScript static semantics reject it (`eval`
     /// assigned in strict code, a redeclared `let`). TypeScript reports these from its checker
     /// and binder, so the source checker can check such a module and report them itself.
