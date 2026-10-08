@@ -1024,6 +1024,44 @@ impl<'a, 's> Lower<'a, 's> {
             .for_each(|it| widen(&mut it.loc));
     }
 
+    /// Where an identifier spelled like a word that strict mode reserves, or `eval` or
+    /// `arguments`, may be (`File::keyword_identifier_positions`): the checker finds each such
+    /// identifier from there and reports what binder.go does for it. Every occurrence of the word
+    /// is recorded, also in a string or a comment: the checker only takes identifiers.
+    fn keyword_identifier_positions(&mut self) {
+        const WORDS: [&[u8]; 12] = [
+            b"implements",
+            b"interface",
+            b"let",
+            b"package",
+            b"private",
+            b"protected",
+            b"public",
+            b"static",
+            b"yield",
+            b"await",
+            b"eval",
+            b"arguments",
+        ];
+        let text = self.module.source.as_bytes();
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+        let mut at = 0;
+        while at < text.len() {
+            if !is_word(text[at]) {
+                at += 1;
+                continue;
+            }
+            let start = at;
+            while at < text.len() && is_word(text[at]) {
+                at += 1;
+            }
+            let preceded_by_dot = start > 0 && text[start - 1] == b'.';
+            if !preceded_by_dot && WORDS.contains(&&text[start..at]) {
+                self.file.keyword_identifier_positions.push(start as u32);
+            }
+        }
+    }
+
     /// `node.Modifiers()` of each parameter: its decorators and modifier keywords. A parameter is
     /// found by its end, the same for the parameter and its decorators' owner.
     fn parameter_modifiers(&mut self) {
@@ -1082,6 +1120,7 @@ impl<'a, 's> Lower<'a, 's> {
             ));
         }
         self.parameter_modifiers();
+        self.keyword_identifier_positions();
         // In source order.
         let mut decorators = std::mem::take(&mut self.file.decorators);
         decorators.sort_by_key(|&(_, e)| self.file[e].pos);

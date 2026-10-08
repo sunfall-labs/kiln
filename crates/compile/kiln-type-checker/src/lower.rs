@@ -68,10 +68,20 @@ impl<'a, 's> Lower<'a, 's> {
             module.source_kind,
             k::SourceKind::JavaScript | k::SourceKind::Jsx
         );
-        file.has_module_syntax = module
-            .items
-            .iter()
-            .any(|i| matches!(i.kind, k::ItemKind::Import | k::ItemKind::Export));
+        // `isAnExternalModuleIndicatorNode`: `import x = a.b` is not one, unless it is exported;
+        // `import x = require("m")` is.
+        let is_namespace_alias = |span: k::Span| {
+            (module.type_syntax.import_equals.iter()).any(|it| {
+                it.span.start <= span.start
+                    && span.end <= it.span.end
+                    && !it.exported
+                    && matches!(it.reference, k::TypeImportEqualsReference::EntityName(_))
+            })
+        };
+        file.has_module_syntax = module.items.iter().any(|i| {
+            matches!(i.kind, k::ItemKind::Import | k::ItemKind::Export)
+                && !is_namespace_alias(i.span)
+        });
         let syntax = &module.type_syntax;
         let mut wrappers: rustc_hash::FxHashMap<k::Span, smallvec::SmallVec<[Wrapper; 1]>> =
             rustc_hash::FxHashMap::default();
