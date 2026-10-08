@@ -81,6 +81,21 @@ impl<'a, 's> Lower<'a, 's> {
                 ));
             }
         }
+        // The errors of oxc's parser that are TypeScript's own, which the checker reports with the
+        // code and the words TypeScript has for them.
+        for diagnostic in module.diagnostics.iter() {
+            if let Some(error) = crate::parser_errors::typescript_error(diagnostic, &module.source)
+            {
+                let args: Vec<&[u8]> = error.args.iter().map(|it| it.as_bytes()).collect();
+                file.diagnostics.push(b::Diagnostic::new(
+                    error.kind,
+                    (error.start, error.end),
+                    error.code,
+                    &args,
+                ));
+                file.has_parse_diagnostics |= error.kind == b::DiagnosticKind::Parse;
+            }
+        }
         // `isAnExternalModuleIndicatorNode`: `import x = a.b` is not one, unless it is exported;
         // `import x = require("m")` is.
         let is_namespace_alias = |span: k::Span| {
