@@ -3018,7 +3018,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         sent: Value,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
-        self.resume_generator_with(generator, Resume::Send(sent), instruction)
+        if generator.borrow().returning.is_some() {
+            // A `return()` can suspend again when a `finally` yields. The next public `.next()`
+            // resumes that finally, but it is still completing the earlier return request: if
+            // the finally finishes, the generator must answer with the original return value.
+            // Keep the host catcher installed until that pending completion reaches the top.
+            match self.resume_catching(generator, Resume::Send(sent), instruction)? {
+                Ok(result) => Ok(result),
+                Err(thrown) => {
+                    self.caught = Some(thrown);
+                    Err(ExecutionError::ThrownAcrossNative)
+                }
+            }
+        } else {
+            self.resume_generator_with(generator, Resume::Send(sent), instruction)
+        }
     }
 
     /// Resume a generator for a public `.return()` call. Return completion is represented by an

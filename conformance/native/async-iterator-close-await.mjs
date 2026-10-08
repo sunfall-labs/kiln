@@ -8,6 +8,22 @@ async function* generator() {
 }
 
 async function main() {
+  // A transpiled async-iterator helper can use a sync generator that yields from `finally` while
+  // implementing its `return()`. The next internal generator step must finish the already-active
+  // return completion instead of re-entering the generator body.
+  function* returnThroughYieldingFinally() {
+    try {
+      yield "body";
+    } finally {
+      yield "cleanup";
+    }
+  }
+  const inner = returnThroughYieldingFinally();
+  inner.next();
+  const closing = inner.return("closed");
+  const closed = inner.next("resume");
+  console.log(`yielding-finally ${closing.value}/${closing.done} ${closed.value}/${closed.done}`);
+
   for await (const value of generator()) {
     console.log(value);
     break;
