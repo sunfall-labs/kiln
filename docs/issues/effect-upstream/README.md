@@ -32,8 +32,12 @@ The complete async regression and the original failing probe now match Node
 in ordinary and GC-stress runs. The full regression also passes with 1, 2 and
 16 concurrent realms, including GC stress. Prepared iterator calls and the
 computed-string write-cache probe pass interpreter/native parity, stress and
-realm checks. An interpreter async-generator request-queue defect still prevents
-parity on the full async regression; its isolated repair is being tested.
+realm checks. The [interpreter request-queue repair](async-generator-queue-validation-20261008/validation-summary.json)
+passes all 303 interpreter unit tests and the complete queue, inherited-then and
+reentrant-ordering regressions. The full async yield-star fixture and original
+external probe now also pass interpreter/native parity. The new queue regression
+and existing delegation-protocol regression still diverge natively on queued
+`return()` and delegated `throw()`; their native repair remains in progress.
 These focused results do not establish complete upstream acceptance or speed gains.
 
 Complete fresh native and interpreter runs of all 322 files and 11,019 official
