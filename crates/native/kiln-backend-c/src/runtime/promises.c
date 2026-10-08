@@ -842,12 +842,24 @@ static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value ge
             }
             if (status == KILN_C99_THROWN) {
                 frame->done = 1;
-                if (kiln_val_from_boundary(*thrown) == KILN_VAL_RETURN_SIGNAL)
+                if (kiln_val_from_boundary(*thrown) == KILN_VAL_RETURN_SIGNAL) {
+                    kiln_value return_value = frame->async_return_value;
+                    frame->async_return_pending = 0;
+                    if (kiln_c99_is_reference(return_value))
+                        kiln_c99_gc_keep_alive((const void *)(uintptr_t)return_value.bits);
+                    kiln_c99_heap_store_value(frame, &frame->async_return_value,
+                                              kiln_c99_undefined());
                     status = kiln_c99_async_generator_settle(
-                        host, promise, frame->async_return_value, 1, depth, thrown);
-                else
+                        host, promise, return_value, 1, depth, thrown);
+                } else {
+                    frame->async_return_pending = 0;
+                    kiln_c99_heap_store_value(frame, &frame->async_return_value,
+                                              kiln_c99_undefined());
                     status = kiln_c99_settle(promise, *thrown, 1);
+                }
                 if (status != KILN_C99_OK) return status;
+                kiln_c99_gc_keep_alive(frame);
+                kiln_c99_gc_keep_alive((const void *)(uintptr_t)promise.bits);
                 return kiln_c99_async_generator_drain_closed(host, frame, depth, thrown);
             }
             if (status != KILN_C99_OK) return status;
@@ -855,10 +867,13 @@ static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value ge
         }
         frame->done = 1;
         frame->async_return_pending = 0;
-        status = kiln_c99_async_generator_settle(
-            host, promise, frame->async_return_value, 1, depth, thrown);
+        if (kiln_c99_is_reference(sent))
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)sent.bits);
         kiln_c99_heap_store_value(frame, &frame->async_return_value, kiln_c99_undefined());
+        status = kiln_c99_async_generator_settle(host, promise, sent, 1, depth, thrown);
         if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_keep_alive(frame);
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)promise.bits);
         return kiln_c99_async_generator_drain_closed(host, frame, depth, thrown);
     }
     return kiln_c99_async_generator_step(host, generator, sent, 0, depth, thrown);
@@ -1391,6 +1406,8 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
             kiln_val_from_boundary(*thrown) == KILN_VAL_RETURN_SIGNAL) {
             kiln_value return_value = frame->async_return_value;
             frame->async_return_pending = 0;
+            if (kiln_c99_is_reference(return_value))
+                kiln_c99_gc_keep_alive((const void *)(uintptr_t)return_value.bits);
             kiln_c99_heap_store_value(frame, &frame->async_return_value, kiln_c99_undefined());
             status = kiln_c99_async_generator_settle(host, step, return_value, 1, depth, thrown);
         } else {
@@ -1407,8 +1424,14 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
         return status;
     }
     frame->done = 1;
+    if (frame->async_return_pending) {
+        frame->async_return_pending = 0;
+        kiln_c99_heap_store_value(frame, &frame->async_return_value, kiln_c99_undefined());
+    }
     status = kiln_c99_async_generator_settle(host, step, produced, 1, depth, thrown);
     if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(frame);
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)step.bits);
     return kiln_c99_async_generator_drain_closed(host, frame, depth, thrown);
 }
 
