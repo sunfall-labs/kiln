@@ -242,6 +242,71 @@ impl Lower<'_, '_> {
         Some(stmt)
     }
 
+    /// Where the exported name of the specifier `export` is: its last token, as `b` of `a as b`
+    /// or `"s"` of `a as "s"`.
+    fn exported_pos(&self, export: &k::Export) -> u32 {
+        let source = self.module.source.as_bytes();
+        let Some(written) = source.get(export.span.start as usize..export.span.end as usize) else {
+            return export.span.start;
+        };
+        // Only `a as b` writes the exported name apart from the local one.
+        let is_alias = written.windows(4).any(|it| {
+            it[0].is_ascii_whitespace() && &it[1..3] == b"as" && it[3].is_ascii_whitespace()
+        });
+        if !is_alias {
+            return export.span.start;
+        }
+        let name = export
+            .exported
+            .as_ref()
+            .map_or(0, |name| name.as_str().len());
+        let quoted = written.ends_with(b"\"") || written.ends_with(b"'");
+        let length = (name + if quoted { 2 } else { 0 }) as u32;
+        match export.span.end - export.span.start >= length {
+            true => export.span.end - length,
+            false => export.span.start,
+        }
+    }
+
+    /// Where the specifier of `import` starts (its `type`, or else its imported name), and where
+    /// its imported name is: `x` of `x as y` and `"s"` of `"s" as y` come before the local name,
+    /// which is all the module record keeps the span of.
+    fn import_specifier_start(&self, import: &k::Import, name: &str) -> (u32, u32) {
+        let source = self.module.source.as_bytes();
+        let local = import.span.start;
+        let Some(before) = source.get(import.statement_span.start as usize..local as usize) else {
+            return (local, local);
+        };
+        let trimmed = before.trim_ascii_end();
+        let imported_pos = match trimmed.strip_suffix(b"as") {
+            Some(rest) if rest.last().is_some_and(u8::is_ascii_whitespace) => {
+                let rest = rest.trim_ascii_end();
+                let quoted = rest.ends_with(b"\"") || rest.ends_with(b"'");
+                let length = name.len() + if quoted { 2 } else { 0 };
+                match rest.len() >= length {
+                    true => import.statement_span.start + (rest.len() - length) as u32,
+                    false => local,
+                }
+            }
+            _ => local,
+        };
+        // `type x`: the specifier starts at `type`.
+        let ahead = source
+            .get(import.statement_span.start as usize..imported_pos as usize)
+            .unwrap_or_default()
+            .trim_ascii_end();
+        let start = match ahead.strip_suffix(b"type") {
+            Some(rest)
+                if rest.trim_ascii_end().ends_with(b"{")
+                    || rest.trim_ascii_end().ends_with(b",") =>
+            {
+                import.statement_span.start + rest.len() as u32
+            }
+            _ => imported_pos,
+        };
+        (start, imported_pos)
+    }
+
     pub(super) fn module_items(&mut self) -> Vec<(u32, b::StmtId)> {
         let module_attributes = self.module.type_syntax.module_attributes.clone();
         for attributes in &module_attributes {
@@ -386,16 +451,19 @@ impl Lower<'_, '_> {
                         namespace = self.atom(&i.local);
                         namespace_pos = i.span.start
                     }
-                    k::ImportName::Name(name) => specs.push(b::ImportSpec {
-                        start: i.span.start,
-                        imported: self.atom(name),
-                        local: self.atom(&i.local),
-                        pos: i.span.start,
-                        type_only: i.type_only && !type_only,
-                        imported_pos: i.span.start,
-                        end: i.span.end,
-                        import: id,
-                    }),
+                    k::ImportName::Name(name) => {
+                        let (start, imported_pos) = self.import_specifier_start(i, name);
+                        specs.push(b::ImportSpec {
+                            start,
+                            imported: self.atom(name),
+                            local: self.atom(&i.local),
+                            pos: i.span.start,
+                            type_only: i.type_only && !type_only,
+                            imported_pos,
+                            end: i.span.end,
+                            import: id,
+                        })
+                    }
                 }
             }
             // `importClause.NamedBindings` is `NamedImports`, empty or not: a `{` before the
@@ -526,7 +594,7 @@ impl Lower<'_, '_> {
                         start: e.span.start,
                         local: self.atom(local),
                         exported,
-                        pos: e.span.start,
+                        pos: self.exported_pos(e),
                         type_only: false,
                         local_pos: e.span.start,
                         end: e.span.end,
@@ -577,7 +645,7 @@ impl Lower<'_, '_> {
                         start: e.span.start,
                         local,
                         exported,
-                        pos: e.span.start,
+                        pos: self.exported_pos(e),
                         type_only: false,
                         local_pos: e.span.start,
                         end: e.span.end,

@@ -259,7 +259,9 @@ impl<'a, 's> Lower<'a, 's> {
     /// the closing bracket, without a trailing comma, which the checker reports (1013).
     fn rest_span(&self, pattern: k::Span) -> k::Span {
         let source = self.module.source.as_bytes();
-        let text = &source[pattern.start as usize..pattern.end as usize];
+        let Some(text) = source.get(pattern.start as usize..pattern.end as usize) else {
+            return pattern;
+        };
         let Some(dots) = text.windows(3).rposition(|it| it == b"...") else {
             return pattern;
         };
@@ -808,7 +810,8 @@ impl<'a, 's> Lower<'a, 's> {
                         // The name is the last thing of the member, before any `)` around it.
                         let source = self.module.source.as_bytes();
                         let written = name.to_lossy_string();
-                        let within = &source[object.span.end as usize..span.end as usize];
+                        let within = (source.get(object.span.end as usize..span.end as usize))
+                            .unwrap_or_default();
                         let name_pos = (within.windows(written.len().max(1)))
                             .rposition(|it| it == written.as_bytes())
                             .map_or(span.end.saturating_sub(written.len() as u32), |at| {
@@ -832,7 +835,9 @@ impl<'a, 's> Lower<'a, 's> {
                         let index = self.expr(key);
                         // Through the `]` that closes the key.
                         let source = self.module.source.as_bytes();
-                        let end = (source[key.span.end as usize..span.end as usize].iter())
+                        let end = (source.get(key.span.end as usize..span.end as usize))
+                            .unwrap_or_default()
+                            .iter()
                             .position(|&byte| byte == b']')
                             .map_or(span.end, |at| key.span.end + at as u32 + 1);
                         self.file.expr(
@@ -1540,6 +1545,9 @@ impl<'a, 's> Lower<'a, 's> {
     fn update_operand(&self, span: k::Span, prefix: bool) -> (u32, u32) {
         let source = self.module.source.as_bytes();
         let (start, end) = (span.start as usize, span.end as usize);
+        if start > end || end > source.len() {
+            return (span.start, span.end);
+        }
         match prefix {
             true => {
                 let rest = &source[(start + 2).min(end)..end];
