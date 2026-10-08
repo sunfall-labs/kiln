@@ -713,7 +713,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     return KILN_C99_OK;
                 }
             }
-            KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+            if (kiln_c99_program_wrote_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE)) {
+                int found;
+                int status = kiln_c99_prototype_store_read_with_receiver(
+                    host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE, target, key, ikey, out, depth,
+                    thrown, &found);
+                if (status != KILN_C99_OK || found) return status;
+            }
             inherited = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
                                                   intrinsic_key, intrinsic_len);
             if (inherited != 0) {
@@ -722,8 +728,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             }
             {
                 int found;
-                int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
-                                                           key, ikey, out, depth, thrown, &found);
+                int status = kiln_c99_prototype_store_read_with_receiver(
+                    host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE, target, key, ikey, out, depth,
+                    thrown, &found);
                 if (status != KILN_C99_OK || found) return status;
             }
             if (kiln_c99_same_name_key(key, "constructor")) {
