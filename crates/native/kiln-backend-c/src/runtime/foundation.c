@@ -682,6 +682,9 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
                                const kiln_val *args, size_t argc);
 static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                          int rejected, int depth, kiln_value *thrown);
+static int kiln_c99_async_generator_request(kiln_host *host, kiln_value generator,
+                                            kiln_value promise, kiln_value sent,
+                                            uint64_t method, int depth, kiln_value *thrown);
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
                                            int finished, int depth, kiln_value *thrown);
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,

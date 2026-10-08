@@ -745,7 +745,7 @@ static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value ge
             }
             /* Yield* closes the delegate before throwing when it has no throw method. The
              * continuation validates/awaits the close result before injecting the TypeError. */
-            status = kiln_c99_get(host, frame->delegate, "return", 6, &method, &method_error);
+            status = kiln_c99_get(host, frame->delegate, "return", 6, &method, depth, &method_error);
             if (status != KILN_C99_OK) {
                 kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
                 frame->delegate_exit = 0;
@@ -879,7 +879,7 @@ static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value ge
     return kiln_c99_async_generator_step(host, generator, sent, 0, depth, thrown);
 }
 
-int kiln_c99_async_generator_request(kiln_host *host, kiln_value generator, kiln_value promise,
+static int kiln_c99_async_generator_request(kiln_host *host, kiln_value generator, kiln_value promise,
                                      kiln_value sent, uint64_t method, int depth,
                                      kiln_value *thrown) {
     kiln_generator *frame = kiln_c99_generator_of(generator);
