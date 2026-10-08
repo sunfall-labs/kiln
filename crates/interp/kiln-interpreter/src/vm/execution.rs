@@ -2797,7 +2797,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Ok(method) => method,
             Err(thrown) => {
                 generator.borrow_mut().delegate = None;
-                return self.resume_generator_with(generator, Resume::Throw(thrown), instruction);
+                return self.resume_generator_throw(generator, thrown, instruction);
             }
         };
         match return_method {
@@ -2811,11 +2811,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(val) => val,
                     Err(thrown) => {
                         generator.borrow_mut().delegate = None;
-                        return self.resume_generator_with(
-                            generator,
-                            Resume::Throw(thrown),
-                            instruction,
-                        );
+                        return self.resume_generator_throw(generator, thrown, instruction);
                     }
                 };
                 if !is_object_type(&inner_result) {
@@ -2830,7 +2826,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .into(),
                         )],
                     );
-                    return self.resume_generator_with(generator, Resume::Throw(err), instruction);
+                    return self.resume_generator_throw(generator, err, instruction);
                 }
                 let done_res = self
                     .eval_catching(|this| this.read_property(&inner_result, "done", instruction))?;
@@ -2838,11 +2834,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(val) => val,
                     Err(thrown) => {
                         generator.borrow_mut().delegate = None;
-                        return self.resume_generator_with(
-                            generator,
-                            Resume::Throw(thrown),
-                            instruction,
-                        );
+                        return self.resume_generator_throw(generator, thrown, instruction);
                     }
                 };
                 let done = done_val.is_truthy();
@@ -2854,14 +2846,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let val = match val_res {
                         Ok(v) => v,
                         Err(thrown) => {
-                            return self.resume_generator_with(
-                                generator,
-                                Resume::Throw(thrown),
-                                instruction,
-                            );
+                            return self.resume_generator_throw(generator, thrown, instruction);
                         }
                     };
-                    self.resume_generator_with(generator, Resume::Return(val), instruction)
+                    self.resume_generator_return(generator, val, instruction)
                 } else {
                     Ok((inner_result, false))
                 }
@@ -2883,11 +2871,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Ok(method) => method,
             Err(thrown_val) => {
                 generator.borrow_mut().delegate = None;
-                return self.resume_generator_with(
-                    generator,
-                    Resume::Throw(thrown_val),
-                    instruction,
-                );
+                return self.resume_generator_throw(generator, thrown_val, instruction);
             }
         };
         match throw_method {
@@ -2912,17 +2896,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                             .into(),
                                         )],
                                     );
-                                    return self.resume_generator_with(
+                                    return self.resume_generator_throw(
                                         generator,
-                                        Resume::Throw(err),
+                                        err,
                                         instruction,
                                     );
                                 }
                             }
                             Err(thrown_val) => {
-                                return self.resume_generator_with(
+                                return self.resume_generator_throw(
                                     generator,
-                                    Resume::Throw(thrown_val),
+                                    thrown_val,
                                     instruction,
                                 );
                             }
@@ -2930,11 +2914,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     Ok(None) => {}
                     Err(thrown_val) => {
-                        return self.resume_generator_with(
-                            generator,
-                            Resume::Throw(thrown_val),
-                            instruction,
-                        );
+                        return self.resume_generator_throw(generator, thrown_val, instruction);
                     }
                 }
                 let err = self.construct_error(
@@ -2943,7 +2923,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         "Iterator does not have a throw method".to_owned().into(),
                     )],
                 );
-                self.resume_generator_with(generator, Resume::Throw(err), instruction)
+                self.resume_generator_throw(generator, err, instruction)
             }
             Some(throw_fn) => {
                 let call_res =
@@ -2952,11 +2932,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(val) => val,
                     Err(thrown_val) => {
                         generator.borrow_mut().delegate = None;
-                        return self.resume_generator_with(
-                            generator,
-                            Resume::Throw(thrown_val),
-                            instruction,
-                        );
+                        return self.resume_generator_throw(generator, thrown_val, instruction);
                     }
                 };
                 if !is_object_type(&inner_result) {
@@ -2971,7 +2947,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .into(),
                         )],
                     );
-                    return self.resume_generator_with(generator, Resume::Throw(err), instruction);
+                    return self.resume_generator_throw(generator, err, instruction);
                 }
                 let done_res = self
                     .eval_catching(|this| this.read_property(&inner_result, "done", instruction))?;
@@ -2979,11 +2955,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(val) => val,
                     Err(thrown_val) => {
                         generator.borrow_mut().delegate = None;
-                        return self.resume_generator_with(
-                            generator,
-                            Resume::Throw(thrown_val),
-                            instruction,
-                        );
+                        return self.resume_generator_throw(generator, thrown_val, instruction);
                     }
                 };
                 let done = done_val.is_truthy();
@@ -2995,15 +2967,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let val = match val_res {
                         Ok(v) => v,
                         Err(thrown_val) => {
-                            return self.resume_generator_with(
-                                generator,
-                                Resume::Throw(thrown_val),
-                                instruction,
-                            );
+                            return self.resume_generator_throw(generator, thrown_val, instruction);
                         }
                     };
                     generator.borrow_mut().instruction = exit_target;
-                    self.resume_generator_with(generator, Resume::Send(val), instruction)
+                    self.resume_generator(generator, val, instruction)
                 } else {
                     Ok((inner_result, false))
                 }
