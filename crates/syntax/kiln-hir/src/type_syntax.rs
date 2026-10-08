@@ -61,6 +61,9 @@ pub struct TypeSyntax {
     /// `@d` on a class, a class member or a parameter, with the expression of each, in source
     /// order. Executable HIR has none.
     pub decorators: Vec<TypeDecoratorSite>,
+    /// `/// <reference ... />` comments with none of `path`, `types`, `lib` or `no-default-lib`
+    /// written as TypeScript reads them, by span: an invalid directive (1084).
+    pub invalid_references: Vec<Span>,
     /// `export {}` statements, which name nothing and so are in no export list, by span. One
     /// makes a declaration file export only what it says (`setExportContextFlag`).
     pub empty_exports: Vec<Span>,

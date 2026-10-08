@@ -566,7 +566,9 @@ impl Lower<'_, '_> {
                                 _ => false,
                             }
                     });
-                if declared || class || in_body || inline {
+                // `export import a = ...` carries its own export flag.
+                let alias = (syntax.import_equals.iter()).any(|it| it.exported && inside(it.span));
+                if declared || class || in_body || inline || alias {
                     continue;
                 }
             }

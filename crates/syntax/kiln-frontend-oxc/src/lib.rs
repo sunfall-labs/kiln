@@ -5146,17 +5146,55 @@ fn capture_type_syntax(
         if !content.starts_with("<reference") {
             continue;
         }
-        let mut attrs = HashMap::<&str, String>::new();
-        for token in content.split_whitespace().skip(1) {
-            let token = token.trim_end_matches(['/', '>']);
-            let Some((key, value)) = token.split_once('=') else {
-                continue;
-            };
-            attrs.insert(key, value.trim_matches(['"', '\'']).to_owned());
+        // `getNamedArgRegEx`: ` name = 'value'` or ` name = "value"`, each value with where it
+        // starts in the source.
+        let mut attrs = HashMap::<&str, (String, u32)>::new();
+        let body_start =
+            comment.span.start + (raw.len() - raw.trim_start_matches('/').len()) as u32;
+        let body = raw.trim_start_matches('/');
+        for name in ["path", "types", "lib", "no-default-lib", "resolution-mode"] {
+            let mut from = 0;
+            while let Some(found) = body[from..].find(name) {
+                let at = from + found;
+                from = at + name.len();
+                if !body[..at].ends_with(|c: char| c.is_whitespace()) {
+                    continue;
+                }
+                let rest = body[from..].trim_start();
+                let Some(rest) = rest.strip_prefix('=') else {
+                    continue;
+                };
+                let rest = rest.trim_start();
+                let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                    continue;
+                };
+                let Some(close) = rest[1..].find(quote) else {
+                    continue;
+                };
+                let value_start = body.len() - rest.len() + 1;
+                attrs.insert(
+                    name,
+                    (
+                        rest[1..1 + close].to_owned(),
+                        body_start + value_start as u32,
+                    ),
+                );
+                break;
+            }
+        }
+        if ["path", "types", "lib", "no-default-lib"]
+            .iter()
+            .all(|name| !attrs.contains_key(name))
+        {
+            collector
+                .result
+                .invalid_references
+                .push(HirSpan::new(comment.span.start, comment.span.end));
+            continue;
         }
         if attrs
             .get("no-default-lib")
-            .is_some_and(|value| value == "true")
+            .is_some_and(|(value, _)| value == "true")
         {
             collector.result.no_default_lib = true;
         }
@@ -5165,9 +5203,9 @@ fn capture_type_syntax(
             ("types", kiln_hir::TypeReferenceKind::Types),
             ("lib", kiln_hir::TypeReferenceKind::Lib),
         ] {
-            if let Some(value) = attrs.get(key) {
+            if let Some((value, position)) = attrs.get(key) {
                 let resolution_mode = if kind == kiln_hir::TypeReferenceKind::Types {
-                    match attrs.get("resolution-mode").map(String::as_str) {
+                    match attrs.get("resolution-mode").map(|(mode, _)| mode.as_str()) {
                         Some("import") => Some(kiln_hir::TypeResolutionMode::Import),
                         Some("require") => Some(kiln_hir::TypeResolutionMode::Require),
                         _ => None,
@@ -5181,7 +5219,7 @@ fn capture_type_syntax(
                     .push(kiln_hir::TypeReferenceDirective {
                         kind,
                         value: value.clone(),
-                        position: comment.span.start,
+                        position: *position,
                         resolution_mode,
                     });
             }

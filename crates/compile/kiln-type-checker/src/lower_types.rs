@@ -1103,6 +1103,16 @@ impl<'a, 's> Lower<'a, 's> {
         body.sort_by_key(|(pos, _)| *pos);
         let ids: Vec<_> = body.into_iter().map(|(_, stmt)| stmt).collect();
         self.file.body = self.file.list(&ids);
+        // `processPragmasIntoFields`: a parse error.
+        for span in &self.module.type_syntax.invalid_references {
+            self.file.diagnostics.push(b::Diagnostic::new(
+                b::DiagnosticKind::Parse,
+                (span.start, span.end),
+                1084,
+                &[],
+            ));
+            self.file.has_parse_diagnostics = true;
+        }
         for reference in &self.module.type_syntax.references {
             self.file.references.push((
                 match reference.kind {
