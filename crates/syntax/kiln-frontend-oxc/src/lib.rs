@@ -5,6 +5,7 @@
 //! types or arena lifetimes into the query database, interpreter, or backends.
 
 mod dce_guard;
+mod jsdoc;
 
 use std::{
     borrow::Cow,
@@ -3209,6 +3210,13 @@ fn capture_type_syntax(
         return HirTypeSyntax {
             module_attributes,
             annotations: jsdoc_variable_types(&collector, program),
+            jsdoc: jsdoc::parse_comments(
+                source,
+                program
+                    .comments
+                    .iter()
+                    .map(|comment| (comment.span.start, comment.span.end)),
+            ),
             ..HirTypeSyntax::default()
         };
     }

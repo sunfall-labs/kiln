@@ -85,6 +85,8 @@ pub struct TypeSyntax {
     pub jsx: Vec<JsxSite>,
     /// Where declarations' names start, which executable HIR does not record: `node.Name()`.
     pub names: Vec<NameSite>,
+    /// The JSDoc comments of a JavaScript file, whose tags are its types.
+    pub jsdoc: crate::jsdoc::JsDocSyntax,
     /// Triple-slash references retained from the parser's comment table.
     pub references: Vec<TypeReferenceDirective>,
     pub no_default_lib: bool,
@@ -488,6 +490,12 @@ pub enum TypeExprKind {
         ty: Option<Box<TypeExpr>>,
     },
     Parenthesized(Box<TypeExpr>),
+    /// `?T`, `T?`, `!T`, `T!`: a nullable or non-nullable type of a JSDoc comment.
+    JsDoc {
+        kind: JsDocTypeKind,
+        is_postfix: bool,
+        ty: Box<TypeExpr>,
+    },
     Unsupported {
         syntax: String,
     },
@@ -495,6 +503,19 @@ pub enum TypeExprKind {
     Raw {
         syntax: String,
     },
+}
+
+/// What a JSDoc type is wrapped in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsDocTypeKind {
+    /// `?T`, `T?`
+    Nullable,
+    /// `!T`, `T!`
+    NonNullable,
+    /// `T=`
+    Optional,
+    /// `...T`
+    Variadic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

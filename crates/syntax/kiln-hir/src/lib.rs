@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 pub mod source_types;
+pub mod jsdoc;
 pub mod type_syntax;
 pub use type_syntax::{
     AmbientModuleItems, BindingIdentifierSite, EnumMember, EnumMemberNameKind,
@@ -22,6 +23,7 @@ pub use type_syntax::{
     TypeParameter, TypeReferenceDirective, TypeReferenceKind, TypeResolutionMode, TypeSignature,
     TypeSignatureParameter, TypeSite, TypeSyntax,
 };
+pub use type_syntax::JsDocTypeKind;
 
 pub use kiln_string::StringUnits;
 
