@@ -1381,6 +1381,10 @@ static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln
         frame->running = 0;
         frame->raising = 0;
         if (status == KILN_C99_YIELDED) {
+            if (frame->delegate_wrapped) {
+                *result = kiln_val_to_boundary(vproduced);
+                return KILN_C99_OK;
+            }
             return kiln_c99_generator_step(host, kiln_val_to_boundary(vproduced), 0, result, depth, thrown);
         }
         frame->done = 1;
@@ -1574,6 +1578,10 @@ static int kiln_c99_generator_delegate_throw(kiln_host *host, kiln_generator *fr
         if (status == KILN_C99_YIELDED) {
             frame->started = 1;
             finished = 0;
+            if (frame->delegate_wrapped) {
+                *result = produced;
+                return KILN_C99_OK;
+            }
         } else {
             frame->done = 1;
             kiln_value completion;
