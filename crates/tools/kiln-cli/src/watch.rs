@@ -1451,6 +1451,25 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
+    fn native_descendant_is_gone(pid: libc::pid_t) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // A killed orphan can remain briefly as a zombie until its new parent reaps it.
+            // It still passes kill(pid, 0), but it cannot execute and no longer holds resources
+            // such as the inherited stdout/stderr pipes that NativeRun must close promptly.
+            if let Some((_, fields)) = stat.rsplit_once(')')
+                && fields.split_whitespace().next() == Some("Z")
+            {
+                return true;
+            }
+        }
+
+        // SAFETY: signal zero checks whether the process is still present without signaling it.
+        (unsafe { libc::kill(pid, 0) }) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
     // A completed editor save is one content change. Truncate/write can expose an empty
     // intermediate file when the writer is descheduled, causing an extra real watch event.
     fn publish_edit(path: &Path, source: &str) {
@@ -2533,10 +2552,7 @@ mod tests {
 
         let mut descendant_is_gone = false;
         for _ in 0..100 {
-            // SAFETY: signal zero performs existence/permission checking without sending a signal.
-            if unsafe { libc::kill(descendant, 0) } == -1
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-            {
+            if native_descendant_is_gone(descendant) {
                 descendant_is_gone = true;
                 break;
             }
@@ -2598,10 +2614,7 @@ mod tests {
 
         let mut descendant_is_gone = false;
         for _ in 0..100 {
-            // SAFETY: signal zero performs existence/permission checking without sending a signal.
-            if unsafe { libc::kill(descendant, 0) } == -1
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-            {
+            if native_descendant_is_gone(descendant) {
                 descendant_is_gone = true;
                 break;
             }
