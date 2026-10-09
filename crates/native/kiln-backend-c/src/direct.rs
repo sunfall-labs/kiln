@@ -179,6 +179,11 @@ pub struct CallPlan {
     /// `None` is retained for standalone planner/emitter callers that have not supplied the
     /// graph facts; module emission installs the exact fact computed during `plan_unit`.
     pub argument_length_values: Option<std::sync::Arc<HashSet<ValueId>>>,
+    /// Independently proven `arguments.length` and `arguments[index]` member reads.
+    pub argument_member_values:
+        Option<std::sync::Arc<HashMap<ValueId, kiln_graph::ArgumentsMember>>>,
+    /// LoadArguments results whose complete use sets take the guarded member path.
+    pub argument_member_arguments: Option<std::sync::Arc<HashSet<ValueId>>>,
     /// Whether the translation unit is chunked across multiple C files.
     pub should_chunk: bool,
 }
@@ -699,6 +704,8 @@ impl DirectPlan {
                 available: shared_available.clone(),
                 publishes_frame: shared_publishes.clone(),
                 argument_length_values: None,
+                argument_member_values: None,
+                argument_member_arguments: None,
                 should_chunk: false,
             }
         };

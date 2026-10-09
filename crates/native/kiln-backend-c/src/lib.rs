@@ -3035,6 +3035,11 @@ fn plan_unit(
         .enumerate()
         .map(|(index, graph)| argument_analysis.argument_length_fact(index, graph))
         .collect();
+    let argument_member_facts: Vec<kiln_graph::ArgumentsMemberFact> = graphs
+        .iter()
+        .enumerate()
+        .map(|(index, graph)| argument_analysis.argument_member_fact(index, graph))
+        .collect();
     let arguments_length_only: Vec<bool> = argument_facts
         .iter()
         .map(|fact| !fact.values.is_empty())
@@ -3053,7 +3058,35 @@ fn plan_unit(
         generic_loop_profile,
         &arguments_length_only,
     );
+    let argument_read_values: Vec<
+        std::collections::HashMap<kiln_graph::ValueId, Vec<kiln_graph::ValueId>>,
+    > = graphs
+        .iter()
+        .zip(&argument_member_facts)
+        .map(|(graph, fact)| {
+            if fact.elidable_arguments.is_empty() {
+                return std::collections::HashMap::new();
+            }
+            graph
+                .blocks
+                .iter()
+                .flat_map(|block| block.operations.iter())
+                .fold(
+                    std::collections::HashMap::new(),
+                    |mut reads, (value, operation)| {
+                        if let kiln_graph::GraphOp::GetProperty { object, .. }
+                        | kiln_graph::GraphOp::GetComputed { object, .. } = operation
+                        {
+                            reads.entry(*object).or_insert_with(Vec::new).push(*value);
+                        }
+                        reads
+                    },
+                )
+        })
+        .collect();
     let empty_argument_values = std::sync::Arc::new(HashSet::new());
+    let empty_argument_members = std::sync::Arc::new(std::collections::HashMap::new());
+    let empty_argument_member_arguments = std::sync::Arc::new(HashSet::new());
     for (index, fact) in argument_facts.iter().enumerate() {
         let values = if fact.values.is_empty() {
             empty_argument_values.clone()
@@ -3061,6 +3094,37 @@ fn plan_unit(
             std::sync::Arc::new(fact.values.clone())
         };
         direct.functions[index].argument_length_values = Some(values.clone());
+        let member_values: std::collections::HashMap<
+            kiln_graph::ValueId,
+            kiln_graph::ArgumentsMember,
+        > = argument_member_facts[index]
+            .members
+            .iter()
+            .filter_map(|(&read, &member)| {
+                (!direct.functions[index].numbers.contains(&read)
+                    && !direct.functions[index].ints.contains(&read))
+                .then_some((read, member))
+            })
+            .collect();
+        let member_arguments: HashSet<kiln_graph::ValueId> = argument_member_facts[index]
+            .elidable_arguments
+            .iter()
+            .filter_map(|arguments_value| {
+                let reads = argument_read_values[index].get(arguments_value)?;
+                (!reads.is_empty() && reads.iter().all(|read| member_values.contains_key(read)))
+                    .then_some(*arguments_value)
+            })
+            .collect();
+        direct.functions[index].argument_member_values = Some(if member_values.is_empty() {
+            empty_argument_members.clone()
+        } else {
+            std::sync::Arc::new(member_values)
+        });
+        direct.functions[index].argument_member_arguments = Some(if member_arguments.is_empty() {
+            empty_argument_member_arguments.clone()
+        } else {
+            std::sync::Arc::new(member_arguments)
+        });
         if let Some(plan) = &mut direct.typed[index] {
             plan.argument_length_values = Some(values.clone());
         }

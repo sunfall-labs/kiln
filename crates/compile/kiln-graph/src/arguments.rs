@@ -1,7 +1,7 @@
 //! Shared argument-object facts over a program and its verified function graphs.
 
 use crate::{FunctionGraph, GraphOp, Terminator, ValueId};
-use kiln_ir::{Constant, FunctionProto, Instruction, Program};
+use kiln_ir::{Constant, FunctionProto, Instruction, Program, UnaryOp};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// The SSA `LoadArguments` results whose only use is the own `.length` read.
@@ -12,6 +12,23 @@ pub struct ArgumentsLengthFact {
     /// True when no reachable load exists, or every reachable load was proven to be `.length`.
     /// False means the proof was rejected and the arguments object remains observable.
     pub reads_elided: bool,
+}
+
+/// One independently proven readonly arguments member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgumentsMember {
+    Length,
+    Index(u32),
+}
+
+/// Fast-path candidates for single-use static member reads. This fact never makes a function
+/// frame elidable: the emitted guard checks whether the real object already exists.
+#[derive(Clone, Debug, Default)]
+pub struct ArgumentsMemberFact {
+    /// GetProperty result values that may use the guarded member path.
+    pub members: HashMap<ValueId, ArgumentsMember>,
+    /// LoadArguments values whose complete use set consists of guarded member reads.
+    pub elidable_arguments: HashSet<ValueId>,
 }
 
 /// Per-arrow lexical-arguments capture requirements, computed once for one exact Program.
@@ -144,6 +161,158 @@ impl<'program> ArgumentsAnalysis<'program> {
             return ArgumentsLengthFact::default();
         };
         self.argument_length_fact_for_member(graph, proto)
+    }
+
+    /// Prove each own `arguments.length` or canonical-index read independently. The result is
+    /// separate from the argc-only length proof and never changes frame-publication decisions.
+    pub fn argument_member_fact(
+        &self,
+        function: usize,
+        graph: &FunctionGraph,
+    ) -> ArgumentsMemberFact {
+        let Some(proto) = self.program.functions.get(function) else {
+            return ArgumentsMemberFact::default();
+        };
+        if proto.arrow
+            || proto.generator
+            || proto.asynchronous
+            || proto.async_generator
+            || proto.mapped_arguments
+            || proto
+                .code
+                .iter()
+                .any(|i| matches!(i, Instruction::DirectEval(_)))
+        {
+            return ArgumentsMemberFact::default();
+        }
+        if !proto
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::LoadArguments))
+        {
+            return ArgumentsMemberFact::default();
+        }
+        let mut loads = HashSet::new();
+        let mut uses = HashMap::<ValueId, Vec<&GraphOp>>::new();
+        let mut terminal = HashSet::new();
+        let mut constant_numbers = HashMap::<ValueId, f64>::new();
+        let mut property_reads = HashMap::<ValueId, Vec<(ValueId, ArgumentsMember)>>::new();
+        for block in &graph.blocks {
+            for (value, op) in &block.operations {
+                match op {
+                    GraphOp::Const {
+                        constant: Constant::Number(bits),
+                        ..
+                    } => {
+                        constant_numbers.insert(*value, f64::from_bits(*bits));
+                    }
+                    GraphOp::Unary {
+                        op: UnaryOp::Negate,
+                        value: operand,
+                    } => {
+                        if let Some(number) = constant_numbers.get(operand) {
+                            constant_numbers.insert(*value, -*number);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for block in &graph.blocks {
+            for (value, op) in &block.operations {
+                if matches!(
+                    op,
+                    GraphOp::Bridge {
+                        instruction: Instruction::LoadArguments,
+                        pushes: 1,
+                        ..
+                    }
+                ) {
+                    loads.insert(*value);
+                }
+                for input in op.operands() {
+                    uses.entry(input).or_default().push(op);
+                }
+                if let GraphOp::GetProperty { object, name, .. } = op
+                    && let Some(Constant::String(units)) =
+                        self.program.constants.get(*name as usize)
+                    && let Ok(text) = units.to_scalar_string()
+                {
+                    let member = if text == "length" {
+                        Some(ArgumentsMember::Length)
+                    } else {
+                        canonical_argument_index(&text).map(ArgumentsMember::Index)
+                    };
+                    if let Some(member) = member {
+                        property_reads
+                            .entry(*object)
+                            .or_default()
+                            .push((*value, member));
+                    }
+                }
+                if let GraphOp::GetComputed { object, key, .. } = op
+                    && let Some(number) = constant_numbers.get(key)
+                    && let Some(index) = canonical_argument_number(*number)
+                {
+                    property_reads
+                        .entry(*object)
+                        .or_default()
+                        .push((*value, ArgumentsMember::Index(index)));
+                }
+            }
+            match &block.terminator {
+                Terminator::Branch { condition, .. }
+                | Terminator::BranchNotNullish { condition, .. }
+                | Terminator::Throw(condition)
+                | Terminator::Return(Some(condition)) => {
+                    terminal.insert(*condition);
+                }
+                Terminator::Suspend {
+                    value,
+                    spilled,
+                    delegate,
+                    delegate_wrapped,
+                    ..
+                } => {
+                    terminal.insert(*value);
+                    terminal.extend(spilled.iter().copied());
+                    if let Some((it, _, _)) = delegate {
+                        terminal.insert(*it);
+                    }
+                    terminal.extend(delegate_wrapped.iter().copied());
+                }
+                _ => {}
+            }
+        }
+        if loads.is_empty() {
+            return ArgumentsMemberFact::default();
+        }
+        let mut members = HashMap::new();
+        let mut elidable_arguments = HashSet::new();
+        for value in &loads {
+            let Some(reads) = property_reads.get(value) else {
+                continue;
+            };
+            let Some(value_uses) = uses.get(value) else {
+                continue;
+            };
+            let all_member_reads = !terminal.contains(value)
+                && value_uses.len() == reads.len()
+                && value_uses.iter().all(|operation| match operation {
+                    GraphOp::GetProperty { object, .. } | GraphOp::GetComputed { object, .. } => {
+                        object == value
+                    }
+                    _ => false,
+                });
+            if all_member_reads {
+                members.extend(reads.iter().copied());
+                elidable_arguments.insert(*value);
+            }
+        }
+        ArgumentsMemberFact {
+            members,
+            elidable_arguments,
+        }
     }
 
     /// Standalone fallback for callers that do not have a function index. The proto must be an
@@ -284,6 +453,24 @@ impl<'program> ArgumentsAnalysis<'program> {
             values: optimized,
         }
     }
+}
+
+fn canonical_argument_index(text: &str) -> Option<u32> {
+    if text.is_empty()
+        || (text.len() > 1 && text.starts_with('0'))
+        || !text.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let index = text.parse::<u32>().ok()?;
+    (index != u32::MAX).then_some(index)
+}
+
+fn canonical_argument_number(number: f64) -> Option<u32> {
+    if !number.is_finite() || number.fract() != 0.0 || number < 0.0 || number >= u32::MAX as f64 {
+        return None;
+    }
+    Some(number as u32)
 }
 
 #[cfg(test)]

@@ -1,6 +1,89 @@
 use super::*;
 
 #[test]
+fn arguments_index_fact_is_separate_and_keeps_the_own_frame_published() {
+    let source = r#"
+function compare() { return arguments.length === 2 && arguments[0] === arguments[1]; }
+function missing() { return arguments[2]; }
+function aliasesObject() { const saved = arguments; return saved[0]; }
+function capturesObject() { return () => arguments[0]; }
+"#;
+    let hir = kiln_frontend_oxc::parse("fixture/arguments-index-facts.ts", source);
+    let program = kiln_ir::compile_module(&hir)
+        .expect("fixture compiles")
+        .program;
+    let graphs = program
+        .functions
+        .iter()
+        .map(|proto| crate::graph::build_function_graph(proto, &program).expect("build graph"))
+        .collect::<Vec<_>>();
+    let analysis = kiln_graph::ArgumentsAnalysis::new(&program);
+    let fact = |name: &str| {
+        let index = program
+            .functions
+            .iter()
+            .position(|proto| {
+                proto
+                    .effective_name_units()
+                    .is_some_and(|units| units.to_lossy_string() == name)
+            })
+            .unwrap();
+        (index, analysis.argument_member_fact(index, &graphs[index]))
+    };
+    let (compare, compare_fact) = fact("compare");
+    assert_eq!(compare_fact.members.len(), 3);
+    let argument_loads: HashSet<_> = graphs[compare]
+        .blocks
+        .iter()
+        .flat_map(|block| block.operations.iter())
+        .filter_map(|(value, operation)| {
+            matches!(
+                operation,
+                GraphOp::Bridge {
+                    instruction: Instruction::LoadArguments,
+                    pushes: 1,
+                    ..
+                }
+            )
+            .then_some(*value)
+        })
+        .collect();
+    assert_eq!(compare_fact.elidable_arguments, argument_loads);
+    assert!(
+        crate::compute_publishes_frame(&program)[compare],
+        "indexed fast paths retain the frame for the out-of-range fallback"
+    );
+    for name in ["aliasesObject", "capturesObject"] {
+        assert!(
+            fact(name).1.members.is_empty(),
+            "{name} observes the real object"
+        );
+    }
+    let (missing, missing_fact) = fact("missing");
+    assert_eq!(missing_fact.members.len(), 1);
+    let old_length = analysis.argument_length_fact(compare, &graphs[compare]);
+    assert!(
+        !old_length.reads_elided && old_length.values.is_empty(),
+        "the indexed proof must not enter the old argc-only length ABI"
+    );
+    assert!(crate::compute_publishes_frame(&program)[missing]);
+
+    let mut mapped_program = program.clone();
+    mapped_program.functions[compare].mapped_arguments = true;
+    let mapped_analysis = kiln_graph::ArgumentsAnalysis::new(&mapped_program);
+    let mapped_graph =
+        crate::graph::build_function_graph(&mapped_program.functions[compare], &mapped_program)
+            .expect("build mapped graph");
+    assert!(
+        mapped_analysis
+            .argument_member_fact(compare, &mapped_graph)
+            .members
+            .is_empty(),
+        "mapped arguments must use the ordinary object path"
+    );
+}
+
+#[test]
 fn arguments_length_graph_fact_is_shared_by_frame_and_generic_tier_planning() {
     let source = r#"
 function argcLoop(limit) {

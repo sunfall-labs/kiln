@@ -247,6 +247,67 @@ fn argc_only_arguments_length_emits_without_publishing_an_arguments_frame() {
 }
 
 #[test]
+fn mixed_arguments_members_guard_the_own_object_in_a_native_release_plan() {
+    let hir = kiln_frontend_oxc::parse(
+        "fixture/equal-equals-arguments.ts",
+        "function equals() { if (arguments.length === 1) return (self) => [self, arguments[0]]; return [arguments[0], arguments[1]]; }\nfunction discard() { arguments[1]; }\n",
+    );
+    let program = kiln_ir::compile_module(&hir)
+        .expect("Equal.equals-shaped fixture compiles")
+        .program;
+    let equals = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|name| name.to_lossy_string() == "equals")
+        })
+        .expect("equals proto");
+    let emitted = emit_with_policy(&program, EmissionPolicy::default())
+        .expect("native release policy emits the fixture");
+    let body = emitted_function_body(&emitted.source, &emitted.symbol, equals);
+    assert!(
+        body.contains("kiln_c99_frame_arguments_object.tag == KILN_VALUE_OBJECT"),
+        "the mixed member fast paths must guard an already materialized object"
+    );
+    assert!(
+        body.contains("(size_t)0 < argc") && body.contains("(size_t)1 < argc"),
+        "both indices read the invocation's actual argv, including extra arguments"
+    );
+    assert!(
+        body.contains("(double)argc"),
+        "length uses argc only when no observable arguments object exists"
+    );
+    assert!(
+        body.contains("kiln_c99_visible_arguments(&given)"),
+        "the missing-index fallback materializes the current frame's own object"
+    );
+    let member_guard = body
+        .find("kiln_c99_frame_arguments_object.tag == KILN_VALUE_OBJECT")
+        .expect("member guard occurs in the shared two-argument path");
+    assert!(
+        !body[..member_guard].contains("kiln_c99_visible_arguments(&given)"),
+        "the two-argument path must not eagerly materialize arguments before checking its members"
+    );
+    let discard = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|name| name.to_lossy_string() == "discard")
+        })
+        .expect("discard proto");
+    let discard_body = emitted_function_body(&emitted.source, &emitted.symbol, discard);
+    assert!(
+        discard_body.contains("kiln_c99_val_read_element")
+            && discard_body.contains("kiln_c99_visible_arguments(&given)"),
+        "an unused out-of-range index still executes its inherited-property read"
+    );
+}
+
+#[test]
 fn generated_closures_retain_their_host_context_without_rebinding_plain_closures() {
     let mut closure_program = program(
         Vec::new(),
