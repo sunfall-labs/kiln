@@ -961,6 +961,21 @@ pub(super) fn emit_graph_op(
                     .join(", ")
             };
             let in_typed = matches!(kind, EntryKind::Typed { .. });
+            // The fast clone of a versioned body took this call's result for a number because
+            // the callee is declared to return one. The declaration is a guess: an answer that
+            // is not a number leaves for the generic clone after this call, which has run once
+            // and does not run again.
+            let declared_exit = if typed && spec.exits && spec.calls.contains(&vid) {
+                let invariant = lookup_speculation_invariant("call_return_number");
+                format!(
+                    " /* Speculation exit [{}]: {} */ if (KILN_UNLIKELY(!KILN_VAL_IS_NUMBER(v{v}))) {{ {} goto kiln_generic_resume_{v}; }}",
+                    invariant.name,
+                    invariant.language_rule,
+                    materialize_all_sunk(graph, symbol, defs, array_slots)
+                )
+            } else {
+                String::new()
+            };
             let sloppy = !strict_functions[target as usize];
             // A function calling itself through its own binding is calling the very closure
             // that is running: its upvalue table is this one, and the callee value need not be
@@ -1176,6 +1191,7 @@ pub(super) fn emit_graph_op(
                     } else {
                         String::new()
                     };
+                    let twin = format!("{declared_exit}{twin}");
                     let int_twin = if live_typed_int {
                         if live_typed {
                             format!(" i{v} = (int64_t)d{v};")
@@ -1199,6 +1215,7 @@ pub(super) fn emit_graph_op(
                 } else {
                     String::new()
                 };
+                let twin = format!("{declared_exit}{twin}");
                 let int_twin = if live_typed_int {
                     if live_typed {
                         format!(" i{v} = (int64_t)d{v};")

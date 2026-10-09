@@ -2838,6 +2838,7 @@ fn trace_speculation(
     array_params: &[(usize, crate::graph::ArrayEvidence)],
     upvalue_arrays: usize,
     calls: usize,
+    declared_calls: usize,
     fields: usize,
     spread_sinks: usize,
     label: &str,
@@ -2850,6 +2851,7 @@ fn trace_speculation(
         && array_params.is_empty()
         && upvalue_arrays == 0
         && calls == 0
+        && declared_calls == 0
         && fields == 0
         && spread_sinks == 0
         && !typed_entry
@@ -2879,6 +2881,13 @@ fn trace_speculation(
     }
     if calls > 0 {
         write!(line, " spec_calls={calls}(method-result-feeds-arithmetic)").unwrap();
+    }
+    if declared_calls > 0 {
+        write!(
+            line,
+            " declared_call_returns={declared_calls}(annotation)"
+        )
+        .unwrap();
     }
     if fields > 0 {
         write!(
@@ -3026,6 +3035,29 @@ fn emit_blocks(
             _ => false,
         })
     };
+    // A call to a known callee whose declared return is `number` (the checker's fact, a guess
+    // like any annotation) and whose result the body could not prove a number: guessed and
+    // checked where the call answers, exactly as a method call's result is.
+    let declared_calls: HashSet<ValueId> = if speculate_enabled {
+        ops.iter()
+            .filter_map(|(vid, op)| match op {
+                GraphOp::Call { callee, .. } if !plan.numbers.contains(vid) => {
+                    let target = *plan.known.get(callee)? as usize;
+                    let callee_proto = program.functions.get(target)?;
+                    (direct_callable(callee_proto, *plan.publishes_frame.get(target)?)
+                        && matches!(
+                            callee_proto.return_type(),
+                            Some(kiln_ir::TypeAnnotation::Number | kiln_ir::TypeAnnotation::Int)
+                        ))
+                    .then_some(*vid)
+                }
+                _ => None,
+            })
+            .filter(feeds_arithmetic)
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let spec_calls: HashSet<ValueId> = ops
         .iter()
         .filter_map(|(vid, op)| match op {
@@ -3033,6 +3065,7 @@ fn emit_blocks(
             _ => None,
         })
         .filter(feeds_arithmetic)
+        .chain(declared_calls.iter().copied())
         .collect();
     // A property read whose answer feeds arithmetic is guessed to be a number and checked. An
     // object's field has no type the graph can prove -- a shape says which slots exist, never
@@ -3079,7 +3112,8 @@ fn emit_blocks(
             &candidate_params_evidence,
             &candidate_array_params_evidence,
             upvalue_arrays,
-            spec_calls.len(),
+            spec_calls.len() - declared_calls.len(),
+            declared_calls.len(),
             spec_fields.len(),
             graph.spread_sinks.len(),
             trace_label,

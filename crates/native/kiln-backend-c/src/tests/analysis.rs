@@ -180,7 +180,7 @@ fn versioning_emits_two_clones_with_entry_guard_and_loop_exit() {
 
 #[test]
 fn speculation_invariants_table_is_sound_and_complete() {
-    assert_eq!(assert_speculation_invariants(SPECULATION_INVARIANTS), 8);
+    assert_eq!(assert_speculation_invariants(SPECULATION_INVARIANTS), 9);
     for name in [
         "parameter_number",
         "loop_speculation_exit",
@@ -190,6 +190,7 @@ fn speculation_invariants_table_is_sound_and_complete() {
         "spread_source_shaped",
         "spread_field_number",
         "method_call_number",
+        "call_return_number",
     ] {
         let row = lookup_speculation_invariant(name);
         assert!(!row.name.is_empty() && !row.language_rule.is_empty());
