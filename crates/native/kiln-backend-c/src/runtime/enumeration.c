@@ -335,6 +335,13 @@ kiln_has_next_prototype:
             return kiln_c99_has_property_key(
                 host, kiln_c99_object_of(store)->prototype, key, ikey, answer, depth, thrown);
         }
+        /* Unrelinked, `Array.prototype` inherits `Object.prototype`, as the read path already
+         * knows: `Object.prototype[1] = v` makes a hole's `1 in array` true. */
+        if (!*answer && target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE) {
+            return kiln_c99_has_property_key(host,
+                                             kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE),
+                                             key, ikey, answer, depth, thrown);
+        }
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_GENERATOR) {

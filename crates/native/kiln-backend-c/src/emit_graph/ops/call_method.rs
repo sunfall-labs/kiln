@@ -1175,17 +1175,17 @@ pub(super) fn typed_call_args_for(
 /// change which indices are visited (the interpreter's own `generic_array_callback` captures the
 /// length once too, for the same reason), so the built array's capacity, fixed to `count0` at
 /// creation, is exactly what the loop writes.
-/// The statements that settle a hole met by a call-site array loop. The loop opened with
-/// `ARRAY_METHOD_GUARD`, `arr->properties.tag == UNDEFINED`, so while those still hold a hole has
-/// no inherited indexed property and stays a hole; a callback may have changed that since (it can
-/// write `Array.prototype[i]` or re-parent the receiver), in which case HasProperty/Get walk the
-/// real chain exactly as the specification does for this index. `elem` is the kiln_val read from
+/// The statements that settle a hole met by a call-site array loop: HasProperty/Get on the real
+/// chain at this index, exactly as the specification does. Every hole asks, because no cheap
+/// guard covers every way an index can appear up the chain (`Object.prototype[i] = v`, an
+/// index written onto `Array.prototype`, a re-parented receiver, a callback doing any of these
+/// mid-loop), and a hole is the rare case in a loop worth speeding up. `elem` is the kiln_val read from
 /// the array (`KILN_VAL_HOLE` for a hole or an index past the live length) and is replaced by
 /// the inherited value when there is one; it is still `KILN_VAL_HOLE` afterwards when the index
 /// is genuinely absent.
 fn inherited_element(o: u32, check: &str) -> String {
     format!(
-        "if (elem == KILN_VAL_HOLE && KILN_UNLIKELY(!({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED))) {{ \
+        "if (KILN_UNLIKELY(elem == KILN_VAL_HOLE)) {{ \
              kiln_value hole_key = kiln_c99_number((double)idx); int hole_present = 0; \
              int hole_status = kiln_c99_has_computed(host, kiln_val_to_boundary(v{o}), hole_key, &hole_present, depth, thrown); \
              if (hole_status != KILN_C99_OK) {{ int status = hole_status; {check} }} \
@@ -1716,7 +1716,7 @@ pub(super) fn emit_call_method(
             (Some("ceil"), 1) => format!("ceil({a})"),
             (Some("trunc"), 1) => format!("trunc({a})"),
             (Some("round"), 1) => format!(
-                "({{ double r = isfinite({a}) ? floor({a} + 0.5) : {a}; if (r == 0.0 && signbit({a})) r = -0.0; r; }})"
+                "({{ double r = isfinite({a}) ? ({a} - floor({a}) >= 0.5 ? floor({a}) + 1.0 : floor({a})) : {a}; if (r == 0.0 && signbit({a})) r = -0.0; r; }})"
             ),
             (Some("sign"), 1) => {
                 format!("(isnan({a}) || {a} == 0.0 ? {a} : ({a} < 0.0 ? -1.0 : 1.0))")
@@ -4617,6 +4617,11 @@ fn emit_call_prepared_method(
     // method value itself is the proof (`KILN_VAL_METHOD_ID` names exactly this function, whatever
     // property it was read from), so no built-in member guard is asked and nothing here is a
     // speculation. A non-number argument leaves for the generic call, which converts it.
+    // A generic-only unit computes every value boxed and never writes the twins, so its
+    // operands are read from the box there whatever the liveness sets say.
+    let twins = !ctx.plan.generic_only;
+    let live_number = |a: &ValueId| twins && ctx.live_numbers.contains(a);
+    let live_int = |a: &ValueId| twins && ctx.live_ints.contains(a);
     if let Some((method_const, body)) = prepared_math_body(&key_str, argc) {
         let loads: String = args
             .iter()
@@ -4627,9 +4632,9 @@ fn emit_call_prepared_method(
                 } else {
                     format!("ma{i}")
                 };
-                if ctx.live_numbers.contains(a) {
+                if live_number(a) {
                     format!("double {name} = d{};", a.0)
-                } else if ctx.live_ints.contains(a) {
+                } else if live_int(a) {
                     format!("double {name} = (double)i{};", a.0)
                 } else {
                     format!("double {name}; memcpy(&{name}, &v{}, sizeof({name}));", a.0)
@@ -4639,10 +4644,10 @@ fn emit_call_prepared_method(
             .join(" ");
         let number_checks: String = args
             .iter()
-            .filter(|a| !ctx.live_numbers.contains(a) && !ctx.live_ints.contains(a))
+            .filter(|a| !live_number(a) && !live_int(a))
             .map(|a| format!(" && KILN_VAL_IS_NUMBER(v{})", a.0))
             .collect();
-        let store = if ctx.live_numbers.contains(&vid) {
+        let store = if live_number(&vid) {
             let box_value = ctx
                 .boxed
                 .map_or(true, |boxed| boxed.contains(&vid))

@@ -79,7 +79,7 @@ pub fn math_expression(name: &str, a: &str, b: &str) -> Option<String> {
         "ceil" => format!("ceil({a})"),
         "trunc" => format!("trunc({a})"),
         "round" => format!(
-            "({{ double r = isfinite({a}) ? floor({a} + 0.5) : {a}; if (r == 0.0 && signbit({a})) r = -0.0; r; }})"
+            "({{ double r = isfinite({a}) ? ({a} - floor({a}) >= 0.5 ? floor({a}) + 1.0 : floor({a})) : {a}; if (r == 0.0 && signbit({a})) r = -0.0; r; }})"
         ),
         "sign" => format!("(isnan({a}) || {a} == 0.0 ? {a} : ({a} < 0.0 ? -1.0 : 1.0))"),
         "pow" => format!("pow({a}, {b})"),

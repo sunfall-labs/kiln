@@ -1430,28 +1430,14 @@ pub(super) fn emit_graph_op(
                     if let Some(prop_name) = resolve_const_string(*key, defs, program)
                         && let Some(&field_idx) = scalar_obj.fields.get(&prop_name)
                     {
-                        let val_vid = val.0;
-                        writeln!(output, "    v{alloc}_f_{field_idx} = v{val_vid};").unwrap();
-                        if live_numbers.contains(val) {
-                            writeln!(output, "    d{alloc}_f_{field_idx} = d{val_vid};").unwrap();
-                        } else if live_ints.contains(val) {
-                            writeln!(output, "    d{alloc}_f_{field_idx} = (double)i{val_vid};")
-                                .unwrap();
-                        } else {
-                            writeln!(
-                                output,
-                                "    memcpy(&d{alloc}_f_{field_idx}, &v{alloc}_f_{field_idx}, sizeof(double));"
-                            )
-                            .unwrap();
-                        }
-                        if live_ints.contains(val) {
-                            writeln!(output, "    i{alloc}_f_{field_idx} = i{val_vid};").unwrap();
-                        } else if live_numbers.contains(val) {
-                            writeln!(output, "    i{alloc}_f_{field_idx} = (int64_t)d{val_vid};")
-                                .unwrap();
-                        } else {
-                            writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
-                        }
+                        emit_sunk_field_store(
+                            output,
+                            alloc,
+                            field_idx,
+                            *val,
+                            live_numbers,
+                            live_ints,
+                        );
                     }
                 }
                 writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
@@ -1874,7 +1860,8 @@ fn emit_sunk_field_store(
     } else if live_numbers.contains(&value) {
         writeln!(output, "    i{alloc}_f_{field_idx} = (int64_t)d{val};").unwrap();
     } else {
-        writeln!(output, "    i{alloc}_f_{field_idx} = 0;").unwrap();
+        // A boxed number with no live twin (a constant, say) can still be read as an integer.
+        writeln!(output, "    i{alloc}_f_{field_idx} = KILN_VAL_IS_NUMBER(v{alloc}_f_{field_idx}) ? (int64_t)d{alloc}_f_{field_idx} : 0;").unwrap();
     }
 }
 
@@ -1951,7 +1938,7 @@ fn emit_sunk_bridge(
             for &field_idx in scalar_obj.fields.values() {
                 writeln!(
                     output,
-                    "    if (kiln_sp_row[{field_idx}] != UINT32_MAX) {{ v{alloc}_f_{field_idx} = kiln_sp_src->slots[kiln_sp_row[{field_idx}]]; memcpy(&d{alloc}_f_{field_idx}, &v{alloc}_f_{field_idx}, sizeof(double)); i{alloc}_f_{field_idx} = 0; }}"
+                    "    if (kiln_sp_row[{field_idx}] != UINT32_MAX) {{ v{alloc}_f_{field_idx} = kiln_sp_src->slots[kiln_sp_row[{field_idx}]]; memcpy(&d{alloc}_f_{field_idx}, &v{alloc}_f_{field_idx}, sizeof(double)); i{alloc}_f_{field_idx} = KILN_VAL_IS_NUMBER(v{alloc}_f_{field_idx}) ? (int64_t)d{alloc}_f_{field_idx} : 0; }}"
                 )
                 .unwrap();
             }

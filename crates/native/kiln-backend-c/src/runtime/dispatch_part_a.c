@@ -3625,10 +3625,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         case KILN_C99_METHOD_MATH_FLOOR: *result = kiln_c99_number(floor(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_CEIL: *result = kiln_c99_number(ceil(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_ROUND: {
-            /* Half rounds *up*, not away from zero, so `floor(x + 0.5)` is the definition. It
-             * loses the sign of `Math.round(-0.5)`, which is -0 and not 0 -- a difference a
-             * console shows and `Object.is` can see. */
-            double rounded = isfinite(first) ? floor(first + 0.5) : first;
+            /* Half rounds *up*, not away from zero. Not `floor(x + 0.5)`: the addition rounds,
+             * so 0.49999999999999994 becomes 1 and an odd integer above 2^52 the next one up;
+             * the fraction against the floor is exact. Both lose the sign of
+             * `Math.round(-0.5)`, which is -0 and not 0 -- a difference a console shows and
+             * `Object.is` can see. */
+            double rounded = isfinite(first) ? (first - floor(first) >= 0.5 ? floor(first) + 1.0 : floor(first)) : first;
             if (rounded == 0.0 && kiln_c99_signbit(first)) {
                 rounded = -0.0;
             }
@@ -3644,7 +3646,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_SQRT: *result = kiln_c99_number(sqrt(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_CBRT: *result = kiln_c99_number(cbrt(first)); return KILN_C99_OK;
-        case KILN_C99_METHOD_MATH_POW: *result = kiln_c99_number(pow(first, second)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_POW: *result = kiln_c99_number((isnan(second) || (fabs(first) == 1.0 && isinf(second))) ? NAN : pow(first, second)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_LOG: *result = kiln_c99_number(log(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_LOG2: *result = kiln_c99_number(log2(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_LOG10: *result = kiln_c99_number(log10(first)); return KILN_C99_OK;
