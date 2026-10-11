@@ -2135,7 +2135,9 @@ fn native_await_promise_resolve_emits_guard_for_microtasks_shape() {
 export async function microtasks() {
   let counter = 0;
   for (let i = 0; i < 20000; i++) {
-    await Promise.resolve(i);
+    // `i + 0`: an argument that can observe the order keeps the method read ahead of it
+    // (a prepared call), which is the shape this test is about.
+    await Promise.resolve(i + 0);
     counter += 1;
   }
   return counter;
@@ -2173,11 +2175,11 @@ export async function microtasks() {
     assert!(guard.contains("handled = 1;"), "{guard}");
 }
 
-/// Realms issue 20: a typed method entry that inlines `Math.sqrt` is entered only after its call
-/// site asks about that one member. Reading the mutable `Math` global can itself invoke an
-/// accessor, so the entry checks the member again after that read and keeps its boxed fallback.
+/// Realms issue 20: a typed method entry that inlines `Math.sqrt` must not answer a patched
+/// member with the libm result. The entry reads the member ahead of its argument and proves the
+/// saved value is the table's `sqrt`; anything else takes the generic call inside the entry.
 #[test]
-fn typed_entry_call_sites_ask_about_the_members_the_entry_inlines() {
+fn typed_entry_proves_the_math_member_it_inlines() {
     use kiln_module_resolver::NodeRuntimeResolver;
 
     let project = TestDirectory::new("typed-entry-relies-emission");
@@ -2207,11 +2209,10 @@ console.log(s);
     )
     .expect("emit typed entry fixture");
     let source = &emitted.source;
-    let sqrt = "kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_MATH, \"sqrt\")";
-    assert!(
-        source.contains(&format!("kiln_typed_ok && ({sqrt})")),
-        "the typed arm asks about Math.sqrt before entering"
-    );
+    // The entry reads `Math.sqrt` ahead of its argument (a prepared call) and uses the libm
+    // call only when that saved value is the table's own `sqrt`, so a patched member takes the
+    // generic call inside the entry and the call site has nothing to ask first.
+    let sqrt = "KILN_VAL_METHOD_ID(method) == KILN_C99_METHOD_MATH_SQRT";
     let definition = source
         .lines()
         .find(|line| line.contains("_t(int depth") && line.trim_end().ends_with('{'))
@@ -2219,8 +2220,8 @@ console.log(s);
     let body = &source[source.find(definition).expect("definition in source")..];
     let body = &body[..body.find("\n}\n").expect("typed entry ends")];
     assert!(
-        body.contains(&format!("if (KILN_LIKELY({sqrt}))")),
-        "the entry checks after its observable global read: {body}"
+        body.contains(sqrt),
+        "the entry proves the saved callee is Math.sqrt before the libm call: {body}"
     );
     assert!(
         !body.contains("kiln_c99_builtins_unmodified()"),
