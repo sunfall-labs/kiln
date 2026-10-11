@@ -1709,48 +1709,13 @@ pub(super) fn emit_call_method(
                 }
             })
             .unwrap_or_default();
-        let call = match (key.to_scalar_string().ok().as_deref(), args.len()) {
-            (Some("sqrt"), 1) => format!("sqrt({a})"),
-            (Some("abs"), 1) => format!("fabs({a})"),
-            (Some("floor"), 1) => format!("floor({a})"),
-            (Some("ceil"), 1) => format!("ceil({a})"),
-            (Some("trunc"), 1) => format!("trunc({a})"),
-            (Some("round"), 1) => format!(
-                "({{ double r = isfinite({a}) ? ({a} - floor({a}) >= 0.5 ? floor({a}) + 1.0 : floor({a})) : {a}; if (r == 0.0 && signbit({a})) r = -0.0; r; }})"
-            ),
-            (Some("sign"), 1) => {
-                format!("(isnan({a}) || {a} == 0.0 ? {a} : ({a} < 0.0 ? -1.0 : 1.0))")
-            }
-            (Some("pow"), 2) => format!("pow({a}, {b})"),
-            (Some("min"), 2) => format!(
-                "((isnan({a}) || isnan({b})) ? NAN : (({a} < {b} || ({a} == 0.0 && {b} == 0.0 && signbit({a}))) ? {a} : {b}))"
-            ),
-            (Some("max"), 2) => format!(
-                "((isnan({a}) || isnan({b})) ? NAN : (({a} > {b} || ({a} == 0.0 && {b} == 0.0 && !signbit({a}))) ? {a} : {b}))"
-            ),
-            (Some("sin"), 1) => format!("sin({a})"),
-            (Some("cos"), 1) => format!("cos({a})"),
-            (Some("tan"), 1) => format!("tan({a})"),
-            (Some("asin"), 1) => format!("asin({a})"),
-            (Some("acos"), 1) => format!("acos({a})"),
-            (Some("atan"), 1) => format!("atan({a})"),
-            (Some("atan2"), 2) => format!("atan2({a}, {b})"),
-            (Some("sinh"), 1) => format!("sinh({a})"),
-            (Some("cosh"), 1) => format!("cosh({a})"),
-            (Some("tanh"), 1) => format!("tanh({a})"),
-            (Some("asinh"), 1) => format!("asinh({a})"),
-            (Some("acosh"), 1) => format!("acosh({a})"),
-            (Some("atanh"), 1) => format!("atanh({a})"),
-            (Some("exp"), 1) => format!("exp({a})"),
-            (Some("expm1"), 1) => format!("expm1({a})"),
-            (Some("log"), 1) => format!("log({a})"),
-            (Some("log2"), 1) => format!("log2({a})"),
-            (Some("log10"), 1) => format!("log10({a})"),
-            (Some("log1p"), 1) => format!("log1p({a})"),
-            (Some("cbrt"), 1) => format!("cbrt({a})"),
-            (Some("hypot"), 2) => format!("hypot({a}, {b})"),
-            _ => unreachable!("PARALLEL_MATH names only these"),
-        };
+        // The tier-1 clone, the guarded intrinsics and the parallel lowering share one
+        // definition, so every JS edge (pow's NaN exponent, round, min/max signed zero) agrees.
+        let call = key
+            .to_scalar_string()
+            .ok()
+            .and_then(|name| crate::parallel_heap::math_expression(&name, &a, &b))
+            .expect("PARALLEL_MATH names only math_expression's functions");
         let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
         let live_typed = ctx.live_numbers.contains(&vid);
         let live_typed_int = ctx.live_ints.contains(&vid);

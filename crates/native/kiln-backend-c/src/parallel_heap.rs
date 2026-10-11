@@ -82,7 +82,8 @@ pub fn math_expression(name: &str, a: &str, b: &str) -> Option<String> {
             "({{ double r = isfinite({a}) ? ({a} - floor({a}) >= 0.5 ? floor({a}) + 1.0 : floor({a})) : {a}; if (r == 0.0 && signbit({a})) r = -0.0; r; }})"
         ),
         "sign" => format!("(isnan({a}) || {a} == 0.0 ? {a} : ({a} < 0.0 ? -1.0 : 1.0))"),
-        "pow" => format!("pow({a}, {b})"),
+        // C's pow answers 1 for pow(1, NaN) and pow(+-1, +-Infinity); JS answers NaN.
+        "pow" => format!("((isnan({b}) || (fabs({a}) == 1.0 && isinf({b}))) ? NAN : pow({a}, {b}))"),
         "min" => format!(
             "((isnan({a}) || isnan({b})) ? NAN : (({a} < {b} || ({a} == 0.0 && {b} == 0.0 && signbit({a}))) ? {a} : {b}))"
         ),
