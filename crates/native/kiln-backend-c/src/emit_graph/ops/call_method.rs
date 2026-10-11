@@ -1522,6 +1522,13 @@ fn emit_reduce_typed(
     )
 }
 
+fn program_key(program: &kiln_ir::Program, name: u32) -> String {
+    match program.constants.get(name as usize) {
+        Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 fn is_proven_array(
     object: ValueId,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
@@ -1549,7 +1556,10 @@ fn is_proven_array(
                 // prove an array only when their own receiver is one -- `view.slice().sort()`
                 // took the array `sort` over a typed array's block and left it unsorted.
                 return match method.as_deref() {
-                    Some("split") => true,
+                    // `split` is not here: `String.prototype.split` can be patched, and a
+                    // separator with a `Symbol.split` answers whatever it likes, so its result
+                    // is an array only when the generic path says so. The intrinsic arms that
+                    // trust a proven array dereference it with no kind test.
                     Some("map" | "filter" | "slice" | "concat") => {
                         is_proven_array(*object, defs, program)
                     }
@@ -1630,8 +1640,22 @@ pub(super) fn emit_call_method(
     ctx: &OpContext,
 ) {
     if let Some(callee) = prepared_callee {
-        emit_call_prepared_method(output, vid, object, name, &callee, args, line, column, ctx);
-        return;
+        // The string and array-slice/join intrinsics below read only the receiver and the
+        // arguments, never the callee, so a prepared call runs them too: the member is looked
+        // up before the arguments, but the intrinsics' own guards (the built-in tables are
+        // untouched for this name, now) reject any call whose arguments rewrote it, and the
+        // saved callee must be a built-in method value.
+        let prepared_name = match program_key(ctx.program, *name).as_str() {
+            "split" | "slice" | "join" | "indexOf" | "substring" | "startsWith" | "endsWith"
+            | "charCodeAt" | "charAt" | "trim" => true,
+            _ => false,
+        };
+        if !prepared_name || ctx.parallel || ctx.plan.generic_only {
+            emit_call_prepared_method(
+                output, vid, object, name, &callee, args, line, column, ctx, "",
+            );
+            return;
+        }
     }
     let v = vid.0;
     let program = ctx.program;
@@ -1760,11 +1784,13 @@ pub(super) fn emit_call_method(
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
     let diagnostic_source = diagnostic_source(diagnostic_site);
-    writeln!(
-        output,
-        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
-    )
-    .unwrap();
+    if prepared_callee.is_none() {
+        writeln!(
+            output,
+            "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
+        )
+        .unwrap();
+    }
     let argc = args.len();
     let key_str = match program.constants.get(*name as usize) {
         Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
@@ -3103,7 +3129,7 @@ pub(super) fn emit_call_method(
             Some(format!(
                 "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX{guard}) {{ \
                      void *ptr = KILN_VAL_PTR(v{o}); \
-                     if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                     if (ptr != NULL && kiln_c99_gc_payload_kind(ptr) == KILN_GC_ARRAY) {{ \
                          kiln_array *arr = (kiln_array *)ptr; \
                          if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED)) {{ \
                              {array_body} \
@@ -3143,7 +3169,7 @@ pub(super) fn emit_call_method(
                 format!(
                     "if (!handled && (v{o} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_VAL_IS_STRING(v{a0})) {{ \
                          void *ptr = KILN_VAL_PTR(v{o}); \
-                         if (kiln_c99_gc_kind_of_ptr(ptr) == KILN_GC_ARRAY) {{ \
+                         if (ptr != NULL && kiln_c99_gc_payload_kind(ptr) == KILN_GC_ARRAY) {{ \
                              kiln_array *arr = (kiln_array *)ptr;",
                     a0 = args[0].0,
                     o = object.0
@@ -4087,6 +4113,21 @@ pub(super) fn emit_call_method(
     // realm has written onto a built-in; after that, whether this realm's program wrote this name
     // onto one of them, remembered per name. A written member falls through to the cached and
     // named paths below, which find it.
+    if let Some(callee) = prepared_callee {
+        let only_strings =
+            format!("{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{string_extra_s}");
+        let guarded = if only_strings.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                " if (KILN_VAL_IS_METHOD(method) && kiln_c99_kind_member_unmodified(\"{key_str}\")) {{{only_strings} }}"
+            )
+        };
+        emit_call_prepared_method(
+            output, vid, object, name, &callee, args, line, column, ctx, &guarded,
+        );
+        return;
+    }
     let kind_intrinsics = format!(
         "{push_s}{regex_s}{map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{sort_s}{array_extra_s}{string_extra_s}"
     );
@@ -4254,6 +4295,7 @@ fn emit_call_prepared_method(
     line: u32,
     column: u32,
     ctx: &OpContext,
+    string_intrinsics: &str,
 ) {
     let v = vid.0;
     let method = callee.0;
@@ -4470,6 +4512,8 @@ fn emit_call_prepared_method(
             "{TYPED_RELIES_MARK} if (KILN_LIKELY({guard})) {{ if (KILN_VAL_IS_BUILTIN(recv) && KILN_VAL_BUILTIN_ID(recv) == KILN_C99_BUILTIN_MATH && KILN_VAL_IS_METHOD(method) && KILN_VAL_METHOD_ID(method) == KILN_C99_METHOD_MATH_SQRT && KILN_VAL_IS_NUMBER(v{argument})) {{ double prepared_arg_{v}; memcpy(&prepared_arg_{v}, &v{argument}, sizeof(prepared_arg_{v})); {store} handled = 1; }} }} "
         ));
     }
+
+    prepared_intrinsics.push_str(string_intrinsics);
 
     let parallel_site =
         crate::parallel::ParallelMethod::from_name(&key_str).map(|parallel_method| {

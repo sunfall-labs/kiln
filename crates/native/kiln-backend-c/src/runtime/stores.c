@@ -15,6 +15,10 @@ static double kiln_c99_array_index(kiln_value key) {
                                 : NULL;
         size_t key_len = string == NULL ? 0 : string->unit_len;
         if (bytes == NULL) return -1.0;
+        /* An index spells itself canonically: one to ten decimal digits and nothing else. Any
+         * other key -- every method and property name -- is rejected here by its first byte,
+         * before the provider is asked to parse it as a number. */
+        if (key_len == 0 || key_len > 10 || (unsigned char)(bytes[0] - '0') > 9u) return -1.0;
         number = kiln_string_to_number(bytes, key_len);
         if (!isfinite(number) || number < 0.0 || floor(number) != number) {
             return -1.0;

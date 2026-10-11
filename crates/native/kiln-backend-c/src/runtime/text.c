@@ -1159,6 +1159,85 @@ static int kiln_c99_join_units_append(uint16_t **units, size_t *length, size_t *
     return KILN_C99_OK;
 }
 
+/* `Array.prototype.join` over an array whose elements are all strings (or nullish / holes, which
+ * contribute nothing) and whose separator is a string: no `ToString` can run user code, so the
+ * length is summed once, the result is allocated exactly, and the bytes (or units) are copied
+ * straight in -- no growable UTF-16 staging buffer, no per-piece conversion. Sets `*handled` to 0
+ * and touches nothing when the array does not have that shape, and the caller walks it the
+ * general way. */
+static int kiln_c99_join_all_strings(kiln_value *result, const kiln_array *array,
+                                     const kiln_string *sep, int *handled) {
+    size_t count = array->count;
+    size_t total = 0;
+    int wide = kiln_string_is_utf16(sep);
+    size_t at;
+    *handled = 0;
+    if (array->has_index_descriptors) return KILN_C99_OK;
+    for (at = 0; at < count; ++at) {
+        kiln_val element = array->elements[at];
+        const kiln_string *piece;
+        if (element == KILN_VAL_UNDEFINED || element == KILN_VAL_NULL || element == KILN_VAL_HOLE)
+            continue;
+        if (!KILN_VAL_IS_STRING(element)) return KILN_C99_OK;
+        piece = (const kiln_string *)KILN_VAL_PTR(element);
+        if (piece == NULL) return KILN_C99_OK;
+        total += piece->unit_len;
+        if (kiln_string_is_utf16(piece)) wide = 1;
+    }
+    if (count > 1) {
+        if (sep->unit_len != 0 && count - 1 > (size_t)UINT32_MAX / sep->unit_len) return KILN_C99_OK;
+        total += (count - 1) * sep->unit_len;
+    }
+    if (total > UINT32_MAX) return KILN_C99_OK;
+    *handled = 1;
+    if (total == 0) {
+        *result = kiln_val_to_boundary(KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_c99_empty_string));
+        return KILN_C99_OK;
+    }
+    if (!wide) {
+        char *buffer = kiln_c99_gc_alloc_text(total);
+        char *dst;
+        if (buffer == NULL) return KILN_C99_OUT_OF_MEMORY;
+        dst = buffer;
+        for (at = 0; at < count; ++at) {
+            kiln_val element = array->elements[at];
+            if (at != 0 && sep->unit_len != 0) {
+                memcpy(dst, kiln_string_latin1(sep), sep->unit_len);
+                dst += sep->unit_len;
+            }
+            if (KILN_VAL_IS_STRING(element)) {
+                const kiln_string *piece = (const kiln_string *)KILN_VAL_PTR(element);
+                if (piece->unit_len != 0) {
+                    memcpy(dst, kiln_string_latin1(piece), piece->unit_len);
+                    dst += piece->unit_len;
+                }
+            }
+        }
+        *result = kiln_val_to_boundary(
+            KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, ((kiln_string *)buffer) - 1));
+        return KILN_C99_OK;
+    } else {
+        kiln_string *joined = kiln_c99_gc_alloc_units(total, KILN_STRING_UTF16);
+        uint16_t *dst;
+        if (joined == NULL) return KILN_C99_OUT_OF_MEMORY;
+        dst = (uint16_t *)(uintptr_t)joined->data;
+        for (at = 0; at < count; ++at) {
+            kiln_val element = array->elements[at];
+            if (at != 0) {
+                for (size_t unit = 0; unit < sep->unit_len; ++unit)
+                    *dst++ = kiln_string_unit_at(sep, unit);
+            }
+            if (KILN_VAL_IS_STRING(element)) {
+                const kiln_string *piece = (const kiln_string *)KILN_VAL_PTR(element);
+                for (size_t unit = 0; unit < piece->unit_len; ++unit)
+                    *dst++ = kiln_string_unit_at(piece, unit);
+            }
+        }
+        *result = kiln_val_to_boundary(KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, joined));
+        return KILN_C99_OK;
+    }
+}
+
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
     if (left.tag != right.tag) {
         return 0;
