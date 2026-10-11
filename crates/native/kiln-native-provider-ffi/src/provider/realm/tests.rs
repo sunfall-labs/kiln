@@ -2652,9 +2652,11 @@ fn http_client_request_ids_are_monotonic_and_realm_scoped() {
     assert_eq!(unsafe { kiln_realm_create(&raw mut first_realm) }, 0);
     assert_eq!(unsafe { kiln_realm_create(&raw mut second_realm) }, 0);
 
-    let mut first = 0;
-    let mut second = 0;
-    let mut other_realm = 0;
+    // `u64`, the width the callback writes: an inferred `i32` slot let the write run into the
+    // neighbouring handle on the stack.
+    let mut first = 0u64;
+    let mut second = 0u64;
+    let mut other_realm = 0u64;
     assert_eq!(
         unsafe {
             kiln_realm_enter(
@@ -2694,7 +2696,8 @@ fn http_client_request_ids_are_monotonic_and_realm_scoped() {
 #[cfg(feature = "realm-http")]
 fn native_http_agent_abi_maps_runtime_decisions_without_rust_layout() {
     let mut handle = 0;
-    let mut reused = 0;
+    // `u64`, the width `exercises_http_agent` writes (see the request-id test above).
+    let mut reused = 0u64;
     assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
     assert_eq!(
         unsafe { kiln_realm_enter(handle, Some(exercises_http_agent), (&raw mut reused).cast()) },
