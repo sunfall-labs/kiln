@@ -191,7 +191,7 @@ extern int kiln_c99_global_binding(kiln_host *host, kiln_value *out, const char 
 extern int kiln_c99_global_builtin(kiln_host *host, kiln_value *out, const char *name,
                                    size_t name_len, int depth, kiln_value *thrown);
 extern int kiln_c99_global_builtin_site(kiln_host *host, kiln_value *out, const char *name,
-                                        size_t name_len, uint32_t *hint, int depth,
+                                        size_t name_len, kiln_c99_global_hint *hint, int depth,
                                         kiln_value *thrown);
 extern int kiln_c99_global_binding_key(kiln_host *host, kiln_value *out,
                                        const kiln_string *name, int *found, int depth,

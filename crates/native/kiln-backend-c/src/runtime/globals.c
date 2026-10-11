@@ -491,7 +491,9 @@ static int kiln_c99_process_object(kiln_value *out) {
     return KILN_C99_OK;
 }
 
-static int kiln_c99_global_object(kiln_value *out) {
+/* Builds the realm's global object the first time it is asked for. Apart from the cached read
+ * below so the read stays a few instructions: this function's tables give it a large frame. */
+static __attribute__((noinline)) int kiln_c99_global_object_build(kiln_value *out) {
     kiln_value *globals;
     static const struct {
         const char *name;
@@ -761,6 +763,17 @@ static int kiln_c99_global_object(kiln_value *out) {
     return KILN_C99_OK;
 }
 
+static int kiln_c99_global_object(kiln_value *out) {
+    kiln_value *globals;
+    if (KILN_LIKELY(kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &globals) ==
+                        KILN_C99_OK &&
+                    globals->tag == KILN_VALUE_OBJECT)) {
+        *out = *globals;
+        return KILN_C99_OK;
+    }
+    return kiln_c99_global_object_build(out);
+}
+
 /* The realm's engine-private object (`__kilnPrivate`): the one channel between the engine, the
  * realm bootstrap and the builtin modules. It holds the engine's own operations -- present only
  * when kiln's extensions are installed (ADR 0068) -- and whatever one builtin hands another
@@ -982,10 +995,10 @@ int kiln_c99_global_builtin(kiln_host *host, kiln_value *out, const char *name, 
  * shape changes, the check fails) is observed exactly as the uncached read observes it. The
  * hint carries no pointer into a realm, so one site can serve several realms at once; a racy
  * store from another realm's thread can only make the next check miss. Anything this does not
- * recognise -- a sealed or dictionary-mode global, an accessor, a miss -- takes the uncached
- * path unchanged. */
+ * recognise -- a dictionary-mode global, an accessor, a miss -- takes the uncached path
+ * unchanged. */
 int kiln_c99_global_builtin_site(kiln_host *host, kiln_value *out, const char *name,
-                                 size_t length, uint32_t *hint, int depth,
+                                 size_t length, kiln_c99_global_hint *hint, int depth,
                                  kiln_value *thrown) {
     kiln_value globals;
     if (name == NULL || hint == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -993,16 +1006,45 @@ int kiln_c99_global_builtin_site(kiln_host *host, kiln_value *out, const char *n
                     globals.tag == KILN_VALUE_OBJECT && length <= UINT32_MAX)) {
         const kiln_object *object = kiln_c99_object_of(globals);
         const kiln_shape *shape = object->shape;
-        if (KILN_LIKELY(shape != NULL && object->sealed == NULL)) {
+        /* A sealed global (the realm's built-in layout) answers first, as the uncached read
+         * does. Its entry keys are canonical process strings, so the hint holds the entry and
+         * its key, and a hit is one pointer compare plus the presence check (`orders`, which a
+         * delete clears) -- no spelling compared. */
+        if (object->sealed != NULL) {
+            const kiln_sealed_layout *layout = object->sealed;
+            const uint32_t *orders = kiln_c99_sealed_orders(object);
+            size_t entry = hint->index;
+            if (!hint->sealed || entry >= layout->count ||
+                layout->entries[entry].key != hint->key) {
+                kiln_string view;
+                view.unit_len = (uint32_t)length;
+                view.flags = kiln_c99_fixed_key_flags(name, length);
+                view.data = name;
+                if (!kiln_c99_sealed_layout_index(layout, &view, NULL, &entry) ||
+                    entry > UINT32_MAX)
+                    return kiln_c99_global_builtin(host, out, name, length, depth, thrown);
+                hint->key = layout->entries[entry].key;
+                hint->index = (uint32_t)entry;
+                hint->sealed = 1;
+            }
+            if (orders[entry] != 0) {
+                kiln_property property;
+                kiln_c99_sealed_property(object, entry, &property);
+                if (!property.accessor) {
+                    *out = property.value;
+                    return KILN_C99_OK;
+                }
+            }
+        } else if (KILN_LIKELY(shape != NULL)) {
+            /* A shape's keys are not canonical, so a slot is checked by spelling. */
             kiln_string view;
-            uint32_t slot = *hint;
+            uint32_t slot = hint->sealed ? UINT32_MAX : hint->index;
+            kiln_property candidate = {.key = NULL};
             view.unit_len = (uint32_t)length;
             view.flags = kiln_c99_fixed_key_flags(name, length);
             view.data = name;
-            kiln_property candidate = {.key = NULL};
-            if (slot < shape->property_count && slot < object->slot_capacity) {
+            if (slot < shape->property_count && slot < object->slot_capacity)
                 candidate.key = shape->keys[slot];
-            }
             if (candidate.key == NULL || !kiln_c99_same_key_view(&candidate, &view)) {
                 uint32_t index;
                 slot = UINT32_MAX;
@@ -1014,7 +1056,10 @@ int kiln_c99_global_builtin_site(kiln_host *host, kiln_value *out, const char *n
                         break;
                     }
                 }
-                if (slot != UINT32_MAX) *hint = slot;
+                if (slot != UINT32_MAX) {
+                    hint->index = slot;
+                    hint->sealed = 0;
+                }
             }
             if (KILN_LIKELY(slot != UINT32_MAX) &&
                 (shape->attrs[slot] & KILN_C99_ATTR_ACCESSOR) == 0) {

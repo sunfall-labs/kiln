@@ -90,10 +90,12 @@ fn summarize_leaf(program: &Program, proto_index: usize, graph: &FunctionGraph) 
     if proto.asynchronous || proto.generator || proto.async_generator || proto.is_class {
         return None;
     }
-    if graph.blocks.len() != 1 || graph.seam_block.is_some() {
+    // The entry block must return; blocks after it (the graph keeps an empty one behind a
+    // return) are unreachable from it.
+    if graph.seam_block.is_some() {
         return None;
     }
-    let block = &graph.blocks[0];
+    let block = graph.blocks.get(graph.entry_block.0 as usize)?;
     if block.exception_handler.is_some() {
         return None;
     }

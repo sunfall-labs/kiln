@@ -1,6 +1,5 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 823
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1075,6 +1074,7 @@ typedef struct kiln_shape_edge_table {
 typedef struct kiln_property {
 typedef struct kiln_sealed_property {
 typedef struct kiln_sealed_layout {
+typedef struct kiln_c99_global_hint {
 typedef struct kiln_sealed_values {
 #define KILN_C99_SEALED_GLOBAL_CODE UINT64_MAX
 #define KILN_C99_SEALED_ENV_CODE (UINT64_MAX - UINT64_C(1))
@@ -3202,9 +3202,10 @@ static int kiln_c99_process_object(kiln_value *out) {
 #endif
 #if KILN_RETAIN_GROUP_NODE_NET
 #endif
-static int kiln_c99_global_object(kiln_value *out) {
+static __attribute__((noinline)) int kiln_c99_global_object_build(kiln_value *out) {
 #if KILN_RETAIN_GROUP_TEMPORAL
 #endif
+static int kiln_c99_global_object(kiln_value *out) {
 #define KILN_C99_REALM_SLOT_PRIVATE UINT32_C(13)
 static int kiln_c99_private_object(kiln_value *out) {
 static _Thread_local int kiln_c99_private_hooks_active;

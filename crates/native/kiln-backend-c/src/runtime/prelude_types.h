@@ -1260,6 +1260,15 @@ typedef struct kiln_sealed_layout {
     kiln_sealed_property entries[];
 } kiln_sealed_layout;
 
+/* One emitted global read's memory of where its name was last found on the global object: a
+ * sealed-layout entry with its canonical key, or a shape slot. Never trusted -- every use
+ * re-checks it -- and holding no realm pointer, so one site serves every realm. */
+typedef struct kiln_c99_global_hint {
+    const kiln_string *key;
+    uint32_t index;
+    uint32_t sealed;
+} kiln_c99_global_hint;
+
 /* Realm-owned values and insertion order for a sealed layout. Value slots are followed by one
  * ordinal per descriptor and then ordinals for realm-only appended keys. Zero means absent.
  * The header stays immediately before `kiln_object.slots`, so reallocating the tail can move
