@@ -42,9 +42,19 @@ pub(super) fn emit_get_property(
         let operation = &operation[1..operation.len() - 1];
         let check = status_check(diagnostic_site, pc, operation, unwind);
         let source = crate::diagnostic_source(diagnostic_site);
+        let inv = crate::prelude::lookup_speculation_invariant("method_shape_cache");
         writeln!(
             output,
-            "    {{ static kiln_c99_site site = {{0}}; int status = kiln_c99_val_prepare_method_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, {source}, (size_t){pc}, \"{operation}\", &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}",
+            "    {{ static kiln_c99_site site = {{0}}; kiln_val cached_fn = 0; \
+                /* Inline method-shape cache [{inv_name}]: {inv_rule} */ \
+                if (KILN_VAL_IS_OBJECT(v{o}) && kiln_c99_site_count(&site) > 0) {{ \
+                    const kiln_object *obj = (const kiln_object *)KILN_VAL_PTR(v{o}); \
+                    if (KILN_LIKELY(obj != NULL && kiln_c99_gc_payload_kind(obj) == KILN_GC_OBJECT && obj->shape != NULL)) cached_fn = kiln_c99_site_cached_callee(&site, obj); \
+                }} \
+                if (KILN_LIKELY(cached_fn != 0 && (KILN_VAL_IS_CLOSURE(cached_fn) || KILN_VAL_IS_METHOD(cached_fn)))) {{ v{v} = cached_fn; }} else {{ \
+                int status = kiln_c99_val_prepare_method_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, {source}, (size_t){pc}, \"{operation}\", &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }} }}",
+            inv_name = inv.name,
+            inv_rule = inv.language_rule,
             o = object.0,
         )
         .unwrap();

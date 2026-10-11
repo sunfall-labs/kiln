@@ -2883,11 +2883,7 @@ fn trace_speculation(
         write!(line, " spec_calls={calls}(method-result-feeds-arithmetic)").unwrap();
     }
     if declared_calls > 0 {
-        write!(
-            line,
-            " declared_call_returns={declared_calls}(annotation)"
-        )
-        .unwrap();
+        write!(line, " declared_call_returns={declared_calls}(annotation)").unwrap();
     }
     if fields > 0 {
         write!(
