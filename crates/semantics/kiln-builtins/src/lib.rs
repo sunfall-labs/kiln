@@ -1495,6 +1495,33 @@ pub const WEB_BOOTSTRAP_SOURCE: &str = concat!(
     include_str!("web_encoding_crypto.ts")
 );
 
+/// [`WEB_BOOTSTRAP_SOURCE`] for a native executable that has selected `families`. With
+/// [`native_bootstrap_family::WEB_PLATFORM`] it is the whole source. Without it, the three
+/// installers of the WHATWG platform (`web.ts`, `web_events_streams.ts` and
+/// `web_encoding_crypto.ts`: fetch and its classes, events, streams, messaging, `atob`/`btoa`,
+/// Web Crypto) are left out, in place, and the private host primitives only they consume are
+/// deleted where they would have deleted them, so the global object is the full one minus the
+/// platform's own names. Timers, signals, `Buffer.prototype` and the text codecs install onto
+/// globals that exist either way, so they always run.
+pub fn web_bootstrap_source_selected(families: u32) -> String {
+    if families & native_bootstrap_family::WEB_PLATFORM != 0 {
+        return WEB_BOOTSTRAP_SOURCE.to_owned();
+    }
+    [
+        include_str!("timers.ts"),
+        include_str!("signals.ts"),
+        "delete (globalThis as any).__kilnJobsPending;\n\
+         delete (globalThis as any).__kilnQueueIo;\n\
+         delete (globalThis as any).__kilnWorkerOp;\n\
+         delete (globalThis as any).__kilnPortWait;\n\
+         delete (globalThis as any).__kilnCompressionPrimitive;",
+        include_str!("buffer.ts"),
+        include_str!("web_text_encoding.ts"),
+        "delete (globalThis as any).__kilnWebCryptoPrimitive;",
+    ]
+    .join("\n")
+}
+
 /// `URL` and `URLSearchParams` over the host's `__kilnUrl*` intrinsics (ADR 0063 rule 4). Part
 /// of every native realm's bootstrap, not only `--node`'s: `URL` is an ECMAScript-adjacent global
 /// a plain module reaches for.
@@ -1596,12 +1623,15 @@ pub mod native_bootstrap_family {
     pub const JSON: u32 = 1 << 12;
     pub const NUMERIC_MATH: u32 = 1 << 13;
     pub const NUMERIC_BIGINT: u32 = 1 << 14;
-    pub const ALL: u32 = (1 << 15) - 1;
+    /// The WHATWG platform installers of the web bootstrap; see
+    /// [`super::web_bootstrap_source_selected`].
+    pub const WEB_PLATFORM: u32 = 1 << 15;
+    pub const ALL: u32 = (1 << 16) - 1;
 
-    /// The native web-global bootstrap is installed in every realm. MessagePort delivery
-    /// captures `__kilnStructuredClone`, whose transfer path in turn captures the ArrayBuffer
-    /// detach primitive. Keep these two families even when user-code liveness cannot see the
-    /// internal web-bootstrap references.
+    /// MessagePort delivery in the web platform captures `__kilnStructuredClone`, whose transfer
+    /// path in turn captures the ArrayBuffer detach primitive. Keep these two families whenever
+    /// [`WEB_PLATFORM`] is selected, even when user-code liveness cannot see the internal
+    /// web-bootstrap references.
     pub const WEB_BOOTSTRAP_DEPENDENCIES: u32 = ARRAY_BUFFER | STRUCTURED_CLONE;
 }
 

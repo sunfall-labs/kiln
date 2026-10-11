@@ -1341,67 +1341,61 @@ fn native_bootstrap_family_selection_closes_over_dependencies_and_open_world() {
     let mut members = kiln_graph::DemandedMembers::default();
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::WEB_BOOTSTRAP_DEPENDENCIES
+        0
     );
     members.names.insert("toLocaleLowerCase".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::WEB_BOOTSTRAP_DEPENDENCIES | family::STRING_LOCALE
+        family::STRING_LOCALE
     );
     members.names.clear();
     members.builtins.insert("Date".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::WEB_BOOTSTRAP_DEPENDENCIES | family::DATE
+        family::DATE
     );
     members.builtins.clear();
     members.builtins.insert("Uint8Array".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::WEB_BOOTSTRAP_DEPENDENCIES | family::TYPED_ARRAY | family::ARRAY_BUFFER
+        family::TYPED_ARRAY | family::ARRAY_BUFFER
     );
     members.builtins.clear();
     members.names.clear();
     members.builtins.insert("Math".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::WEB_BOOTSTRAP_DEPENDENCIES
+        0
     );
     members.names.insert("floor".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::WEB_BOOTSTRAP_DEPENDENCIES
+        0
     );
     members.names.clear();
     members.names.insert("getOwnPropertyNames".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::WEB_BOOTSTRAP_DEPENDENCIES
-            | family::NUMERIC_MATH
-            | family::TYPED_ARRAY
-            | family::ARRAY_BUFFER
+        family::NUMERIC_MATH | family::TYPED_ARRAY | family::ARRAY_BUFFER
     );
     members.names.clear();
     members.builtins.clear();
     members.names.insert("f16round".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::WEB_BOOTSTRAP_DEPENDENCIES
-            | family::NUMERIC_MATH
-            | family::TYPED_ARRAY
-            | family::ARRAY_BUFFER
+        family::NUMERIC_MATH | family::TYPED_ARRAY | family::ARRAY_BUFFER
     );
     members.names.clear();
     members.builtins.insert("BigInt".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::WEB_BOOTSTRAP_DEPENDENCIES | family::NUMERIC_BIGINT
+        family::NUMERIC_BIGINT
     );
     members.builtins.clear();
     members.names.insert("asUintN".to_owned());
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
-        family::WEB_BOOTSTRAP_DEPENDENCIES | family::NUMERIC_BIGINT
+        family::NUMERIC_BIGINT
     );
     members.names.clear();
     members.has_computed_access = true;
@@ -1414,6 +1408,89 @@ fn native_bootstrap_family_selection_closes_over_dependencies_and_open_world() {
     assert_eq!(
         native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
         family::ALL
+    );
+    members.builtins.clear();
+    // The WHATWG platform comes with the families its MessagePort captures, by a global's name
+    // or by a property name (sloppy code reaches the global object as `this`).
+    for (globals, names) in [
+        (&["fetch"][..], &[][..]),
+        (&[][..], &["ReadableStream"][..]),
+    ] {
+        members.globals = globals.iter().map(|name| (*name).to_owned()).collect();
+        members.names = names.iter().map(|name| (*name).to_owned()).collect();
+        assert_eq!(
+            native_bootstrap_families(&members, false, kiln_graph::CORE_METHOD_GROUPS),
+            family::WEB_PLATFORM | family::WEB_BOOTSTRAP_DEPENDENCIES
+        );
+    }
+    members.globals.clear();
+    members.names.clear();
+    assert_eq!(
+        native_bootstrap_families(&members, true, kiln_graph::CORE_METHOD_GROUPS),
+        family::ALL
+    );
+}
+
+/// The platform installers' globals, read from their sources the ways they install them:
+/// `(globalThis as any).X =`, `Object.defineProperty(G, "X"` or `(globalThis, 'X'`, a
+/// `["X", X]` row of web_events_streams' class table, and `defineServeGlobal("X")`. A global
+/// missing from `WEB_PLATFORM_NAMES` would be absent from a program that names it.
+#[test]
+fn web_platform_names_cover_every_global_the_platform_installs() {
+    let sources = [
+        include_str!("../../../../semantics/kiln-builtins/src/web.ts"),
+        include_str!("../../../../semantics/kiln-builtins/src/web_events_streams.ts"),
+        include_str!("../../../../semantics/kiln-builtins/src/web_encoding_crypto.ts"),
+    ];
+    let ident = |text: &str| -> String {
+        text.chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+            .collect()
+    };
+    let mut installed = std::collections::BTreeSet::new();
+    for source in sources {
+        for line in source.lines() {
+            let line = line.trim();
+            for prefix in ["(globalThis as any).", "G."] {
+                if let Some(rest) = line.strip_prefix(prefix) {
+                    let name = ident(rest);
+                    if !name.is_empty()
+                        && rest[name.len()..].trim_start().starts_with('=')
+                        && !rest[name.len()..].trim_start().starts_with("==")
+                    {
+                        installed.insert(name);
+                    }
+                }
+            }
+            for marker in [
+                "Object.defineProperty(G, \"",
+                "Object.defineProperty(globalThis, '",
+                "Object.defineProperty(globalThis, \"",
+                "defineServeGlobal(\"",
+                "[\"",
+            ] {
+                if let Some(at) = line.find(marker) {
+                    let name = ident(&line[at + marker.len()..]);
+                    let is_row = marker == "[\"" && line.contains(&format!("\", {name}]"));
+                    if !name.is_empty() && (marker != "[\"" || is_row) {
+                        installed.insert(name);
+                    }
+                }
+            }
+        }
+    }
+    installed.retain(|name| !name.starts_with("__kiln"));
+    assert!(
+        installed.len() >= 30,
+        "the scan found the installers: {installed:?}"
+    );
+    let missing: Vec<_> = installed
+        .iter()
+        .filter(|name| !crate::graph::WEB_PLATFORM_NAMES.contains(&name.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "WEB_PLATFORM_NAMES is missing {missing:?}"
     );
 }
 

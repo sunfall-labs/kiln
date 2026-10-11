@@ -1143,7 +1143,7 @@ fn compile_native_builtin_bootstrap(
     // WHATWG web standards (fetch, Headers, Request, Response, etc.) are global,
     // not gated behind the node adapter: the HTTP host capability
     // (process.__kilnNativeModules.http.request) exists in both modes.
-    let web = kiln_builtins::WEB_BOOTSTRAP_SOURCE;
+    let web = kiln_builtins::web_bootstrap_source_selected(families);
     let source = if node {
         format!(
             "{NATIVE_BUILTIN_BOOTSTRAP_SOURCE}\n{common_ts_builtins}\n{url}\n{web}\n{get_builtin_module}\n{import_meta}"
@@ -1178,6 +1178,70 @@ fn compile_native_builtin_bootstrap(
 /// liveness inputs.
 pub(super) const NATIVE_WEB_BOOTSTRAP_METHOD_GROUPS: u32 = kiln_graph::method_groups::MATH_NUMBER;
 
+/// Every name through which a closed-world program can reach the WHATWG platform installers
+/// (`kiln_builtins::web_bootstrap_source_selected`). Each global they install or replace: the
+/// classes and functions, `crypto` and `AbortController`, and the `Kiln`/`Bun` serve namespaces.
+/// Each global whose behaviour they shape without replacing it: an abort reason is a
+/// `DOMException` (`AbortSignal`), a structured clone transfers and refuses through it, and a
+/// worker's control port and messages run on its MessagePort. And the spellings of the global
+/// object and of code that can reach it by computed name. Property names count as well as
+/// globals, because sloppy code reaches the global object as `this`. A name missing here turns a reachable
+/// global into a ReferenceError -- or, under `typeof`, a silent `"undefined"` -- so the test
+/// `web_platform_names_cover_every_global_the_platform_installs` reads the installers' sources.
+pub(super) const WEB_PLATFORM_NAMES: &[&str] = &[
+    // Installed or replaced on the global object.
+    "AbortController",
+    "Blob",
+    "BroadcastChannel",
+    "Bun",
+    "ByteLengthQueuingStrategy",
+    "CompressionStream",
+    "CountQueuingStrategy",
+    "CryptoKey",
+    "CustomEvent",
+    "DOMException",
+    "DecompressionStream",
+    "Event",
+    "EventTarget",
+    "File",
+    "FormData",
+    "Headers",
+    "Kiln",
+    "MessageChannel",
+    "MessageEvent",
+    "MessagePort",
+    "ReadableStream",
+    "ReadableStreamDefaultController",
+    "ReadableStreamDefaultReader",
+    "Request",
+    "Response",
+    "TransformStream",
+    "TransformStreamDefaultController",
+    "WritableStream",
+    "WritableStreamDefaultController",
+    "WritableStreamDefaultWriter",
+    "atob",
+    "btoa",
+    "crypto",
+    "fetch",
+    // Shaped without being replaced.
+    "AbortSignal",
+    "structuredClone",
+    "Worker",
+    // The global object, and code that can reach it by computed name.
+    "globalThis",
+    "global",
+    "self",
+    "window",
+    "Function",
+    "eval",
+    // The same globals as `members.builtins` spells the ones the compiler loads directly
+    // (`GlobalBuiltin`'s Debug names).
+    "GlobalThis",
+    "Eval",
+    "StructuredClone",
+];
+
 /// A native executable with no open-world access constructs only the intrinsic families it can
 /// reach. Unknown computed/global access keeps the full surface. The remaining conditions are
 /// deliberately conservative: a constructor or prototype reached through a stored value, for
@@ -1209,11 +1273,15 @@ pub(super) fn native_bootstrap_families(
             .iter()
             .any(|name| members.builtins.contains(*name) || members.globals.contains(*name))
     };
-    // WEB_BOOTSTRAP_SOURCE is emitted unconditionally and its MessagePort implementation
-    // captures structuredClone; structuredClone uses ArrayBuffer's transfer/detach support.
-    // These are bootstrap dependencies rather than user-code demands, so seed them here
-    // instead of retaining every native builtin family.
-    let mut selected = family::WEB_BOOTSTRAP_DEPENDENCIES;
+    // The WHATWG platform (fetch and its classes, events, streams, messaging, `atob`/`btoa`,
+    // Web Crypto) is reachable here only by name: the paths above already kept everything for
+    // open-world code, computed access and the global object. Its MessagePort captures
+    // structuredClone, which uses ArrayBuffer's transfer/detach support; those are bootstrap
+    // dependencies rather than user-code demands, so they come with it.
+    let mut selected = 0;
+    if builtin(WEB_PLATFORM_NAMES) || names(WEB_PLATFORM_NAMES) {
+        selected |= family::WEB_PLATFORM | family::WEB_BOOTSTRAP_DEPENDENCIES;
+    }
     if builtin(&["JSON"]) || names(&["stringify"]) {
         selected |= family::JSON;
     }
@@ -1305,9 +1373,6 @@ pub(super) fn native_bootstrap_families(
     if builtin(&["structuredClone"]) || members.globals.contains("structuredClone") {
         selected |= family::STRUCTURED_CLONE;
     }
-    // The WHATWG web bootstrap (fetch, streams, events) is included unconditionally and
-    // web_events_streams.ts calls __kilnStructuredClone, so the family must always be present.
-    selected |= family::STRUCTURED_CLONE;
     if builtin(&["Map", "Set"]) || names(&["getOrInsert", "getOrInsertComputed"]) {
         selected |= family::MAP_UPSERT;
     }
