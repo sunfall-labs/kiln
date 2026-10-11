@@ -65,8 +65,8 @@ and a baseline that only goes down (ADR 0063). The interpreter leads the native 
 the target of both.
 
 **Native provider** — The private, statically linked Rust archive exposed through the registry in
-`kiln-native-number-abi`, packaged through `kiln-native-provider-contract`, and implemented by
-`kiln-native-number-ffi`. It owns coarse realm,
+`kiln-native-provider-contract`, which also packages it, and implemented by
+`kiln-native-provider-ffi`. It owns coarse realm,
 semantic-engine, concurrency and foreign-interface operations used by emitted C. Do not call it the
 number provider; numbers are one service it contains.
 

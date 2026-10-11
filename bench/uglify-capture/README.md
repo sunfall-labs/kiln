@@ -64,33 +64,26 @@ reviewed `dynamic.c` control change before building.
 
 ## Dictionary-index control
 
-Use `--control-kind dictionary-index` to compare the realm-owned dictionary
-lookup index with the correct pre-index Uglify run. The comparator permits only
-five tracked file differences and pins every candidate/control content digest
-to the reviewed implementation in commits `8b8931ae` and `9e775ce4`. It verifies
-the actual tracked inventory and every other tracked worktree byte. Evidence
-records the file digests, the reviewed delta digest, and both source commit
-references; a different implementation needs a deliberate comparator update.
+`--control-kind dictionary-index` compares the realm-owned dictionary lookup index with a
+pre-index control build of the same workload. The comparator permits only a fixed set of tracked
+file differences and pins every candidate/control content digest to the reviewed implementation
+(commits `8b8931ae` and `9e775ce4`); it verifies the actual tracked inventory and every other
+tracked worktree byte. Evidence records the file digests, the reviewed delta digest, and both
+source commit references. A different implementation needs a deliberate comparator update.
 
-The pre-index executable can reuse CLI67's already-built native-release binary.
-The frozen provenance record at
-`docs/issues/npm-compat/results/dictionary-index-baseline.json` (`fb7750ef`)
-records binary SHA-256 `9238826aec4dd48964ac9e4576407f6a3213e34c52635da33e98b49275aad92e`
-and proves its source differs from the pre-index baseline only by the added
-dictionary semantics fixture. No control rebuild is needed. Build the index
-candidate once from the production source tree, then run:
+Build the candidate from the production source tree and the control from a worktree at the
+pre-index content, then run:
 
 ```sh
 python3 bench/uglify-capture/compare.py \
-  target/npm-compat-evidence/uglify-dictionary-index \
-  /var/tmp/kiln/kiln-npm-managed/target/npm-compat-evidence/uglify-production-cli67 \
+  <candidate-binary> <control-binary> \
   --production-source "$PWD" \
-  --control-source /var/tmp/kiln/kiln-dictionary-control \
+  --control-source <control-worktree> \
   --control-kind dictionary-index \
-  --results conformance/npm-compat/results/uglify-dictionary-index.json
+  --results <results.json>
 ```
 
-The source paths must be the index candidate and its matched pre-index control
-tree. The five pre-index implementation files must have the pinned `9e775ce4`
-content; shared later commits are fine when their actual tracked bytes match in
-both trees. The comparator rejects any unreviewed file delta or content hash.
+The source paths must be the candidate and its matched pre-index control tree. The pre-index
+implementation files must have the pinned `9e775ce4` content; shared later commits are fine when
+their actual tracked bytes match in both trees. The comparator rejects any unreviewed file delta
+or content hash.

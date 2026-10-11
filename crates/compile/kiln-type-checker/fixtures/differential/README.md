@@ -10,8 +10,8 @@ The evidence discipline follows the useful part of Theo's `ts-rust` harness: eac
 stable name and complete inputs, and a pinned compiler oracle is recorded alongside the checked
 result. Reference audited at `pingdotgg/ts-rust` commit
 `dfb3ca6d234ad05ac2519b46dcdba60bf4a0e50b` (MIT). The expected rows here come from the installed
-TypeScript 7.0.2 CLI at
-`~/.cache/kiln/type-engine-investigation/typescript-native-7.0.2/package/lib/tsc`.
+TypeScript 7.0.2 native CLI (the `package/lib/tsc` binary of the `typescript-native` 7.0.2
+package, installed anywhere you like and passed as `--tsc`).
 No upstream syntax tree or checker implementation is used.
 
 Run the Rust harness with `mise exec -- mbx test -p kiln-type-checker --test differential`.
@@ -19,7 +19,7 @@ Verify the pinned oracle with:
 
 ```sh
 python3 crates/compile/kiln-type-checker/tools/verify_differential_oracle.py \
-  --tsc ~/.cache/kiln/type-engine-investigation/typescript-native-7.0.2/package/lib/tsc
+  --tsc <path-to>/typescript-native-7.0.2/package/lib/tsc
 ```
 
 The CLI reports diagnostic start locations but does not expose end spans, so oracle rows record

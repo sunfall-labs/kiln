@@ -15,7 +15,7 @@ a *pass*. See **Findings** and **Findings, node as the reference** below.
 
 ## Contents
 
-| target | what it compares | measured cost per case |
+| target | what it compares | measured cost per case (one development machine) |
 |---|---|---|
 | `differential_native` | interpreter stdout vs native stdout, byte for byte | **446 ms** (clang) / **819 ms** (zig) |
 | `node_reference` | the batched node reference against a real `node` process, and five pinned findings | 48 ms |
@@ -36,7 +36,7 @@ compiler developer's `cargo check --workspace` loop.
 
 ## Commands
 
-Nothing below needs nightly. Sanitizers are not used and are not wanted here — the bugs being
+Sanitizers are not used and are not wanted here — the bugs being
 looked for are wrong answers, not memory errors, and every engine is safe Rust.
 
 ```sh
@@ -72,9 +72,10 @@ Observed: 201,160 runs in 21 s for the memo oracle (coverage 1061, corpus 420), 
 21 s for `structured_ir` (coverage 3190, corpus 894). Instrumentation costs roughly 5× against
 the plain RNG engine and buys a corpus that keeps whatever reached new code.
 
-`--sanitizer NONE` is required, and it is the reason nightly is not: cargo-bolero's default
-`--sanitizer address` needs `-Zsanitizer`, which is nightly-only, and ASan finds nothing in safe
-Rust. Without the flag the build fails on the pinned 1.97.1 toolchain.
+`--sanitizer NONE` is used throughout: cargo-bolero's default `--sanitizer address` needs
+`-Zsanitizer` and an extra instrumented build, and ASan finds nothing in safe Rust. The repository
+pins a nightly toolchain (`rust-toolchain.toml`), which `fuzz/` inherits, but the flag keeps the
+run independent of sanitizer support.
 
 Two things had to change in this crate to make `cargo bolero` build at all, and both are worth
 knowing before adding a file here:
@@ -408,9 +409,9 @@ and passes; these are three shapes it does not contain.
 The third is not the depth limit itself — `[[[[1]]]]` and `{p0:{p1:{p2:{p3:1}}}}` both agree with
 node — but where an array reached through objects sits relative to it.
 
-### Confirmed fixed while this was being written
+### Confirmed fixed since
 
-Two bugs named as known when this work started were fixed in the tree mid-session, and both are now
+Two bugs named as known when this work started have since been fixed, and both are now
 regression tests in `tests/node_reference.rs` rather than findings:
 
 - `parseInt({toString: () => "99"})` and `parseFloat` — was `NaN` in **both** engines, is now `99`.

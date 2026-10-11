@@ -25,7 +25,7 @@ than a missing feature:
   ordinary property called "length" and the speculative events stayed, so a nested mapping
   composed against a duplicated event stream. Only nested mappings failed, which is what made it
   worth chasing: a flat one and a sequence both parsed.
-All six pass. What each found is kept because it is the record of what only real code finds:
+What each found is kept because it is the record of what only real code finds:
 
 - **marked** found that `encodeURI` and its three siblings did not exist. It sanitises every href
   through `encodeURI` inside a `try`, so the `ReferenceError` was swallowed and every link in a
@@ -58,33 +58,34 @@ a history. `.gitignore` draws the line by name.
 
 ## The heavy set
 
-The thirteen above all passed, and a corpus that passes everything has stopped finding things.
+The thirteen above passed on their first full runs, and a corpus that passes everything has stopped finding things.
 These nine are chosen to be *large machine-generated applications* rather than utility libraries,
 and to stress parts of the language the first thirteen never reach: a whole compiler, three more
 proxy shapes, two more parser toolchains, runtime code generation, a server renderer, and the
-promise machinery. Five pass. Four fail, and each of the four now names one missing thing rather
-than a mixture.
+promise machinery. When they were added, five passed and four failed, each naming one missing
+thing rather than a mixture. Current verdicts come from `scripts/thirdparty.sh`; the history
+below is what each probe found, with its status at the time it was written.
 
 Four of them -- `typescript`, `babel`, `postcss`, `react-ssr` -- are bundled as CommonJS for the
 *node* platform (see *Building the heavy set*), so `scripts/thirdparty.sh` runs those four under
 `--node`. Running one of them without the adapter it was built for reports "require is not
 defined", which says nothing about the library.
 
-| probe | what it is, and why it is here | verdict |
-|---|---|---|
-| `typescript` | the TypeScript 5.9 compiler API: transpile a source string, walk the AST, then type-check through a virtual `CompilerHost`. 9.9 MB, the largest and most language-complete input here | `os.platform` |
-| `react-ssr` | `react-dom/server` `renderToString` over a component tree with context, hooks, memo and HTML escaping. The single most common thing a real TypeScript server does | missing globals |
-| `babel` | `@babel/parser` + `traverse` + `generator`: parse, rewrite the AST, print it. A second parser toolchain, built as a chain of `class X extends Y` mixins | **pass** |
-| `postcss` | a CSS tokenizer, mutable AST and stringifier, plus a plugin run through the async processor. A third parser shape: character-code scanning rather than regex | `path.dirname` |
-| `ajv` | a JSON Schema validator that compiles each schema to JavaScript and hands it to `new Function`. The runtime-code-generation shape every OpenAPI and fastify stack takes | **pass** |
-| `vue-reactivity` | Vue 3's dependency tracking: object, array, collection and readonly proxy handlers, `Reflect` with an explicit receiver, `effectScope` | **pass** |
-| `async-concurrency` | p-queue / p-map / p-limit / p-retry / p-timeout and IxJS: `Promise.any`, `allSettled`, `withResolvers`, Promise subclassing, `AbortSignal`, `Symbol.asyncIterator` | `AbortController` |
-| `mobx` | a third proxy shape: `defineProperty` accessor pairs under a proxy, transactions, `observe`/`intercept`, lazy computeds | **pass** |
-| `rxjs` | observables, schedulers and Promise interop in both directions, `from(asyncIterable)`, subjects, `retry` | **pass** |
+| probe | what it is, and why it is here |
+|---|---|
+| `typescript` | the TypeScript 5.9 compiler API: transpile a source string, walk the AST, then type-check through a virtual `CompilerHost`. 9.9 MB, the largest and most language-complete input here |
+| `react-ssr` | `react-dom/server` `renderToString` over a component tree with context, hooks, memo and HTML escaping. The single most common thing a real TypeScript server does |
+| `babel` | `@babel/parser` + `traverse` + `generator`: parse, rewrite the AST, print it. A second parser toolchain, built as a chain of `class X extends Y` mixins |
+| `postcss` | a CSS tokenizer, mutable AST and stringifier, plus a plugin run through the async processor. A third parser shape: character-code scanning rather than regex |
+| `ajv` | a JSON Schema validator that compiles each schema to JavaScript and hands it to `new Function`. The runtime-code-generation shape every OpenAPI and fastify stack takes |
+| `vue-reactivity` | Vue 3's dependency tracking: object, array, collection and readonly proxy handlers, `Reflect` with an explicit receiver, `effectScope` |
+| `async-concurrency` | p-queue / p-map / p-limit / p-retry / p-timeout and IxJS: `Promise.any`, `allSettled`, `withResolvers`, Promise subclassing, `AbortSignal`, `Symbol.asyncIterator` |
+| `mobx` | a third proxy shape: `defineProperty` accessor pairs under a proxy, transactions, `observe`/`intercept`, lazy computeds |
+| `rxjs` | observables, schedulers and Promise interop in both directions, `from(asyncIterable)`, subjects, `retry` |
 
 ### What each one found
 
-Ordered the way this corpus is meant to be read: a wrong answer outranks a refusal, because a
+Statuses (*fixed*, *open*) are as of when each probe was written and may have moved since; the `findings/` reproductions are the way to check one. Ordered the way this corpus is meant to be read: a wrong answer outranks a refusal, because a
 program that gets a wrong number does not know it needs to stop. Each entry records what the
 probe found and where that finding now stands.
 
@@ -121,8 +122,8 @@ probe found and where that finding now stands.
   stubs whose exports are not enumerable. `Object.keys(require("path"))` is 0 against node's 17, so
   every `{ ...require("path") }` re-export shim yields nothing, and individual members are simply
   absent -- `os.platform` (which is where the TypeScript compiler's `getNodeSystem` stops) and
-  `path.dirname` (which is where postcss's `PreviousMap` stops). *Open*, and being worked on
-  elsewhere: the Node adapter's materializers are another session's. `findings/node-builtin-surface.js`.
+  `path.dirname` (which is where postcss's `PreviousMap` stops). *Open when
+  written*; see `findings/node-builtin-surface.js`.
 - **ajv and babel both hit the interpreter's step budget.** `ExecutionLimits::default` set
   `max_steps` to 1,000,000 and there was no flag to raise it, so `ajv.compile({ type: "integer" })`
   -- the smallest schema there is -- was refused on its own. *Fixed*: `kiln run` is unmetered and

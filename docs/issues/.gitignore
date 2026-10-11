@@ -1,0 +1,17 @@
+# The tracker commits filings and the small probes they run; logs, JSON dumps, profiles, tarballs
+# and other run evidence stay on the machine that produced them (docs/agents/issue-tracker.md).
+*
+!*/
+!.gitignore
+!.floor
+!*.md
+!*.mjs
+!*.cjs
+!*.mts
+!*.ts
+!*.js
+!*.py
+!*.sh
+!*.patch
+!*.rs
+!*.toml

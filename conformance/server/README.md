@@ -1,15 +1,13 @@
 # The Node-server probes
 
-Five vertical server programs. All five now run under explicit interpreted Node mode when the
-reproducible package fixtures are installed. `s01` through `s03` also run as native standalone
-artifacts; the framework probes remain the next native gates.
+Vertical server programs (`s01` through `s09`; `manifest.toml`'s `[server]` group is the
+authoritative list). They run under explicit interpreted Node mode (`kiln test conformance/server
+--node`) when the reproducible package fixtures are installed, and several also run as native
+standalone artifacts.
 
 `docs/design.md` §14 puts the Node compatibility graft at step 10 and the async event loop at
-step 11. `docs/language-coverage.md` turns everything before that into a ten-step ladder, and
-the corpus is partway up it. Nothing in this directory is reachable from where the ladder
-currently stands — that is the point. The rest of the corpus measures the next rung; this
-directory marks the destination, so that "run a Node server, compiled" is a gauge with a reading
-rather than an intention with a date.
+step 11. This directory is the gauge for "run a Node server, compiled": it records what each
+server shape needs rather than collapsing the target to a compatibility percentage.
 
 The reading is executable behavior plus precise refusal. `s01` is the minimal end-to-end gate and
 `s02` proves sequential routing through async handlers and `s03` proves request-body streaming and
@@ -38,10 +36,10 @@ itself set, so none of them can be made to pass by reading the host clock. That 
 real, and it is what prompted ADR 0031, which turns ADR 0015's closing sentence — "no hidden
 dependency to remove later if the decision is revisited, only one to add, in one place,
 deliberately" — into four realm capabilities with their current constants as the defaults. Read
-with that ADR, these four probes are expected to pass in the *deterministic* realm: a server that
+with that ADR, these probes are expected to pass in the *deterministic* realm: a server that
 works only when it can read the real clock is a server this compiler has not finished.
 
-## The five
+## The first five
 
 | Probe | What it is for |
 | --- | --- |
@@ -63,43 +61,13 @@ exactly the part still unproven. ADR 0027 already gave bare specifiers a resolut
 it already works; Node package resolution and CommonJS interop at the scale of a real dependency
 tree is what remains, and the probe keeps its imports so that it keeps asking.
 
-## What passing would be worth
+## Measuring a server
 
-`scripts/server-baseline.sh` measures `s01` under node, deno, bun, and Kiln — as a script, and as a
-standalone executable where the toolchain offers one — and writes
-`bench/results/server-baseline.json`. All three print the byte-identical line this corpus
-records, so it is one program measured three ways rather than three programs.
-
-Taken on `darwin`, medians over 10 runs after 2 discarded, against node v25.9.0, deno 2.9.5 and bun 1.4.0:
-
-| target | form | cold start | peak RSS | artifact |
-| --- | --- | --- | --- | --- |
-| node | script | 130 ms | 58.1 MiB | — |
-| deno | script | 28 ms | 34.9 MiB | — |
-| bun | script | 23 ms | 25.4 MiB | — |
-| deno | standalone | 27 ms | 34.7 MiB | 64.3 MiB |
-| bun | standalone | 24 ms | 24.4 MiB | 60.9 MiB |
-| kiln | script | 630 ms | 40.7 MiB | — |
-| **kiln** | **standalone** | **8 ms** | **3.3 MiB** | **4.6 MiB** |
-
-The artifact column is the argument. Sixty-odd megabytes is a JavaScript engine, and shipping one
-is what `deno compile` and `bun build --compile` do; it is the cost kiln's design declines to pay
-by compiling ahead of time to C and linking the small Rust runtime of ADR 0018 instead. Whether
-that is worth anything is an empirical question, and the numbers above are the answer's other
-half.
-
-That was a claim while the kiln rows were empty. It is now a measurement: the standalone form
-builds and serves, at **13x smaller, 7x less resident and 3x faster to start** than the nearest
-of the two, on the same program, producing byte-identical output, in the deterministic realm.
-
-Two qualifications kept deliberately in view. The interpreted row is 630 ms and should be - that
-is the interpreter, which design.md ranks native runtime performance fourth precisely so it can
-exist; the standalone row is the one the project is about. And this is `s01`, ten lines: it says
-what a floor costs, not what an application costs, and s02-s04 are what will move it.
-
-The node, deno and bun columns were recorded from a checkout where kiln scored nothing,
-deliberately, so the comparison could not be taken by someone who already knew which answer they
-wanted. The script never gates.
+`scripts/server-baseline.sh` measures `s01`-style servers under node, deno, bun, and Kiln and
+writes `bench/results/server-baseline.json`, which holds the committed figures and the versions
+they were taken with. `bench/server/compare.sh` is the throughput comparison reported in the top
+level README. Those numbers are the record; they are not copied here, because they move with the
+machine and with the runtimes compared. The script never gates.
 
 ## Two findings these produced before they ran once
 
@@ -124,7 +92,7 @@ The probes are `.mjs`, and that is a finding rather than a preference.
 
 `kiln-conformance` parsed every program under the Script goal, deliberately: the corpus is
 mostly scripts, its expected output was observed from scripts, and the module goal would let
-module-only syntax be silently accepted in programs never run that way. The first draft of these
+module-only syntax be silently accepted in programs never run that way. The first draft of the first
 four was `.js`, so all four refused with `Cannot use import statement outside a module` — an
 answer that named the runner's default rather than kiln's server gap.
 
@@ -132,6 +100,6 @@ The runner now makes that distinction at the Node seam rather than globally. Ord
 conformance programs keep their explicit extension/Script behavior. Node-mode entries use the
 production format policy: `.mjs` is ESM, `.cjs` is CommonJS, and `.js` follows the nearest
 `package.json` `type`. Deleting that manifest reclassifies the next run, so the harness does not
-retain a stale module decision. The four probes remain `.mjs` because their format is part of the
+retain a stale module decision. The probes remain `.mjs` because their format is part of the
 fixture itself, but `.js`-plus-`type` applications now exercise the same rule Node does instead of
 sidestepping it.

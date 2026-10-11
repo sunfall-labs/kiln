@@ -25,7 +25,7 @@ preserved in [results-2026-09-27.md](results-2026-09-27.md).
 
 ## How it measures
 
-The rules are `CLAUDE.md`'s "Benchmarking: time the work, not the launcher":
+The rules are `AGENTS.md`'s "Benchmarking: time the work, not the launcher":
 
 - **Warm, inside the process.** Every JavaScript program hands its workload to
   `bench/harness.mjs`: one cold call reported apart, a batch calibrated to outlast 50 ms, then the

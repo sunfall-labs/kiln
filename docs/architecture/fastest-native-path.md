@@ -1,6 +1,11 @@
 # The fastest native path
 
-A design note. It exists because the performance review of 2026-09-04 grouped every gap against
+> A point-in-time design note: the measurements are from September 2026 on one machine and the
+> emitted-C excerpts predate later work (the value graph, ADR 0061 and successors). Read the
+> numbers as the argument's evidence, not as current performance; `mise run bench` regenerates
+> them.
+
+A design note. It exists because a performance review (2026-09-04) grouped every gap against
 node by cause -- dispatch, boxed values, builtin quality -- and named NaN-boxing as the biggest
 lever. That grouping is right and this note keeps it. What it adds is the thing a list of levers
 cannot say: what the emitted C has to *look like* at the end, measured, and the one structural
@@ -294,7 +299,7 @@ can **vectorise**, which node's tiering never attempts; the hand-emitted `class-
 ## Order of work
 
 Each step names the benchmark it moves and the number from the ceiling table it should reach.
-The rule from `CLAUDE.md` holds throughout: every number is taken in a worktree, checksums must
+The rule from `AGENTS.md` holds throughout: every number is taken in a worktree, checksums must
 match node's, and `mise run gate` is the acceptance test, because the generic path is what the
 conformance corpora exercise and it must not move.
 

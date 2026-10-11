@@ -7,7 +7,7 @@
 #   KILN_VERSION      a version such as 0.1.0 (default: the latest release)
 #   KILN_INSTALL_DIR  where releases are unpacked (default: ~/.kiln)
 #   KILN_BIN_DIR      where the `kiln` link goes (default: ~/.local/bin)
-#   GITHUB_TOKEN      read access, needed while the repository is private
+#   GITHUB_TOKEN      optional; raises the GitHub API rate limit
 #
 # A release is unpacked whole into $KILN_INSTALL_DIR/<version>/, because bin/kiln finds its native
 # provider archives at bin/../lib/kiln; the link in $KILN_BIN_DIR points into it. Every download
@@ -60,7 +60,7 @@ else
 	release_url="https://api.github.com/repos/$repo/releases/latest"
 fi
 fetch "$release_url" "$work/release.json" application/vnd.github+json ||
-	die "could not read the release from $release_url (private repository? set GITHUB_TOKEN)"
+	die "could not read the release from $release_url (rate limited? set GITHUB_TOKEN)"
 
 # Asset API URLs work for private repositories with a token, where browser URLs do not. The JSON
 # is read with sed rather than jq, which is not on every machine.

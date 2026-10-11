@@ -5,10 +5,10 @@ been split into the domain files listed below, as a pure move: the concatenation
 in the order listed, was byte-identical to the original single file it replaced. No behaviour
 changed.
 
-One file has been added since: `ryu_tables.c`, which is generated and holds only data. A file
+Two files were added after the split: `ryu_tables.c`, which is generated and holds only data, and `webcrypto.c`, a thin bridge. A file
 added here is a decision about the *shape* of the prelude rather than an ordinary edit -- the
-default place for new C is one of the domain files below -- and this one earns its own because
-it is 636 lines nobody reads and nobody hand-edits.
+default place for new C is one of the domain files below -- and `ryu_tables.c` earns its own because
+it is a table nobody reads and nobody hand-edits.
 
 **Order is load-bearing.** C needs a declaration before its use, so the parts of each original
 file are concatenated in exactly the order below (see `runtime_parts!` and `core_parts!` in
@@ -35,6 +35,7 @@ split.
 | `generators.c` | generator objects |
 | `methods.c` | method tables and names, array prototype methods, CommonJS require |
 | `web.c` | entropy, hex, UTF-8 validation, URL, URLSearchParams, querystring |
+| `webcrypto.c` | the private byte-span bridge to the shared `kiln-webcrypto` implementation |
 | `ryu_tables.c` | GENERATED (`scripts/gen-ryu-tables.py`): Ryu's two 128-bit multiplier tables, read only by `numbers.c` |
 | `numbers.c` | number formatting: the shortest-round-trip `Number::toString`, fixed, precision, exponential, radix |
 | `builtins.c` | built-in names, regexp replacement expansion, arguments objects |
@@ -62,7 +63,6 @@ split.
 | `temporal.c` | Temporal operations |
 | `dispatch_part_a.c` | argument conversion, DataView methods, sort, and `invoke_method_dispatch` through the `Object.assign` case |
 | `dispatch_part_b.c` | remaining `invoke_method_dispatch` cases, beginning at `Date.now`; its function and switch close here |
-
 | `enumeration.c` | iteration, has, delete, own keys, enumeration, proxy spread |
 | `spread.c` | object spread |
 | `definitions.c` | accessors, descriptors, defineProperty and friends, private names, methods |

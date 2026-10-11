@@ -6,5 +6,5 @@ Node.js test-suite paths and are pinned to Node v24.7.0 commit
 
 Passing upstream tests may currently have harness-only placeholders here while the direct
 `test/common` runner is built; executable adapted assertions remain in `../upstream-adapted` and
-are the CI gate. Expected-failure entries are inventoried now so newly passing behavior is visible
+are the gate. Expected-failure entries are inventoried now so newly passing behavior is visible
 and promoted deliberately rather than discovered through an undocumented ad-hoc test.

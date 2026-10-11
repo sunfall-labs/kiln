@@ -100,7 +100,14 @@ jobs:
         run: |
           cat dist/*.sha256 > dist/SHA256SUMS
           tag="v$VERSION"
-          flags=(--title "kiln $VERSION" --generate-notes)
+          # The notes are CHANGELOG.md's section for this version; without one, GitHub's
+          # generated list of commits stands in.
+          awk -v v="$VERSION" '/^## \[/{on=index($0,"## [" v "]")==1; next} /^\[[^]]*\]: /{next} on' CHANGELOG.md > notes.md
+          if [[ -s notes.md ]]; then
+            flags=(--title "kiln $VERSION" --notes-file notes.md)
+          else
+            flags=(--title "kiln $VERSION" --generate-notes)
+          fi
           # A manual run makes a draft for review; only a tag publishes.
           if [[ $GITHUB_REF_TYPE != tag ]]; then
             flags+=(--draft --target "$GITHUB_SHA")

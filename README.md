@@ -4,19 +4,21 @@ kiln compiles JavaScript and TypeScript to native executables. It is written in 
 and links the result against a small Rust runtime built on Tokio and Hyper. There is no
 JavaScript engine inside the binary.
 
-A ten-line `node:http` server compiles to a 4 MB executable that starts in 8 ms, holds under
-10 MB resident under load, and serves more requests per second than Node, Bun and Deno on the
-same machine. The interpreter that ships alongside the compiler runs the same program
-immediately, so the edit-run loop never waits for a native build.
+A ten-line `node:http` server compiles to a small native executable that starts in milliseconds and
+holds around 10 MB resident under load. In the measurements below (see [Measured](#measured)) a
+single kiln realm served more requests per second than Node, Bun and Deno on the same machine for a
+hello-world server, and about the same as Bun for a small service. The interpreter that ships
+alongside the compiler runs the same program immediately, so the edit-run loop never waits for a
+native build.
 
 ## Status
 
 kiln is at v0 and under active development, with a strong focus on high ECMAScript conformance, real-world library compatibility, and native performance:
 
-- **ECMAScript Conformance**: Tracks the official Test262 suite, passing the vast majority of tests across standard built-ins, syntax, and runtime semantics (tracked chunk-by-chunk in `conformance/test262-baseline.json`).
-- **Real-World Library Compatibility**: Executes unmodified third-party libraries and application bundles, producing output byte-identical to Node under both the interpreter and the native C backend (`conformance/thirdparty`, run with `scripts/thirdparty.sh`): tooling and compilers, reactive and state systems, validation and runtime generation, and standard utilities. The bundle set itself is whatever that directory holds -- it is not enumerated here, because bundles arrive over time and the largest ones stay reproducible-from-`build.sh` rather than committed (see `.gitignore`).
-- **Targeted Corpora**: Held to clean runs across dedicated suites for language edge cases (`conformance/guard`), Node compatibility (`conformance/node`), regression tests (`conformance/regress`), Effect runtime semantics (`conformance/effect`), and HTTP server workloads (`conformance/server`).
-- **Engine Parity**: The compiled native C backend is held to byte-identical output and matching exit codes with the bytecode interpreter across the entire native corpus (`conformance/native`), ensuring zero divergence between execution modes.
+- **ECMAScript Conformance**: Tracks the official Test262 suite, passing most tests across standard built-ins, syntax, and runtime semantics. The committed baseline (`conformance/test262-baseline.json`, pinned Test262 commit recorded in it) holds 97,178 passing and 5,072 failing variants across 122 chunks; it is the source of truth and moves with the code, so the gate compares chunk by chunk rather than trusting a total.
+- **Real-World Library Compatibility**: Executes unmodified third-party libraries and application bundles, compared against Node's output under both the interpreter and the native C backend (`conformance/thirdparty`, run with `scripts/thirdparty.sh`; the harness requires matching output): tooling and compilers, reactive and state systems, validation and runtime generation, and standard utilities. The bundle set itself is whatever that directory holds -- it is not enumerated here, because bundles arrive over time and the largest ones stay reproducible-from-`build.sh` rather than committed (see `.gitignore`).
+- **Targeted Corpora**: Checked by dedicated suites for language edge cases (`conformance/guard`), Node compatibility (`conformance/node`), regression tests (`conformance/regress`), Effect runtime semantics (`conformance/effect`), and HTTP server workloads (`conformance/server`).
+- **Engine Parity**: The compiled native C backend is checked for byte-identical output and matching exit codes against the bytecode interpreter across the native corpus (`conformance/native`, run with `scripts/native.sh`); a divergence is a failing probe.
 
 Today it compiles and executes a substantial language and runtime surface: modules (ESM and CommonJS, including cyclic dependencies), classes and private fields, closures, generators and `yield*`, async functions and promises, standard built-ins (`Map`, `Set`, typed arrays, JSON, regular expressions, BigInt, Temporal, `Date`, `DataView`), and the core `node:*` APIs (`http`, `net`, `fs`, `events`, `stream`, `buffer`, `path`, `url`, `util`) needed for high-throughput services.
 
@@ -24,7 +26,7 @@ What is not implemented is refused with a source location rather than approximat
 
 ## Measured
 
-`bench/server/compare.sh`, 2026-09-02, one machine, keep-alive, four client processes with
+`bench/server/compare.sh`, taken 2026-09-02 on one macOS machine, keep-alive, four client processes with
 sixteen connections each, median of three interleaved passes. A single client process saturates
 before these servers do, which is why there are four.
 
@@ -161,7 +163,7 @@ curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install
 
 That unpacks the release into `~/.kiln/<version>/` and links `kiln` into `~/.local/bin`.
 `KILN_VERSION`, `KILN_INSTALL_DIR` and `KILN_BIN_DIR` override the defaults, and `GITHUB_TOKEN` is
-needed while the repository is private. A release carries the binary and every native provider
+used for the GitHub API requests when set (and is required if the repository is private). A release carries the binary and every native provider
 archive (`lib/kiln/`), so `kiln build` needs only a C compiler -- Clang, GCC, cc or Zig -- and no
 Rust toolchain; `kiln run` needs neither. Each archive is checked against the release's
 `SHA256SUMS` before it is unpacked. To unpack one by hand, keep its `bin/` and `lib/` together:
@@ -179,6 +181,8 @@ target on a `v*` tag and publishes the result.
 ## Building from source
 
 Rust nightly-2026-09-15 (pinned in `rust-toolchain.toml`) and a C compiler: Zig, Clang, cc or GCC on `PATH`.
+
+Day-to-day development goes through `mbx` and `mise` (see `AGENTS.md`); bare `cargo` works too.
 
 ```sh
 cargo build
@@ -270,7 +274,7 @@ Every decision of that kind is an ADR under `docs/adr/`, numbered and never edit
 | `kiln-interpreter` | the deterministic bytecode VM |
 | `kiln-backend-c` | the C emitter and the C runtime prelude |
 | `kiln-runtime`, `kiln-host-abi` | the Tokio/Hyper realm runtime and the host-operation contract |
-| `kiln-native-number-ffi`, `kiln-native`, `kiln-native-toolchain` | the runtime archive linked into executables, the native build coordinator, the compiler boundary |
+| `kiln-native-provider-ffi`, `kiln-native`, `kiln-native-toolchain` | the runtime archive linked into executables, the native build coordinator, the compiler boundary |
 | `kiln-daemon`, `kiln-cli` | the resident compiler process and the `kiln` binary |
 | `kiln-conformance`, `kiln-test262`, `kiln-test-selector` | corpus discovery, classification and failures-first selection |
 | `bench` | the timing harness and the server benchmarks |

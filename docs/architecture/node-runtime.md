@@ -195,7 +195,7 @@ completion never invokes JavaScript directly—it queues a continuation on the r
 
 Kiln vendors a pinned Node test tree separately from its configuration. Like Deno, the checked-in
 configuration is an explicit map of test path to expectation: pass, skip with reason,
-platform-specific, expected failure, or flaky. CI gates tests promoted to pass. A periodic full run
+platform-specific, expected failure, or flaky. The gate (`mise run gate`) fails if a test promoted to pass stops passing. A periodic full run
 reports every test, including failures, so compatibility can improve without allowlist drift.
 
 The priority matrix follows real server leverage, not alphabetical module coverage:
@@ -233,7 +233,7 @@ bodies, sequential requests, request-body streaming, and Buffer reassembly witho
 scheduler or transport seam. Native Buffer views reuse the typed-array byte store; Node identity
 is a property of the view, not a second container or a native ABI type.
 `bench/results/server-baseline.json` measures the first artifact alongside
-Node, Deno, and Bun without making the comparison a CI gate.
+Node, Deno, and Bun without making the comparison a gate.
 
 ## Migration sequence
 

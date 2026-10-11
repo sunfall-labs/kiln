@@ -4,8 +4,8 @@ from __future__ import annotations
 import atexit, argparse, hashlib, json, os, platform, statistics, subprocess, time, uuid
 from pathlib import Path
 
-DEFAULT_BINARY = Path('~/Work/kiln-checker-port/target/release/kiln')
-DEFAULT_TSC = Path('~/.cache/kiln/type-engine-investigation/typescript-native-7.0.2/package/lib/tsc')
+DEFAULT_BINARY = Path('~/Work/kiln-checker-port/target/release/kiln').expanduser()
+DEFAULT_TSC = Path('~/.cache/kiln/type-engine-investigation/typescript-native-7.0.2/package/lib/tsc').expanduser()
 DEFAULT_PROJECT = Path.home()/'.cache/kiln/typechecker-perf/checker-project-v2'
 
 

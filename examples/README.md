@@ -26,5 +26,5 @@ Generation is deterministic: the same commit produces byte-identical files, whic
 reason timings from two different runs are comparable at all. `.kiln-bench-manifest` in each
 workload directory records the fingerprint that was written.
 
-They are not committed — regenerating them is cheaper and more trustworthy than reviewing a
+They are not committed (`examples/.gitignore`) — regenerating them is cheaper and more trustworthy than reviewing a
 few hundred generated files in a diff.

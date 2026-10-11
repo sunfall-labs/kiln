@@ -237,7 +237,7 @@
     "passes": 3,
     "scope": "all22 repository microbenchmarks",
     "method": "Unmodified bench/compare.sh Python payload and bench/harness.mjs with coordinator-only barrier before floor/warm/timed executions; compilation excluded.",
-    "quiet_window": "Gate and pre-push contracts finished; all3 agents confirmed no active builds or runtime execution; full Effect selection waits until timings complete.",
+    "quiet_window": "No other builds or runtime executions were active during timing.",
     "start_unix": 1791087171.0699291,
     "script_sha256": "c49fce271289fba1bf62fbe310384c4b051570592791f640932762d84ba53a3a",
     "harness_sha256": "b041101125e8f8e789321983bd5ec1579c3a8a8d63abf584adaae43afdcaf827",

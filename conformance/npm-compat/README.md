@@ -8,7 +8,7 @@ binary's stdout is compared byte for byte. Same output, it passes. The smoke
 tests here are kiln-authored — porffor's are not published.
 
 This is an **informational benchmark, not a gate**. `run.sh` exits 0 even when
-packages fail, and nothing here is wired into `mise run gate` or CI. The
+packages fail, and nothing here is wired into `mise run gate`. The
 committed baselines in `results/` are the record to compare against, not a
 threshold to enforce.
 For acceptance, invoke `runner.py` with `--require-pass`; it retains the complete

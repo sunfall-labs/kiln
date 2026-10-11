@@ -1,6 +1,8 @@
 # Repository microbenchmarks, 2026-10-04
 
-All 22 repository microbenchmarks completed under Node, Bun, the interpreter and native, with no reported checksum divergences. The production compiler is the immutable `560e7ccc` binary validated at `e872e3a0`; all native binaries use `native-release`. Builds finished before the measurement window; the gate and pre-push checks had ended, and all three agents held builds and runtime execution throughout timing.
+A dated record from one Linux machine; `mise run bench` reproduces the table on yours.
+
+All 22 repository microbenchmarks completed under Node, Bun, the interpreter and native, with no reported checksum divergences. The production compiler is the immutable `560e7ccc` binary validated at `e872e3a0`; all native binaries use `native-release`. Builds finished before the measurement window, and no other builds or tests ran during timing.
 
 The repository harness separates first-call timing from warm steady state. The table reports steady-state milliseconds per workload iteration, using the median of three process samples. Native compilation and process startup are excluded. The interpreter uses external timing with its matching measured floor because its virtual clock cannot time synchronous work. [Machine-readable results](microbench-2026-10-04.json) retain all four runtimes, floors, compiler/harness/source/binary digests and the measurement conditions.
 
@@ -31,4 +33,4 @@ Native is faster than Bun in 6 rows and within 10% in 8. The median per-row nati
 | io/fs-promises.mjs | 11 | 5.375 | 4.562 | 0.85x |
 | io/microtasks.mjs | 0.75 | 0.625 | 1.594 | 2.55x |
 
-These are JavaScript microbenchmarks. The direct-TypeScript Effect comparison uses the pinned upstream tests and Bun separately; this table does not replace that inventory or establish whole-suite Effect performance. The earlier run overlapped pre-push builds and was discarded before publishing any timings.
+These are JavaScript microbenchmarks. The direct-TypeScript Effect comparison uses the pinned upstream tests and Bun separately; this table does not replace that inventory or establish whole-suite Effect performance.

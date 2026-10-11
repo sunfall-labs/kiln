@@ -2183,7 +2183,7 @@ fn method_inline_cache_prelude_surface() {
 #[test]
 fn prelude_core_freeze_policy_enforced() {
     // Step 5.1: Freeze prelude_core.c. New builtins are TypeScript with intrinsics (design.md §5).
-    // Policy in CLAUDE.md / AGENTS.md; a builtin added in C is a review refusal.
+    // Policy in AGENTS.md; a builtin added in C is a review refusal.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let agents_md = std::fs::read_to_string(root.join("AGENTS.md")).expect("AGENTS.md readable");
     assert!(

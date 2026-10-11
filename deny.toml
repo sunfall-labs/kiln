@@ -1,4 +1,4 @@
-# Supply-chain policy, enforced by `cargo deny check` in CI (.github/workflows/ci.yml).
+# Supply-chain policy, enforced by `cargo deny check` (run it before a release).
 #
 # The dependency tree is deliberately tiny (docs/adr/0004), so this file is written to notice
 # the moment that stops being true: a new licence, a second copy of a crate, or a source other

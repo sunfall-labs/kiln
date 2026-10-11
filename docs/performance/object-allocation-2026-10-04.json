@@ -177,7 +177,7 @@
     "candidate": 4.4375,
     "bun": 0.018798828125
   },
-  "measurement_conditions": "Three alternating fresh-process rounds with existing in-process harness; all three Luna agents held compiles/tests. Compilation, startup and module setup excluded from warm medians. No active program paused.",
+  "measurement_conditions": "Three alternating fresh-process rounds with existing in-process harness; no other compiles or tests ran. Compilation, startup and module setup excluded from warm medians. No active program paused.",
   "compiler_sha256": {
     "baseline": "4b657e6d6a9ad66a96cc7777aac12232cf3993b081386148a8fa0abafdfe7215",
     "candidate": "27b59b37d8f9d7fb75bddd3dabd3e755867673fca7eeb79bb33a88f3e28e2aeb"

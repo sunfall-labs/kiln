@@ -43,7 +43,7 @@
 # that writes files at fixed paths, which every realm of one process shares; a probe the native
 # backend refuses to build.
 #
-# Execute it; do not `bash` it (see CLAUDE.md: macOS's bash 3.2 breaks the cleanup trap).
+# Execute it; do not `bash` it (see AGENTS.md: macOS's bash 3.2 breaks the cleanup trap).
 if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
 	for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash)"; do
 		# shellcheck disable=SC2016

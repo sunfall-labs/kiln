@@ -43,7 +43,7 @@ and a "not available" cell becomes a number when the feature it names exists.
 
 ## How it measures
 
-The rules are `CLAUDE.md`'s "Benchmarking: time the work, not the launcher":
+The rules are `AGENTS.md`'s "Benchmarking: time the work, not the launcher":
 
 - **Warm, repeated, inside the process.** Every program times itself with `performance.now()`,
   runs a cold iteration first and reports it apart, and reports a median of warm iterations.

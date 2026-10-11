@@ -4,7 +4,7 @@ This records the isolated production `native-release` comparison of the baseline
 collector on the same Effect shrink workload. It measures the production policy; it is not an
 all-O3 comparison. `native-release` keeps the prelude at O3, but large generic source modules are
 compiled at O0 while specialized modules use O2. The workload source was
-`~/.cache/kiln/effect-gc-minor-diagnostic/files/shrink-bench/shrink-benchmark.ts`
+`shrink-benchmark.ts` (not committed)
 (SHA-256 `a61378506dfea63f850798038d15af133e38d01d2076255d8bfd764371df5868`). Both native artifacts
 and Bun reported `SHRINK Falsified:1001:0` on every invocation.
 
@@ -16,8 +16,7 @@ and Bun reported `SHRINK Falsified:1001:0` on every invocation.
 
 The final native median is 45.1% lower than baseline (1.822x faster). It remains 32.3x slower
 than Bun on this workload. Each process warmed once and then emitted three measured samples; the
-nine invocations were alternated across engines. Raw output is retained in
-`.scratch/paired-runtime/` in the measurement worktree.
+nine invocations were alternated across engines. Raw output was not committed.
 
 The source worktrees were isolated: baseline tree `4439a70b1cf7d6f7bcc4033e969a7822711d399f`
 at `56ebd92e97efba4812bb5ffcc585643e6379ca3b`, final tree

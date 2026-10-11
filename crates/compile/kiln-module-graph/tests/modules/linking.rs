@@ -933,9 +933,7 @@ fn debug_pi_index_ts() {
     let handle = std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
-            let index_path = std::path::Path::new(
-                "/path/to/pi/packages/coding-agent/src/cli.ts",
-            );
+            let index_path = std::path::Path::new("/path/to/pi/packages/coding-agent/src/cli.ts");
             if !index_path.exists() {
                 return;
             }
@@ -949,9 +947,8 @@ fn debug_pi_index_ts() {
                 OxcFrontend,
             );
             if let Ok(graph) = &res {
-                let sdk_path = std::path::Path::new(
-                    "/path/to/pi/packages/coding-agent/src/core/sdk.ts",
-                );
+                let sdk_path =
+                    std::path::Path::new("/path/to/pi/packages/coding-agent/src/core/sdk.ts");
                 let resolved = graph.resolved_export(sdk_path, "AgentSessionRuntime");
                 eprintln!("DEBUG_PI SDK RESOLVED: {:?}", resolved);
             }

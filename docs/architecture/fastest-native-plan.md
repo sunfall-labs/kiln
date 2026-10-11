@@ -1,5 +1,9 @@
 # The fastest native path: plan of record
 
+> Written in September 2026 and annotated as steps landed ("Landed <date>" marks what had landed
+> when the row was written). Rows and numbers are point-in-time; current figures come from
+> `mise run bench`, `mise run facts` and the baselines under `bench/results/`.
+
 The steps. The reasoning and the measurements are in `fastest-native-path.md`; this file is what
 to hand to whoever picks up a step. Each step says what it is, where it lives, what it depends on,
 and what "done" means as a number or a gate. Steps inside a phase are independent unless a
@@ -66,7 +70,7 @@ if any one slips, nothing else compensates for it.
 - An optimization landing before the verifier (1.2), the exit mode (2.1) and the fuzzer (2.2).
   A fast wrong answer costs more than the speed it bought.
 - A number from the shared checkout, without its checksum, or without its client count. Every
-  wrong conclusion recorded in `NOTES.md` came from one of those.
+  wrong measurement recorded in `NOTES.md` came from one of those.
 - The compatibility gap. Speed on programs nobody can run is not a runtime. Track C is table
   stakes, not a nice-to-have.
 - Attention on anything under "later, only if needed" before the three bets have landed.
@@ -87,26 +91,10 @@ first, then the inventory's receivers by refused count. At `047bc973`: 313 refus
 `Date.prototype` 33, the typed-array prototype 41, `String.prototype` 15, `Intl` 12, `crypto` 12,
 `RegExp.prototype` 11, the `DisposableStack` prototypes 11 each, `globalThis` 11.
 
-## Start: this week
-
-Phase 0 and B.0 are independent, days each, and they are the scoreboard: nothing after them can
-be judged without them. One worktree and one owner per step, landed as each finishes:
-
-| owner | step | worktree |
-| --- | --- | --- |
-| 1 | 0.1, 0.2 toolchain flags and the FMA probe | `../kiln-flags` |
-| 2 | 0.3 NaN-boxing seam | `../kiln-seam` |
-| 3 | 0.4, 0.5 TDZ elimination and diagnostics | `../kiln-tdz` |
-| 4 | 0.6 bundles in the gate, then Track C | `../kiln-bundles` |
-| 5 | B.0 server scenarios and the leak check, then B.2, B.4, B.7 | `../kiln-io` |
-| 6 | the ADR for 1.1, 1.2 and the invariants; argued in `docs/adr/` while the above land | `../kiln-graph` |
-
-Owner 6 starts 1.1 the day the ADR is accepted and 0.3 has landed.
-
 ## Cadence
 
-- The harness table, with commit hashes and client counts, goes into `NOTES.md` weekly under a
-  dated heading, alongside `docs/issues/fastest-native/measure.sh`'s three rows and the thirdparty
+- The harness table, with commit hashes and client counts, is recorded under a dated heading
+  alongside `docs/issues/fastest-native/measure.sh`'s three rows and the thirdparty
   pass count.
 - A step is done when its "done when" column is true, the gate is green, and its row has moved.
   A step whose row did not move is reverted, not kept.
@@ -141,7 +129,7 @@ Owner 6 starts 1.1 the day the ADR is accepted and 0.3 has landed.
 | # | step | depends on | done when |
 | --- | --- | --- | --- |
 | 2.1 | Versioning. For a region with a non-`unknown` guess, emit the guarded unboxed clone and the generic clone; a guard failure boxes registers and `goto`s the generic clone. Two clones, entry guard, exits at the header and before calls only. `KILN_SPECULATE=0` emits the generic clone alone; `KILN_SPECULATE=exit` fails every guard on first execution, then at random. **Landed 2026-09-05** (`35b22e7`): two clones emitted for speculative regions (Clone A unboxed fast path, Clone B generic fallback), invariant-backed guards in `prelude.rs`, header exit jumps, clean deopt, passes under `KILN_SPECULATE=exit` (106 matched / 0 diverged) and `0`. | 1.3, 1.6 | `loop` ≤ 30 ms **(29 ms, done)**; `mandelbrot` (30.8 ms, 0.99x), `nbody` (843 ms, 1.01x), `collatz` (287 ms, 0.64x) within 1.2x of node **(done)**; the native corpus passes under `=exit` **(done)** |
-| 2.2 | Differential fuzzing of the optimizer. A generator of small typed-ish programs in `fuzz/`, run under `KILN_SPECULATE=0`, `=1`, `=exit` and node, compared by output. **Landed 2026-09-05** (`aa6f6c5a`, `612e02a8`). | 2.1 | runs in CI nightly; a found divergence becomes a `conformance/differential` probe |
+| 2.2 | Differential fuzzing of the optimizer. A generator of small typed-ish programs in `fuzz/`, run under `KILN_SPECULATE=0`, `=1`, `=exit` and node, compared by output. **Landed 2026-09-05** (`aa6f6c5a`, `612e02a8`). | 2.1 | run periodically with `scripts/fuzz-optimizer.sh`; a found divergence becomes a `conformance/differential` probe |
 | 2.3 | Direct calls. A call to an immutable binding is a direct C call. Typed entry (`double f(double)`) beside the boxed entry; known-callee sites with typed arguments call it. Frame globals saved only when `publishes_frame`. **Landed 2026-09-05** (`direct.rs`): a callee is known when it is the `MakeFunction` value or a read of a binding that holds `undefined` then the closure with nothing but inert operations before the defining store; such a call is by name, with the running closure's own upvalue table on self-recursion and no dead-zone check on a binding never marked uninitialized. The typed entry is reached only from sites that proved every argument a number and passed the parameter count; whether it returns a `double` is a greatest fixpoint over the unit. It takes only what its body names -- `double fib_t(int depth, double n)` for fib -- returns its number in a register, and signals a throw, a refusal or the depth limit with `KILN_VAL_TYPED_FAIL`, a NaN payload nothing else produces, the status and thrown value left pending in two frame globals. Bodies that publish no frame no longer write the frame global. fib 51 → 13 ms against node's 22 and the corrected ceiling's 11, at load 5. | 2.1 | `fib` within 1.2x of the 11 ms ceiling **(13 ms, done)**; `frame` within 1.2x of node |
 | 2.4 | Inline sites, closed world first. PIC hit path emitted inline: shape compare, slot load. In a closed program, prototype methods and builtins are final and need no runtime check; in an open program the site falls back to today's out-of-line cache. Intrinsics for `Math.*`, array `length` and `push`, string `length` and index. Epochs are added only if open-world programs measurably need them. **Landed 2026-09-05** (`10ccbec5`, `a5aa5447`). **Continued 2026-09-06:** a cached callee whose body is one of the unit's methods of that name is called by name; a body that can be restarted -- nothing in it has an effect before a slow path -- gets a *fast clone* whose every slow path is a restart through the boxed entry, so it has no runtime call, no saved registers, and is inlined at the site; a function's cache sites are shared by its clones and declared once at file scope; a site's hit compares the receiver's shape against each entry and reads the slot from the receiver; a read of a binding stored once behind an inert prefix of its owner's entry block has no dead-zone check; `Math` is a constant, not a boundary value. Each function has a *receiver-shape cache*: four rows of shapes matched once at entry, a slot per read of `this` in each, filled by the boxed clone and read by every clone with one indexed load and no compare. class-poly 6.5 → 4.2 ms against node's 0.5, every sample now inside the loop with the clones inlined. What is left is the loop around the call -- the element read, the call site's cache and closure checks, the status checks, a tag test on every arithmetic operation and the induction variable's overflow check -- about 120 instructions against node's fifteen. The rest of the way is a typed loop region: slots and call results speculated as numbers under one guard, which is the second half of 2.1 applied to a region rather than a parameter. **Continued 2026-09-06 (typed entries by name, the loop guesses):** a restartable body's typed entry is the fast clone with the typed signature -- every slow path a restart through the boxed body, the parameters boxed again for it -- so a guarded arithmetic result is a number on the fast path and stays a double, and a method-call site whose cache remembers one of the unit's methods enters that typed entry by name with the closure's flags decided by the proto; reads of one name of `this` share a receiver-cache column; an arithmetic result proven a number is computed as its twin and boxed only where the box is read, so the NaN canonicalisation leaves the intermediates; `-fno-math-errno`; the typed entry is `always_inline`, because `static inline` alone left it a call. The versioned body now guesses beyond its parameters: an upvalue stored once and indexed or measured is an array, checked at entry, and a method call whose answer feeds arithmetic answers a number, checked where it answers with an exit into the generic clone right after that call (`Speculation`, invariants `upvalue_array` and `method_call_number`). class-poly 4.2 → 2.2 ms. What is left, about ninety instructions: the site's cache walk and closure checks (~25), each slot read's index load, bound check and tag test (~10), the loop's bound, hole and overflow checks (~15). The ceiling of this design is about fifty; the ideal's twenty-five needs the shape model to give slot indices at compile time (a constructor's stores are one shape path) and a per-shape number representation for a slot, which are runtime work, not emitter work. **Continued 2026-09-06 (the cache answers by where the method lives):** the site cache remembered a prototype method by value under the receiver's shape, and a shape says nothing about the prototype; an entry now remembers the holder, its shape and the record, and a hit walks the chain by pointer and reads the record live (`conformance/native/method-cache-prototype.js`). The receiver-shape cache claims a row whole from the shape's key table at first sight -- slot indices from the shape, no absent-slot or capacity test on a read -- and a typed entry takes its row from the site. class-poly 2.2 → 2.4 ms, sound. **2026-09-06, the rest of the corpus:** booleans carry a twin and proven numbers nothing reads boxed lose their box; the integer slow path is an opaque cold call so it stays a branch (mandelbrot 26 → 13 ms, node 11.4, plain C 11.5); a spread adopts a shaped source's shape, pairs after a spread are defined on the accumulator, eight inline slots (object-spread 11.2 → 4.5 ms, node 0.32, the rest is the between-turns collector: 6.6 GB peak). **2026-09-06:** a site that called a static method on a builtin (`Promise.resolve`, `Object.keys`) now caches it, stamped with a store epoch every write onto a builtin moves and with the realm generation; `Math.*` intrinsics do not yet consult the epoch (`docs/issues/builtin-static-override`). A `DefineNamedProperty` site memoises its shape transition (object-spread 1.96 → 1.15 ms). | 1.6, 2.3 | `class-poly` ≤ 1 ms **(2.4 ms, open)**; `collections`, `object-spread` within 2x of node |
 | 2.5 | Integers inside regions. `int` in the lattice with overflow falling back to `double`, boxed as a double on region exit; induction-variable ranges remove the `%` integrality test. Bounds checks stay. **Landed 2026-09-05** (`f0490be1`, `dc58b7f0`). | 2.1 | `loop` level with node; no tagged integer anywhere in the prelude |
@@ -165,7 +153,7 @@ Owner 6 starts 1.1 the day the ADR is accepted and 0.3 has landed.
 
 | # | step | depends on | done when |
 | --- | --- | --- | --- |
-| 5.1 | Freeze `prelude_core.c` (later split into the domain files under `crates/native/kiln-backend-c/src/runtime/`; the freeze applies to all of them). New builtins are TypeScript with intrinsics (design.md §5). **Landed 2026-09-05** (`0aa69bd2`). | none | policy in `CLAUDE.md`; a builtin added in C is a review refusal |
+| 5.1 | Freeze `prelude_core.c` (later split into the domain files under `crates/native/kiln-backend-c/src/runtime/`; the freeze applies to all of them). New builtins are TypeScript with intrinsics (design.md §5). **Landed 2026-09-05** (`0aa69bd2`). | none | policy in `AGENTS.md`; a builtin added in C is a review refusal |
 | 5.2 | Partial evaluation of builtins. The graph inlines and specializes hot builtin families at call sites on the value graph. Specializations added for `array` (sort with fast timsort, pop, shift, includes with hole handling), `string` (startsWith, endsWith, charCodeAt, charAt, trim, slice, indexOf, substring), `JSON` (stringify, parse), `Map/Set` (alloc, get, set, has, add, delete, clear, .size), and `iterator` (next). **Landed 2026-09-06** (`02a38d46`): zero divergences across native suite (108 matched / 0 diverged), 17 thirdparty bundles matched, all gate checks passed. | 2.4, 4.3 | each migrated family within 1.2x of / faster than C version (collections 28.9ms, json 413ms, array-sort 16.7ms, string-ops 77.2ms) |
 | 5.3 | Regex literals lowered to C matchers at build time; `regress` remains for dynamic patterns. **Landed 2026-09-05** (`89125eb7`, `51120e48`). | 1.3 | `regex` within 1.5x of node (16.58ms vs node 14.0ms, 1.18x) |
 
@@ -203,26 +191,25 @@ step is wrong.
 ## Phase 6: representation, to the 1.2x line
 
 Decided 2026-09-07. Every row of `bench/` within 1.2x of node or ahead of it, most ahead.
-Phases 2 to 5 exhausted the call-site levers (NOTES 2026-09-06: a method call is ninety
+Phases 2 to 5 exhausted the call-site levers (a method call is ninety
 instructions at full width; the rest is the representation). Each remaining gap has one
 named cause, and each cause is a representation change across the runtime, done in this
-order of leverage. Work is split into worktrees by file ownership; the orchestrator owns the
-emitter and integration, agents own bounded runtime projects, and every batch lands through
+order of leverage. Work is split by file ownership, and every batch lands through
 the gate with `KILN_IC_CHECK` and `KILN_SPECULATE=exit` runs where a cache or a clone changed.
 
-| # | project | closes | owner and files | done when |
+| # | project | closes | files | done when |
 | --- | --- | --- | --- | --- |
-| 6.1 | Escape analysis for a literal with a spread: an object whose only uses are its spread, its defines and constant-key reads in one function is never allocated; literal-defined keys read the defined value, other keys read `base`'s slot at the spread point under a learned shape guard, and any other use or a guard failure allocates as today. **Landed 2026-09-08** (`graph.rs`, `emit_graph/`). | object-spread (non-escaping case) | orchestrator; `graph.rs`, `emit_graph/` | object-spread ahead of node (0.18ms vs 0.78ms, 4.2x); probe of spread snapshot semantics matches node under `KILN_SPECULATE=exit` |
-| 6.2 | A shortest-round-trip double formatter in C with JS `Number.prototype.toString` spelling, differentially fuzzed against node; used by JSON first, then by every number-to-text. **Landed 2026-09-08** (`0434dc4e`, `numbers.c`, `json.c`). | json, and every number that becomes text | agent; `numbers.c`, `json.c`, a fuzz probe | one million random doubles and the edge list spell identically to node; json within 1.1x (63ms vs 56ms) |
-| 6.3 | The promise job lane in C: reactions queue into a ring the prelude owns and the drain runs them in one call, with the queue a GC root; next-tick and completion lanes stay where they are and drain around it in node's order. **Landed 2026-09-08** (`91d67016`, `87a30846`, `promises.c`, `heap.c`). | microtasks | agent; `promises.c`, `heap.c` (marking), the FFI drain | microtasks ahead of node (0.60ms vs 0.78ms); ordering probes and the node corpus unchanged |
-| 6.4 | A lean object: a three-word header plus inline slots, the rare fields (accessors, freeze bits, brands, elements) in a side extension; allocation a bump and a template copy, inlined into emitted C; spread a memcpy. **Landed 2026-09-08** (`a8699be1`, `88a34034`). | object-spread (escaping case), json parse, every allocation-heavy row | orchestrator design; agents per file group for the field-access rewrite | object-spread with an escaping literal within 1.2x; no row slower |
-| 6.5 | Typed slots: a shape records which slots hold doubles unboxed, a `this.x` read on the row path is a load with no NaN-box check, and a typed accumulator is never boxed across a loop. **Landed 2026-09-08** (`c1b8ac3c`, `0335e5be`, `shapes.c`, `boxed.c`, emitter). | class-poly, mandelbrot, nbody, loop | orchestrator; `shapes.c`, `boxed.c`, emitter | class-poly within 1.5x (1.65ms vs 1.09ms, ~3.2ns/call); mandelbrot, loop, nbody at or ahead of node |
-| 6.6 | Sliced strings: substring, slice and split parts share the source buffer; join writes into its final string once; the emitted intrinsics make slices. **Landed 2026-09-12** (`9823bb96`, `703b3206`). | string-ops, json stringify | agent for the runtime, orchestrator for the intrinsics | string-ops at parity with node (14.0ms vs 13.25ms); json stringify quoting accelerated |
+| 6.1 | Escape analysis for a literal with a spread: an object whose only uses are its spread, its defines and constant-key reads in one function is never allocated; literal-defined keys read the defined value, other keys read `base`'s slot at the spread point under a learned shape guard, and any other use or a guard failure allocates as today. **Landed 2026-09-08** (`graph.rs`, `emit_graph/`). | object-spread (non-escaping case) | `graph.rs`, `emit_graph/` | object-spread ahead of node (0.18ms vs 0.78ms, 4.2x); probe of spread snapshot semantics matches node under `KILN_SPECULATE=exit` |
+| 6.2 | A shortest-round-trip double formatter in C with JS `Number.prototype.toString` spelling, differentially fuzzed against node; used by JSON first, then by every number-to-text. **Landed 2026-09-08** (`0434dc4e`, `numbers.c`, `json.c`). | json, and every number that becomes text | `numbers.c`, `json.c`, a fuzz probe | one million random doubles and the edge list spell identically to node; json within 1.1x (63ms vs 56ms) |
+| 6.3 | The promise job lane in C: reactions queue into a ring the prelude owns and the drain runs them in one call, with the queue a GC root; next-tick and completion lanes stay where they are and drain around it in node's order. **Landed 2026-09-08** (`91d67016`, `87a30846`, `promises.c`, `heap.c`). | microtasks | `promises.c`, `heap.c` (marking), the FFI drain | microtasks ahead of node (0.60ms vs 0.78ms); ordering probes and the node corpus unchanged |
+| 6.4 | A lean object: a three-word header plus inline slots, the rare fields (accessors, freeze bits, brands, elements) in a side extension; allocation a bump and a template copy, inlined into emitted C; spread a memcpy. **Landed 2026-09-08** (`a8699be1`, `88a34034`). | object-spread (escaping case), json parse, every allocation-heavy row | object model, emitter | object-spread with an escaping literal within 1.2x; no row slower |
+| 6.5 | Typed slots: a shape records which slots hold doubles unboxed, a `this.x` read on the row path is a load with no NaN-box check, and a typed accumulator is never boxed across a loop. **Landed 2026-09-08** (`c1b8ac3c`, `0335e5be`, `shapes.c`, `boxed.c`, emitter). | class-poly, mandelbrot, nbody, loop | `shapes.c`, `boxed.c`, emitter | class-poly within 1.5x (1.65ms vs 1.09ms, ~3.2ns/call); mandelbrot, loop, nbody at or ahead of node |
+| 6.6 | Sliced strings: substring, slice and split parts share the source buffer; join writes into its final string once; the emitted intrinsics make slices. **Landed 2026-09-12** (`9823bb96`, `703b3206`). | string-ops, json stringify | string runtime, emitted intrinsics | string-ops at parity with node (14.0ms vs 13.25ms); json stringify quoting accelerated |
 
 Rules that hold across the phase: no row gets slower (the table is measured whole after every
 landing); a change to a cache or a clone runs the corpora under `KILN_IC_CHECK` and the
-benchmarks under `KILN_SPECULATE=exit` before it lands; an agent reports numbers it measured
-and what it did not do, and the orchestrator reviews the diff before cherry-picking.
+benchmarks under `KILN_SPECULATE=exit` before it lands; a change reports the numbers it measured
+and what it did not do, and the diff is reviewed before it lands.
 
 ## Later, only if needed
 
@@ -254,7 +241,7 @@ client processes: hello 169.6k rps against node 130.2k; mixed 123.4k against nod
 - Trust a TypeScript type. Guard it.
 - Add a `can_fuse_*`. Add a rule.
 - Add a third clone, a heap integer, or remove a bounds check. Reopen the invariants first.
-- Measure on the shared checkout, under load from other agents, or report a number without its
+- Measure on a checkout something else is writing, under load from other builds, or report a number without its
   checksum. `measure.sh` refuses above a load average of 1.5 for this reason.
 - Land a speculative path without its off switch, its exit mode, and a differential run.
 - Put work on the request path into JavaScript that Rust could do with what the closed world knows.
