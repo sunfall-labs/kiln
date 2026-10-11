@@ -21,7 +21,9 @@ every core; several of them will thrash a machine that `mbx` would have kept bus
 
 ### The toolchain comes from mise
 
-`rust@1.97.1` and `mbx` are pinned in the global mise config. Do not install Rust tooling by hand,
+Rust is pinned to `nightly-2026-09-15` in `rust-toolchain.toml` and the repository's `.mise.toml`
+(the type checker, a port of Bun's, uses `allocator_api`); `mbx` is pinned in the global mise
+config. Do not install Rust tooling by hand,
 and do not stub a tool to test a fallback: put a stub in a directory and prepend it to `PATH` for
 one command. (The archived log, `docs/notes/2026-08-29-to-2026-10-02.md`, records ninety minutes lost to a stubbed `rustup` that resolved back into
 itself.)

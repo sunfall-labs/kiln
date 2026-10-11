@@ -178,7 +178,7 @@ target on a `v*` tag and publishes the result.
 
 ## Building from source
 
-Rust 1.97.1 (pinned in `rust-toolchain.toml`) and a C compiler: Zig, Clang, cc or GCC on `PATH`.
+Rust nightly-2026-09-15 (pinned in `rust-toolchain.toml`) and a C compiler: Zig, Clang, cc or GCC on `PATH`.
 
 ```sh
 cargo build
