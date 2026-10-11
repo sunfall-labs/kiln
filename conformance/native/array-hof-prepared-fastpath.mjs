@@ -100,3 +100,54 @@ log("string", Array.prototype.map.call("abc", (x) => x.toUpperCase()));
 // Types that lie: a string receiver and a typed array take their own methods.
 log("typed array", Array.from(new Float64Array([1, 2, 3]).map((x) => x * 2)));
 log("string indexOf", "abcabc".indexOf("c"));
+
+// Non-inert arguments keep the method read ahead of them (prepared call); the loops still run
+// when the saved callee is the original, and not when an argument changed it.
+{
+  let bump = 0;
+  const next = () => ++bump;
+  const arr = [1, 2, 3, 4];
+  log("prepared map thisArg", arr.map(function (x) { return x + this.k; }, { k: next() }));
+  log("prepared reduce init", arr.reduce((a, x) => a + x, next() * 10));
+  log("prepared filter", arr.filter((x) => x > next() ));
+  const swapper = [1, 2, 3];
+  const saved = Array.prototype.indexOf;
+  log("prepared indexOf arg", swapper.indexOf((() => { Array.prototype.indexOf = () => "swapped"; return 2; })()));
+  Array.prototype.indexOf = saved;
+  const own = [5, 6];
+  own.includes = () => "own includes";
+  log("prepared own member", own.includes(next()));
+}
+
+// A hole met after the callback gave the prototype an indexed property: the specification
+// walks the chain at that index.
+{
+  const a = [1, , 3];
+  log("inherited map", a.map((x, i) => { if (i === 0) Array.prototype[1] = "inherited"; return x; }));
+  delete Array.prototype[1];
+  const b = [1, , 3];
+  log("inherited filter", b.filter((x, i) => { if (i === 0) Array.prototype[1] = "inherited"; return true; }));
+  delete Array.prototype[1];
+  const c = [1, , 3];
+  log("inherited reduce", c.reduce((acc, x, i) => { if (i === 0) Object.prototype[1] = 10; return acc + x; }, 0));
+  delete Object.prototype[1];
+  const d = [1, 2];
+  log("grow during filter", d.filter((x, i) => { if (i === 0) d.push(9); return true; }));
+  const e = [1, 2];
+  log("grow during reduce", e.reduce((acc, x, i) => { if (i === 0) e.push(9); return acc + x; }, 0));
+}
+
+// The result of a patched built-in is not necessarily an array, and a chained call must not
+// read it as one.
+{
+  const original = Array.prototype.map;
+  Array.prototype.map = function () { return { length: 2, 0: "x", 1: "y", filter() { return "custom filter"; } }; };
+  log("map returns non-array", [1, 2].map((x) => x).filter((x) => true));
+  Array.prototype.map = original;
+  const originalSlice = Array.prototype.slice;
+  Array.prototype.slice = function () { return "not an array"; };
+  log("slice returns string", [1, 2, 3].slice(0, 2).length);
+  Array.prototype.slice = originalSlice;
+  class Sp extends Array { static get [Symbol.species]() { return function () { return { length: 0, push() {}, forEach() {}, filter() { return "species filter"; } }; }; } }
+  log("species result", Sp.from([1, 2]).map((x) => x) !== undefined);
+}
