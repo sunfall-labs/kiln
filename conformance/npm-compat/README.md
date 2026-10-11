@@ -38,7 +38,8 @@ TIMEOUT_S=300 ./run.sh       # per-package timeout (default 600s)
 ```
 
 Each invocation retains a unique directory under `results/raw/` with full Node,
-compiler, and native stdout/stderr, a TSV, and `results.json`. Unknown filters,
+compiler, and native stdout/stderr, a TSV, and `results.json`. Built executables are deleted once
+they have run (their sizes stay in `results.json`); `--keep-binaries` keeps them. Unknown filters,
 duplicate inventory names, and missing tests are infrastructure errors. Package
 failures remain informational. Compilation and binary execution have separate
 600-second limits and separate durations; `compile-timeout` and `runtime-timeout`

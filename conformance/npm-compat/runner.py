@@ -69,6 +69,8 @@ def main():
                         help='native build profile; release uses NODE_ENV=production for every phase')
     parser.add_argument('--require-pass', action='store_true',
                         help='exit nonzero if any selected package does not pass; retain all evidence')
+    parser.add_argument('--keep-binaries', action='store_true',
+                        help='keep each built executable in the raw directory (they are deleted after running by default: 361 node binaries are >10 GB)')
     parser.add_argument('packages', nargs='*')
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -160,6 +162,8 @@ def main():
                         status = 'pass'
                     else:
                         status = 'wrong-output'
+                    if not args.keep_binaries:
+                        binary.unlink(missing_ok=True)
             result['status'] = status
             evidence['results'].append(result)
             evidence['completed'] = len(evidence['results'])
