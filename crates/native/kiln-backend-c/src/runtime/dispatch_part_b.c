@@ -2682,6 +2682,16 @@
                                                          depth, thrown);
             if (shown_status != KILN_C99_OK) return shown_status;
         }
+        if (shown_separator.tag == KILN_VALUE_STRING && shown_separator.ptr != NULL) {
+            /* Strings and nullish only: nothing can run user code, so the result is sized once
+             * and filled in place instead of staged through a growable UTF-16 buffer. */
+            int joined_directly = 0;
+            status = kiln_c99_join_all_strings(result, array,
+                                               (const kiln_string *)shown_separator.ptr,
+                                               &joined_directly);
+            if (status != KILN_C99_OK) return status;
+            if (joined_directly) return KILN_C99_OK;
+        }
         /* The length is read once, as `LengthOfArrayLike` does: an element's `toString` can
          * push or pop, and the walk goes on to the length it started with, reading a vanished
          * index as undefined. */

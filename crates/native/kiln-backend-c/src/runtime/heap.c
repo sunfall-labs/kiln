@@ -3184,10 +3184,24 @@ static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
 #undef KILN_C99_STORE_LOOKUP_COUNT
 #undef KILN_C99_STORE_INTERIOR_LOOKUP_COUNT
 
+/* The first test `kiln_c99_candidate_record_pointer_store` makes, inline: no candidate groups and
+ * an owner inside the nursery's active range (so young), where the store creates neither an
+ * old-to-young edge nor a ledger entry. Split and slice fill a block they allocated one call ago,
+ * so asking here saves a call per element on the commonest path. Any other owner takes the full
+ * function, which repeats this test and goes on. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_store_barrier_vacuous(const kiln_gc_heap *heap,
+                                                                    const void *owner_payload) {
+    return heap != NULL && heap->candidate_ledger_groups == 0 && heap->nursery.active &&
+           heap->nursery.base != NULL && heap->nursery.bump != NULL &&
+           (uintptr_t)owner_payload >= (uintptr_t)heap->nursery.base &&
+           (uintptr_t)owner_payload < (uintptr_t)heap->nursery.bump;
+}
+
 static KILN_ALWAYS_INLINE inline void kiln_c99_candidate_record_val_store(
     const void *owner_payload, kiln_val value) {
     if (owner_payload == NULL || KILN_VAL_IS_NUMBER(value) ||
         value < KILN_TAG_STRING_PREFIX || kiln_c99_no_write_depth != 0) return;
+    if (kiln_c99_store_barrier_vacuous(kiln_c99_gc_heap_if_cached(), owner_payload)) return;
     kiln_c99_candidate_record_pointer_store(kiln_c99_gc_heap(), owner_payload,
                                             KILN_VAL_PTR(value));
 }
@@ -3231,7 +3245,7 @@ static KILN_ALWAYS_INLINE inline void kiln_c99_heap_store_pointer(
         kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
         if (KILN_UNLIKELY(heap == NULL))
             kiln_c99_heap_record_pointer(owner_payload, pointer);
-        else
+        else if (!kiln_c99_store_barrier_vacuous(heap, owner_payload))
             kiln_c99_candidate_record_pointer_store(heap, owner_payload, pointer);
     }
     memcpy(slot, &pointer, sizeof pointer);
