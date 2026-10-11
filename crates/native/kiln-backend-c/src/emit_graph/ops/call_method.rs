@@ -1175,6 +1175,30 @@ pub(super) fn typed_call_args_for(
 /// change which indices are visited (the interpreter's own `generic_array_callback` captures the
 /// length once too, for the same reason), so the built array's capacity, fixed to `count0` at
 /// creation, is exactly what the loop writes.
+/// The statements that settle a hole met by a call-site array loop. The loop opened with
+/// `ARRAY_METHOD_GUARD`, `arr->properties.tag == UNDEFINED`, so while those still hold a hole has
+/// no inherited indexed property and stays a hole; a callback may have changed that since (it can
+/// write `Array.prototype[i]` or re-parent the receiver), in which case HasProperty/Get walk the
+/// real chain exactly as the specification does for this index. `elem` is the kiln_val read from
+/// the array (`KILN_VAL_HOLE` for a hole or an index past the live length) and is replaced by
+/// the inherited value when there is one; it is still `KILN_VAL_HOLE` afterwards when the index
+/// is genuinely absent.
+fn inherited_element(o: u32, check: &str) -> String {
+    format!(
+        "if (elem == KILN_VAL_HOLE && KILN_UNLIKELY(!({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED))) {{ \
+             kiln_value hole_key = kiln_c99_number((double)idx); int hole_present = 0; \
+             int hole_status = kiln_c99_has_computed(host, kiln_val_to_boundary(v{o}), hole_key, &hole_present, depth, thrown); \
+             if (hole_status != KILN_C99_OK) {{ int status = hole_status; {check} }} \
+             if (hole_present) {{ \
+                 kiln_value hole_value = kiln_c99_undefined(); \
+                 hole_status = kiln_c99_get_computed(host, kiln_val_to_boundary(v{o}), hole_key, &hole_value, depth, thrown); \
+                 if (hole_status != KILN_C99_OK) {{ int status = hole_status; {check} }} \
+                 elem = kiln_val_from_boundary(hole_value); \
+             }} \
+         }}"
+    )
+}
+
 fn emit_map_typed(
     symbol: &str,
     o: u32,
@@ -1213,16 +1237,19 @@ fn emit_map_typed(
     // non-number or a hole into it. The element is then read at its visit, an index past the
     // current length is a hole, and an element that is no longer a number goes through the
     // boxed body -- `map`'s own steps. A callback that reaches nothing keeps the plain loop.
+    let resolve = inherited_element(o, check);
     let (elements, element, step) = if c.needs.runtime {
         (
             String::new(),
             "arr->elements[idx]".to_owned(),
             format!(
                 "if (KILN_UNLIKELY(idx >= arr->count || !KILN_VAL_IS_NUMBER(arr->elements[idx]))) {{ \
-                     if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
+                     kiln_val elem = idx < arr->count ? arr->elements[idx] : KILN_VAL_HOLE; \
+                     {resolve} \
+                     if (elem == KILN_VAL_HOLE) {{ \
                          out_elems[idx] = KILN_VAL_HOLE; built_arr->is_numeric = 0; built_arr->count = idx + 1; continue; \
                      }} \
-                     kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                     kiln_val vargs[3] = {{ elem, kiln_c99_val_from_double((double)idx), v{o} }}; \
                      kiln_val prod = KILN_VAL_UNDEFINED; \
                      int status; \
                      if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
@@ -1298,12 +1325,14 @@ fn emit_map_typed(
                      if (status != KILN_C99_OK) return status; \
                      kiln_array *built_arr = kiln_c99_array_of(built_val); \
                      for (size_t idx = 0; idx < count0; ++idx) {{ \
-                         if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
+                         kiln_val elem = idx < arr->count ? arr->elements[idx] : KILN_VAL_HOLE; \
+                         {resolve} \
+                         if (elem == KILN_VAL_HOLE) {{ \
                              kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], KILN_VAL_HOLE); \
                              built_arr->is_numeric = 0; \
                              continue; \
                          }} \
-                         kiln_val vargs[3] = {{ arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                         kiln_val vargs[3] = {{ elem, kiln_c99_val_from_double((double)idx), v{o} }}; \
                          kiln_val prod = KILN_VAL_UNDEFINED; \
                          int status; \
                          if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)3); }} \
@@ -1348,6 +1377,7 @@ fn emit_filter_typed(
     }
     let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
     let call_args = typed_call_args(c.needs, &param_refs);
+    let resolve = inherited_element(o, check);
     let (call, truthy) = if c.returns_double {
         (
             format!(
@@ -1411,13 +1441,15 @@ fn emit_filter_typed(
                      v{v} = kiln_val_from_boundary(built_val); \
                      handled = 1; \
                  }} else if (!plain->generator) {{ \
+                     size_t count0 = arr->count; \
                      kiln_value built_val; \
-                     int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, 1); \
+                     int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
                      if (status != KILN_C99_OK) return status; \
                      kiln_array *built_arr = kiln_c99_array_of(built_val); \
-                     for (size_t idx = 0; idx < arr->count; ++idx) {{ \
-                         if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
-                         kiln_val elem = arr->elements[idx]; \
+                     for (size_t idx = 0; idx < count0; ++idx) {{ \
+                         kiln_val elem = idx < arr->count ? arr->elements[idx] : KILN_VAL_HOLE; \
+                         {resolve} \
+                         if (elem == KILN_VAL_HOLE) continue; \
                          kiln_val vargs[3] = {{ elem, kiln_c99_val_from_double((double)idx), v{o} }}; \
                          kiln_val prod = KILN_VAL_UNDEFINED; \
                          int status; \
@@ -1459,6 +1491,7 @@ fn emit_reduce_typed(
     let (o, a0, a1, v) = site;
     let target = c.target;
     let call_args = typed_call_args(c.needs, &["dacc", "d_elem"]);
+    let resolve = inherited_element(o, check);
     let (header, footer) = if known_arr {
         (
             format!(
@@ -1502,9 +1535,12 @@ fn emit_reduce_typed(
                      handled = 1; \
                  }} else if (!plain->generator) {{ \
                      kiln_val vacc = v{a1}; \
-                     for (size_t idx = 0; idx < arr->count; ++idx) {{ \
-                         if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
-                         kiln_val vargs[4] = {{ vacc, arr->elements[idx], kiln_c99_val_from_double((double)idx), v{o} }}; \
+                     size_t count0 = arr->count; \
+                     for (size_t idx = 0; idx < count0; ++idx) {{ \
+                         kiln_val elem = idx < arr->count ? arr->elements[idx] : KILN_VAL_HOLE; \
+                         {resolve} \
+                         if (elem == KILN_VAL_HOLE) continue; \
+                         kiln_val vargs[4] = {{ vacc, elem, kiln_c99_val_from_double((double)idx), v{o} }}; \
                          kiln_val prod = KILN_VAL_UNDEFINED; \
                          int status; \
                          if (!plain->publishes_frame) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; status = plain->body(&ctx_call, &prod, plain->upvalues, &vrecv, vargs, (size_t)4); }} \
@@ -1522,17 +1558,14 @@ fn emit_reduce_typed(
     )
 }
 
-fn program_key(program: &kiln_ir::Program, name: u32) -> String {
-    match program.constants.get(name as usize) {
-        Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
+/// Whether `object` is the result of an array literal, so a loop can read it as a `kiln_array`
+/// without testing its kind. Only a literal counts: the result of `map`, `filter`, `slice` or
+/// `concat` is whatever the method returns, and with `Array.prototype.<m>` patched (or a
+/// `Symbol.species` constructor) that is not an array, so those results get the kind test.
 fn is_proven_array(
     object: ValueId,
     defs: &std::collections::HashMap<ValueId, &GraphOp>,
-    program: &kiln_ir::Program,
+    _program: &kiln_ir::Program,
 ) -> bool {
     let mut curr = object;
     for _ in 0..8 {
@@ -1541,31 +1574,6 @@ fn is_proven_array(
             Some(GraphOp::StoreLocal { value, .. })
             | Some(GraphOp::StoreCell { value, .. })
             | Some(GraphOp::CheckTdz { value, .. }) => curr = *value,
-            Some(GraphOp::CallMethod {
-                object,
-                name,
-                prepared_callee: None,
-                ..
-            }) => {
-                let method = program.constants.get(*name as usize).and_then(|c| match c {
-                    Constant::String(s) => s.to_scalar_string().ok(),
-                    _ => None,
-                });
-                // `map`, `filter`, `slice` and `concat` answer an array only on an array: a
-                // typed array's answer a typed array, and a string's `slice` a string. So they
-                // prove an array only when their own receiver is one -- `view.slice().sort()`
-                // took the array `sort` over a typed array's block and left it unsorted.
-                return match method.as_deref() {
-                    // `split` is not here: `String.prototype.split` can be patched, and a
-                    // separator with a `Symbol.split` answers whatever it likes, so its result
-                    // is an array only when the generic path says so. The intrinsic arms that
-                    // trust a proven array dereference it with no kind test.
-                    Some("map" | "filter" | "slice" | "concat") => {
-                        is_proven_array(*object, defs, program)
-                    }
-                    _ => false,
-                };
-            }
             _ => return false,
         }
     }
@@ -1640,19 +1648,16 @@ pub(super) fn emit_call_method(
     ctx: &OpContext,
 ) {
     if let Some(callee) = prepared_callee {
-        // The string and array-slice/join intrinsics below read only the receiver and the
-        // arguments, never the callee, so a prepared call runs them too: the member is looked
-        // up before the arguments, but the intrinsics' own guards (the built-in tables are
-        // untouched for this name, now) reject any call whose arguments rewrote it, and the
-        // saved callee must be a built-in method value.
-        let prepared_name = match program_key(ctx.program, *name).as_str() {
-            "split" | "slice" | "join" | "indexOf" | "substring" | "startsWith" | "endsWith"
-            | "charCodeAt" | "charAt" | "trim" => true,
-            _ => false,
+        // A prepared call (the method was read before its arguments) runs the array loops below
+        // too, behind an identity test on the saved callee (`prepared_original_member`). Units
+        // that cannot use them, and the parallel family, keep the plain prepared call.
+        let key = match ctx.program.constants.get(*name as usize) {
+            Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+            _ => String::new(),
         };
-        if !prepared_name || ctx.parallel || ctx.plan.generic_only {
+        if ctx.plan.generic_only || ctx.parallel || key.starts_with("parallel") {
             emit_call_prepared_method(
-                output, vid, object, name, &callee, args, line, column, ctx, "",
+                output, vid, object, name, &callee, args, line, column, ctx, "", None,
             );
             return;
         }
@@ -2832,7 +2837,9 @@ pub(super) fn emit_call_method(
                              kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                              kiln_c99_normalize_closure_receiver(&vrecv, plain); \
                              for (size_t idx = 0; idx < count0; ++idx) {{ \
-                                 if (idx >= arr->count || arr->elements[idx] == KILN_VAL_HOLE) {{ \
+                                 kiln_val elem = idx < arr->count ? arr->elements[idx] : KILN_VAL_HOLE; \
+                                 {resolve} \
+                                 if (elem == KILN_VAL_HOLE) {{ \
                                      kiln_c99_heap_store_val(built_arr, &built_arr->elements[built_arr->count++], KILN_VAL_HOLE); \
                                      built_arr->is_numeric = 0; \
                                      continue; \
@@ -2852,13 +2859,14 @@ pub(super) fn emit_call_method(
                         "plain",
                         "vrecv",
                         &[
-                            "arr->elements[idx]",
+                            "elem",
                             "kiln_c99_val_from_double((double)idx)",
                             &format!("v{}", object.0)
                         ],
                         "prod",
                         &check
                     ),
+                    resolve = inherited_element(object.0, &check),
                 )
             }
         };
@@ -2904,15 +2912,17 @@ pub(super) fn emit_call_method(
                 format!(
                     "{header} \
                          if (KILN_LIKELY({ARRAY_METHOD_GUARD} && arr->properties.tag == KILN_VALUE_UNDEFINED && !plain->generator && !kiln_inheriting && depth < KILN_C99_MAX_CALL_DEPTH && ({this_ok}))) {{ \
+                             size_t count0 = arr->count; \
                              kiln_value built_val; \
-                             int status = kiln_c99_new_array_with_capacity(&built_val, arr->count, 1); \
+                             int status = kiln_c99_new_array_with_capacity(&built_val, count0, 1); \
                              if (status != KILN_C99_OK) return status; \
                              kiln_array *built_arr = kiln_c99_array_of(built_val); \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : {this_arg}; \
                              kiln_c99_normalize_closure_receiver(&vrecv, plain); \
-                             for (size_t idx = 0; idx < arr->count; ++idx) {{ \
-                                 if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
-                                 kiln_val elem = arr->elements[idx]; \
+                             for (size_t idx = 0; idx < count0; ++idx) {{ \
+                                 kiln_val elem = idx < arr->count ? arr->elements[idx] : KILN_VAL_HOLE; \
+                                 {resolve} \
+                                 if (elem == KILN_VAL_HOLE) continue; \
                                  kiln_val prod = KILN_VAL_UNDEFINED; \
                                  {call} \
                                  if (kiln_c99_val_truthy(prod)) {{ \
@@ -2935,6 +2945,7 @@ pub(super) fn emit_call_method(
                         "prod",
                         &check
                     ),
+                    resolve = inherited_element(object.0, &check),
                 )
             }
         };
@@ -2971,8 +2982,11 @@ pub(super) fn emit_call_method(
                              kiln_val vacc = v{a1}; \
                              kiln_val vrecv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; \
                              kiln_c99_normalize_closure_receiver(&vrecv, plain); \
-                             for (size_t idx = 0; idx < arr->count; ++idx) {{ \
-                                 if (arr->elements[idx] == KILN_VAL_HOLE) continue; \
+                             size_t count0 = arr->count; \
+                             for (size_t idx = 0; idx < count0; ++idx) {{ \
+                                 kiln_val elem = idx < arr->count ? arr->elements[idx] : KILN_VAL_HOLE; \
+                                 {resolve} \
+                                 if (elem == KILN_VAL_HOLE) continue; \
                                  kiln_val prod = KILN_VAL_UNDEFINED; \
                                  {call} \
                                  vacc = prod; \
@@ -2987,13 +3001,14 @@ pub(super) fn emit_call_method(
                         "vrecv",
                         &[
                             "vacc",
-                            "arr->elements[idx]",
+                            "elem",
                             "kiln_c99_val_from_double((double)idx)",
                             &format!("v{}", object.0)
                         ],
                         "prod",
                         &check
                     ),
+                    resolve = inherited_element(object.0, &check),
                 )
             }
         };
@@ -4114,21 +4129,19 @@ pub(super) fn emit_call_method(
     // realm has written onto a built-in; after that, whether this realm's program wrote this name
     // onto one of them, remembered per name. A written member falls through to the cached and
     // named paths below, which find it.
-    if let Some(callee) = prepared_callee {
+    // A prepared call's string intrinsics, behind the string kind's own member guard (the
+    // intrinsics themselves test that the receiver is a string).
+    let prepared_strings = {
         let only_strings =
             format!("{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{string_extra_s}");
-        let guarded = if only_strings.trim().is_empty() {
+        if only_strings.trim().is_empty() {
             String::new()
         } else {
             format!(
                 " if (KILN_VAL_IS_METHOD(method) && kiln_c99_kind_member_unmodified(\"{key_str}\")) {{{only_strings} }}"
             )
-        };
-        emit_call_prepared_method(
-            output, vid, object, name, &callee, args, line, column, ctx, &guarded,
-        );
-        return;
-    }
+        }
+    };
     let kind_intrinsics = format!(
         "{push_s}{regex_s}{map_s}{filter_s}{reduce_s}{slice_s}{join_s}{split_s}{index_of_s}{substring_s}{collection_s}{sort_s}{array_extra_s}{string_extra_s}"
     );
@@ -4142,6 +4155,29 @@ pub(super) fn emit_call_method(
     } else {
         String::new()
     };
+    if let Some(callee) = prepared_callee {
+        // Everything above is the by-name call's own lowering; here the callee is already in
+        // hand, so only the intrinsic text is wanted and the prepared emitter places it.
+        let loops = if kind_intrinsics.trim().is_empty() {
+            None
+        } else {
+            Some(format!("{typed_remembered}{kind_intrinsics}"))
+        };
+        emit_call_prepared_method(
+            output,
+            vid,
+            object,
+            name,
+            &callee,
+            args,
+            line,
+            column,
+            ctx,
+            &prepared_strings,
+            loops.as_deref(),
+        );
+        return;
+    }
     let n = argc.max(1);
 
     let typed_sync = if typed && spec.exits && spec.calls.contains(&vid) {
@@ -4345,6 +4381,27 @@ fn prepared_math_body(name: &str, argc: usize) -> Option<(&'static str, String)>
 /// Emit a named call with its property value already resolved before argument evaluation.
 /// Static candidates still enter their generated body directly, but the saved value is always
 /// the authority: arguments may have replaced the property's current value by this point.
+/// C statements declaring `int prepared_original`: whether the saved callee `method` (a `kiln_val`
+/// read before the call's arguments) is the original `member` of the built-in `builtin` (a
+/// `KILN_C99_BUILTIN_` suffix such as `ARRAY_PROTOTYPE`, `STRING_PROTOTYPE`, `MATH`). It holds
+/// only while the program has written no member of that name onto the built-in
+/// (`kiln_c99_builtin_member_unmodified`, so the read below can reach no accessor) and the
+/// value the built-in answers for the name is the saved one -- the identity compare that
+/// proves an intrinsic standing in for the member is standing in for what the program called.
+/// `check` is the site's status check, run on `status` if the read itself fails. Every
+/// prepared-aware intrinsic (arrays, strings, `Math`) uses this one test.
+pub(crate) fn prepared_original_member(
+    builtin: &str,
+    member: &str,
+    method: &str,
+    check: &str,
+) -> String {
+    format!(
+        "int prepared_original = 0; if (kiln_c99_builtin_member_unmodified(KILN_C99_BUILTIN_{builtin}, \"{member}\")) {{ kiln_value canonical = kiln_c99_undefined(); int canonical_status = kiln_c99_get(host, kiln_c99_builtin(KILN_C99_BUILTIN_{builtin}), \"{member}\", {len}, &canonical, depth, thrown); if (canonical_status != KILN_C99_OK) {{ status = canonical_status; {check} }} else {{ prepared_original = kiln_c99_strict_equal(canonical, kiln_val_to_boundary({method})); }} }} ",
+        len = member.len(),
+    )
+}
+
 fn emit_call_prepared_method(
     output: &mut String,
     vid: ValueId,
@@ -4356,6 +4413,7 @@ fn emit_call_prepared_method(
     column: u32,
     ctx: &OpContext,
     string_intrinsics: &str,
+    array_intrinsics: Option<&str>,
 ) {
     let v = vid.0;
     let method = callee.0;
@@ -4634,6 +4692,19 @@ fn emit_call_prepared_method(
         })
         .unwrap_or_default();
 
+    // The array loops lowered for the by-name call, for a receiver that is an array whose saved
+    // callee is `Array.prototype.<name>` itself. They leave `handled` clear whenever one of their
+    // own guards fails, and the saved callee is invoked below as before.
+    let array_loops = array_intrinsics
+        .map(|loops| {
+            let identity =
+                prepared_original_member("ARRAY_PROTOTYPE", &key_str, "method", &check);
+            format!(
+                "if (!handled && (recv & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(recv)) == KILN_GC_ARRAY) {{ {identity} if (prepared_original) {{ {loops} }} }} "
+            )
+        })
+        .unwrap_or_default();
+
     let sync = if ctx.live_numbers.contains(&vid) {
         if ctx.spec.exits && ctx.spec.calls.contains(&vid) {
             let invariant = lookup_speculation_invariant("method_call_number");
@@ -4663,7 +4734,7 @@ fn emit_call_prepared_method(
     writeln!(
         output,
 
-        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});\n    {{ {arguments} kiln_val method = v{method}; kiln_val recv = v{receiver}; int status; int kiln_twin = 0; int handled = 0; {prepared_intrinsics} {parallel_pool} if (!handled && KILN_VAL_IS_CLOSURE(method)) {{ kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(method); if (!plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val receiver_for_call = plain->arrow ? plain->captured_this : recv; KILN_C99_NORMALIZE_RECEIVER(receiver_for_call, plain); int kiln_typed_ok = !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH; (void)kiln_typed_ok; {typed_direct} if (!handled) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; kiln_js_frame js_frame; kiln_c99_js_frame_enter_named(&js_frame, plain, {method_key}); {direct} kiln_c99_js_frame_leave_inline(&js_frame); {check} v{v} = call_result; }} }} else if (!handled) {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} }} else if (!handled && KILN_VAL_IS_METHOD(method) && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_val_invoke_cached_method(host, KILN_VAL_METHOD_ID(method), recv, {args_ptr}, (size_t){argc}, depth, thrown, &v{v}); kiln_c99_js_frame_set_method_name(NULL); {check} }} else if (!handled) {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} {sync}{sync_int} }}",
+        "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});\n    {{ {arguments} kiln_val method = v{method}; kiln_val recv = v{receiver}; int status; int kiln_twin = 0; int handled = 0; {prepared_intrinsics} {array_loops} {parallel_pool} if (!handled && KILN_VAL_IS_CLOSURE(method)) {{ kiln_closure *plain = (kiln_closure *)KILN_VAL_PTR(method); if (!plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_val call_result = KILN_VAL_UNDEFINED; kiln_val receiver_for_call = plain->arrow ? plain->captured_this : recv; KILN_C99_NORMALIZE_RECEIVER(receiver_for_call, plain); int kiln_typed_ok = !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH; (void)kiln_typed_ok; {typed_direct} if (!handled) {{ kiln_host call_host; kiln_call_context ctx_call = {{ kiln_c99_closure_host(host, plain, &call_host), thrown, NULL, depth + 1 }}; kiln_js_frame js_frame; kiln_c99_js_frame_enter_named(&js_frame, plain, {method_key}); {direct} kiln_c99_js_frame_leave_inline(&js_frame); {check} v{v} = call_result; }} }} else if (!handled) {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} }} else if (!handled && KILN_VAL_IS_METHOD(method) && depth < KILN_C99_MAX_CALL_DEPTH) {{ kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_val_invoke_cached_method(host, KILN_VAL_METHOD_ID(method), recv, {args_ptr}, (size_t){argc}, depth, thrown, &v{v}); kiln_c99_js_frame_set_method_name(NULL); {check} }} else if (!handled) {{ kiln_value bargs[{argcap}]; for (size_t i = 0; i < (size_t){argc}; i++) bargs[i] = kiln_val_to_boundary(call_args[i]); kiln_value result = kiln_c99_undefined(); kiln_c99_js_frame_set_method_name({method_key}); status = kiln_c99_call(host, &result, kiln_val_to_boundary(method), kiln_val_to_boundary(recv), {boundary_args}, (size_t){argc}, depth, thrown); kiln_c99_js_frame_set_method_name(NULL); {check} v{v} = kiln_val_from_boundary(result); }} {sync}{sync_int} }}",
 
         argcap = argc.max(1),
         boundary_args = if argc == 0 { "NULL" } else { "bargs" },

@@ -227,6 +227,35 @@ pub enum GraphOp {
     },
 }
 
+/// The index of the `GetProperty` that produced `callee` when the operations after it, up to the
+/// end of `operations`, are the arguments of a call that can neither run user code, write, throw
+/// nor suspend. Then reading the method after the arguments instead of before them is
+/// unobservable, and the call needs no saved callee.
+fn foldable_prepared_lookup(
+    operations: &[(ValueId, GraphOp)],
+    callee: ValueId,
+    object: ValueId,
+    name: u32,
+) -> Option<usize> {
+    let lookup = operations.iter().rposition(|(value, _)| *value == callee)?;
+    let GraphOp::GetProperty {
+        object: read_object,
+        name: read_name,
+        ..
+    } = &operations[lookup].1
+    else {
+        return None;
+    };
+    if *read_object != object || *read_name != name {
+        return None;
+    }
+    let allowed = Effects::ALLOCATES | Effects::READS_HEAP;
+    operations[lookup + 1..]
+        .iter()
+        .all(|(_, op)| op.effects().difference(allowed).is_empty())
+        .then_some(lookup)
+}
+
 impl GraphOp {
     /// Every value this operation reads.
     pub fn operands(&self) -> Vec<ValueId> {
@@ -1745,6 +1774,36 @@ pub fn build_function_graph(
                     let site = graph.alloc_site();
                     let result = graph.alloc_value();
                     let call_site = program.debug_call_site(debug_function_span, pc);
+                    // The lookup the compiler hoisted ahead of the arguments is only observable
+                    // when something between it and the call can run user code or write; when
+                    // nothing can, the ordinary by-name call is the same program, and it is the
+                    // form every intrinsic (`map`, `filter`, `indexOf`, `Math.*`...) lowers.
+                    if let Some(lookup) =
+                        foldable_prepared_lookup(&operations, prepared_callee, object, *name)
+                    {
+                        operations.remove(lookup);
+                        operations.push((
+                            result,
+                            GraphOp::CallMethod {
+                                object,
+                                name: *name,
+                                args,
+                                prepared_callee: None,
+                                site,
+                                line: call_site.map_or(0, |entry| entry.line),
+                                column: call_site.map_or(0, |entry| entry.column),
+                            },
+                        ));
+                        graph.origins.insert(
+                            result,
+                            Origin {
+                                pc: pc as u32,
+                                label: crate::instruction_diagnostic(inst, &program.constants),
+                            },
+                        );
+                        frame.stack.push(result);
+                        continue;
+                    }
                     operations.push((
                         result,
                         GraphOp::CallMethod {
@@ -5162,5 +5221,68 @@ mod dead_phi_tests {
         assert!(!changed);
         assert_eq!(graph.blocks.len(), 3);
         crate::verifier::verify_function_graph(&graph).expect("graph verifies");
+    }
+}
+
+#[cfg(test)]
+mod prepared_fold_tests {
+    use super::*;
+
+    fn lookup(result: u32, object: u32, name: u32) -> (ValueId, GraphOp) {
+        (
+            ValueId(result),
+            GraphOp::GetProperty {
+                object: ValueId(object),
+                name,
+                site: SiteId(0),
+            },
+        )
+    }
+
+    #[test]
+    fn hoisted_lookup_folds_when_arguments_are_inert() {
+        let ops = vec![
+            lookup(2, 1, 7),
+            (
+                ValueId(3),
+                GraphOp::MakeFunction {
+                    index: 0,
+                    site: SiteId(1),
+                },
+            ),
+            (ValueId(4), GraphOp::LoadLocal(0)),
+        ];
+        assert_eq!(
+            foldable_prepared_lookup(&ops, ValueId(2), ValueId(1), 7),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn hoisted_lookup_stays_prepared_when_arguments_can_run_user_code() {
+        let ops = vec![lookup(2, 1, 7), lookup(3, 9, 8)];
+        assert_eq!(
+            foldable_prepared_lookup(&ops, ValueId(2), ValueId(1), 7),
+            None
+        );
+        let ops = vec![lookup(2, 1, 7), (ValueId(3), GraphOp::LoadCell(0))];
+        assert_eq!(
+            foldable_prepared_lookup(&ops, ValueId(2), ValueId(1), 7),
+            None
+        );
+    }
+
+    #[test]
+    fn lookup_of_another_receiver_or_name_is_not_folded() {
+        let ops = vec![lookup(2, 5, 7)];
+        assert_eq!(
+            foldable_prepared_lookup(&ops, ValueId(2), ValueId(1), 7),
+            None
+        );
+        let ops = vec![lookup(2, 1, 6)];
+        assert_eq!(
+            foldable_prepared_lookup(&ops, ValueId(2), ValueId(1), 7),
+            None
+        );
     }
 }
