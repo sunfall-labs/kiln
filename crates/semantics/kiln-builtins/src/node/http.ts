@@ -60,6 +60,23 @@ if (incomingMessagePrototype && typeof Readable === "function") {
   if (IncomingMessage.prototype !== incomingMessagePrototype) {
     IncomingMessage.prototype = incomingMessagePrototype;
   }
+  // The host ends a request body with `push(null)`. Readable state for a message that nobody
+  // streams would be built only to record that, on every request, so the end waits on the
+  // message instead: the `_readableState` getter below replays it the first time anything
+  // reads the stream, and adding a listener the end would reach asks for the state.
+  const pendingEnd = Symbol("kiln.http.pendingEnd");
+  const readablePush = Readable.prototype.push;
+  Object.defineProperty(incomingMessagePrototype, "push", {
+    configurable: true,
+    writable: true,
+    value: function push(this: any, chunk: any, encoding?: any): boolean {
+      if (chunk === null && !Object.prototype.hasOwnProperty.call(this, "_readableState")) {
+        this[pendingEnd] = true;
+        return false;
+      }
+      return readablePush.call(this, chunk, encoding);
+    },
+  });
   // Native EventEmitter methods own listener storage for HTTP host objects. Keep that storage
   // authoritative, while applying Readable's data-listener transition through the shared state.
   for (const name of ["on", "addListener", "once"]) {
@@ -70,7 +87,11 @@ if (incomingMessagePrototype && typeof Readable === "function") {
       writable: true,
       value: function (this: any, event: any, listener: any): any {
         const result = nativeRegister.call(this, event, listener);
-        if (event === "data" && this._readableState.flowing !== false) this.resume();
+        if (event === "data") {
+          if (this._readableState.flowing !== false) this.resume();
+        } else if (this[pendingEnd] && (event === "end" || event === "readable" || event === "close")) {
+          void this._readableState;
+        }
         return result;
       },
     });
@@ -137,6 +158,10 @@ if (incomingMessagePrototype && typeof Readable === "function") {
       if (incoming.readable === undefined) incoming.readable = initialized.readable;
       if (incoming.readableEnded === undefined) incoming.readableEnded = initialized.readableEnded;
       if (incoming.destroyed === undefined) incoming.destroyed = initialized.destroyed;
+      if (incoming[pendingEnd]) {
+        incoming[pendingEnd] = false;
+        readablePush.call(incoming, null);
+      }
       return state;
     },
   });

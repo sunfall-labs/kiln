@@ -60,7 +60,7 @@ def runtime_command(runtime: str, variant: dict[str, Path], workload: str, sourc
     if runtime == "kiln": return [str(variant["hello" if simple_server else "app"])]
     if runtime == "node": return ["node", str(script)]
     if runtime == "bun": return ["bun", "run", str(script)]
-    if runtime == "deno": return ["deno", "run", "--allow-net", "--quiet", str(script)]
+    if runtime == "deno": return ["deno", "run", "--allow-net", "--allow-read", "--quiet", str(script)]
     raise ValueError(f"unknown runtime {runtime}")
 
 def client_command(node_bin: str, driver: Path, duration: int, connections: int, port: int, workload: str) -> list[str]:
