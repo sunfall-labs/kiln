@@ -4331,6 +4331,7 @@ static int kiln_dyn_source_to_string(const char *source, size_t source_len, kiln
 static char *kiln_dyn_utf8_from_units(const uint16_t *units, size_t count, size_t *byte_len) {
 static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
 static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+static int kiln_dyn_eval_sequence(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_preflight_indirect_eval(kiln_host *host, const char *source, size_t length,
 static int kiln_dyn_validate_parameter_separators(const char *source, size_t length,
 static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t length,
@@ -4371,6 +4372,7 @@ typedef enum {
 static int kiln_dyn_resolve_update_reference(kiln_host *host, kiln_dyn_scope *scope,
 static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
 static kiln_value kiln_dyn_void_result(void) {
+static int kiln_dyn_await_operand_follows(const kiln_dyn_lexer *lex) {
 static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_multiplicative(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_additive(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -4386,12 +4388,18 @@ static int kiln_dyn_eval_logical_and(kiln_host *host, kiln_dyn_lexer *lex, kiln_
 static int kiln_dyn_eval_logical_or(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_ternary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_member_assignment_ahead(const kiln_dyn_lexer *input, int mode) {
+static int kiln_dyn_eval_member_assignment_impl(kiln_host *host, kiln_dyn_lexer *lex,
 static int kiln_dyn_eval_member_assignment(kiln_host *host, kiln_dyn_lexer *lex,
+static int kiln_dyn_call_chain_assignment_ahead(const kiln_dyn_lexer *input, size_t *final_offset) {
+reject:
+static int kiln_dyn_eval_call_chain_assignment(kiln_host *host, kiln_dyn_lexer *lex,
+static int kiln_dyn_eval_member_assignment_impl(kiln_host *host, kiln_dyn_lexer *lex,
 static int kiln_dyn_eval_delete_member(kiln_host *host, kiln_dyn_lexer *lex,
 static int kiln_dyn_eval_delete_identifier(kiln_host *host, kiln_dyn_lexer *lex,
 static int kiln_dyn_eval_delete_operand(kiln_host *host, kiln_dyn_lexer *lex,
 static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+static int kiln_dyn_eval_sequence(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_c99_dynamic_eval_expression_impl(kiln_host *host, kiln_value source,
 direct_eval_unsupported:
 direct_eval_done:
