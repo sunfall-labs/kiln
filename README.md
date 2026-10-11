@@ -4,12 +4,11 @@ kiln compiles JavaScript and TypeScript to native executables. It is written in 
 and links the result against a small Rust runtime built on Tokio and Hyper. There is no
 JavaScript engine inside the binary.
 
-A ten-line `node:http` server compiles to a small native executable that starts in milliseconds and
-holds around 10 MB resident under load. In the measurements below (see [Measured](#measured)) a
-single kiln realm served more requests per second than Node, Bun and Deno on the same machine for a
-hello-world server, and about the same as Bun for a small service. The interpreter that ships
-alongside the compiler runs the same program immediately, so the edit-run loop never waits for a
-native build.
+A ten-line `node:http` server compiles to a native executable that starts in milliseconds and,
+in the measurements below (see [Measured](#measured)), serves more hello-world requests per second
+from one core than Node, Bun or Deno do with all of theirs, in a third of Node's memory. The
+interpreter that ships alongside the compiler runs the same program immediately, so the edit-run
+loop never waits for a native build.
 
 ## Status
 
@@ -26,46 +25,26 @@ What is not implemented is refused with a source location rather than approximat
 
 ## Measured
 
-`bench/server/compare.sh`, taken 2026-09-02 on one macOS machine, keep-alive, four client processes with
-sixteen connections each, median of three interleaved passes. A single client process saturates
-before these servers do, which is why there are four.
+`bench/server/compare.sh` on Linux x86_64 (AMD Ryzen 7 5800H, 8 cores), 2026-10-11: keep-alive,
+four client processes with sixteen connections each, median of three interleaved passes, every
+answer checked by the client. A single client process saturates before these servers do, which is
+why there are four. Resident is the server's peak RSS under the same load.
 
-A hello-world server:
-
-| runtime | requests/s | p50 | p99 | resident |
+| runtime | hello world | small service | 1 KB JSON echo | resident |
 |---|---|---|---|---|
-| kiln native | 163.7k | 0.32 ms | 1.02 ms | 8 MB |
-| bun 1.4 | 142.5k | 0.36 ms | 1.21 ms | 76 MB |
-| node 25.9 | 115.0k | 0.48 ms | 1.39 ms | 84 MB |
-| deno 2.9 | 104.1k | 0.54 ms | 1.37 ms | 121 MB |
+| kiln native | **65.7k** | 23.5k | 12.7k | 26-33 MB |
+| bun 1.4.2 | 60.6k | 48.4k | 36.7k | 63-65 MB |
+| node 26.8.1 | 45.6k | 32.3k | 26.5k | 87 MB |
+| deno 2.9.7 | 43.9k | 30.5k | 37.0k | 153-155 MB |
 
-A small service (URL routing, query parsing, JSON in and out, a POST body, an 8 KB response,
-header echo, an async handler that awaits a timer), every answer checked by the client:
+The small service is URL routing, query parsing, JSON in and out, a POST body, an 8 KB response,
+header echo and an async handler that awaits a timer (`bench/server/app.mjs`).
 
-| runtime | requests/s | p50 | p99 | resident |
-|---|---|---|---|---|
-| kiln native | 111.4k | 0.44 ms | 1.68 ms | 10 MB |
-| bun 1.4 | 107.6k | 0.42 ms | 2.04 ms | 94 MB |
-| node 25.9 | 89.0k | 0.57 ms | 2.00 ms | 101 MB |
-| deno 2.9 | 78.8k | 0.62 ms | 2.89 ms | 126 MB |
-
-The machine was shared while these ran; the per-pass ranges and raw log are in
-`docs/issues/server-throughput/measurements-2026-09-02.md`. `bench/server/compare.sh` reproduces the
-table, `bench/server/run.sh` one row.
-
-The same script on Linux/x86_64 (Xeon Platinum 8259CL, 2026-09-03, node 22.23 and bun 1.4, no deno
-installed):
-
-| runtime | hello | small service | resident |
-|---|---|---|---|
-| kiln native | 72.3k | 42.9k | 8-9 MB |
-| bun 1.4 | 65.5k | 44.7k | 66-76 MB |
-| node 22.23 | 39.0k | 27.4k | 81-83 MB |
-
-Read that row honestly: it is **one** kiln realm, on one core, against runtimes that are not
-single-threaded. Measured while serving, bun runs twelve threads and node five, and kiln one -- so
-kiln leads hello world and trails bun on the small service by four percent while doing *less* work
-per request than either (23.7 microseconds of CPU against bun's 26.7).
+Read the table honestly. It is **one** kiln realm on one core against runtimes that are not
+single-threaded, and kiln leads only where the request has no body: delivering a request body
+currently runs through the TypeScript `Readable` implementation in generic compiled code, which is
+the next thing to make fast. `bench/server/compare.sh` reproduces the table, `bench/server/run.sh`
+one row; the numbers are properties of one machine on one afternoon.
 
 The server measurements below use `KILN_WORKERS`, which forks that many processes over one
 `SO_REUSEPORT` listener. For programs that run several top-level realms in one process,
@@ -78,17 +57,17 @@ among the `KILN_WORKERS` realms (so N workers share the cores rather than each t
 and `KILN_PARALLELISM=1` runs every such map inline on the realm thread. A call whose measured work
 is too small to pay for the fork-join runs inline either way. Setting `KILN_WORKERS=auto` detects the
 number of online CPU cores via `sysconf(_SC_NPROCESSORS_ONLN)` (clamped 1..1024) and forks one
-realm per core. With four of them the small service serves **51.8k**, ahead of bun, and ten client
-processes are needed before the load generator stops being the limit:
+realm per core. On the machine above, with ten client processes (fewer cannot load several
+workers):
 
-| clients | workers=1 | workers=2 | workers=4 | workers=auto |
+| workload | workers=1 | workers=2 | workers=4 | workers=auto (16) |
 |---|---|---|---|---|
-| 10 (hello) | 47.1k | 84.4k | **107.8k** | 86.1k |
+| hello world | 57.8k | 87.1k | **94.0k** | 81.6k |
+| small service | 20.0k | 35.7k | 53.3k | **60.3k** |
 
-The comparison table above stays single-realm because that is the like-for-like core-for-core
-number, and it is the one to beat. Absolute figures are about half the macOS table further up,
-which was taken on an unrecorded machine; the two are not comparable and neither is presented as
-the other. Full provenance is in `docs/issues/server-throughput/measurements-2026-09-03.md`.
+Four workers put the small service ahead of bun's 48.4k. The comparison table above stays
+single-realm because that is the like-for-like core-for-core number, and it is the one to beat;
+`auto` trails four workers on hello world because the ten load generators share the same cores.
 
 A binary reads `KILN_WORKERS` when it starts, so one artifact is right on every machine it is
 copied to. `kiln build --workers=auto` records a default for when the variable is unset, still
