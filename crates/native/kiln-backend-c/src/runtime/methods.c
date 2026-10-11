@@ -145,6 +145,22 @@ static int kiln_c99_store_has_indexed_property(kiln_value store, int *answer) {
         *answer = 1;
         return KILN_C99_OK;
     }
+    /* An index can live in any of the object's stores: its elements (where `o[1] = v` puts
+     * it), its shape's slots, a sealed layout or the dictionary list. A yes only sends the
+     * caller to the ordinary `in`, so anything not cheaply ruled out answers yes. */
+    if (object->element_count != 0 || object->sealed != NULL) {
+        *answer = 1;
+        return KILN_C99_OK;
+    }
+    if (object->shape != NULL) {
+        for (index = 0; index < object->shape->property_count; ++index) {
+            if (object->shape->keys[index] != NULL &&
+                kiln_c99_key_index_key(object->shape->keys[index]) >= 0.0) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+        }
+    }
     for (index = 0; index < object->count; ++index) {
         if (object->properties[index].key != NULL &&
             kiln_c99_key_index_key(object->properties[index].key) >= 0.0) {

@@ -1,6 +1,6 @@
 # Native generic `map`/`reduce` miss an index added up the chain mid-walk
 
-Status: open
+Status: closed
 
 `Array.prototype.map` and `reduce`, when a unit calls them through the generic path rather than
 the loops lowered at the call site, skip a hole whose index a callback has just added to the
@@ -23,3 +23,7 @@ Found by `conformance/native/array-hof-prepared-fastpath.mjs` while landing the 
 loop work, which handles this case in its own loops (`inherited_element`). The generic path was
 not changed by that work. Candidates: `kiln_c99_array_next_present_index` (methods.c) deciding
 from the prototype stores' indexed keys, and the C `map`/`reduce` arms in `dispatch_part_b.c`.
+
+Fixed: `kiln_c99_store_has_indexed_property` (methods.c) looked only at a prototype store's
+dictionary list, so an index in its elements (`Object.prototype[1] = 10`) or a shape slot let the
+hole be skipped. It now answers yes for any of them; the probe cases are restored.

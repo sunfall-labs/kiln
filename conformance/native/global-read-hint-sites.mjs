@@ -66,8 +66,7 @@ globalThis.Number = savedNumber;
 
 // Deleting the name itself.
 delete globalThis.Math;
-// `typeof` of the deleted name is left to docs/issues/typeof-deleted-builtin-global.md.
-log("deleted", "Math" in globalThis, readMathStrict());
+log("deleted", readMathName(), "Math" in globalThis, readMathStrict());
 globalThis.Math = original;
 log("back", readMathName(), readMathStrict());
 
@@ -104,7 +103,7 @@ const savedJSON = globalThis.JSON;
 globalThis.JSON = 1;
 log("trio json=1", trio());
 delete globalThis.JSON;
-log("trio json gone", "JSON" in globalThis);
+log("trio json gone", trio());
 globalThis.JSON = savedJSON;
 log("trio restored", trio());
 

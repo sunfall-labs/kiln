@@ -22,7 +22,6 @@ impl super::Compiler {
                     unreachable!("the guard above matched an identifier")
                 };
                 let unbound = self.names_nothing(name)
-                    && Builtin::from_name(name).is_none()
                     && name != "undefined"
                     && !(name == "arguments" && self.compiling_function());
                 self.with_scoped_load(name, |compiler| {
@@ -43,7 +42,9 @@ impl super::Compiler {
                 self.code.push(Instruction::Unary(UnaryOp::TypeOf));
             }
             // `typeof undeclaredName` is "undefined" rather than a throw -- the one place a name
-            // may be read without existing, and the whole reason feature detection works.
+            // may be read without existing, and the whole reason feature detection works. A
+            // built-in's name goes the same way: the program can delete it (`delete
+            // globalThis.JSON`), and then `typeof JSON` is "undefined" too.
             ExpressionKind::Unary {
                 operator: UnaryOperator::TypeOf,
                 argument,
@@ -51,7 +52,6 @@ impl super::Compiler {
                 &argument.kind,
                 ExpressionKind::Identifier(name)
                     if self.names_nothing(name)
-                        && Builtin::from_name(name).is_none()
                         && name != "undefined"
                         && name != "this"
                         && !(name == "arguments" && self.compiling_function())
