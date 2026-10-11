@@ -68,12 +68,33 @@ fi
 
 # 3. Core workspace test suites
 echo "=== 3/3: Core workspace test suites ==="
+
+# A warm run of every suite takes minutes. A test that hangs -- a native fixture waiting on a
+# server that never answers -- would otherwise hold the push indefinitely; past the bound the
+# step fails, and libtest's "has been running for over 60 seconds" lines above name the test.
+# KILN_PRE_PUSH_TIMEOUT_MINUTES overrides the bound (a cold build of every crate is slower).
+run_bounded() {
+	local minutes="${KILN_PRE_PUSH_TIMEOUT_MINUTES:-40}"
+	if command -v timeout >/dev/null 2>&1; then
+		local status=0
+		timeout --kill-after=30 "${minutes}m" "$@" || status=$?
+		if [[ $status -eq 124 || $status -eq 137 ]]; then
+			echo "pre-push: the workspace suites did not finish within ${minutes} minutes; a test above is likely hung" >&2
+		fi
+		return "$status"
+	fi
+	"$@"
+}
 PACKAGES=()
 
 # If global manifest/lockfile or shared core IR changed, test all 5
 if matches_pattern "(Cargo\.(toml|lock)|crates/compile/kiln-ir/|crates/compile/kiln-graph/|crates/semantics/kiln-builtin-surface/|crates/foundation/kiln-host-abi/)"; then
 	PACKAGES=(kiln-cli kiln-daemon kiln-native kiln-backend-c kiln-interpreter)
 else
+	# The TypeScript built-ins run in both engines: a change there is a change to each.
+	if matches_pattern "crates/semantics/kiln-builtins/"; then
+		PACKAGES+=(kiln-interpreter kiln-native kiln-cli)
+	fi
 	if matches_pattern "(crates/interp/kiln-interpreter/|crates/interp/kiln-module-eval/)"; then
 		PACKAGES+=(kiln-interpreter kiln-native kiln-cli)
 	fi
@@ -99,10 +120,10 @@ if [[ ${#PACKAGES[@]} -gt 0 ]]; then
 		fi
 	done < <(printf "%s\n" "${PACKAGES[@]}" | awk '!seen[$0]++')
 	echo "Running tests for: ${MBX_ARGS[*]}"
-	mbx test "${MBX_ARGS[@]}" --offline
+	run_bounded mbx test "${MBX_ARGS[@]}" --offline
 else
 	if [[ $RUN_ALL -eq 1 ]]; then
-		mbx test -p kiln-cli -p kiln-daemon -p kiln-native -p kiln-backend-c -p kiln-interpreter --offline
+		run_bounded mbx test -p kiln-cli -p kiln-daemon -p kiln-native -p kiln-backend-c -p kiln-interpreter --offline
 	else
 		echo "Skipped: no workspace crate changes detected."
 	fi

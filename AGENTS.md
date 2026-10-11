@@ -91,7 +91,9 @@ loop is local. `scripts/pre-push.sh` runs the HTTP close contract, the native pr
 the core crate tests, each only when the commits being pushed touch what it checks; `--all` runs
 everything. `mise run hooks` points the checkout's `core.hooksPath` at `.githooks`, after which it
 runs before every `git push`; `mise run pre-push` runs it by hand. `KILN_SKIP_PRE_PUSH=1` bypasses
-the hook for a deliberate exception. The only GitHub workflow is `.github/workflows/release.yml`,
+the hook for a deliberate exception. A warm run of the crate tests takes a few minutes; the step
+is bounded (40 minutes, `KILN_PRE_PUSH_TIMEOUT_MINUTES`) and native test fixtures are killed after
+60 seconds, so a hung test fails the push naming itself rather than holding it. The only GitHub workflow is `.github/workflows/release.yml`,
 for manual and tag releases.
 
 `conformance/test262-baseline.json` holds a pass/fail count per chunk. A whole-corpus number is one
