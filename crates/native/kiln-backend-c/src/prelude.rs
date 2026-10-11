@@ -4589,6 +4589,7 @@ fn build_runtime_prelude_source(src: &str) -> String {
         "kiln_c99_process",
         "kiln_c99_atomics",
         "kiln_c99_builtin_store_epoch",
+        "kiln_c99_actor_candidate_ever",
         "kiln_c99_streaks[64];",
     ];
 

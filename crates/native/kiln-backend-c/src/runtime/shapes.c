@@ -711,6 +711,7 @@ static kiln_val *kiln_c99_object_elements_resize(kiln_object *object, size_t cap
     kiln_val *elements;
     if (capacity < object->element_capacity || capacity > SIZE_MAX / sizeof(kiln_val))
         return NULL;
+    kiln_c99_gc_note_finalizable(object);
     candidate_id = object->candidate_elements ? 0 : kiln_c99_object_candidate_id(object);
     if (object->candidate_elements || candidate_id != 0) {
         kiln_c99_candidate_object_elements *header;
@@ -750,6 +751,7 @@ static kiln_val *kiln_c99_object_slots_resize(kiln_object *object, size_t capaci
     uint64_t candidate_id;
     if (object->sealed != NULL || capacity < object->slot_capacity ||
         capacity > SIZE_MAX / sizeof(kiln_val)) return NULL;
+    kiln_c99_gc_note_finalizable(object);
     candidate_id = object->candidate_slots ? 0 : kiln_c99_object_candidate_id(object);
     if (object->candidate_slots ||
         (candidate_id != 0 && !kiln_c99_object_slots_owned(object))) {
@@ -789,6 +791,7 @@ static kiln_val *kiln_c99_object_slots_resize(kiln_object *object, size_t capaci
 
 static int kiln_c99_object_reserve_properties(kiln_object *object, size_t needed) {
     if (needed <= object->capacity) return KILN_C99_OK;
+    kiln_c99_gc_note_finalizable(object);
     if (object->candidate_properties || object->properties == NULL ||
         kiln_c99_object_properties_in_block(object)) {
         uint64_t candidate_id = object->candidate_properties ? 0
@@ -857,6 +860,7 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     if (object == NULL) {
         return KILN_C99_OK;
     }
+    kiln_c99_gc_note_finalizable(object);
     if (object->sealed != NULL) {
         kiln_property *properties;
         kiln_sealed_values *values;
@@ -1276,6 +1280,7 @@ static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
     object->capacity = 0;
     kiln_c99_heap_store_pointer(object, &object->slots, values->values);
     object->slot_capacity = count;
+    kiln_c99_gc_note_finalizable(object);
     object->sealed = layout;
     return 1;
 }
@@ -1313,6 +1318,7 @@ static int kiln_c99_sealed_layout_attach_empty(uint32_t tag, uint64_t code,
     object->shape = NULL;
     kiln_c99_heap_store_pointer(object, &object->slots, values->values);
     object->slot_capacity = count;
+    kiln_c99_gc_note_finalizable(object);
     object->sealed = layout;
     return 1;
 }
@@ -1392,7 +1398,8 @@ static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
 }
 
 /* Both the realm allocator and a private graph arena use this exact object layout. */
-static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
+static KILN_ALWAYS_INLINE inline void kiln_c99_object_init_from(kiln_object *object, size_t tail_slots,
+                                                                 size_t first_inline_slot) {
     kiln_c99_heap_store_pointer(object, &object->properties, NULL);
     object->count = 0;
     object->capacity = 0;
@@ -1419,7 +1426,9 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     kiln_c99_heap_store_interior_pointer(object, &object->slots,
         tail_slots == 0 ? offsetof(kiln_object, inline_slots) : sizeof(kiln_object));
     object->slot_capacity = tail_slots == 0 ? KILN_C99_INLINE_SLOTS : tail_slots;
-    for (size_t slot_i = 0; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {
+    /* Inline slots below `first_inline_slot` are left unwritten: the caller stores every one of
+     * them before anything else can run (no allocation or collection happens in between). */
+    for (size_t slot_i = first_inline_slot; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {
         kiln_c99_heap_store_val(object, &object->inline_slots[slot_i], KILN_VAL_UNDEFINED);
     }
     for (size_t slot_i = 0; slot_i < tail_slots; ++slot_i)
@@ -1427,6 +1436,10 @@ static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
     kiln_c99_heap_store_pointer(object, &object->elements, NULL);
     object->element_count = 0;
     object->element_capacity = 0;
+}
+
+static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
+    kiln_c99_object_init_from(object, tail_slots, 0);
 }
 
 static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
@@ -1440,6 +1453,24 @@ static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
     if (object == NULL) return KILN_C99_OUT_OF_MEMORY;
     kiln_c99_object_init(object, tail_slots);
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* An object literal whose site already knows its shape: one nursery bump, one pass over the
+ * fixed header, then the `count` values stored straight into the inline slots. `shape` must be
+ * a portable shape of exactly `count` inline-slot properties whose double-slot mask matches
+ * the values (the site checks that before calling), and the object has no prototype link,
+ * exactly as `kiln_c99_val_new_object_literal` leaves it. */
+static int kiln_c99_new_object_literal_shaped(kiln_val *out, const kiln_shape *shape,
+                                              const kiln_val *pairs, size_t count) {
+    kiln_object *object = (kiln_object *)kiln_c99_gc_alloc_hot(KILN_GC_OBJECT, sizeof *object, 0);
+    size_t index;
+    if (KILN_UNLIKELY(object == NULL)) return KILN_C99_OUT_OF_MEMORY;
+    kiln_c99_object_init_from(object, 0, count);
+    object->shape = (kiln_shape *)shape;
+    for (index = 0; index < count; ++index)
+        kiln_c99_heap_store_val(object, &object->inline_slots[index], pairs[index * 2 + 1]);
+    *out = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, object);
     return KILN_C99_OK;
 }
 

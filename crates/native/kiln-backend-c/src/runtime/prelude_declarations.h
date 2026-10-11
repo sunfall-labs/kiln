@@ -135,7 +135,10 @@ extern int kiln_c99_unit_keys_claim(uint64_t *owner);
 extern void kiln_c99_unit_keys_release(uint64_t *owner, void *heap);
 extern void kiln_c99_gc_release(void *payload);
 extern void kiln_c99_gc_result_roots(void *opaque, void *context, int phase);
+extern void kiln_c99_gc_note_finalizable(const void *payload);
 extern int kiln_c99_new_object(kiln_value *out);
+extern int kiln_c99_new_object_literal_shaped(kiln_val *out, const kiln_shape *shape,
+                                             const kiln_val *pairs, size_t count);
 extern int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 extern int kiln_c99_new_array(kiln_value *out);
 extern const char *kiln_c99_typed_name(kiln_typed_kind kind);

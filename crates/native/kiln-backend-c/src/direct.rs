@@ -3761,3 +3761,18 @@ fn known_callees(program: &Program, graphs: &[FunctionGraph], entry: &FunctionGr
 #[cfg(test)]
 #[path = "tests/direct_known_calls.rs"]
 mod effect_proto_diagnostic;
+
+/// The callee facts `known_callees` proves, per body, for the leaf-literal pass: for each
+/// proto's graph (in `graphs` order) and then for the entry graph, the callee value that is the
+/// closure of a given proto. The same proof the direct-call plan trusts; no new fact.
+pub(crate) fn known_call_targets(
+    program: &Program,
+    graphs: &[FunctionGraph],
+    entry: &FunctionGraph,
+) -> (Vec<HashMap<ValueId, u32>>, HashMap<ValueId, u32>) {
+    let known = known_callees(program, graphs, entry);
+    (
+        known.functions.into_iter().map(|f| f.known).collect(),
+        known.entry.known,
+    )
+}

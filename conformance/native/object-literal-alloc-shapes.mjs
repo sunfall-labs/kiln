@@ -61,3 +61,30 @@ for (let i = 0; i < 20000; i++) {
   big += Object.keys(o).length;
 }
 console.log("grown", big);
+
+// Leaf literal reads (`f(x).k` where f only returns a literal): the call and the object may
+// be elided, so nothing observable may depend on either.
+function pickA(i) { return { a: i, b: 2, c: "s" }; }
+function pickLate(i, j) { return { first: i, second: j }; }
+let leafTotal = 0;
+for (let i = 0; i < 30000; i++) leafTotal += pickA(i).a + pickA(i).b + pickLate(i, 1).second;
+console.log("leaf", leafTotal, pickA(5).c, pickLate(1).second, pickLate(1, 2, 3).first);
+// a key the literal does not define reads through the prototype chain
+Object.prototype.inherited = "from-proto";
+console.log("leaf-proto", pickA(1).inherited, pickA(1).missing, pickA(1).toString === Object.prototype.toString);
+delete Object.prototype.inherited;
+// the call may not be elided when the result is used twice or escapes
+const r = pickA(9);
+console.log("leaf-escape", r.a, r.b, r === r, pickA(9) === pickA(9), Object.keys(r).join(","));
+// arguments are still evaluated, in order, even when unused by the read
+const order = [];
+function note(x) { order.push(x); return x; }
+console.log("leaf-order", pickLate(note(1), note(2)).first, order.join(","));
+// nested reads
+console.log("leaf-nested", pickA(pickA(7).a).a);
+// a callee that gets reassigned is not the leaf any more
+let swap = (i) => ({ a: "other" + i });
+function swapped(i) { return { a: i }; }
+const results = [];
+for (let n = 0; n < 3; n++) { results.push(swapped(n).a); if (n === 0) swapped = swap; }
+console.log("leaf-reassign", results.join(","));

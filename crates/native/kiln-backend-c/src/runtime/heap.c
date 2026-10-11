@@ -101,14 +101,16 @@ static inline int kiln_c99_gc_kind_finalized(uint32_t kind) {
     return masked < 64 && ((KILN_GC_FINALIZED_KINDS >> masked) & 1u) != 0;
 }
 
-/* The finalised kinds whose finaliser has work from the moment they are made. The other three --
- * a closure, a promise, a generator -- own nothing outside their block until a rarer path gives
+/* The finalised kinds whose finaliser has work from the moment they are made. The other four --
+ * a closure, a promise, a generator and a plain object (whose side buffers -- properties, owned
+ * slots, elements, sealed values, dictionary index -- are all installed through the sites listed
+ * with `kiln_c99_object_note_buffers` users in shapes.c/properties.c/lib.rs) -- own nothing outside their block until a rarer path gives
  * them something (more than four captures, a second reaction, an async generator's request
  * queue), and that path calls `kiln_c99_gc_note_finalizable`. Until then their finaliser is a
  * no-op by construction, which is what lets a nursery collection skip a dead one unread. */
 #define KILN_GC_FINALIZED_AT_ALLOC                                                                 \
     (KILN_GC_FINALIZED_KINDS & ~((UINT64_C(1) << KILN_GC_CLOSURE) | (UINT64_C(1) << KILN_GC_PROMISE) | \
-                                 (UINT64_C(1) << KILN_GC_GENERATOR)))
+                                 (UINT64_C(1) << KILN_GC_GENERATOR) | (UINT64_C(1) << KILN_GC_OBJECT)))
 
 static inline int kiln_c99_gc_kind_finalized_at_alloc(uint32_t kind) {
     uint32_t masked = kind & KILN_GC_KIND_MASK;
@@ -6855,8 +6857,7 @@ static void kiln_c99_graph_candidate_close(kiln_c99_par_arena *arena) {
 /* Set (never cleared) before the first candidate factory scope starts anywhere in the process.
  * While it is 0 no heap has an `actor_candidate_id`, so `kiln_c99_candidate_literal` is exactly
  * the static string address and emitted code skips the call and its realm lookup. */
-extern int kiln_c99_actor_candidate_ever;
-int kiln_c99_actor_candidate_ever = 0;
+static int kiln_c99_actor_candidate_ever = 0;
 
 static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
     uint64_t id;

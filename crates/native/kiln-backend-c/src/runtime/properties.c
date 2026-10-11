@@ -150,6 +150,7 @@ static kiln_dictionary_index *kiln_c99_dictionary_index_for(kiln_object *object)
         while (lookup->buckets[bucket] != 0) bucket = (bucket + 1) & (capacity - 1);
         lookup->buckets[bucket] = ordinal + 1;
     }
+    kiln_c99_gc_note_finalizable(object);
     object->dictionary_index = lookup;
     return lookup;
 }

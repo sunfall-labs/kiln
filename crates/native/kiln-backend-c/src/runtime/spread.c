@@ -820,6 +820,7 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
                     properties[i].writable = 1;
                     properties[i].configurable = 1;
                 }
+                kiln_c99_gc_note_finalizable(copy);
                 kiln_c99_heap_store_pointer(copy, &copy->properties, properties);
                 copy->count = count;
                 copy->capacity = count;
