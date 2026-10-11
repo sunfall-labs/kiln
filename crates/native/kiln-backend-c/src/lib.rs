@@ -1826,6 +1826,9 @@ fn compact_closure_source(
 struct RenderedFunctions {
     sites: usize,
     function_declarations: Vec<String>,
+    /// For a chunked unit, the function index each entry of the chunked body list renders.
+    /// Pruned (unreachable) functions emit no body, so body position is not function index.
+    chunked_indices: Vec<usize>,
 }
 
 struct RenderedModule {
@@ -1865,6 +1868,7 @@ fn render_functions(
     mut workers: Option<(&str, &mut String)>,
 ) -> RenderedFunctions {
     let mut fn_declarations: Vec<String> = vec![String::new(); program.functions.len()];
+    let mut chunked_indices: Vec<usize> = Vec::new();
     if policy.type_profile_record {
         output.push_str(
             "static inline uint32_t kiln_profile_tag_of(kiln_val v) {\n\
@@ -2741,6 +2745,7 @@ fn render_functions(
         if should_chunk {
             if let Some(ref mut bodies) = chunked_bodies {
                 bodies.push(func_buf);
+                chunked_indices.push(index);
             }
         }
     }
@@ -2817,6 +2822,7 @@ fn render_functions(
     RenderedFunctions {
         sites: site_offset,
         function_declarations: fn_declarations,
+        chunked_indices,
     }
 }
 
@@ -5842,26 +5848,30 @@ fn render_module_positioned(
         if chunk_ends.len() > 1 {
             chunks.push(chunk_0);
             chunk_generic_mixed_optimization.push(
-                generic_optimized_functions[..chunk_0_funcs]
+                rendered_funcs.chunked_indices[..chunk_0_funcs]
                     .iter()
-                    .any(|&selected| selected),
+                    .any(|&index| generic_optimized_functions[index]),
             );
             let mut start = chunk_0_funcs;
+            let all_funcs = rendered_funcs.function_declarations.len();
             for &end in &chunk_ends[1..] {
-                let referenced = scan_referenced_functions(
-                    &function_texts[start..end],
-                    unit_symbol,
-                    total_funcs,
-                );
-                let decl_len: usize = (0..total_funcs)
-                    .filter(|&i| (i >= start && i < end) || referenced[i])
+                // `start..end` positions bodies, which exist only for functions that survived
+                // liveness pruning; declarations and flags are keyed by function index.
+                let mut own = vec![false; all_funcs];
+                for &index in &rendered_funcs.chunked_indices[start..end] {
+                    own[index] = true;
+                }
+                let referenced =
+                    scan_referenced_functions(&function_texts[start..end], unit_symbol, all_funcs);
+                let decl_len: usize = (0..all_funcs)
+                    .filter(|&i| own[i] || referenced[i])
                     .map(|i| rendered_funcs.function_declarations[i].len())
                     .sum();
                 let bodies_len: usize = function_texts[start..end].iter().map(String::len).sum();
                 let mut chunk_k = String::with_capacity(chunk_header.len() + decl_len + bodies_len);
                 chunk_k.push_str(&chunk_header);
-                for i in 0..total_funcs {
-                    if (i >= start && i < end) || referenced[i] {
+                for i in 0..all_funcs {
+                    if own[i] || referenced[i] {
                         chunk_k.push_str(&rendered_funcs.function_declarations[i]);
                     }
                 }
@@ -5870,9 +5880,9 @@ fn render_module_positioned(
                 }
                 chunks.push(chunk_k);
                 chunk_generic_mixed_optimization.push(
-                    generic_optimized_functions[start..end]
+                    rendered_funcs.chunked_indices[start..end]
                         .iter()
-                        .any(|&selected| selected),
+                        .any(|&index| generic_optimized_functions[index]),
                 );
                 start = end;
             }
