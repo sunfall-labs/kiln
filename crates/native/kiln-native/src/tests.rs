@@ -130,6 +130,58 @@ impl Drop for TestDirectory {
     }
 }
 
+/// How long a fixture program may run before it counts as hung. Generous for a loaded machine;
+/// the point is that a fixture that never exits -- a server whose request never ends -- fails
+/// naming itself instead of holding the whole suite (and the pre-push hook) indefinitely.
+const FIXTURE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run a fixture program built moments ago and collect its output, failing the test if it has not
+/// exited by [`FIXTURE_DEADLINE`]. Readers drain both pipes while it runs, so a fixture that
+/// prints more than a pipe holds cannot stall either.
+fn fixture_output(mut command: std::process::Command, what: &str) -> std::process::Output {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn_when_launchable()
+        .unwrap_or_else(|error| panic!("run {what}: {error}"));
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().expect("fixture stdout is piped")));
+    let stderr = drain(Box::new(child.stderr.take().expect("fixture stderr is piped")));
+    let deadline = Instant::now() + FIXTURE_DEADLINE;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap_or_else(|error| panic!("poll {what}: {error}")) {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = stdout.join().unwrap_or_default();
+            let stderr = stderr.join().unwrap_or_default();
+            panic!(
+                "{what} did not exit within {FIXTURE_DEADLINE:?}; stdout so far {:?}, stderr {:?}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    std::process::Output {
+        status,
+        stdout: stdout.join().expect("stdout reader"),
+        stderr: stderr.join().expect("stderr reader"),
+    }
+}
+
 fn run_native_http_fixture(name: &str, source: &str) -> Option<String> {
     use kiln_module_resolver::NodeRuntimeResolver;
     use std::process::Command;
@@ -161,9 +213,7 @@ fn run_native_http_fixture(name: &str, source: &str) -> Option<String> {
             },
         )
         .expect("native node:http graph builds");
-    let output = Command::new(&report.output)
-        .output_when_launchable()
-        .expect("run native node:http fixture");
+    let output = fixture_output(Command::new(&report.output), "native node:http fixture");
     assert!(
         output.status.success(),
         "status={} stdout={:?} stderr={:?}",
@@ -212,7 +262,7 @@ fn run_native_release_fixture(name: &str, source: &str) -> Option<String> {
         } else {
             command.env_remove("KILN_GC_STRESS");
         }
-        command.output().expect("run native release fixture")
+        fixture_output(command, "native release fixture")
     };
     let normal = run(false);
     assert!(
@@ -268,9 +318,7 @@ fn run_native_failure_fixture(name: &str, source: &str) -> Option<String> {
             },
         )
         .expect("native diagnostic graph builds");
-    let output = Command::new(&report.output)
-        .output()
-        .expect("run native diagnostic fixture");
+    let output = fixture_output(Command::new(&report.output), "native diagnostic fixture");
     assert!(!output.status.success(), "fixture unexpectedly succeeded");
     Some(String::from_utf8(output.stderr).expect("diagnostic output is UTF-8"))
 }
@@ -318,9 +366,7 @@ fn run_native_failure_fixture_with_dependency(
             },
         )
         .expect("native diagnostic graph builds");
-    let output = Command::new(&report.output)
-        .output()
-        .expect("run native diagnostic fixture");
+    let output = fixture_output(Command::new(&report.output), "native diagnostic fixture");
     assert!(!output.status.success(), "fixture unexpectedly succeeded");
     Some(String::from_utf8(output.stderr).expect("diagnostic output is UTF-8"))
 }
