@@ -983,7 +983,7 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
             int builtin_key_matches = target.tag != KILN_VALUE_BUILTIN ||
                 ((uint32_t)target.bits == site->cached_builtin &&
                  kiln_c99_site_member_matches_bytes(site, key, key_len) &&
-                 kiln_c99_realm_cached_builtin_member_untouched(
+                 kiln_c99_cached_builtin_member_ok(
                      site->cached_builtin, site->cached_member, site->cached_member_len));
             if (builtin_key_matches &&
                 (target.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED)) {
@@ -1012,7 +1012,8 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
     view.flags = KILN_STRING_LATIN1;
     view.data = key;
     int status = kiln_c99_get_site(host, target, &view, NULL, out, depth, thrown, site);
-    if (site != NULL && status == KILN_C99_OK && out->tag == KILN_VALUE_METHOD) {
+    if (site != NULL && status == KILN_C99_OK && out->tag == KILN_VALUE_METHOD &&
+        (target.tag != KILN_VALUE_BUILTIN || !kiln_c99_builtin_store_has_own((uint32_t)target.bits, key, key_len))) {
         if (target.tag == KILN_VALUE_STRING ||
             target.tag == KILN_VALUE_NUMBER ||
             target.tag == KILN_VALUE_BOOLEAN ||
@@ -1110,6 +1111,10 @@ static inline void kiln_c99_site_cache_method_key(kiln_c99_site *site, uint8_t t
         }
         member[index] = (char)unit;
     }
+    /* The method reached here came from the member table only if the realm's store lacked the
+     * name; one that came out of the store (`Math.sqrt = Math.floor`) is that realm's alone, and
+     * remembering it would hand it to every realm that reads through this site. */
+    if (kiln_c99_builtin_store_has_own(builtin, member, len)) return;
     kiln_c99_site_cache_method(site, tag, method, builtin, member, len);
 }
 
@@ -1135,7 +1140,7 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
         return 1;
     } else if (ctag == KILN_VALUE_BUILTIN) {
         if (!kiln_c99_site_member_matches_key(site, key) ||
-            !kiln_c99_realm_cached_builtin_member_untouched(
+            !kiln_c99_cached_builtin_member_ok(
                 site->cached_builtin, site->cached_member, site->cached_member_len)) return 0;
         return KILN_VAL_IS_BUILTIN(target) &&
                KILN_VAL_BUILTIN_ID(target) == site->cached_builtin;

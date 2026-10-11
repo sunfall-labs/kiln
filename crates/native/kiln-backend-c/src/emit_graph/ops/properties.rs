@@ -42,9 +42,31 @@ pub(super) fn emit_get_property(
         let operation = &operation[1..operation.len() - 1];
         let check = status_check(diagnostic_site, pc, operation, unwind);
         let source = crate::diagnostic_source(diagnostic_site);
+        // A built-in namespace's method (`Math.sqrt`) read ahead of its arguments: once this
+        // site has remembered the table's method for its own spelling, the read is a few
+        // compares inline instead of a call into the runtime that re-derives the key, re-matches
+        // the spelling and re-proves the member (`kiln_c99_cached_builtin_member_ok`: one compare
+        // of the stores summary while no realm has modified a built-in, the realm's own record
+        // otherwise). The site is write-once (`kiln_c99_site_cache_method`) and belongs to this
+        // one constant key, so the spelling compare is the runtime's own hit test; any miss,
+        // including a modified built-in, takes the runtime call below unchanged.
+        let inline_hit = if key_str.is_ascii()
+            && !key_str.is_empty()
+            && key_str.len() < 32
+            && !key_str.starts_with("@@")
+        {
+            let literal = crate::string::c_string(&key_str);
+            let len = key_str.len();
+            format!(
+                "if (KILN_LIKELY(kiln_c99_site_has_method(&site) && site.cached_tag == KILN_VALUE_BUILTIN && KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == site.cached_builtin && site.cached_member_len == {len} && memcmp(site.cached_member, {literal}, {len}) == 0 && kiln_c99_cached_builtin_member_ok(site.cached_builtin, site.cached_member, {len}))) {{ v{v} = KILN_VAL_METHOD(site.cached_method); }} else ",
+                o = object.0,
+            )
+        } else {
+            String::new()
+        };
         writeln!(
             output,
-            "    {{ static kiln_c99_site site = {{0}}; int status = kiln_c99_val_prepare_method_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, {source}, (size_t){pc}, \"{operation}\", &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }}",
+            "    {{ static kiln_c99_site site = {{0}}; {inline_hit}{{ int status = kiln_c99_val_prepare_method_key(host, v{o}, {symbol}_key_{name}, depth, thrown, &site, {source}, (size_t){pc}, \"{operation}\", &v{v}); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(v{o})); {check} }} }}",
             o = object.0,
         )
         .unwrap();

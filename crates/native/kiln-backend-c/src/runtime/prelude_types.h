@@ -1526,6 +1526,18 @@ static int kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char 
 static int kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *member,
                                                           size_t len) KILN_C99_RARE_CALL;
 #endif
+/* A built-in method a call site remembered (`kiln_c99_site_cache_method`) is still the answer for
+ * its exact spelling in the current realm. The hot side is the summary's one compare: while no
+ * live realm has stored onto a built-in outside its bootstrap, no realm's own-property store
+ * holds a member a program put there, and a site caches a member only when the realm that taught
+ * it found the store without it (`kiln_c99_site_may_cache_builtin`), so the table's member is the
+ * answer in every realm. Otherwise the current realm's own record decides. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_cached_builtin_member_ok(uint32_t builtin,
+                                                                        const char *member,
+                                                                        size_t length) {
+    return KILN_LIKELY(kiln_c99_builtin_store_epoch == 0) ||
+           kiln_c99_realm_cached_builtin_member_untouched(builtin, member, length);
+}
 /* Bit `id` of the bitmap's word `word`: a compile-time constant for a named built-in. */
 #define KILN_C99_BIT_OF_BUILTIN(id, word) \
     (((uint32_t)(id) >> 6) == (uint32_t)(word) ? (UINT64_C(1) << ((uint32_t)(id) & 63u)) : UINT64_C(0))

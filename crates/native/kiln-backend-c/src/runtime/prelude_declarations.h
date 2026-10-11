@@ -441,7 +441,7 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
     } else if (ctag == KILN_VALUE_BUILTIN) {
         if (key == NULL || key->unit_len != site->cached_member_len ||
             site->cached_member_len == UINT8_MAX ||
-            !kiln_c99_realm_cached_builtin_member_untouched(
+            !kiln_c99_cached_builtin_member_ok(
                 site->cached_builtin, site->cached_member, site->cached_member_len)) return 0;
         for (size_t index = 0; index < key->unit_len; ++index) {
             uint32_t unit = kiln_string_unit_at(key, (uint32_t)index);
