@@ -1050,6 +1050,11 @@ typedef struct kiln_closure {
 static inline kiln_host *kiln_c99_closure_host(kiln_host *host,
 static inline kiln_host *kiln_c99_module_host(kiln_host *host) {
 typedef struct kiln_js_frame {
+extern _Thread_local kiln_js_frame *kiln_c99_js_frame_top;
+extern int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure);
+static KILN_ALWAYS_INLINE inline void kiln_c99_js_frame_enter_named(kiln_js_frame *frame,
+static KILN_ALWAYS_INLINE inline void kiln_c99_js_frame_leave_inline(kiln_js_frame *frame) {
+#define KILN_C99_NORMALIZE_RECEIVER(RECEIVER, CLOSURE)                                           \
 typedef struct kiln_method_store {
 typedef enum kiln_native_prototype_surface {
 typedef struct kiln_native_constructor {
@@ -1112,6 +1117,7 @@ static int kiln_c99_realm_builtins_untouched(uint64_t mask0, uint64_t mask1, int
 static int kiln_c99_realm_builtin_member_untouched(uint32_t builtin, const char *member, size_t len)
 static int kiln_c99_realm_cached_builtin_member_untouched(uint32_t builtin, const char *member,
 #endif
+static KILN_ALWAYS_INLINE inline int kiln_c99_cached_builtin_member_ok(uint32_t builtin,
 #define KILN_C99_BIT_OF_BUILTIN(id, word) \
 static KILN_ALWAYS_INLINE inline int kiln_c99_builtins_unmodified_mask(uint64_t mask0, uint64_t mask1,
 #define kiln_c99_builtin_pair_unmodified(a, b)                                                     \
@@ -2404,6 +2410,7 @@ static kiln_gc_block *kiln_c99_gc_lookup_interior(const kiln_gc_heap *, uintptr_
 static void kiln_c99_candidate_record_pointer_store(kiln_gc_heap *heap,
 #undef KILN_C99_STORE_LOOKUP_COUNT
 #undef KILN_C99_STORE_INTERIOR_LOOKUP_COUNT
+static KILN_ALWAYS_INLINE inline int kiln_c99_store_barrier_vacuous(const kiln_gc_heap *heap,
 static KILN_ALWAYS_INLINE inline void kiln_c99_candidate_record_val_store(
 static void kiln_c99_heap_record_pointer(const void *owner_payload, const void *pointer) {
 static KILN_ALWAYS_INLINE inline const void *kiln_c99_gc_value_pointer(kiln_value value) {
@@ -2602,6 +2609,7 @@ static uint64_t kiln_c99_graph_candidate_next_id;
 static uint64_t kiln_c99_graph_candidate_new_id(void) {
 static int kiln_c99_graph_candidate_open(kiln_c99_par_arena *arena, const kiln_gc_heap *heap,
 static void kiln_c99_graph_candidate_close(kiln_c99_par_arena *arena) {
+static int kiln_c99_actor_candidate_ever = 0;
 static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
 static void kiln_c99_actor_candidate_finish(kiln_gc_heap *heap, int sealed);
 static int kiln_c99_actor_candidate_end(kiln_gc_heap *heap, int completed) {
@@ -2696,6 +2704,7 @@ static kiln_shared_facade *kiln_c99_shared_facade_find(kiln_gc_heap *heap, uint3
 static int kiln_c99_shared_facade_reserve(kiln_gc_heap *heap) {
 static void kiln_c99_shared_facade_insert(kiln_gc_heap *heap, kiln_shared_facade *facade) {
 static void kiln_c99_shared_facade_remove(kiln_gc_heap *heap, kiln_shared_facade *facade) {
+static KILN_ALWAYS_INLINE inline int kiln_c99_gc_object_block_is_plain(const kiln_gc_block *block) {
 static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
 static int kiln_c99_gc_weak_key_live(kiln_gc_heap *heap, const kiln_value *key) {
@@ -2841,8 +2850,10 @@ static int kiln_c99_sealed_layout_index(const kiln_sealed_layout *layout,
 static int kiln_c99_sealed_layout_attach(uint32_t tag, uint64_t code,
 static int kiln_c99_sealed_layout_attach_empty(uint32_t tag, uint64_t code,
 static void kiln_c99_sealed_layout_publish(uint32_t tag, uint64_t code,
+static KILN_ALWAYS_INLINE inline void kiln_c99_object_init_from(kiln_object *object, size_t tail_slots,
 static void kiln_c99_object_init(kiln_object *object, size_t tail_slots) {
 static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
+static int kiln_c99_new_object_literal_shaped(kiln_val *out, const kiln_shape *shape,
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_object_for_owner(kiln_value *out, const void *owner_payload) {
 static int kiln_c99_new_shared_facade(uint32_t graph, uint32_t generation, uint32_t node,
@@ -3445,6 +3456,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
 #endif
 static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
 static int kiln_c99_join_units_append(uint16_t **units, size_t *length, size_t *capacity,
+static int kiln_c99_join_all_strings(kiln_value *result, const kiln_array *array,
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
 static int kiln_c99_loose_equal(kiln_value left, kiln_value right) {
 static uint32_t kiln_c99_to_uint32(double value) {

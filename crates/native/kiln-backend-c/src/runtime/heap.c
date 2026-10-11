@@ -110,7 +110,7 @@ static inline int kiln_c99_gc_kind_finalized(uint32_t kind) {
  * no-op by construction, which is what lets a nursery collection skip a dead one unread. */
 #define KILN_GC_FINALIZED_AT_ALLOC                                                                 \
     (KILN_GC_FINALIZED_KINDS & ~((UINT64_C(1) << KILN_GC_CLOSURE) | (UINT64_C(1) << KILN_GC_PROMISE) | \
-                                 (UINT64_C(1) << KILN_GC_GENERATOR) | (UINT64_C(1) << KILN_GC_OBJECT)))
+                                 (UINT64_C(1) << KILN_GC_GENERATOR)))
 
 static inline int kiln_c99_gc_kind_finalized_at_alloc(uint32_t kind) {
     uint32_t masked = kind & KILN_GC_KIND_MASK;

@@ -106,6 +106,9 @@ fn summarize_leaf(program: &Program, proto_index: usize, graph: &FunctionGraph) 
     for (id, op) in &block.operations {
         match op {
             GraphOp::Const { .. } => {}
+            // A parameter read: the body has no stores (only these three operations), so slot
+            // `k` still holds argument `k` (or `undefined` when fewer were passed).
+            GraphOp::LoadLocal(slot) if (*slot as usize) < proto.parameter_count as usize => {}
             GraphOp::NewObject { pairs, .. } => {
                 for (key, _) in pairs {
                     // Static string keys only: a computed key can run user code (ToPropertyKey),
@@ -136,11 +139,11 @@ fn summarize_leaf(program: &Program, proto_index: usize, graph: &FunctionGraph) 
         if is_array_index(&text) || !seen.insert(text.clone()) {
             return None;
         }
-        let param = graph
-            .initial_locals
-            .iter()
-            .position(|local| local == value)
-            .filter(|slot| *slot < proto.parameter_count as usize);
+        let param = match defs.get(value) {
+            Some(GraphOp::LoadLocal(slot)) => Some(*slot as usize),
+            _ => graph.initial_locals.iter().position(|local| local == value),
+        }
+        .filter(|slot| *slot < proto.parameter_count as usize);
         if let Some(slot) = param {
             leaf.fields.insert(text, Field::Param(slot));
         } else if let Some(op @ GraphOp::Const { .. }) = defs.get(value) {

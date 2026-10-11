@@ -1223,7 +1223,10 @@ fn runtime_prelude_size() {
     // the additional ABI entries are private operations, not public C builtins.
     // String-wrapper own-slot construction and direct-call attribution bring the final
     // measured unit to 85,732 lines, still with no duplicated section or new public C builtin.
-    const CEILING_LINES: usize = 86_000;
+    // Reviewed 2026-10-10: the per-realm value-slot cache, the per-site global hint, the
+    // all-string join, the shaped literal constructor and the inline call/builtin-member helpers
+    // bring it to 86,103 lines; each is a private helper of an existing kernel, appearing once.
+    const CEILING_LINES: usize = 86_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

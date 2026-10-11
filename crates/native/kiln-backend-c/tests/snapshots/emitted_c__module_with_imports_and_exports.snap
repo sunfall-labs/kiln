@@ -139,6 +139,7 @@ int kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_namespace_wrapper(kiln_value *r
                 goto namespace_entry_done;
             }
         }
+        kiln_c99_gc_note_finalizable(data);
         status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
                                   sizeof *data->properties);
         if (status != KILN_C99_OK) {
