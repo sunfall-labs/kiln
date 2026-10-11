@@ -15,9 +15,19 @@ extern char **environ;
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
     void *slot = NULL;
     int status;
+    kiln_c99_realm_state *realm;
     if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
+    realm = kiln_c99_realm();
+    if (KILN_LIKELY(key < KILN_C99_REALM_SLOT_CACHE_KEYS)) {
+        slot = realm->value_slot_cache[key];
+        if (KILN_LIKELY(slot != NULL)) {
+            *out = (kiln_value *)slot;
+            return KILN_C99_OK;
+        }
+    }
     status = kiln_realm_value_slot(key, &slot);
     if (status != KILN_C99_OK || slot == NULL) return status;
+    if (key < KILN_C99_REALM_SLOT_CACHE_KEYS) realm->value_slot_cache[key] = slot;
     *out = (kiln_value *)slot;
     return KILN_C99_OK;
 }
@@ -962,6 +972,60 @@ int kiln_c99_global_builtin(kiln_host *host, kiln_value *out, const char *name, 
     memcpy(message, name, length);
     memcpy(message + length, " is not defined", sizeof " is not defined");
     return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, message);
+}
+
+/* The same read as `kiln_c99_global_builtin`, for one emitted site that remembers where the
+ * name was last found. `hint` is only a slot index into the global object's shape: it is never
+ * trusted, because every use re-checks that the current shape still holds this exact name in
+ * that slot, and that the slot is a plain data property. So reassigning `globalThis.Math`
+ * (the slot's value is read fresh each time), deleting it, or turning it into an accessor (the
+ * shape changes, the check fails) is observed exactly as the uncached read observes it. The
+ * hint carries no pointer into a realm, so one site can serve several realms at once; a racy
+ * store from another realm's thread can only make the next check miss. Anything this does not
+ * recognise -- a sealed or dictionary-mode global, an accessor, a miss -- takes the uncached
+ * path unchanged. */
+int kiln_c99_global_builtin_site(kiln_host *host, kiln_value *out, const char *name,
+                                 size_t length, uint32_t *hint, int depth,
+                                 kiln_value *thrown) {
+    kiln_value globals;
+    if (name == NULL || hint == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (KILN_LIKELY(kiln_c99_global_object(&globals) == KILN_C99_OK &&
+                    globals.tag == KILN_VALUE_OBJECT && length <= UINT32_MAX)) {
+        const kiln_object *object = kiln_c99_object_of(globals);
+        const kiln_shape *shape = object->shape;
+        if (KILN_LIKELY(shape != NULL && object->sealed == NULL)) {
+            kiln_string view;
+            uint32_t slot = *hint;
+            view.unit_len = (uint32_t)length;
+            view.flags = kiln_c99_fixed_key_flags(name, length);
+            view.data = name;
+            kiln_property candidate = {.key = NULL};
+            if (slot < shape->property_count && slot < object->slot_capacity) {
+                candidate.key = shape->keys[slot];
+            }
+            if (candidate.key == NULL || !kiln_c99_same_key_view(&candidate, &view)) {
+                uint32_t index;
+                slot = UINT32_MAX;
+                for (index = 0; index < shape->property_count && index < object->slot_capacity;
+                     ++index) {
+                    candidate.key = shape->keys[index];
+                    if (kiln_c99_same_key_view(&candidate, &view)) {
+                        slot = index;
+                        break;
+                    }
+                }
+                if (slot != UINT32_MAX) *hint = slot;
+            }
+            if (KILN_LIKELY(slot != UINT32_MAX) &&
+                (shape->attrs[slot] & KILN_C99_ATTR_ACCESSOR) == 0) {
+                kiln_property property;
+                kiln_c99_shape_property(object, slot, &property);
+                *out = property.value;
+                return KILN_C99_OK;
+            }
+        }
+    }
+    return kiln_c99_global_builtin(host, out, name, length, depth, thrown);
 }
 
 /* The headed form: global names compare as units, so a non-ASCII binding resolves the

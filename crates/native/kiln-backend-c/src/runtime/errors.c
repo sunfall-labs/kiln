@@ -69,12 +69,12 @@ int kiln_c99_error_prototype(uint64_t kind, kiln_value *out) {
 }
 
 static int kiln_c99_error_stack_accessors(kiln_value *getter, kiln_value *setter) {
-    void *getter_slot = NULL;
-    void *setter_slot = NULL;
+    kiln_value *getter_slot = NULL;
+    kiln_value *setter_slot = NULL;
     if (getter == NULL || setter == NULL) return KILN_C99_INVALID_ARGUMENT;
-    if (kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_GETTER, &getter_slot) !=
+    if (kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_GETTER, &getter_slot) !=
             KILN_C99_OK ||
-        kiln_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_SETTER, &setter_slot) !=
+        kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_ERROR_STACK_SETTER, &setter_slot) !=
             KILN_C99_OK ||
         getter_slot == NULL || setter_slot == NULL) {
         *getter = kiln_c99_undefined();

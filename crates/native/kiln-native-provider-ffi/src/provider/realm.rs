@@ -18,6 +18,7 @@ use kiln_runtime::{
 };
 use kiln_string::StringUnits;
 use std::cell::{Cell, RefCell};
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
@@ -827,9 +828,13 @@ struct NativeRealm {
     cancelled: Rc<RefCell<HashSet<RequestId>>>,
     queued: Rc<RefCell<HashMap<RequestId, Option<ResourceId>>>>,
     symbols: RefCell<hashbrown::HashMap<StringUnits, u64, std::collections::hash_map::RandomState>>,
-    symbol_keys: RefCell<HashMap<u64, StringUnits>>,
-    callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
-    value_slots: RefCell<HashMap<u32, Box<[u64; 4]>>>,
+    // The three maps below are keyed by small integers this process assigns itself (symbol ids,
+    // the C kernel's callable tags and codes, its fixed slot numbers), never by program-chosen
+    // text, so std's SipHash HashDoS defence buys nothing and cost 10% of a hot loop's time.
+    // `symbols` above is keyed by program-controlled strings and keeps RandomState.
+    symbol_keys: RefCell<FxHashMap<u64, StringUnits>>,
+    callable_stores: RefCell<FxHashMap<(u32, u64), CallableStore>>,
+    value_slots: RefCell<FxHashMap<u32, Box<[u64; 4]>>>,
     /// Parsed asymmetric keys belong to this realm and are discarded with it. Handles are opaque
     /// integers; generated code never receives a Rust pointer or a copy of private components.
     crypto_keys: RefCell<HashMap<u64, kiln_key_core::ImportedKey>>,
@@ -1350,9 +1355,9 @@ impl NativeRealm {
             symbols: RefCell::new(hashbrown::HashMap::with_hasher(
                 std::collections::hash_map::RandomState::new(),
             )),
-            symbol_keys: RefCell::new(HashMap::new()),
-            callable_stores: RefCell::new(HashMap::new()),
-            value_slots: RefCell::new(HashMap::new()),
+            symbol_keys: RefCell::new(FxHashMap::default()),
+            callable_stores: RefCell::new(FxHashMap::default()),
+            value_slots: RefCell::new(FxHashMap::default()),
             crypto_keys: RefCell::new(HashMap::new()),
             next_crypto_key: Cell::new(1),
             argv: RefCell::new(Vec::new()),

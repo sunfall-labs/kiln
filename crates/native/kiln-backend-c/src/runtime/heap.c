@@ -9878,6 +9878,8 @@ static void kiln_c99_gc_free_local_shapes(kiln_gc_heap *heap) {
 static void kiln_c99_gc_teardown_begin(void *opaque) {
     kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
     if (heap == NULL || heap->fallback) return;
+    /* The provider has already freed this realm's value slots; no cached address may outlive them. */
+    memset(heap->realm.value_slot_cache, 0, sizeof heap->realm.value_slot_cache);
     heap->collecting = 1;
     kiln_c99_gc_begin(heap);
 }

@@ -2772,6 +2772,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "num-traits",
  "regress",
+ "rustc-hash",
  "tokio",
 ]
 

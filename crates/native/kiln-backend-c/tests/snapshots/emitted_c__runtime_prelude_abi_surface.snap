@@ -1605,6 +1605,7 @@ static uint32_t kiln_c99_method_declared_length(uint64_t code) {
 #define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
 #define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
 #define KILN_C99_REALM_SLOT_CONSOLE UINT32_C(4)
+#define KILN_C99_REALM_SLOT_CACHE_KEYS 32
 static int kiln_c99_is_symbol_key(const char *key, size_t key_len);
 static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell,
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -3199,6 +3200,7 @@ static int kiln_c99_object_prototype_binding(kiln_host *host, kiln_value *out,
 int kiln_c99_bootstrap_global(kiln_host *host, kiln_value *out, const char *name,
 int kiln_c99_global_binding(kiln_host *host, kiln_value *out, const char *name,
 int kiln_c99_global_builtin(kiln_host *host, kiln_value *out, const char *name, size_t length,
+int kiln_c99_global_builtin_site(kiln_host *host, kiln_value *out, const char *name,
 int kiln_c99_global_binding_key(kiln_host *host, kiln_value *out, const kiln_string *name,
 static int kiln_c99_global_own_binding(kiln_value *out, const char *name, size_t name_len,
 static int kiln_c99_global_own_binding_key(kiln_value *out, const kiln_string *name,

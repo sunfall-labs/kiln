@@ -3,6 +3,9 @@
 #define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
 #define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
 #define KILN_C99_REALM_SLOT_CONSOLE UINT32_C(4)
+/* Keys below this are the kernel's fixed singleton slots, and their pointers are cached in the
+ * realm state (`value_slot_cache`); the provider's keys above it (node:ffi roots) are not. */
+#define KILN_C99_REALM_SLOT_CACHE_KEYS 32
 
 static int kiln_c99_is_symbol_key(const char *key, size_t key_len);
 static KILN_ALWAYS_INLINE inline void kiln_c99_val_store_cell(kiln_val *cell,
@@ -1100,6 +1103,11 @@ typedef struct kiln_c99_realm_state {
     struct kiln_ffi_function_meta *ffi_functions;
     struct kiln_ffi_callback_meta *ffi_callbacks;
     uint32_t ffi_next_root;
+    /* `kiln_realm_value_slot` answers, by key. A slot's address is stable for the life of the
+     * realm that owns it, and this state belongs to that realm's heap, so a realm never sees
+     * another's pointer. Zeroed with the heap, and again when the realm tears down
+     * (`kiln_c99_gc_teardown_begin`), the moment the provider frees the slots. */
+    void *value_slot_cache[KILN_C99_REALM_SLOT_CACHE_KEYS];
     /* The realm's bootstrap adopted the `Timeout` and `Immediate` prototypes
      * (`kiln_c99_timer_op`, op 5), so `setTimeout` and the others hand back a timer record.
      * Plain data: the prototypes themselves are in value slots, which are roots. */
