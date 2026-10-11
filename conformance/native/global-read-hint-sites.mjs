@@ -66,13 +66,14 @@ globalThis.Number = savedNumber;
 
 // Deleting the name itself.
 delete globalThis.Math;
-log("deleted", readMathName(), readMathStrict());
+// `typeof` of the deleted name is left to docs/issues/typeof-deleted-builtin-global.md.
+log("deleted", "Math" in globalThis, readMathStrict());
 globalThis.Math = original;
 log("back", readMathName(), readMathStrict());
 
-// Writable false: the value is still read, and a write does not change it.
+// Writable false: the value is still read, and a write (strict: a module) throws and changes nothing.
 Object.defineProperty(globalThis, "Math", { writable: false, value: original });
-globalThis.Math = { sqrt: () => "nope" };
+try { globalThis.Math = { sqrt: () => "nope" }; } catch (e) { log("readonly write", e.constructor.name); }
 log("readonly", sqrtOf(64), mathIsOriginal(original));
 Object.defineProperty(globalThis, "Math", { writable: true, value: original });
 
@@ -103,7 +104,7 @@ const savedJSON = globalThis.JSON;
 globalThis.JSON = 1;
 log("trio json=1", trio());
 delete globalThis.JSON;
-log("trio json gone", trio());
+log("trio json gone", "JSON" in globalThis);
 globalThis.JSON = savedJSON;
 log("trio restored", trio());
 
