@@ -3909,6 +3909,15 @@ typedef struct {
 static int kiln_c99_sort_compare_typed(kiln_c99_typed_sort_context *ctx, double a,
 typedef struct {
 static size_t kiln_c99_timsort_min_run_length(size_t n) {
+static int kiln_c99_timsort_scratch_reserve_val(kiln_value *owner, kiln_val **scratch,
+static void kiln_c99_timsort_scratch_load_val(kiln_value owner, kiln_val *dst, const kiln_val *src,
+static void kiln_c99_timsort_scratch_release_val(kiln_value *owner, kiln_val **scratch) {
+#define kiln_c99_timsort_scratch_reserve_val_fast kiln_c99_timsort_scratch_reserve_val
+#define kiln_c99_timsort_scratch_load_val_fast kiln_c99_timsort_scratch_load_val
+#define kiln_c99_timsort_scratch_release_val_fast kiln_c99_timsort_scratch_release_val
+static int kiln_c99_timsort_scratch_reserve_typed(kiln_value *owner, double **scratch,
+static void kiln_c99_timsort_scratch_load_typed(kiln_value owner, double *dst, const double *src,
+static void kiln_c99_timsort_scratch_release_typed(kiln_value *owner, double **scratch) {
 #define KILN_DEF_TIMSORT(SUFFIX, TYPE, CTX_TYPE, CMP_FUNC)                                         \
 KILN_DEF_TIMSORT(val, kiln_val, kiln_c99_sort_context, kiln_c99_sort_compare_val)
 KILN_DEF_TIMSORT(typed, double, kiln_c99_typed_sort_context, kiln_c99_sort_compare_typed)
