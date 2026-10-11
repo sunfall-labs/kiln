@@ -64,7 +64,7 @@ if (incomingMessagePrototype && typeof Readable === "function") {
   // Readable state for a request that nobody streams would be built only to record that, on
   // every request, so a complete request without state skips the push: the `_readableState`
   // getter below replays it when anything first reads the stream, and adding a listener the end
-  // would reach asks for the state. The replay waits a tick, as the host's own push did, so
+  // would reach creates the state. The replay waits a tick, as the host's own push did, so
   // listeners registered in the same turn (`data`, then `end`) all see it.
   const createReadableState = Readable[Symbol.for("kiln.stream.createReadableState")];
   const readablePush = Readable.prototype.push;
@@ -91,7 +91,10 @@ if (incomingMessagePrototype && typeof Readable === "function") {
         const result = nativeRegister.call(this, event, listener);
         if (event === "data") {
           if (this._readableState.flowing !== false) this.resume();
-        } else if ((event === "end" || event === "readable" || event === "close") && endDeferred(this)) {
+        } else if ((event === "end" || event === "readable" || event === "close") &&
+                   !hasOwnProperty.call(this, "_readableState")) {
+          // A listener the end reaches gets the stream now, before the host pushes the end,
+          // so it fires even when nothing else reads the request (an `end` listener alone).
           void this._readableState;
         }
         return result;
