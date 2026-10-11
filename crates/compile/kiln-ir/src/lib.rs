@@ -1187,3 +1187,15 @@ pub use compile::*;
 
 #[cfg(test)]
 mod tests;
+
+/// `**` and `Math.pow` on numbers (ECMA-262 Number::exponentiate). `f64::powf` follows C's
+/// `pow`, which answers 1 where the language answers NaN: a NaN exponent, and an infinite
+/// exponent with a base of magnitude one. The interpreter and the constant folder both use this;
+/// the native backend's twin is `kiln_c99_js_pow` in the C prelude.
+pub fn js_exponentiate(base: f64, exponent: f64) -> f64 {
+    if exponent.is_nan() || (exponent.is_infinite() && base.abs() == 1.0) {
+        f64::NAN
+    } else {
+        base.powf(exponent)
+    }
+}

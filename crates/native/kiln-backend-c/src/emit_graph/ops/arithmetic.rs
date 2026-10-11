@@ -566,7 +566,7 @@ pub(super) fn emit_binary_ints(
         BinaryOp::Exponentiate => {
             writeln!(
                 output,
-                "    d{v} = pow((double)i{l}, (double)i{r});{box_stmt}"
+                "    d{v} = kiln_c99_js_pow((double)i{l}, (double)i{r});{box_stmt}"
             )
             .unwrap();
             if typed_int {
@@ -670,7 +670,7 @@ pub(super) fn emit_binary_numbers(
         BinaryOp::Subtract => emit_arith(output, &format!("{a} - {b}")),
         BinaryOp::Multiply => emit_arith(output, &format!("{a} * {b}")),
         BinaryOp::Divide => emit_arith(output, &format!("{a} / {b}")),
-        BinaryOp::Exponentiate => emit_arith(output, &format!("pow({a}, {b})")),
+        BinaryOp::Exponentiate => emit_arith(output, &format!("kiln_c99_js_pow({a}, {b})")),
         BinaryOp::Remainder => emit_arith(
             output,
             &format!(

@@ -3799,7 +3799,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_SQRT: *result = kiln_c99_number(sqrt(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_CBRT: *result = kiln_c99_number(cbrt(first)); return KILN_C99_OK;
-        case KILN_C99_METHOD_MATH_POW: *result = kiln_c99_number((isnan(second) || (fabs(first) == 1.0 && isinf(second))) ? NAN : pow(first, second)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_POW: *result = kiln_c99_number(kiln_c99_js_pow(first, second)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_LOG: *result = kiln_c99_number(log(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_LOG2: *result = kiln_c99_number(log2(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_LOG10: *result = kiln_c99_number(log10(first)); return KILN_C99_OK;

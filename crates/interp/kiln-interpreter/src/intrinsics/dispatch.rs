@@ -1762,18 +1762,10 @@ pub(crate) fn call_native(
         Native::MathAsin => Value::Number(argument_number(arguments)?.asin()),
         Native::MathAcos => Value::Number(argument_number(arguments)?.acos()),
         Native::MathAtan => Value::Number(argument_number(arguments)?.atan()),
-        // Number::exponentiate (ECMA-262 §6.1.6.1.3) differs from C's pow where IEEE 754 says
-        // "1": a NaN exponent is NaN, and so is a base of +1 or -1 to an infinite power.
         Native::MathPow => {
             let base = argument_number(arguments)?;
             let exponent = argument_number_at(arguments, 1)?;
-            Value::Number(
-                if exponent.is_nan() || (base.abs() == 1.0 && exponent.is_infinite()) {
-                    f64::NAN
-                } else {
-                    base.powf(exponent)
-                },
-            )
+            Value::Number(kiln_ir::js_exponentiate(base, exponent))
         }
         // `Math.min()` with no arguments is Infinity and `Math.max()` is -Infinity, which are the
         // identities for the fold rather than an error. Any NaN argument wins outright.

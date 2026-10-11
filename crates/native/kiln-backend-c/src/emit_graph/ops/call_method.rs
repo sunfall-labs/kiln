@@ -2282,7 +2282,7 @@ pub(super) fn emit_call_method(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                              {guard2}{{ \
                                  {load2} \
-                                 v{v} = kiln_c99_val_from_double((isnan(ma1) || (fabs(ma0) == 1.0 && isinf(ma1))) ? NAN : pow(ma0, ma1)); \
+                                 v{v} = kiln_c99_val_from_double(kiln_c99_js_pow(ma0, ma1)); \
                                  handled = 1; \
                              }} \
                          }}",
@@ -4322,7 +4322,7 @@ fn prepared_math_body(name: &str, argc: usize) -> Option<(&'static str, String)>
         )),
         ("pow", 2) => Some((
             "KILN_C99_METHOD_MATH_POW",
-            "RES = (isnan(ma1) || (fabs(ma0) == 1.0 && isinf(ma1))) ? NAN : pow(ma0, ma1);"
+            "RES = kiln_c99_js_pow(ma0, ma1);"
                 .to_owned(),
         )),
         ("min", 2) => Some((

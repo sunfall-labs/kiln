@@ -79,15 +79,7 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
     case 3: return kiln_c99_number(kiln_c99_as_number(left) * kiln_c99_as_number(right));
     case 4: return kiln_c99_number(kiln_c99_as_number(left) / kiln_c99_as_number(right));
     case 5: return kiln_c99_number(fmod(kiln_c99_as_number(left), kiln_c99_as_number(right)));
-    case 6: {
-        /* `**` is not C's `pow` at the edges: an exponent of NaN, or an infinite exponent with a
-         * base of magnitude one, is NaN in JavaScript where C answers 1. */
-        double base = kiln_c99_as_number(left);
-        double exponent = kiln_c99_as_number(right);
-        if (isnan(exponent) || (isinf(exponent) && fabs(base) == 1.0))
-            return kiln_c99_number(NAN);
-        return kiln_c99_number(pow(base, exponent));
-    }
+    case 6: return kiln_c99_number(kiln_c99_js_pow(kiln_c99_as_number(left), kiln_c99_as_number(right)));
     case 7: return kiln_c99_boolean(kiln_c99_strict_equal(left, right));
     case 8: return kiln_c99_boolean(!kiln_c99_strict_equal(left, right));
     case 9:

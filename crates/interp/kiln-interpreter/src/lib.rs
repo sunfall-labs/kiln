@@ -2779,7 +2779,9 @@ fn binary(
         BinaryOp::Multiply => Value::Number(left.as_number() * right.as_number()),
         BinaryOp::Divide => Value::Number(left.as_number() / right.as_number()),
         BinaryOp::Remainder => Value::Number(left.as_number() % right.as_number()),
-        BinaryOp::Exponentiate => Value::Number(left.as_number().powf(right.as_number())),
+        BinaryOp::Exponentiate => {
+            Value::Number(kiln_ir::js_exponentiate(left.as_number(), right.as_number()))
+        }
         BinaryOp::StrictEqual => Value::Boolean(strict_equal(&left, &right)),
         // `key in object` tests presence, which is not the same question as reading the key and
         // comparing to undefined: a property explicitly set to undefined is present.
