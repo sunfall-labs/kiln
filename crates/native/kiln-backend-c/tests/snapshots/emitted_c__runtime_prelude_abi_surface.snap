@@ -4313,11 +4313,13 @@ static int kiln_dyn_scope_update(kiln_dyn_scope *scope, const char *name, size_t
 static int kiln_dyn_scope_get(kiln_host *host, kiln_dyn_scope *scope, const char *name,
 static void kiln_dyn_scope_destroy(kiln_dyn_scope *scope) {
 typedef enum {
+typedef struct kiln_dyn_template {
 typedef struct {
 typedef struct kiln_dyn_active_label {
 typedef struct {
 static int kiln_dyn_label_matches(const kiln_dyn_active_label *labels,
 static void kiln_dyn_token_free(kiln_dyn_token *tok);
+static void kiln_dyn_template_free(kiln_dyn_template *tmpl);
 static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex);
 static int kiln_dyn_current_token_is_control_head(const kiln_dyn_lexer *lex) {
 static int kiln_dyn_labeled_statement_targets_iteration(const kiln_dyn_lexer *lex) {
@@ -4326,6 +4328,7 @@ static int kiln_dyn_throw_unexpected_token(kiln_dyn_lexer *lex, kiln_value *thro
 static int kiln_dyn_throw_unresolvable_reference(kiln_value *thrown,
 static int kiln_dyn_source_to_string(const char *source, size_t source_len, kiln_value *out);
 static int kiln_dyn_validate_source(const char *source, size_t length, int strict,
+static void kiln_dyn_template_free(kiln_dyn_template *tmpl) {
 static void kiln_dyn_token_free(kiln_dyn_token *tok) {
 static int kiln_dyn_is_ident_name(kiln_dyn_token_kind kind) {
 static int kiln_dyn_hex_digit(unsigned char ch) {
@@ -4338,6 +4341,11 @@ static int kiln_dyn_read_hex(const char *source, size_t length, size_t *position
 static int kiln_dyn_append_codepoint(uint16_t **units, size_t *capacity, size_t *length,
 static int kiln_dyn_source_to_string(const char *source, size_t source_len, kiln_value *out) {
 static char *kiln_dyn_utf8_from_units(const uint16_t *units, size_t count, size_t *byte_len) {
+static int kiln_dyn_lex_string_chars(kiln_dyn_lexer *lex, char quote, uint16_t **units_io,
+static void kiln_dyn_skip_quoted_raw(const char *src, size_t len, size_t *pos, char quote) {
+static int kiln_dyn_template_reserve(kiln_dyn_template *tmpl) {
+static int kiln_dyn_template_substitution_end(const kiln_dyn_lexer *lex, size_t *end) {
+static void kiln_dyn_lex_template(kiln_dyn_lexer *lex, const char *start) {
 static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
 static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_sequence(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -4346,13 +4354,27 @@ static int kiln_dyn_validate_parameter_separators(const char *source, size_t len
 static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t length,
 static int kiln_dyn_preflight_direct_eval(kiln_host *host, const char *source, size_t length,
 static int kiln_dyn_require_string_codegen(kiln_value *thrown) {
-static kiln_value kiln_dyn_parse_only_binary(const kiln_dyn_lexer *lex, int operation,
+static kiln_value kiln_dyn_parse_only_placeholder(void) { return kiln_c99_undefined(); }
+static int kiln_dyn_binary(kiln_host *host, const kiln_dyn_lexer *lex, int operation,
+#define KILN_DYN_BINARY(code, left, right, dest) \
 static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
-typedef struct kiln_dyn_object_binding {
 static int kiln_dyn_scope_has_uninitialized_own(kiln_dyn_scope *scope,
 KILN_VALUE_UNINITIALIZED;
-static int kiln_dyn_eval_object_binding(kiln_host *host, kiln_dyn_lexer *lex,
-done:
+enum {
+static int kiln_dyn_collect_pattern_names(kiln_dyn_lexer *look,
+static int kiln_dyn_parse_assignment_unexecuted(kiln_host *host, kiln_dyn_lexer *lex,
+static int kiln_dyn_is_binding_identifier(kiln_dyn_token_kind kind) {
+static int kiln_dyn_bind_name(kiln_dyn_lexer *lex, kiln_dyn_scope *scope, int kind,
+static int kiln_dyn_skip_binding_target(kiln_dyn_lexer *lex) {
+static size_t kiln_dyn_token_offset(const kiln_dyn_lexer *lex) {
+static int kiln_dyn_bind_target(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+static int kiln_dyn_bind_target_range(kiln_host *host, kiln_dyn_lexer *lex,
+static int kiln_dyn_binding_default(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+static int kiln_dyn_bind_object_pattern(kiln_host *host, kiln_dyn_lexer *lex,
+static int kiln_dyn_bind_array_pattern(kiln_host *host, kiln_dyn_lexer *lex,
+static int kiln_dyn_bind_target(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+static int kiln_dyn_eval_pattern_declaration(kiln_host *host, kiln_dyn_lexer *lex,
+static int kiln_dyn_bind_parameters(kiln_host *host, kiln_dyn_scope *scope, const char *params,
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_new_environment(kiln_value *out) {
 static int kiln_dyn_captured_record_push(kiln_value records, int with_record,
@@ -4368,6 +4390,13 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *re
 static int kiln_dyn_append_source_units(kiln_value *source, kiln_value part) {
 static int kiln_dyn_function_constructor_source(kiln_value parameters, kiln_value body,
 static int kiln_dyn_body_has_use_strict(const char *body, size_t length) {
+static int kiln_dyn_member_modifier_follows(const kiln_dyn_lexer *lex) {
+static int kiln_dyn_params_are_blank(const char *params, size_t params_len) {
+static int kiln_dyn_eval_template_substitution(kiln_host *host, kiln_dyn_lexer *lex,
+static int kiln_dyn_eval_template_literal(kiln_host *host, kiln_dyn_lexer *lex,
+static kiln_value kiln_dyn_template_raw_string(const kiln_dyn_lexer *lex,
+static int kiln_dyn_make_template_object(const kiln_dyn_lexer *lex, const kiln_dyn_template *tmpl,
+static int kiln_dyn_eval_tagged_template(kiln_host *host, kiln_dyn_lexer *lex,
 static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 object_property_value_ready:;
 static int kiln_dyn_eval_postfix_inner(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -4383,6 +4412,7 @@ static int kiln_dyn_update_identifier(kiln_host *host, kiln_dyn_scope *scope,
 static kiln_value kiln_dyn_void_result(void) {
 static int kiln_dyn_await_operand_follows(const kiln_dyn_lexer *lex) {
 static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+static int kiln_dyn_eval_exponent(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_multiplicative(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_additive(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_shift(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -4390,6 +4420,12 @@ static int kiln_dyn_eval_relational(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
 static int kiln_dyn_eval_equality(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static void kiln_dyn_skip_expr(kiln_dyn_lexer *lex, int stop_at_colon) {
 static void kiln_dyn_skip_unexecuted(kiln_dyn_lexer *lex, kiln_dyn_token_kind logical_op,
+static int kiln_dyn_is_compound_assignment(kiln_dyn_token_kind kind) {
+static int kiln_dyn_is_assignment_operator(kiln_dyn_token_kind kind) {
+static int kiln_dyn_is_logical_assignment(kiln_dyn_token_kind kind) {
+static int kiln_dyn_compound_binary_code(kiln_dyn_token_kind kind) {
+static int kiln_dyn_logical_assignment_short_circuits(kiln_dyn_token_kind kind,
+static int kiln_dyn_parse_assignment_unexecuted(kiln_host *host, kiln_dyn_lexer *lex,
 static int kiln_dyn_eval_bitwise_and(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_bitwise_xor(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_bitwise_or(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -4441,12 +4477,18 @@ static int kiln_dyn_switch_predeclare(kiln_dyn_scope *scope,
 static int kiln_dyn_switch_initialize_functions(kiln_host *host,
 static int kiln_dyn_consume_function_declaration(kiln_dyn_lexer *lex,
 static int kiln_dyn_prepare_block_scope(kiln_host *host, kiln_dyn_scope *parent,
+static int kiln_dyn_for_bind(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 typedef struct {
 typedef struct {
 static int kiln_dyn_preflight_body(kiln_host *host, const char *source, size_t length,
 static int kiln_dyn_preflight_direct_eval(kiln_host *host, const char *source, size_t length,
 static int kiln_dyn_function_statement_boundary(kiln_dyn_token_kind kind) {
+static int kiln_dyn_lexicals_push(kiln_dyn_lexical_declaration **out, size_t *out_count,
+static int kiln_dyn_collect_pattern_names(kiln_dyn_lexer *look,
+static int kiln_dyn_collect_target_names(kiln_dyn_lexer *look,
+static void kiln_dyn_skip_pattern_expression(kiln_dyn_lexer *look) {
+static int kiln_dyn_collect_pattern_names(kiln_dyn_lexer *look,
 static int kiln_dyn_collect_lexicals(const char *source, size_t source_len,
 oom:
 static int kiln_dyn_scope_predeclare_lexicals(kiln_dyn_scope *scope,

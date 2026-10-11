@@ -1,0 +1,145 @@
+// Binding patterns and parameter lists inside dynamic code: array and object patterns with
+// defaults, nesting, computed keys and rest, in declarations, parameters, for-of heads and catch
+// bindings. Defaults and rest parameters used to be dropped without an error.
+const run = (name, source, ...args) => {
+  try { console.log(name, JSON.stringify(Function("a", "b", source)(...args))); }
+  catch (error) { console.log(name, "threw", error.name); }
+};
+// declarations
+run("array-basic", "var [x, y] = [1, 2]; return x + y");
+run("array-const", "const [x, y] = [1, 2]; return [y, x]");
+run("array-let-skip", "let [, second, , fourth] = [1, 2, 3, 4]; return [second, fourth]");
+run("array-default", "const [x = 5, y = 6] = [undefined, 2]; return [x, y]");
+run("array-default-null-kept", "const [x = 5] = [null]; return x");
+run("array-default-expression", "var n = 0; const [x = ++n, y = ++n] = [10]; return [x, y, n]");
+run("array-missing", "const [x, y] = [1]; return [x, y === undefined]");
+run("array-rest", "const [h, ...t] = [1, 2, 3]; return [h, t]");
+run("array-rest-empty", "const [h, ...t] = [1]; return [h, t]");
+run("array-nested", "const [[p, q], [r]] = [[1, 2], [3]]; return [p, q, r]");
+run("array-from-string", "const [c1, c2] = 'hi'; return [c1, c2]");
+run("array-from-set", "const [e1, e2] = new Set([7, 8, 9]); return [e1, e2]");
+run("array-from-map", "const [[k, v]] = new Map([['key', 'val']]); return [k, v]");
+run("array-from-generator", "const [x, y] = a(); return [x, y]", function* () { yield 1; yield 2; yield 3; });
+run("array-not-iterable", "const [x] = 5; return x");
+run("array-null", "const [x] = null; return x");
+run("array-holes", "const [x, y] = [1, , 3]; return [x, y === undefined]");
+run("array-trailing-comma", "const [x, y,] = [1, 2, 3]; return [x, y]");
+run("array-multiple-declarators", "var [x] = [1], [y] = [2]; return x + y");
+run("array-mixed-declarators", "var z = 3, [x] = [1]; return z + x");
+run("object-basic", "const { x, y } = { x: 1, y: 2 }; return [x, y]");
+run("object-rename", "const { x: first, y: second } = { x: 1, y: 2 }; return [first, second]");
+run("object-default", "const { x = 5, y = 6 } = { y: 2 }; return [x, y]");
+run("object-rename-default", "const { x: z = 9 } = {}; return z");
+run("object-default-uses-earlier", "const { x = 1, y = x + 1 } = {}; return [x, y]");
+run("object-nested", "const { p: { q } } = { p: { q: 7 } }; return q");
+run("object-nested-default", "const { p: { q = 2 } = {} } = {}; return q");
+run("object-nested-array", "const { list: [first, ...others] } = { list: [1, 2, 3] }; return [first, others]");
+run("array-nested-object", "const [{ n }, { m = 4 }] = [{ n: 1 }, {}]; return [n, m]");
+run("object-rest", "const { x, ...rest } = { x: 1, y: 2, z: 3 }; return [x, rest]");
+run("object-rest-empty", "const { x, ...rest } = { x: 1 }; return [x, rest]");
+run("object-rest-only", "const { ...copy } = { a: 1, b: 2 }; return copy");
+run("object-rest-skips-non-enumerable", "var o = Object.defineProperty({ a: 1 }, 'hidden', { value: 2 }); const { ...r } = o; return Object.keys(r)");
+run("object-rest-multiple-removed", "const { p, r2, ...r } = { p: 1, q: 2, r2: 3, s: 4 }; return r");
+run("object-rest-with-rename", "const { p: renamed, ...r } = { p: 1, q: 2 }; return [renamed, r]");
+run("object-rest-prototype-own-only", "var o = Object.create({ inherited: 1 }); o.own = 2; const { ...r } = o; return r");
+run("object-computed-key", "var k = 'dyn'; const { [k]: v } = { dyn: 'found' }; return v");
+run("object-computed-key-default", "const { ['a' + 'b']: v = 'dflt' } = {}; return v");
+run("object-string-key", "const { 'quoted key': v } = { 'quoted key': 1 }; return v");
+run("object-numeric-key", "const { 0: zero, 1: one } = ['z', 'o']; return [zero, one]");
+run("object-from-array-length", "const { length } = [1, 2, 3]; return length");
+run("object-from-string", "const { length, 0: ch } = 'abc'; return [length, ch]");
+run("object-getter-called", "var calls = 0; const { v } = { get v() { calls++; return 'g'; } }; return [v, calls]");
+run("object-null", "const { x } = null; return x");
+run("object-undefined", "const { x } = undefined; return x");
+run("object-empty-pattern", "const {} = { a: 1 }; return 'ok'");
+run("object-var", "var { x, y } = { x: 1, y: 2 }; return x + y");
+run("object-let", "let { x } = { x: 5 }; x++; return x");
+run("object-const-readonly", "const { x } = { x: 1 }; x = 2; return x");
+run("object-trailing-comma", "const { x, } = { x: 1 }; return x");
+run("object-keyword-key", "const { default: d, class: c } = { default: 1, class: 2 }; return [d, c]");
+run("object-from-call", "const f = () => ({ p: 1, q: 2 }); const { p, q } = f(); return p + q");
+run("object-in-block", "var out = []; { const { v } = { v: 1 }; out.push(v); } { const { v } = { v: 2 }; out.push(v); } return out");
+run("object-closure-capture", "const { x } = { x: 3 }; return (() => x * 2)()");
+run("object-tdz", "const { x = y, y } = { }; return 1");
+run("object-duplicate-lexical", "let x = 1; const { x } = { x: 2 }; return x");
+run("mixed-deep", "const { a: [{ b: [c = 3] = [] } = {}] = [] } = {}; return c");
+
+// parameters
+run("param-default", "function f(x = 5) { return x; } return [f(), f(undefined), f(null), f(1)]");
+run("param-default-uses-earlier", "function f(x, y = x * 2) { return [x, y]; } return f(3)");
+run("param-default-evaluated-lazily", "var n = 0; function f(x = ++n) { return x; } f(1); f(); f(); return n");
+run("param-rest", "function f(x, ...r) { return [x, r]; } return [f(1), f(1, 2, 3)]");
+run("param-rest-only", "function f(...r) { return r.length; } return [f(), f(1, 2)]");
+run("param-rest-is-array", "function f(...r) { return Array.isArray(r); } return f(1)");
+run("param-object", "function f({ x, y }) { return x + y; } return f({ x: 1, y: 2 })");
+run("param-object-default", "function f({ x = 1, y = 2 } = {}) { return [x, y]; } return [f(), f({ x: 9 })]");
+run("param-array", "function f([x, y]) { return x + y; } return f([3, 4])");
+run("param-array-rest", "function f([h, ...t]) { return [h, t]; } return f([1, 2, 3])");
+run("param-mixed", "function f(a, { b, c = 3 }, [d], ...e) { return [a, b, c, d, e]; } return f(1, { b: 2 }, [4], 5, 6)");
+run("param-arrow-default", "var f = (x, y = 10) => x + y; return [f(1), f(1, 2)]");
+run("param-arrow-rest", "var f = (...r) => r; return f(1, 2, 3)");
+run("param-arrow-destructured", "var f = ({ k }, [v]) => k + v; return f({ k: 'a' }, ['b'])");
+run("param-arrow-single-destructured", "var f = ({ k }) => k; return f({ k: 'solo' })");
+run("param-arrow-default-object", "var f = ({ k } = { k: 'dflt' }) => k; return [f(), f({ k: 'given' })]");
+run("param-method-default", "var o = { m(x = 4) { return x; } }; return [o.m(), o.m(1)]");
+run("param-method-rest", "var o = { m(h, ...t) { return t; } }; return o.m(1, 2, 3)");
+run("param-method-object", "var o = { m({ a }) { return a; } }; return o.m({ a: 'm' })");
+run("param-constructor-default", "return Function('x = 5', 'return x')()");
+run("param-constructor-rest", "return Function('a', '...r', 'return r')(1, 2, 3)");
+run("param-constructor-pattern", "return Function('{ a, b }', 'return a + b')({ a: 1, b: 2 })");
+run("param-constructor-array-pattern", "return Function('[a, b]', 'return a * b')([3, 4])");
+run("param-constructor-defaults-mixed", "return Function('a', 'b = a + 1', 'return [a, b]')(4)");
+run("param-default-function", "function f(cb = () => 'made') { return cb(); } return f()");
+run("param-default-closure-over-param", "function f(x, g = () => x) { return g(); } return f('captured')");
+run("param-default-object-literal", "function f(o = { k: 1 }) { return o.k; } return f()");
+run("param-default-string-with-comma", "function f(s = 'a, b') { return s; } return f()");
+run("param-default-template", "function f(s = `t${1 + 1}`) { return s; } return f()");
+run("param-default-regex", "function f(r = /a,b/) { return r.source; } return f()");
+run("param-default-nested-call", "function f(x = Math.max(1, 2)) { return x; } return f()");
+run("param-trailing-comma", "function f(a, b,) { return [a, b]; } return f(1, 2)");
+run("param-default-in-rest-position", "function f(a = 1, ...r) { return [a, r]; } return f(undefined, 2, 3)");
+run("param-arguments-still-available", "function f(a = 1) { return arguments.length; } return f(7, 8, 9)");
+run("param-shadow-outer", "var x = 'outer'; function f(x = 'param') { return x; } return [f(), x]");
+run("param-throws-in-default", "function f(x = (() => { throw new RangeError('d'); })()) { return x; } return f()");
+run("param-iife-pattern", "return (function ({ a }, [b]) { return a + b; })({ a: 1 }, [2])");
+run("param-async-default", "async function f(x = 3) { return x; } return typeof f().then");
+
+// for-of / for-in heads
+run("forof-array-pattern", "var out = []; for (const [k, v] of [['a', 1], ['b', 2]]) out.push(k + v); return out");
+run("forof-object-pattern", "var out = []; for (const { id, tag = 't' } of [{ id: 1 }, { id: 2, tag: 'x' }]) out.push(id + tag); return out");
+run("forof-entries", "var out = []; for (const [k, v] of Object.entries({ a: 1, b: 2 })) out.push(k + v); return out");
+run("forof-map", "var out = []; for (const [k, v] of new Map([['x', 1], ['y', 2]])) out.push(k + v); return out");
+run("forof-map-entries-let", "var out = []; for (let [k, v] of new Map([['x', 1]]).entries()) out.push(k, v); return out");
+run("forof-var-pattern", "for (var [k, v] of [['a', 1]]) {} return [k, v]");
+run("forof-nested-pattern", "var out = []; for (const { p: [x, y] } of [{ p: [1, 2] }]) out.push(x + y); return out");
+run("forof-rest-pattern", "var out = []; for (const [h, ...t] of [[1, 2, 3]]) out.push(h, t); return out");
+run("forof-set", "var s = 0; for (const x of new Set([1, 2, 3])) s += x; return s");
+run("forof-string", "var s = ''; for (const c of 'abc') s = c + s; return s");
+run("forof-string-surrogates", "var n = 0; for (const c of 'a\\u{1F600}b') n++; return n");
+run("forof-generator", "var s = 0; for (const x of a()) s += x; return s", function* () { yield 1; yield 2; yield 3; });
+run("forof-map-values", "var out = []; for (const v of new Map([[1, 'a'], [2, 'b']]).values()) out.push(v); return out");
+run("forof-array-values", "var out = []; for (const v of [10, 20].values()) out.push(v); return out");
+run("forof-break-inside-set", "var out = []; for (const x of new Set([1, 2, 3])) { if (x === 2) break; out.push(x); } return out");
+run("forof-continue-pattern", "var out = []; for (const [a, b] of [[1, 2], [3, 4]]) { if (a === 1) continue; out.push(b); } return out");
+run("forof-return-pattern", "for (const [a] of [[7], [8]]) { return a; }");
+run("forof-not-iterable", "for (const x of 5) { } return 1");
+run("forof-null-pattern-element", "for (const [a] of [null]) { } return 1");
+run("forof-empty-set", "var n = 0; for (const x of new Set()) n++; return n");
+run("forof-typed-array", "var s = 0; for (const x of new Uint8Array([1, 2, 3])) s += x; return s");
+run("cstyle-for-pattern-init", "var out = []; for (var [i, j] = [0, 5]; i < 3; i++) out.push(i + j); return out");
+
+// catch bindings
+run("catch-optional", "try { throw 1; } catch { return 'caught'; }");
+run("catch-optional-no-throw", "try { return 'ok'; } catch { return 'no'; }");
+run("catch-optional-finally", "var log = []; try { throw 1; } catch { log.push('c'); } finally { log.push('f'); } return log");
+run("catch-optional-nested", "try { try { throw 1; } catch { throw 2; } } catch (e) { return e; }");
+run("catch-optional-rethrow-skip", "var out = []; for (var i = 0; i < 3; i++) { try { if (i === 1) throw i; out.push(i); } catch { out.push('c'); } } return out");
+run("catch-param-still-works", "try { throw new TypeError('m'); } catch (e) { return e.message; }");
+run("catch-object-pattern", "try { throw { code: 7, msg: 'm' }; } catch ({ code, msg }) { return [code, msg]; }");
+run("catch-object-pattern-default", "try { throw {}; } catch ({ code = 'none' }) { return code; }");
+run("catch-array-pattern", "try { throw [1, 2]; } catch ([a, b]) { return a + b; }");
+run("catch-error-destructure", "try { null.x; } catch ({ name }) { return name; }");
+run("catch-binding-scoped", "var e = 'outer'; try { throw 'inner'; } catch (e) { } return e");
+run("catch-optional-missing-block", "try { throw 1; } catch return 1;");
+console.log("eval-array-pattern", (0, eval)("(() => { const [a, b = 2] = [1]; return a + b; })()"));
+console.log("eval-object-rest", JSON.stringify((0, eval)("(() => { const { x, ...r } = { x: 1, y: 2 }; return r; })()")));
