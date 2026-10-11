@@ -9,9 +9,6 @@
 !/bench/results/thirdparty-baseline.json
 # Whole-program facts baseline for benchmarks and bundles (fastest-native Step 1.7)
 !/bench/results/facts-baseline.json
-# Native executable size baseline: a recorded number is what makes later growth
-# a diff someone has to justify. Written by scripts/binary-sizes.sh.
-!/bench/results/binary-sizes-baseline.json
 .DS_Store
 /.kiln/
 **/.kiln/
