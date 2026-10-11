@@ -97,6 +97,13 @@ kiln_say "building the CLI"
 KILN_BUILD_COMMIT=$commit KILN_BUILD_TARGET=$target \
 	kiln_cargo build --release --locked -p kiln-cli --bin kiln
 cp target/release/kiln "$stage/bin/kiln"
+# The release profile keeps line tables (`debug = 1`) for local profiling; shipped, they are
+# three quarters of the binary (409 MB -> 84 MB on x86_64 Linux). Strip the debug sections and
+# keep the symbol table, so a panic's backtrace still names its functions.
+case "$target" in
+*-apple-darwin) strip -S "$stage/bin/kiln" ;;
+*) strip --strip-debug "$stage/bin/kiln" ;;
+esac
 
 # Variant names come from the contract, so a variant added there is packaged without editing this.
 contract_bin="$work/contract"
