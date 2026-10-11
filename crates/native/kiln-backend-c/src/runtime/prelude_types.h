@@ -3140,11 +3140,20 @@ typedef struct kiln_generator {
     int running;
     kiln_value *queue_promises;
     kiln_value *queue_sent;
+    uint8_t *queue_methods;
     size_t queue_count;
     size_t queue_capacity;
+    size_t queue_head;
     int queue_executing;
+    uint8_t async_request_kind;
+    uint8_t async_delegate_close;
+    uint8_t async_delegate_result_done;
+    /* A generator return completion survives yields in finally; async and sync frames share it. */
+    uint8_t return_pending;
+    kiln_value return_value;
     kiln_value delegate;
     size_t delegate_exit;
+    uint8_t delegate_wrapped;
 } kiln_generator;
 
 /* The parts a civil date is made of. The realm has one zone and it is UTC (ADR 0015), so there
@@ -3274,7 +3283,9 @@ typedef struct kiln_reaction {
     /* Set when both handlers are the suspended frame an `await` left, to be stepped rather than
      * called: a frame is not callable, and a reaction merely carrying one would otherwise read
      * as a `then` with no handler. */
-    uint8_t continuation: 2;
+    /* Await continuations include async-generator delegate/return modes 4..6. A 2-bit
+     * field silently aliases those modes to ordinary promise continuations. */
+    uint8_t continuation;
 } kiln_reaction;
 
 typedef struct kiln_promise {
@@ -3407,7 +3418,7 @@ typedef struct kiln_microtask {
     kiln_value argument;
     kiln_value derived;
     uint8_t rejected: 1;
-    uint8_t continuation: 2;
+    uint8_t continuation;
 } kiln_microtask;
 
 /* One process.nextTick callback. The Realm Runtime owns lane ordering; this payload contains

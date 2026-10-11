@@ -1,0 +1,9 @@
+# Original Hash native 25-case baseline
+
+The unchanged upstream Hash TypeScript test ran directly with the frozen receiver-fix CLI (`1d0c39f6f15188edd9850fdacbbe5e09a58634d27920f5f7bc112b4e498a20d7`), full native provider, one build/runtime worker and the original 5-second case / 10-second hook defaults. All 25 original case IDs and modes exactly match the Node/Vitest inventory. There are 24 passes and one original-deadline failure: the HashMap persistent/in-place-edit hash law. This is a failed focused baseline, not completion of the 322-file native suite.
+
+Two preceding bounded builds timed out before recording any cases; this successful warm-cache continuation retained the same source and compiler policy. Its added compile tracing is diagnostic only. The trace records 299 C compiles: 160 application units (274.370 seconds summed), 137 instantiation units (46.413 seconds), prelude (112.367 seconds), and graph launcher (251.659 seconds). These are compiler trace durations, not application execution timings. Concurrent gate work and different cache populations preclude a cold-build or relative speed claim.
+
+The supervisor exited with the test failure, reaped its child and verified the process group absent. Source inputs and generated entry hashes were unchanged. Full reports, original case records, stdout, build trace and cleanup receipt are compressed here; `SHA256SUMS.json` records both compressed and uncompressed hashes, verified by round-trip decompression. Binaries remain in owned scratch storage.
+
+Successful object compilation publishes each object immediately to the content-addressed cache. Cache hit reads refresh modification time, so an mtime-window scan cannot establish publication counts or a missing-publication defect. The earlier contrary cache hypothesis was withdrawn; no cache integrity defect was established.

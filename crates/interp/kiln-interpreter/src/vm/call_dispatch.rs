@@ -141,7 +141,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let generator = Rc::clone(generator);
                 let sent = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let step = PromiseState::pending();
-                self.drive_async_generator(&generator, &step, Resume::Send(sent))?;
+                self.enqueue_async_generator_request(
+                    &generator,
+                    AsyncGeneratorRequestKind::Next,
+                    sent,
+                    Rc::clone(&step),
+                )?;
                 Ok(Some(Value::Promise(step)))
             }
             // `return` and `throw` on an async generator, both of which finish -- or unwind --
@@ -161,44 +166,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let generator = Rc::clone(generator);
                 let sent = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let step = PromiseState::pending();
-                let returning = matches!(method, CallbackMethod::AsyncGeneratorReturn);
-                let entered = {
-                    let state = generator.borrow();
-                    state.started && !state.done
-                };
-                if entered {
-                    let resume = if returning {
-                        Resume::Return(sent)
-                    } else {
-                        Resume::Throw(sent)
-                    };
-                    self.drive_async_generator(&generator, &step, resume)?;
+                let kind = if matches!(method, CallbackMethod::AsyncGeneratorReturn) {
+                    AsyncGeneratorRequestKind::Return
                 } else {
-                    // Never entered, or already finished: there is nothing to unwind, so the
-                    // completion is answered directly. `return` still awaits its argument --
-                    // `AsyncGeneratorAwaitReturn` does -- which is observable as a tick and as a
-                    // rejection when the argument is a rejected promise.
-                    generator.borrow_mut().complete();
-                    if returning {
-                        let target = match sent {
-                            Value::Promise(inner) => inner,
-                            other => {
-                                let pending = PromiseState::pending();
-                                self.resolve_promise(&pending, other);
-                                pending
-                            }
-                        };
-                        self.react(
-                            &target,
-                            Value::Undefined,
-                            Value::Undefined,
-                            Sink::AsyncGeneratorReturn(Rc::clone(&step)),
-                            false,
-                        );
-                    } else {
-                        self.settle(&step, &Settled::Rejected(sent));
-                    }
-                }
+                    AsyncGeneratorRequestKind::Throw
+                };
+                self.enqueue_async_generator_request(&generator, kind, sent, Rc::clone(&step))?;
                 Ok(Some(Value::Promise(step)))
             }
             // Generator methods drive the machine, so they cannot go through `array_callback`.
@@ -233,7 +206,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?
                 } else {
-                    self.resume_generator_with(&generator, Resume::Throw(thrown), instruction)?
+                    self.resume_generator_throw(&generator, thrown, instruction)?
                 };
                 if generator.borrow().delegate.is_some() && !done {
                     Ok(Some(value))
@@ -543,6 +516,7 @@ mod weak_get_or_insert_tests {
             inferred_name: None,
             upvalues: vec![Rc::clone(&counter)],
             realm: RealmId::PRIMARY,
+            arguments_length_only: false,
             captured_arguments: None,
             captured_new_target: None,
             captured_this: None,

@@ -398,6 +398,29 @@ impl super::Compiler {
         self.patch_jump(finished);
     }
 
+    /// Call the `next` method captured when the iterator record was created.
+    ///
+    /// The iterator protocol consumes the actual arguments, not an argument-array object, so a
+    /// fixed-arity call avoids materializing a temporary array for every step. `CallComputed`
+    /// keeps the receiver and captured callee together; its key operand is metadata only, and an
+    /// undefined placeholder preserves `Apply`'s lack of a method-name hint.
+    pub(super) fn emit_call_captured_iterator_next(
+        &mut self,
+        iterator: &str,
+        next_method: &str,
+        sent: Option<&str>,
+    ) {
+        self.load_hidden(iterator);
+        self.push_constant(Constant::Undefined);
+        self.load_hidden(next_method);
+        if let Some(sent) = sent {
+            self.load_hidden(sent);
+        }
+        self.code.push(Instruction::CallComputed {
+            argc: u16::from(sent.is_some()),
+        });
+    }
+
     /// One `IteratorStep`, leaving the value it produced when `want_value` is set.
     ///
     /// An exhausted iterator yields `undefined` rather than stopping the walk: `var [a, b] = [1]`
@@ -417,10 +440,7 @@ impl super::Compiler {
         // closed.
         self.push_constant(Constant::Boolean(true));
         self.store_hidden(done);
-        self.load_hidden(iterator);
-        self.load_hidden(next_method);
-        self.code.push(Instruction::NewArray { count: 0 });
-        self.code.push(Instruction::Apply);
+        self.emit_call_captured_iterator_next(iterator, next_method, None);
         self.guard_iterator_result();
         self.store_hidden(step);
         self.load_hidden(step);
@@ -471,10 +491,7 @@ impl super::Compiler {
         let drained = self.emit_jump(Instruction::JumpIfTruthy(0));
         self.push_constant(Constant::Boolean(true));
         self.store_hidden(done);
-        self.load_hidden(iterator);
-        self.load_hidden(next_method);
-        self.code.push(Instruction::NewArray { count: 0 });
-        self.code.push(Instruction::Apply);
+        self.emit_call_captured_iterator_next(iterator, next_method, None);
         self.guard_iterator_result();
         self.store_hidden(step);
         self.load_hidden(step);
@@ -540,9 +557,8 @@ impl super::Compiler {
     /// Returns the jump taken when there is no `return` to call, which the caller patches to
     /// wherever it lands after dealing with the result: an absent `return` leaves nothing.
     ///
-    /// Applied rather than called by name, because the language reads `return` once and a second
-    /// read would run an accessor twice. The empty argument array is also what `return` sees as
-    /// its own `arguments`, whose length one test asserts.
+    /// The language reads `return` once; a prepared call preserves that captured value and the
+    /// iterator receiver without allocating an argument array for the zero-argument invocation.
     pub(super) fn emit_iterator_return(&mut self, binding: &str, span: Span) -> usize {
         let name = self.constant_index(Constant::String("return".to_owned().into()));
         let held = format!("%closing{}", self.hidden_bindings);
@@ -557,8 +573,8 @@ impl super::Compiler {
         self.patch_jump(present);
         self.load_hidden(binding);
         self.load_hidden(&held);
-        self.code.push(Instruction::NewArray { count: 0 });
-        self.code.push(Instruction::Apply);
+        self.code
+            .push(Instruction::CallMethodPrepared { name, argc: 0 });
         absent
     }
 
@@ -1577,7 +1593,17 @@ impl super::Compiler {
                 self.without_completion(|compiler| compiler.statements(&body));
                 self.scopes.pop().expect("finalizer scope was just pushed");
             }
-            Cleanup::CloseIterator { binding } => self.emit_iterator_close(&binding.clone()),
+            Cleanup::CloseIterator {
+                binding,
+                awaiting,
+                span,
+            } => {
+                if *awaiting {
+                    self.emit_async_iterator_close(&binding.clone(), *span, false);
+                } else {
+                    self.emit_iterator_close(&binding.clone());
+                }
+            }
             Cleanup::DisposeResources(slots) => self.emit_disposals(&slots.clone()),
         }
     }
@@ -1705,6 +1731,35 @@ impl super::Compiler {
         self.code.push(Instruction::Pop);
         self.code.push(Instruction::Pop);
         self.patch_jump(done);
+    }
+
+    /// `AsyncIteratorClose` for a `for await` loop. Its `return()` promise must be awaited so
+    /// cleanup finishes before the abrupt completion leaves the loop. When closing for a throw,
+    /// the original exception wins over a throwing/rejected `return()` and its result need not be
+    /// checked for being an object.
+    pub(super) fn emit_async_iterator_close(
+        &mut self,
+        binding: &str,
+        span: Span,
+        preserve_throw: bool,
+    ) {
+        let guard = preserve_throw.then(|| self.emit_jump(Instruction::PushHandler(0)));
+        let absent = self.emit_iterator_return(binding, span);
+        self.code.push(Instruction::Await);
+        if !preserve_throw {
+            self.require_object("Async iterator result of `return` is not an object");
+        }
+        self.code.push(Instruction::Pop);
+        self.patch_jump(absent);
+
+        if let Some(guard) = guard {
+            self.code.push(Instruction::PopHandler);
+            let closed = self.emit_jump(Instruction::Jump(0));
+            self.patch_jump(guard);
+            // The awaited close failed; preserve the exception that was already on the stack.
+            self.code.push(Instruction::Pop);
+            self.patch_jump(closed);
+        }
     }
 
     /// Run every cleanup between here and `depth`, innermost first.
@@ -1959,10 +2014,7 @@ impl super::Compiler {
         let handler_jump = self.emit_jump(Instruction::PushHandler(0));
 
         let start = self.code.len();
-        self.load_hidden(&iterator_binding);
-        self.load_hidden(&next_binding);
-        self.code.push(Instruction::NewArray { count: 0 });
-        self.code.push(Instruction::Apply);
+        self.emit_call_captured_iterator_next(&iterator_binding, &next_binding, None);
         if awaiting {
             // An async iterator hands back a promise of the result object; a sync one hands back
             // the object itself and has nothing to wait for here.
@@ -2002,6 +2054,8 @@ impl super::Compiler {
         // landing pads below, which is why the loop's own context is recorded *above* it.
         self.finalizers.push(Cleanup::CloseIterator {
             binding: iterator_binding.clone(),
+            awaiting,
+            span,
         });
         self.handler_depth += 1;
         self.loops.push(LoopContext {
@@ -2035,12 +2089,16 @@ impl super::Compiler {
                 self.patch_jump_to(jump, break_pad);
             }
             self.code.push(Instruction::PopHandler);
-            self.emit_iterator_close(&iterator_binding);
+            if awaiting {
+                self.emit_async_iterator_close(&iterator_binding, span, false);
+            } else {
+                self.emit_iterator_close(&iterator_binding);
+            }
             let leave = self.emit_jump(Instruction::Jump(0));
-            self.emit_catch_pad(handler_jump, &iterator_binding);
+            self.emit_catch_pad(handler_jump, &iterator_binding, awaiting, span);
             self.patch_jump(leave);
         } else {
-            self.emit_catch_pad(handler_jump, &iterator_binding);
+            self.emit_catch_pad(handler_jump, &iterator_binding, awaiting, span);
         }
         self.patch_jump(normal_exit);
         self.scopes.pop().expect("loop scope was just pushed");
@@ -2048,9 +2106,19 @@ impl super::Compiler {
 
     /// The landing pad an exception thrown inside a `for-of` body reaches: close the iterator,
     /// then let the exception carry on outwards. Entering it has already popped the handler.
-    pub(super) fn emit_catch_pad(&mut self, handler_jump: usize, binding: &str) {
+    pub(super) fn emit_catch_pad(
+        &mut self,
+        handler_jump: usize,
+        binding: &str,
+        awaiting: bool,
+        span: Span,
+    ) {
         self.patch_jump(handler_jump);
-        self.emit_iterator_close(binding);
+        if awaiting {
+            self.emit_async_iterator_close(binding, span, true);
+        } else {
+            self.emit_iterator_close(binding);
+        }
         self.code.push(Instruction::Throw);
     }
 
@@ -2149,11 +2217,11 @@ impl super::Compiler {
         self.declare_hidden(&sent_binding, span);
 
         let start = self.code.len();
-        self.load_hidden(&iterator_binding);
-        self.load_hidden(&next_binding);
-        self.load_hidden(&sent_binding);
-        self.code.push(Instruction::NewArray { count: 1 });
-        self.code.push(Instruction::Apply);
+        self.emit_call_captured_iterator_next(
+            &iterator_binding,
+            &next_binding,
+            Some(&sent_binding),
+        );
         if asynchronous {
             // An async iterator answers with a promise of the step, so the step object itself
             // is what has to be awaited. A wrapped sync iterator answers with the step directly

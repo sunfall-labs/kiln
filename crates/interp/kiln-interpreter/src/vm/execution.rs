@@ -1016,8 +1016,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.unwind(thrown, current)?;
                 }
                 Instruction::LoadArguments => {
-                    let arguments = self.arguments_object();
-                    self.stack.push(arguments);
+                    let optimized = self.function.as_ref().is_some_and(|closure| {
+                        closure.arguments_length_only
+                            && Self::code(&program, self.function.as_ref())
+                                .get(self.instruction)
+                                .is_some_and(|next| match next {
+                                    Instruction::GetProperty(name) => matches!(
+                                        program.constants.get(*name as usize),
+                                        Some(Constant::String(value)) if value.eq("length")
+                                    ),
+                                    _ => false,
+                                })
+                    });
+                    if optimized {
+                        let closure = self.function.as_ref().expect("proof belongs to a closure");
+                        self.stack.push(Value::Number(self.arguments.len() as f64));
+                        let depth = self.frames.len();
+                        if self.arguments_length_markers.len() <= depth {
+                            self.arguments_length_markers.resize(depth + 1, None);
+                        }
+                        self.arguments_length_markers[depth] = Some(ArgumentsLengthMarker {
+                            load_instruction: current,
+                            instruction: self.instruction,
+                            program: Rc::as_ptr(&program) as usize,
+                            function: closure.function,
+                            frame_depth: depth,
+                        });
+                    } else {
+                        let arguments = self.arguments_object();
+                        self.stack.push(arguments);
+                    }
                 }
                 // A rest parameter is always the *call's* arguments, arrow or not.
                 Instruction::RestArguments(from) => {
@@ -1868,6 +1896,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::GetProperty(name) => {
                     let name = self.string_constant_units(*name, current)?;
                     let target = self.pop(current)?;
+                    let marker_matches = self
+                        .function
+                        .as_ref()
+                        .is_some_and(|closure| closure.arguments_length_only)
+                        && self
+                            .arguments_length_markers
+                            .get(self.frames.len())
+                            .copied()
+                            .flatten()
+                            .is_some_and(|marker| {
+                                marker.load_instruction.checked_add(1) == Some(marker.instruction)
+                                    && marker.instruction == current
+                                    && marker.program == Rc::as_ptr(&program) as usize
+                                    && self
+                                        .function
+                                        .as_ref()
+                                        .is_some_and(|closure| marker.function == closure.function)
+                                    && marker.frame_depth == self.frames.len()
+                            });
+                    if marker_matches && name.eq("length") {
+                        self.arguments_length_markers[self.frames.len()] = None;
+                        debug_assert!(matches!(target, Value::Number(_)));
+                        self.stack.push(Value::Number(self.arguments.len() as f64));
+                        continue;
+                    }
                     if target.is_nullish() {
                         let shown = name.to_lossy_string();
                         self.throw_error(
@@ -2564,6 +2617,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 awaiting: false,
                 returning: None,
                 delegate: None,
+                async_requests: None,
             }),
         });
         let module_map = self.gc_module_map();
@@ -2645,6 +2699,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction: self.instruction,
             stack_base,
         });
+        self.reset_arguments_marker_for_current_frame();
         self.function = Some(Rc::clone(closure));
         self.mapped_arguments = closure.has_mapped_arguments();
         self.instruction = 0;
@@ -2742,7 +2797,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Ok(method) => method,
             Err(thrown) => {
                 generator.borrow_mut().delegate = None;
-                return self.resume_generator_with(generator, Resume::Throw(thrown), instruction);
+                return self.resume_generator_throw(generator, thrown, instruction);
             }
         };
         match return_method {
@@ -2756,11 +2811,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(val) => val,
                     Err(thrown) => {
                         generator.borrow_mut().delegate = None;
-                        return self.resume_generator_with(
-                            generator,
-                            Resume::Throw(thrown),
-                            instruction,
-                        );
+                        return self.resume_generator_throw(generator, thrown, instruction);
                     }
                 };
                 if !is_object_type(&inner_result) {
@@ -2775,7 +2826,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .into(),
                         )],
                     );
-                    return self.resume_generator_with(generator, Resume::Throw(err), instruction);
+                    return self.resume_generator_throw(generator, err, instruction);
                 }
                 let done_res = self
                     .eval_catching(|this| this.read_property(&inner_result, "done", instruction))?;
@@ -2783,11 +2834,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(val) => val,
                     Err(thrown) => {
                         generator.borrow_mut().delegate = None;
-                        return self.resume_generator_with(
-                            generator,
-                            Resume::Throw(thrown),
-                            instruction,
-                        );
+                        return self.resume_generator_throw(generator, thrown, instruction);
                     }
                 };
                 let done = done_val.is_truthy();
@@ -2799,14 +2846,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let val = match val_res {
                         Ok(v) => v,
                         Err(thrown) => {
-                            return self.resume_generator_with(
-                                generator,
-                                Resume::Throw(thrown),
-                                instruction,
-                            );
+                            return self.resume_generator_throw(generator, thrown, instruction);
                         }
                     };
-                    self.resume_generator_with(generator, Resume::Return(val), instruction)
+                    self.resume_generator_return(generator, val, instruction)
                 } else {
                     Ok((inner_result, false))
                 }
@@ -2828,11 +2871,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Ok(method) => method,
             Err(thrown_val) => {
                 generator.borrow_mut().delegate = None;
-                return self.resume_generator_with(
-                    generator,
-                    Resume::Throw(thrown_val),
-                    instruction,
-                );
+                return self.resume_generator_throw(generator, thrown_val, instruction);
             }
         };
         match throw_method {
@@ -2857,17 +2896,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                             .into(),
                                         )],
                                     );
-                                    return self.resume_generator_with(
+                                    return self.resume_generator_throw(
                                         generator,
-                                        Resume::Throw(err),
+                                        err,
                                         instruction,
                                     );
                                 }
                             }
                             Err(thrown_val) => {
-                                return self.resume_generator_with(
+                                return self.resume_generator_throw(
                                     generator,
-                                    Resume::Throw(thrown_val),
+                                    thrown_val,
                                     instruction,
                                 );
                             }
@@ -2875,11 +2914,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     Ok(None) => {}
                     Err(thrown_val) => {
-                        return self.resume_generator_with(
-                            generator,
-                            Resume::Throw(thrown_val),
-                            instruction,
-                        );
+                        return self.resume_generator_throw(generator, thrown_val, instruction);
                     }
                 }
                 let err = self.construct_error(
@@ -2888,7 +2923,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         "Iterator does not have a throw method".to_owned().into(),
                     )],
                 );
-                self.resume_generator_with(generator, Resume::Throw(err), instruction)
+                self.resume_generator_throw(generator, err, instruction)
             }
             Some(throw_fn) => {
                 let call_res =
@@ -2897,11 +2932,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(val) => val,
                     Err(thrown_val) => {
                         generator.borrow_mut().delegate = None;
-                        return self.resume_generator_with(
-                            generator,
-                            Resume::Throw(thrown_val),
-                            instruction,
-                        );
+                        return self.resume_generator_throw(generator, thrown_val, instruction);
                     }
                 };
                 if !is_object_type(&inner_result) {
@@ -2916,7 +2947,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .into(),
                         )],
                     );
-                    return self.resume_generator_with(generator, Resume::Throw(err), instruction);
+                    return self.resume_generator_throw(generator, err, instruction);
                 }
                 let done_res = self
                     .eval_catching(|this| this.read_property(&inner_result, "done", instruction))?;
@@ -2924,11 +2955,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(val) => val,
                     Err(thrown_val) => {
                         generator.borrow_mut().delegate = None;
-                        return self.resume_generator_with(
-                            generator,
-                            Resume::Throw(thrown_val),
-                            instruction,
-                        );
+                        return self.resume_generator_throw(generator, thrown_val, instruction);
                     }
                 };
                 let done = done_val.is_truthy();
@@ -2940,15 +2967,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let val = match val_res {
                         Ok(v) => v,
                         Err(thrown_val) => {
-                            return self.resume_generator_with(
-                                generator,
-                                Resume::Throw(thrown_val),
-                                instruction,
-                            );
+                            return self.resume_generator_throw(generator, thrown_val, instruction);
                         }
                     };
                     generator.borrow_mut().instruction = exit_target;
-                    self.resume_generator_with(generator, Resume::Send(val), instruction)
+                    self.resume_generator(generator, val, instruction)
                 } else {
                     Ok((inner_result, false))
                 }
@@ -2963,7 +2986,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         sent: Value,
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
-        self.resume_generator_with(generator, Resume::Send(sent), instruction)
+        if generator.borrow().returning.is_some() {
+            // A `return()` can suspend again when a `finally` yields. The next public `.next()`
+            // resumes that finally, but it is still completing the earlier return request: if
+            // the finally finishes, the generator must answer with the original return value.
+            // Keep the host catcher installed until that pending completion reaches the top.
+            match self.resume_catching(generator, Resume::Send(sent), instruction)? {
+                Ok(result) => Ok(result),
+                Err(thrown) => {
+                    self.caught = Some(thrown);
+                    Err(ExecutionError::ThrownAcrossNative)
+                }
+            }
+        } else {
+            self.resume_generator_with(generator, Resume::Send(sent), instruction)
+        }
     }
 
     /// Resume a generator for a public `.return()` call. Return completion is represented by an
@@ -2986,6 +3023,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// A public throw can finish an earlier return after its finally catches the injected
+    /// exception. Catch the internal completion here before an enclosing async host sees it.
+    pub(crate) fn resume_generator_throw(
+        &mut self,
+        generator: &Rc<GeneratorData>,
+        thrown: Value,
+        instruction: usize,
+    ) -> Result<(Value, bool), ExecutionError> {
+        match self.resume_catching(generator, Resume::Throw(thrown), instruction)? {
+            Ok(result) => Ok(result),
+            Err(thrown) => {
+                self.caught = Some(thrown);
+                Err(ExecutionError::ThrownAcrossNative)
+            }
+        }
+    }
+
     /// Resume a generator, optionally by throwing the `.return()` signal into it.
     pub(crate) fn resume_generator_with(
         &mut self,
@@ -2994,7 +3048,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<(Value, bool), ExecutionError> {
         if generator.borrow().done {
-            return Ok((Value::Undefined, true));
+            // A completed iterator still answers a return request with its supplied value.
+            return Ok((
+                match resume {
+                    Resume::Return(value) => value,
+                    Resume::Send(_) | Resume::Throw(_) => Value::Undefined,
+                },
+                true,
+            ));
         }
         // Resuming a generator from inside its own body is a TypeError. Letting it through
         // recursed until the *Rust* stack overflowed, and a stack overflow aborts the process
@@ -3037,20 +3098,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let (
             closure,
             locals,
-            saved_stack,
-            saved_handlers,
+            mut saved_stack,
+            mut saved_handlers,
             instruction_pointer,
             this_value,
             new_target,
             arguments,
             started,
         ) = {
-            let state = generator.borrow();
+            // `running` was set before entering this body, so no second resumption can observe
+            // these temporarily empty saved registers. Moving them avoids cloning every local,
+            // operand, and handler tuple at each `next()`. The active VM frame and stack become
+            // the generator's roots until the suspension path moves them back below.
+            let mut state = generator.borrow_mut();
             (
                 Rc::clone(&state.closure),
-                state.locals.clone(),
-                state.stack.clone(),
-                state.handlers.clone(),
+                std::mem::take(&mut state.locals),
+                std::mem::take(&mut state.stack),
+                std::mem::take(&mut state.handlers),
                 state.instruction,
                 state.this_value.clone(),
                 state.new_target.clone(),
@@ -3097,15 +3162,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction: self.instruction,
             stack_base,
         });
+        self.reset_arguments_marker_for_current_frame();
         self.function = Some(closure);
         self.mapped_arguments = self
             .function
             .as_ref()
             .is_some_and(|closure| closure.has_mapped_arguments());
         self.instruction = instruction_pointer;
-        self.stack.extend(saved_stack);
+        // Keep the saved vector's capacity for the next resumption. Once the caller's stack has
+        // reached its high-water mark, appending and draining the generator segment can reuse
+        // both buffers without cloning its values or allocating a fresh segment each time.
+        self.stack.append(&mut saved_stack);
         // Re-base the generator's handlers onto wherever its stack landed this time.
-        for (target, frame_offset, stack_offset) in saved_handlers {
+        for (target, frame_offset, stack_offset) in saved_handlers.drain(..) {
             self.handlers.push(Handler {
                 target,
                 frame_depth: depth + 1 + frame_offset,
@@ -3122,6 +3191,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.suspended = false;
         self.suspended_delegate = None;
         let outcome = if raising {
+            // A throw caught inside a suspended finally can finish an earlier return. Its
+            // payload belongs to that return, rather than to the value just thrown into yield.
+            // Capture it before completing the generator clears its suspended state.
+            let return_completion = match &resume {
+                Resume::Return(value) => value.clone(),
+                Resume::Throw(_) => generator
+                    .borrow()
+                    .returning
+                    .clone()
+                    .unwrap_or(Value::Undefined),
+                Resume::Send(_) => unreachable!("checked by `raising`"),
+            };
             // Throwing at the suspension point runs every `finally` between there and the top of
             // the generator, then arrives as `GeneratorReturned`.
             let raised = match &resume {
@@ -3145,7 +3226,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.truncate(stack_base);
                     self.restore_caller_frame();
                     generator.borrow_mut().complete();
-                    return Ok((sent.clone(), true));
+                    return Ok((return_completion, true));
                 }
                 // The same ending, reached the other way: the innermost handler belongs to
                 // whoever called `return`, so `unwind` refused to jump to it and sent the signal
@@ -3160,7 +3241,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.truncate(stack_base);
                     self.restore_caller_frame();
                     generator.borrow_mut().complete();
-                    return Ok((sent.clone(), true));
+                    return Ok((return_completion, true));
                 }
                 // Any other abrupt completion leaves the body for good. The specification
                 // sets the generator to `completed` before it propagates the throw, so a later
@@ -3186,26 +3267,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
         if self.suspended {
             // Take back the handlers belonging to the generator, as offsets.
-            let mut retained = Vec::new();
+            saved_handlers.clear();
             while self
                 .handlers
                 .last()
                 .is_some_and(|handler| handler.frame_depth > depth)
             {
                 let handler = self.handlers.pop().expect("checked by the loop condition");
-                retained.push((
+                saved_handlers.push((
                     handler.target,
                     handler.frame_depth - depth - 1,
                     handler.stack_height.saturating_sub(stack_base),
                 ));
             }
-            retained.reverse();
+            saved_handlers.reverse();
 
             let mut state = generator.borrow_mut();
             state.locals = std::mem::take(&mut self.locals);
             state.instruction = self.instruction;
-            state.stack = self.stack.split_off(stack_base);
-            state.handlers = retained;
+            saved_stack.clear();
+            saved_stack.extend(self.stack.drain(stack_base..));
+            state.stack = saved_stack;
+            state.handlers = saved_handlers;
             state.started = true;
             state.awaiting = self.suspended_awaiting;
             state.delegate = self.suspended_delegate.take();

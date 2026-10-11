@@ -180,6 +180,10 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// false -- a write went into an array nothing else could reach, and every definition made
     /// on it was discarded by the statement after it.
     pub(super) arguments_object: Option<Value>,
+    /// A numeric placeholder pushed for a graph-proven adjacent `arguments.length` read.
+    /// It remains attached to its bytecode frame across bounded runs and is consumed only by
+    /// the matching property instruction.
+    pub(super) arguments_length_markers: Vec<Option<ArgumentsLengthMarker>>,
     /// Whether the running frame's `arguments` is the *mapped* kind: sloppy code with a simple
     /// parameter list.
     ///
@@ -429,4 +433,13 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// outside a session has a map of its own.
     pub(super) module_map: SharedModuleMap,
     pub(super) limits: ExecutionLimits,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ArgumentsLengthMarker {
+    pub(super) load_instruction: usize,
+    pub(super) instruction: usize,
+    pub(super) program: usize,
+    pub(super) function: u32,
+    pub(super) frame_depth: usize,
 }

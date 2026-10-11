@@ -828,12 +828,12 @@ struct NativeRealm {
     cancelled: Rc<RefCell<HashSet<RequestId>>>,
     queued: Rc<RefCell<HashMap<RequestId, Option<ResourceId>>>>,
     symbols: RefCell<hashbrown::HashMap<StringUnits, u64, std::collections::hash_map::RandomState>>,
-    // The three maps below are keyed by small integers this process assigns itself (symbol ids,
-    // the C kernel's callable tags and codes, its fixed slot numbers), never by program-chosen
+    // The two maps below are keyed by small integers this process assigns itself (symbol ids,
+    // the C kernel's fixed slot numbers), never by program-chosen
     // text, so std's SipHash HashDoS defence buys nothing and cost 10% of a hot loop's time.
     // `symbols` above is keyed by program-controlled strings and keeps RandomState.
     symbol_keys: RefCell<FxHashMap<u64, StringUnits>>,
-    callable_stores: RefCell<FxHashMap<(u32, u64), CallableStore>>,
+    callable_stores: RefCell<CallableStoreRegistry>,
     value_slots: RefCell<FxHashMap<u32, Box<[u64; 4]>>>,
     /// Parsed asymmetric keys belong to this realm and are discarded with it. Handles are opaque
     /// integers; generated code never receives a Rust pointer or a copy of private components.
@@ -959,6 +959,80 @@ struct RealmDiagnostic {
 struct CallableStore {
     pointer: *mut c_void,
     drop: DropWork,
+}
+
+/// The realm owns callable stores in the canonical map. This small direct-mapped front cache
+/// only aliases those pointers; it never owns or roots them independently. A matching null
+/// pointer is a cached negative lookup, and the full key is checked before accepting any slot.
+const CALLABLE_STORE_CACHE_LEN: usize = 64;
+
+#[derive(Clone, Copy)]
+struct CallableStoreCacheEntry {
+    key: (u32, u64),
+    pointer: *mut c_void,
+}
+
+struct CallableStoreRegistry {
+    stores: HashMap<(u32, u64), CallableStore>,
+    cache: [Option<CallableStoreCacheEntry>; CALLABLE_STORE_CACHE_LEN],
+}
+
+impl Default for CallableStoreRegistry {
+    fn default() -> Self {
+        Self {
+            stores: HashMap::new(),
+            cache: [None; CALLABLE_STORE_CACHE_LEN],
+        }
+    }
+}
+
+impl CallableStoreRegistry {
+    fn cache_index(key: (u32, u64)) -> usize {
+        let (tag, code) = key;
+        let mixed = code ^ (code >> 32) ^ u64::from(tag).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        mixed as usize & (CALLABLE_STORE_CACHE_LEN - 1)
+    }
+
+    fn lookup(&mut self, key: (u32, u64)) -> Option<*mut c_void> {
+        let slot = Self::cache_index(key);
+        if let Some(entry) = self.cache[slot]
+            && entry.key == key
+        {
+            return Some(entry.pointer);
+        }
+        if let Some(store) = self.stores.get(&key) {
+            let pointer = store.pointer;
+            self.cache[slot] = Some(CallableStoreCacheEntry { key, pointer });
+            return Some(pointer);
+        }
+        self.cache[slot] = Some(CallableStoreCacheEntry {
+            key,
+            pointer: ptr::null_mut(),
+        });
+        None
+    }
+
+    fn publish(&mut self, key: (u32, u64), candidate: *mut c_void, drop: DropWork) -> *mut c_void {
+        let slot = Self::cache_index(key);
+        let pointer = match self.stores.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.get().pointer,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(CallableStore {
+                    pointer: candidate,
+                    drop,
+                });
+                candidate
+            }
+        };
+        self.cache[slot] = Some(CallableStoreCacheEntry { key, pointer });
+        pointer
+    }
+
+    fn clear(&mut self) {
+        // Invalidate pointer aliases before dropping their canonical owners.
+        self.cache.fill(None);
+        self.stores.clear();
+    }
 }
 
 type GcRootsFn = unsafe extern "C" fn(*mut c_void, *mut c_void, i32);
@@ -1118,7 +1192,7 @@ fn for_each_provider_root(realm: &NativeRealm, sink: &impl GcRootSink) {
     for slot in realm.value_slots.borrow().values() {
         sink.value(slot.as_ptr().cast::<c_void>());
     }
-    for store in realm.callable_stores.borrow().values() {
+    for store in realm.callable_stores.borrow().stores.values() {
         sink.block(store.pointer);
     }
     for continuation in realm.continuations.borrow().values() {
@@ -1356,7 +1430,7 @@ impl NativeRealm {
                 std::collections::hash_map::RandomState::new(),
             )),
             symbol_keys: RefCell::new(FxHashMap::default()),
-            callable_stores: RefCell::new(FxHashMap::default()),
+            callable_stores: RefCell::new(CallableStoreRegistry::default()),
             value_slots: RefCell::new(FxHashMap::default()),
             crypto_keys: RefCell::new(HashMap::new()),
             next_crypto_key: Cell::new(1),
@@ -3591,22 +3665,18 @@ pub unsafe extern "C" fn kiln_realm_callable_store(
             return INVALID_ARGUMENT;
         };
         let mut stores = realm.callable_stores.borrow_mut();
-        if let Some(store) = stores.get(&(tag, code)) {
-            unsafe { out_store.write(store.pointer) };
+        if let Some(pointer) = stores.lookup((tag, code))
+            && (!pointer.is_null() || candidate.is_null())
+        {
+            unsafe { out_store.write(pointer) };
             return 0;
         }
         let Some(drop) = drop_candidate else {
             unsafe { out_store.write(ptr::null_mut()) };
             return 0;
         };
-        stores.insert(
-            (tag, code),
-            CallableStore {
-                pointer: candidate,
-                drop,
-            },
-        );
-        unsafe { out_store.write(candidate) };
+        let pointer = stores.publish((tag, code), candidate, drop);
+        unsafe { out_store.write(pointer) };
         0
     })
 }

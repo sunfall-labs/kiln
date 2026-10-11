@@ -852,9 +852,9 @@ static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int kiln_c99_realm_tag
 /* Canonical headed store walk shared by arrays, collections and promises. The raw helper in
  * keys.c remains a Latin1 adapter for fixed C names; arbitrary property keys enter here so the
  * receiver's store and its prototype chain compare UTF-16 units exactly once. */
-static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
-                                  const kiln_string *key, const kiln_string *canonical,
-                                  kiln_value *out, int depth, kiln_value *thrown, int *found) {
+static int kiln_c99_store_get_key_with_receiver(
+    kiln_host *host, kiln_value target, kiln_value receiver, const kiln_string *key,
+    const kiln_string *canonical, kiln_value *out, int depth, kiln_value *thrown, int *found) {
     kiln_value *slot = kiln_c99_exotic_store(target);
     kiln_value current;
     size_t steps;
@@ -899,11 +899,18 @@ static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
                                 "definition",
                                 out);
             }
-            return kiln_c99_call(host, out, property.getter, target, NULL, 0, depth, thrown);
+            return kiln_c99_call(host, out, property.getter, receiver, NULL, 0, depth, thrown);
         }
         current = object->prototype;
     }
     return KILN_C99_OK;
+}
+
+static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
+                                  const kiln_string *key, const kiln_string *canonical,
+                                  kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    return kiln_c99_store_get_key_with_receiver(host, target, target, key, canonical, out,
+                                                depth, thrown, found);
 }
 
 /* Read a named property.  A missing one is undefined; a read *through* undefined or null is an

@@ -4,12 +4,67 @@ Goal: execute every pinned Effect test directly in kiln, prioritizing native, wi
 bundling sources. Bun supplies the direct-TypeScript performance comparison; the official
 Node/Vitest inventory and per-case outcomes establish correctness and runner fidelity.
 
-## Current checkpoint, 2026-10-06
+## Current checkpoint, 2026-10-08
+
+The goal remains incomplete. GitHub and localhost sockets are reachable again. Milestone `f0eefa7e` was pushed to main at the user’s explicit request and remote HEAD verified. The earlier DNS and EPERM failures are historical evidence. Publication of a checkpoint does not establish completion.
+
+The [complete interpreter survey](full-interpreter-322-20261008/) completed every original file and all 11,019 canonical records: 10,907 passed, 67 failed, 45 skipped. Every failing ID is retained. This is a failed survey, not acceptance. No assertion, case mode or deadline was relaxed.
+
+Shared native property lookup now preserves the original receiver through accessors, fresh-key prototype chains and replacement builtin parents. The receiver matrix passed normally, with allocation stress, and at 1, 2 and 16 concurrent realms. Reviewed private ABI and size checks passed 2/2; the size guard remains 87,000 lines. These representative checks do not establish whole-suite acceptance.
+
+The fresh full native run selected all 322 files, then stopped at the disk guard after Array (146/146) and ArrayNaNIndex (8/8) passed. The other 320 files remain unverified. Its producer confirmed child cleanup and unchanged inputs. The [portable partial-run archive](full-native-322-partial-20261008/) retains the compressed report, raw logs, exact 154 case records, pins and verified cleanup evidence; native binaries were excluded. Disk space recovered afterward; a complete rerun is prepared.
+
+The eight `HttpClient` interpreter cases that failed as `ServeError` in the restricted full run were replayed in isolation after localhost access was restored; all eight passed with Node/Vitest modes and outcomes matching. The [focused replay archive](httpclient-vm-replay-unrestricted-20261008/) preserves the exact IDs and hashes. This one-file result does not change the full 322-file interpreter totals or establish full-suite acceptance.
+
+The [checkpoint gate](checkpoint-gate-20261008/) finished with five failed steps. Native parity passed 676 matches with no divergences, and routine Test262 met its chunk baselines (97,729/102,522; 116 deferred). The stale facts and absent-answer inventories and two test synchronization races have focused verified repairs. Async iterator cleanup now matches all 17 native thirdparty probes in a separate candidate; its interpreter follow-up remains under validation. The original native Hash test still records 24/25 passing under both baseline and isolated O2 policy, so O2 is held. Complete final-source native/interpreter replays, every remaining original-deadline failure, a passing final gate and checksum-matched Bun benchmarks remain required.
+
+## Historical checkpoint, 2026-10-07
+
+The goal remains incomplete. The last verified public main is `d43e10ae`; current
+local milestones have not been published because `git push origin HEAD:main`
+fails with `Could not resolve host: github.com`. Public main cannot be refreshed
+or independently reverified while that failure persists.
+
+The [prepared iterator evaluation](prepared-iterator-evaluation-20261008/)
+preserves complete original inventories for interpreter Hash (24/25 passing)
+and native Sharding (62/66 passing). Their exact failing IDs and original
+five-second timeout errors match the production CLI. ClusterWorkflowEngine
+compilation timed out after 1,200 seconds before any case ran; this is not
+complete native 113-case coverage. The original failed supervisor receipt and
+supplemental harness provenance correction are retained beside the results.
+
+The [shared-key cache evaluation](native-shared-key-cache-evaluation-20261008/)
+found mixed results on checksum-matched workloads, so that candidate remains
+outside production. A separate computed-string own-write cache and interpreter
+own-slot hint are being validated in an isolated combined candidate. The hint's
+two focused mutation/key-domain tests pass; that does not prove upstream deadline
+acceptance or a performance gain.
+
+The [native iterator validation](native-iterator-validation-20261008/supplemental-evidence.md)
+records a correction for async `yield*` publishing an extra iterator-result object.
+The complete async regression and the original failing probe now match Node
+in ordinary and GC-stress runs. The full regression also passes with 1, 2 and
+16 concurrent realms, including GC stress. Prepared iterator calls and the
+computed-string write-cache probe pass interpreter/native parity, stress and
+realm checks. The [interpreter request-queue repair](async-generator-queue-validation-20261008/validation-summary.json)
+passes all 303 interpreter unit tests and the complete queue, inherited-then and
+reentrant-ordering regressions. The full async yield-star fixture and original
+external probe now also pass interpreter/native parity. The new queue regression
+and existing delegation-protocol regression still diverge natively on queued
+`return()` and delegated `throw()`; their native repair remains in progress.
+These focused results do not establish complete upstream acceptance or speed gains.
+
+Complete fresh native and interpreter runs of all 322 files and 11,019 official
+cases, the required final gate, all checksum-matched Bun benchmark comparisons,
+latest-main integration and successful publication remain required. Original
+case/hook budgets, assertion bodies, modes and skips remain authoritative.
+
+## Historical checkpoint, 2026-10-06
 
 Public main includes the bounded generic known-call analysis at `6d5fe097` and
 materialized-intrinsic lookup index at `d87b1e38`. Both were normally pushed and
-remote main was verified. The earlier network/publication restrictions below are
-historical and no longer apply.
+remote main was verified. Publication succeeded at that checkpoint. Current publication attempts are again
+blocked by GitHub DNS resolution, as recorded above.
 
 The [complete frozen interpreter survey](interpreter-survey-20261006/) selected
 all 322 files and registered all 11,019 official cases. It recorded 10,941 passes,

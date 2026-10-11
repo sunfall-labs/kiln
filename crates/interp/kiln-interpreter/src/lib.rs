@@ -752,6 +752,37 @@ pub struct GeneratorState {
     /// When suspended at `YieldStar`, the active delegate iterator, the target instruction to resume
     /// at if `inner.throw()` completes with `done: true`, and whether the delegate is a wrapped synchronous iterator.
     delegate: Option<(Value, usize, bool)>,
+    /// Async-generator requests are serialized: only the first request may resume the body, and
+    /// the next request starts after the current request's result is settled.
+    async_requests: Option<Box<AsyncGeneratorRequests>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AsyncGeneratorRequests {
+    pub(crate) current: Option<AsyncGeneratorRequest>,
+    pub(crate) pending: std::collections::VecDeque<AsyncGeneratorRequest>,
+    /// The current item has been handed to the generator body and is still waiting to complete.
+    pub(crate) current_started: bool,
+    /// `start_async_generator_request` is draining requests that completed synchronously. A
+    /// completion during that drain only advances `current`; the outer loop starts it next.
+    pub(crate) draining: bool,
+    /// Promise resolution may invoke a user `then` getter. Requests enqueued reentrantly from
+    /// that getter must be allowed to resume the next ready item before resolution returns.
+    pub(crate) resolving: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct AsyncGeneratorRequest {
+    pub(crate) kind: AsyncGeneratorRequestKind,
+    pub(crate) value: Value,
+    pub(crate) step: Rc<PromiseData>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum AsyncGeneratorRequestKind {
+    Next,
+    Return,
+    Throw,
 }
 
 impl GeneratorState {
@@ -868,6 +899,9 @@ pub struct Closure {
     pub inferred_name: Option<StringUnits>,
     /// One cell per [`kiln_ir::FunctionProto::upvalues`] entry, in the same order.
     pub upvalues: Vec<Cell>,
+    /// The body has a graph proof that each `LoadArguments` is used only for `.length`.
+    /// This authorizes the paired-instruction fast path without changing the boxed fallback.
+    pub(crate) arguments_length_only: bool,
     /// The realm this function was created in.
     ///
     /// `GetFunctionRealm`, and the only thing that makes it observable: a constructor whose

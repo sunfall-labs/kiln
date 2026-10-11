@@ -174,9 +174,12 @@ pub(super) enum Sink {
     /// `AsyncGeneratorAwaitReturn`: the argument of a `return()` on a generator with no body
     /// left to unwind, being awaited before it becomes the final step.
     ///
-    /// The generator itself is not carried because there is nothing to resume -- it is already
-    /// finished, and all that remains is to decide the step this `return()` promised.
-    AsyncGeneratorReturn(Rc<PromiseData>),
+    /// The generator is already finished; this sink only decides the step this `return()`
+    /// promised after its value settles.
+    AsyncGeneratorReturn(Rc<GeneratorData>, Rc<PromiseData>),
+    /// Awaiting the completion value of `return()` on a suspended async generator before
+    /// injecting the return completion into its body.
+    AsyncGeneratorReturnActive(Rc<GeneratorData>, Rc<PromiseData>),
     /// Awaiting the `return` argument when the delegate iterator has no `return` method.
     AsyncGeneratorDelegateReturnMissing(Rc<GeneratorData>, Rc<PromiseData>),
     /// Awaiting the result of calling `return()` to close the delegate when `throw()` is missing.

@@ -605,6 +605,18 @@ pub(super) fn emit_graph_op(
             writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
         }
         GraphOp::Bridge {
+            instruction: Instruction::LoadArguments,
+            ..
+        } if plan
+            .argument_member_arguments
+            .as_ref()
+            .is_some_and(|values| values.contains(&vid)) =>
+        {
+            // Every statically keyed member read independently guards the current frame's real
+            // object; any missing-index fallback then materializes that same frame normally.
+            writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
+        }
+        GraphOp::Bridge {
             instruction: Instruction::HostCall { op, argc },
             operands,
             pushes: _,
@@ -1713,6 +1725,70 @@ pub(super) fn emit_graph_op(
             if live_typed_int {
                 writeln!(output, "    i{v} = (int64_t)argc;").unwrap();
             }
+        }
+        GraphOp::GetProperty { object, name, .. }
+            if plan
+                .argument_member_values
+                .as_ref()
+                .and_then(|values| values.get(&vid))
+                .is_some() =>
+        {
+            let member = plan.argument_member_values.as_ref().unwrap()[&vid];
+            let need_box = ctx.boxed.map_or(true, |boxed| boxed.contains(&vid));
+            let op_name = crate::string::c_string(&match member {
+                kiln_graph::ArgumentsMember::Length => "GetProperty(arguments.length)".to_owned(),
+                kiln_graph::ArgumentsMember::Index(index) => {
+                    format!("GetProperty(arguments[{index}])")
+                }
+            });
+            let op_name = &op_name[1..op_name.len() - 1];
+            let check = status_check(diagnostic_site, pc, op_name, unwind);
+            let fast = match member {
+                kiln_graph::ArgumentsMember::Length => {
+                    if need_box {
+                        format!("v{v} = kiln_c99_val_from_double((double)argc);")
+                    } else {
+                        String::new()
+                    }
+                }
+                kiln_graph::ArgumentsMember::Index(index) => {
+                    if need_box {
+                        format!("v{v} = args[{index}];")
+                    } else {
+                        String::new()
+                    }
+                }
+            };
+            let fallback_store = if need_box {
+                format!(" v{v} = read;")
+            } else {
+                String::new()
+            };
+            let missing_index = match member {
+                kiln_graph::ArgumentsMember::Index(index) => format!(
+                    "if ((size_t){index} < argc) {{ {fast} }} else {{ kiln_value given; kiln_val read; int status = kiln_c99_visible_arguments(&given); if (status != KILN_C99_OK) return status; status = kiln_c99_val_read_property_key(host, kiln_val_from_boundary(given), {symbol}_key_{name}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(given); {check} {fallback_store} }}"
+                ),
+                kiln_graph::ArgumentsMember::Length => fast,
+            };
+            writeln!(output, "    {{ static kiln_c99_site site = {{0}}; if (kiln_c99_frame_arguments_object.tag == KILN_VALUE_OBJECT) {{ kiln_val read; int status = kiln_c99_val_read_property_key(host, kiln_val_from_boundary(kiln_c99_frame_arguments_object), {symbol}_key_{name}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_c99_frame_arguments_object); {check}{fallback_store} }} else {{ {missing_index} }} }}").unwrap();
+        }
+        GraphOp::GetComputed {
+            object: _, key: _, ..
+        } if let Some(kiln_graph::ArgumentsMember::Index(index)) = plan
+            .argument_member_values
+            .as_ref()
+            .and_then(|values| values.get(&vid)) =>
+        {
+            let need_box = ctx.boxed.map_or(true, |boxed| boxed.contains(&vid));
+            let box_read = if need_box {
+                format!(" v{v} = read;")
+            } else {
+                String::new()
+            };
+            let key = format!("kiln_c99_val_from_double((double){index})");
+            let check = status_check(diagnostic_site, pc, "GetComputed(arguments[index])", unwind);
+            writeln!(output, "    {{ if (kiln_c99_frame_arguments_object.tag == KILN_VALUE_OBJECT) {{ kiln_val read; int status = kiln_c99_val_read_element(host, kiln_val_from_boundary(kiln_c99_frame_arguments_object), {key}, depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_c99_frame_arguments_object, kiln_val_to_boundary({key})); {check}{box_read} }} else if ((size_t){index} < argc) {{ {} }} else {{ kiln_value given; kiln_val read; int status = kiln_c99_visible_arguments(&given); if (status != KILN_C99_OK) return status; status = kiln_c99_val_read_element(host, kiln_val_from_boundary(given), {key}, depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(given, kiln_val_to_boundary({key})); {check}{box_read} }} }}",
+                if need_box { format!("v{v} = args[{index}];") } else { String::new() }).unwrap();
         }
         GraphOp::GetProperty { object, name, .. } => {
             properties::emit_get_property(output, vid, object, name, &ctx)

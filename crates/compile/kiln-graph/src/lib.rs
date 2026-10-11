@@ -1,5 +1,6 @@
 //! Backend-neutral value graph construction and analysis over compiled bytecode.
 
+pub mod arguments;
 pub mod closed_world;
 pub mod demanded;
 mod dominators;
@@ -9,6 +10,10 @@ mod suspended_liveness;
 pub mod validation;
 pub mod verifier;
 
+pub use arguments::{
+    ArgumentsAnalysis, ArgumentsLengthFact, ArgumentsMember, ArgumentsMemberFact,
+    ArrowArgumentsCaptureFacts,
+};
 pub use closed_world::{
     closed_world_function_liveness, closed_world_module_live_slots,
     closed_world_module_live_slots_with_declarations, closed_world_namespace_members,
@@ -21,7 +26,7 @@ pub use demanded::{
 pub use graph::*;
 pub use kiln_db::summaries_digest;
 pub use summary::{summarize_function, summarize_graph, summarize_program};
-pub use suspended_liveness::suspended_local_liveness;
+pub use suspended_liveness::{suspended_local_clear_slots, suspended_local_liveness};
 pub use validation::{StackEffectError, stack_effect};
 pub use verifier::{VerifierError, verify_function_graph};
 

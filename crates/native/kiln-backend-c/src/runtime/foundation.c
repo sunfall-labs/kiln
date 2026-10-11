@@ -449,6 +449,9 @@ static int kiln_c99_reflect_define_property(kiln_host *host, kiln_value target,
                                             kiln_value *thrown);
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
                                  kiln_value *out, int depth, kiln_value *thrown);
+static int kiln_c99_get_computed_with_receiver(kiln_host *host, kiln_value target, kiln_value key,
+                                               kiln_value receiver, kiln_value *out, int depth,
+                                               kiln_value *thrown);
 static int kiln_c99_definition_store(kiln_value target, kiln_value *out);
 static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, size_t argc,
                                       kiln_value *thrown);
@@ -501,9 +504,18 @@ static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *ke
 static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
                                   const kiln_string *key, const kiln_string *canonical,
                                   kiln_value *out, int depth, kiln_value *thrown, int *found);
+static int kiln_c99_store_get_key_with_receiver(kiln_host *host, kiln_value target,
+                                                kiln_value receiver, const kiln_string *key,
+                                                const kiln_string *canonical, kiln_value *out,
+                                                int depth, kiln_value *thrown, int *found);
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
-                                 const kiln_string *canonical, kiln_value *out, int depth,
-                                 kiln_value *thrown);
+                                 kiln_value receiver, const kiln_string *canonical,
+                                 kiln_value *out, int depth, kiln_value *thrown);
+static int kiln_c99_get_key_with_receiver(kiln_host *host, kiln_value target,
+                                          const kiln_string *key,
+                                          const kiln_string *canonical,
+                                          kiln_value receiver, kiln_value *out, int depth,
+                                          kiln_value *thrown);
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed);
 static void kiln_c99_bytes_retire(uint8_t *bytes, size_t size);
 static void kiln_c99_gc_note_external(size_t size);
@@ -685,6 +697,9 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
                                const kiln_val *args, size_t argc);
 static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
                                          int rejected, int depth, kiln_value *thrown);
+static int kiln_c99_async_generator_request(kiln_host *host, kiln_value generator,
+                                            kiln_value promise, kiln_value sent,
+                                            uint64_t method, int depth, kiln_value *thrown);
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
                                            int finished, int depth, kiln_value *thrown);
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,

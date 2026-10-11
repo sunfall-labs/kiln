@@ -21,7 +21,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.handlers.truncate(installed);
         match outcome {
             Ok(value) => Ok(value),
-            Err(ExecutionError::CaughtByHost) => {
+            Err(ExecutionError::CaughtByHost | ExecutionError::ThrownAcrossNative) => {
                 Err(self.caught.take().unwrap_or(Value::Undefined))
             }
             Err(error) => match error.as_javascript_error() {
@@ -54,8 +54,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.handlers.truncate(installed);
                 Ok(Ok(value))
             }
-            Err(ExecutionError::CaughtByHost) => {
-                // `unwind` popped it; anything the callee left above it goes too.
+            Err(ExecutionError::CaughtByHost | ExecutionError::ThrownAcrossNative) => {
+                // A public generator resume catches its own unwind and carries the actual
+                // JavaScript value across the native boundary. Consume that value here just
+                // as we do when our own host handler catches it directly.
                 self.handlers.truncate(installed);
                 Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
             }

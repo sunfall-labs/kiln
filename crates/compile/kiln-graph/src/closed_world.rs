@@ -663,8 +663,17 @@ fn namespace_members(
                 Terminator::Branch { condition, .. }
                 | Terminator::BranchNotNullish { condition, .. } => is_namespace(*condition),
                 Terminator::Return(Some(value)) | Terminator::Throw(value) => is_namespace(*value),
-                Terminator::Suspend { value, spilled, .. } => {
-                    is_namespace(*value) || spilled.iter().any(|value| is_namespace(*value))
+                Terminator::Suspend {
+                    value,
+                    spilled,
+                    delegate_wrapped,
+                    ..
+                } => {
+                    is_namespace(*value)
+                        || spilled.iter().any(|value| is_namespace(*value))
+                        || delegate_wrapped
+                            .as_ref()
+                            .is_some_and(|wrapped| is_namespace(*wrapped))
                 }
                 Terminator::Jump(_) | Terminator::Return(None) | Terminator::Unreachable => false,
             };

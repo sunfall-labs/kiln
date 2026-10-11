@@ -180,8 +180,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return match outcome {
                     Settled::Fulfilled(value) => {
                         let result = iteration_result(value, false);
-                        self.settle(&step, &Settled::Fulfilled(result));
-                        Ok(())
+                        self.finish_async_generator_request(
+                            &generator,
+                            &step,
+                            Settled::Fulfilled(result),
+                        )
                     }
                     // The `?` on the specification's `Await` puts the failure back inside the
                     // body, at the `yield` -- so the generator's own `try` blocks see it, which
@@ -320,8 +323,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             self.drive_async_generator(&generator, &step, Resume::Return(value))
                         } else {
                             let result = iteration_result(value, false);
-                            self.resolve_promise(&step, result);
-                            Ok(())
+                            self.finish_async_generator_request(
+                                &generator,
+                                &step,
+                                Settled::Fulfilled(result),
+                            )
                         }
                     }
                 };
@@ -417,8 +423,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             self.drive_async_generator(&generator, &step, Resume::Send(value))
                         } else {
                             let result = iteration_result(value, false);
-                            self.resolve_promise(&step, result);
-                            Ok(())
+                            self.finish_async_generator_request(
+                                &generator,
+                                &step,
+                                Settled::Fulfilled(result),
+                            )
                         }
                     }
                 };
@@ -448,8 +457,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 self.drive_async_generator(&generator, &step, Resume::Return(value))
                             } else {
                                 let result = iteration_result(value, false);
-                                self.resolve_promise(&step, result);
-                                Ok(())
+                                self.finish_async_generator_request(
+                                    &generator,
+                                    &step,
+                                    Settled::Fulfilled(result),
+                                )
                             }
                         } else {
                             if done {
@@ -457,25 +469,52 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 self.drive_async_generator(&generator, &step, Resume::Send(value))
                             } else {
                                 let result = iteration_result(value, false);
-                                self.resolve_promise(&step, result);
-                                Ok(())
+                                self.finish_async_generator_request(
+                                    &generator,
+                                    &step,
+                                    Settled::Fulfilled(result),
+                                )
                             }
                         }
                     }
                 };
             }
-            Sink::AsyncGeneratorReturn(step) => {
-                let step = Rc::clone(step);
+            Sink::AsyncGeneratorReturn(generator, step) => {
+                let (generator, step) = (Rc::clone(generator), Rc::clone(step));
                 match outcome {
                     Settled::Fulfilled(value) => {
                         let result = iteration_result(value, true);
-                        self.settle(&step, &Settled::Fulfilled(result));
+                        self.finish_async_generator_request(
+                            &generator,
+                            &step,
+                            Settled::Fulfilled(result),
+                        )?;
                     }
                     // A `return()` handed a rejected promise rejects the step: the value never
                     // arrived, so there is no completion to report as done.
-                    Settled::Rejected(reason) => self.settle(&step, &Settled::Rejected(reason)),
+                    Settled::Rejected(reason) => {
+                        self.finish_async_generator_request(
+                            &generator,
+                            &step,
+                            Settled::Rejected(reason),
+                        )?;
+                    }
                 }
                 return Ok(());
+            }
+            Sink::AsyncGeneratorReturnActive(generator, step) => {
+                let (generator, step) = (Rc::clone(generator), Rc::clone(step));
+                return match outcome {
+                    Settled::Fulfilled(value) => {
+                        self.drive_async_generator(&generator, &step, Resume::Return(value))
+                    }
+                    Settled::Rejected(reason) => {
+                        // Await rejection is thrown at the suspended yield, so the generator's
+                        // own catch/finally handlers receive it. An uncaught rejection completes
+                        // the body before the request promise is rejected.
+                        self.drive_async_generator(&generator, &step, Resume::Throw(reason))
+                    }
+                };
             }
             Sink::ModuleAwait(state) => {
                 let state = Rc::clone(state);

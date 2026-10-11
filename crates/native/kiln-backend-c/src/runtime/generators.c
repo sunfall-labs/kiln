@@ -59,11 +59,19 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->running = 0;
     kiln_c99_heap_store_pointer(frame, &frame->queue_promises, NULL);
     kiln_c99_heap_store_pointer(frame, &frame->queue_sent, NULL);
+    kiln_c99_heap_store_pointer(frame, &frame->queue_methods, NULL);
     frame->queue_count = 0;
     frame->queue_capacity = 0;
+    frame->queue_head = 0;
     frame->queue_executing = 0;
+    frame->async_request_kind = 0;
+    frame->async_delegate_close = 0;
+    frame->async_delegate_result_done = 0;
+    frame->return_pending = 0;
+    kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
     kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
     frame->delegate_exit = 0;
+    frame->delegate_wrapped = 0;
     if (closure->async_generator || (closure->generator && !closure->asynchronous)) {
         kiln_value prototype;
         int status = kiln_c99_prototype_object(function, &prototype);

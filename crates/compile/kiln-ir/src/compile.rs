@@ -573,7 +573,11 @@ enum Cleanup {
     Finally(Vec<Statement>),
     /// `if (it.return) it.return()` against a hidden `for-of` binding. Held as the binding rather
     /// than as statements because it has no source form to re-compile.
-    CloseIterator { binding: String },
+    CloseIterator {
+        binding: String,
+        awaiting: bool,
+        span: Span,
+    },
     /// The `using` declarations of one scope, disposed in reverse declaration order.
     ///
     /// Held as bindings rather than as a runtime list because which declarations a scope

@@ -1,0 +1,9 @@
+# Partial full native Effect survey, 2026-10-08
+
+This is an **aborted partial run**, not a completed survey or acceptance result. The official native runner completed only `Array` (146/146 pass) and `ArrayNaNIndex` (8/8 pass): 2 of 322 selected files and 154/154 recorded cases. The disk guard then terminated the run before `AtomRef`; 320 files remain pending. No failures or skips were observed in the 154 cases that did complete.
+
+The runner ended with signal-derived exit `-15` after 969.95 seconds. Its disk guard fired at 1,038,409,728 bytes free, below the configured 1 GiB floor (1,073,741,824 bytes). The supervisor records input hashes unchanged and cleanup confirmed: its runner process group and all observed descendant groups are absent. The separate resource audit records a later lower free-space observation; these are time-specific readings, not contradictory run outcomes.
+
+The unchanged per-test deadline was 5,000 ms and the before-each hook deadline was 10,000 ms. The run used the pinned Effect source and runner, CLI `1d0c39f6f15188edd9850fdacbbe5e09a58634d27920f5f7bc112b4e498a20d7` built from compiler commit `4c86f1fd22e1753e081fb5e8ff36239803d638ae`, and ABI 82 Full provider manifest/archive hashes listed in `metadata.json`.
+
+`report.json.zst` is the runner report snapshot. `supervisor-status.json.zst`, `partial-receipt.json.zst`, and `resource-audit.json.zst` preserve the termination and input-integrity evidence. The per-file native JSON and raw logs retain the exact 154 case records; `recorded-cases.json` provides their IDs and outcomes directly. Each compressed source was decompressed and SHA-256 checked against the original before this archive was accepted. `SHA256SUMS` covers the archived files. Native executables and toolchain binaries were deliberately excluded.

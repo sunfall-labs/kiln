@@ -519,17 +519,6 @@ pub struct CModuleUnit {
     pub generic_mixed_optimization: bool,
 }
 
-fn generic_mixed_for_program(program: &Program, policy: &EmissionPolicy) -> bool {
-    policy.generic_only
-        && direct::select_generic_optimization_functions(
-            program,
-            &compute_publishes_frame(program),
-            None,
-        )
-        .into_iter()
-        .any(|selected| selected)
-}
-
 /// Backwards-compatible descriptive alias for callers that call an emitted unit a module.
 pub type GeneratedModule = CModule;
 
@@ -572,13 +561,13 @@ pub fn emit_with_policy(program: &Program, policy: EmissionPolicy) -> Result<CMo
     validate(program)?;
     let (program_hash, symbol_hash) = hash_program_pair_with_policy(program, &policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render(program, program_hash, &symbol, &policy)?;
+    let (source, generic_mixed_optimization) = render(program, program_hash, &symbol, &policy)?;
     Ok(CModule {
         symbol,
         source,
         program_hash,
         generic_only: policy.generic_only,
-        generic_mixed_optimization: generic_mixed_for_program(program, &policy),
+        generic_mixed_optimization,
         chunks: Vec::new(),
         chunk_generic_mixed_optimization: Vec::new(),
         parallel_workers: None,
@@ -3047,8 +3036,23 @@ fn plan_unit(
     if let Some(extra) = extra_entry_slots {
         entry_graph.mark_non_escaping_objects_with_extra_slots(program, Some(extra));
     }
-    let publishes_frame = compute_publishes_frame(program);
-    let direct = direct::DirectPlan::plan_with_loop_profile(
+    let argument_analysis = kiln_graph::ArgumentsAnalysis::new(program);
+    let argument_facts: Vec<emit_graph::ArgumentsLengthFact> = graphs
+        .iter()
+        .enumerate()
+        .map(|(index, graph)| argument_analysis.argument_length_fact(index, graph))
+        .collect();
+    let argument_member_facts: Vec<kiln_graph::ArgumentsMemberFact> = graphs
+        .iter()
+        .enumerate()
+        .map(|(index, graph)| argument_analysis.argument_member_fact(index, graph))
+        .collect();
+    let arguments_length_only: Vec<bool> = argument_facts
+        .iter()
+        .map(|fact| !fact.values.is_empty())
+        .collect();
+    let publishes_frame = compute_publishes_frame_with_argument_facts(program, &argument_facts);
+    let mut direct = direct::DirectPlan::plan_with_argument_length_facts(
         program,
         &graphs,
         &entry_graph,
@@ -3059,7 +3063,82 @@ fn plan_unit(
         parallel_in_generic,
         speculate,
         generic_loop_profile,
+        &arguments_length_only,
     );
+    let argument_read_values: Vec<
+        std::collections::HashMap<kiln_graph::ValueId, Vec<kiln_graph::ValueId>>,
+    > = graphs
+        .iter()
+        .zip(&argument_member_facts)
+        .map(|(graph, fact)| {
+            if fact.elidable_arguments.is_empty() {
+                return std::collections::HashMap::new();
+            }
+            graph
+                .blocks
+                .iter()
+                .flat_map(|block| block.operations.iter())
+                .fold(
+                    std::collections::HashMap::new(),
+                    |mut reads, (value, operation)| {
+                        if let kiln_graph::GraphOp::GetProperty { object, .. }
+                        | kiln_graph::GraphOp::GetComputed { object, .. } = operation
+                        {
+                            reads.entry(*object).or_insert_with(Vec::new).push(*value);
+                        }
+                        reads
+                    },
+                )
+        })
+        .collect();
+    let empty_argument_values = std::sync::Arc::new(HashSet::new());
+    let empty_argument_members = std::sync::Arc::new(std::collections::HashMap::new());
+    let empty_argument_member_arguments = std::sync::Arc::new(HashSet::new());
+    for (index, fact) in argument_facts.iter().enumerate() {
+        let values = if fact.values.is_empty() {
+            empty_argument_values.clone()
+        } else {
+            std::sync::Arc::new(fact.values.clone())
+        };
+        direct.functions[index].argument_length_values = Some(values.clone());
+        let member_values: std::collections::HashMap<
+            kiln_graph::ValueId,
+            kiln_graph::ArgumentsMember,
+        > = argument_member_facts[index]
+            .members
+            .iter()
+            .filter_map(|(&read, &member)| {
+                (!direct.functions[index].numbers.contains(&read)
+                    && !direct.functions[index].ints.contains(&read))
+                .then_some((read, member))
+            })
+            .collect();
+        let member_arguments: HashSet<kiln_graph::ValueId> = argument_member_facts[index]
+            .elidable_arguments
+            .iter()
+            .filter_map(|arguments_value| {
+                let reads = argument_read_values[index].get(arguments_value)?;
+                (!reads.is_empty() && reads.iter().all(|read| member_values.contains_key(read)))
+                    .then_some(*arguments_value)
+            })
+            .collect();
+        direct.functions[index].argument_member_values = Some(if member_values.is_empty() {
+            empty_argument_members.clone()
+        } else {
+            std::sync::Arc::new(member_values)
+        });
+        direct.functions[index].argument_member_arguments = Some(if member_arguments.is_empty() {
+            empty_argument_member_arguments.clone()
+        } else {
+            std::sync::Arc::new(member_arguments)
+        });
+        if let Some(plan) = &mut direct.typed[index] {
+            plan.argument_length_values = Some(values.clone());
+        }
+        if let Some(plan) = &mut direct.parallel[index] {
+            plan.argument_length_values = Some(values);
+        }
+    }
     Ok((graphs, body, entry_graph, direct))
 }
 
@@ -5024,7 +5103,7 @@ fn render(
     program_hash: u64,
     symbol: &str,
     policy: &EmissionPolicy,
-) -> Result<String, EmitError> {
+) -> Result<(String, bool), EmitError> {
     parallel::with_original_source(program, || {
         render_positioned(program, program_hash, symbol, policy)
     })
@@ -5035,7 +5114,7 @@ fn render_positioned(
     program_hash: u64,
     symbol: &str,
     policy: &EmissionPolicy,
-) -> Result<String, EmitError> {
+) -> Result<(String, bool), EmitError> {
     let plan = validate_program(program).expect("render called after validation");
     let mut compacted;
     let program = if policy.compact || policy.omit_source {
@@ -5146,6 +5225,10 @@ fn render_positioned(
         None,
         None,
     );
+    let generic_mixed_optimization = direct
+        .functions
+        .iter()
+        .any(|function| function.generic_function_optimized);
     let func_sites = rendered_funcs.sites;
     let entry_sites = render_entry(
         &mut output,
@@ -5179,7 +5262,7 @@ fn render_positioned(
     if policy.compact {
         prune_unused_compact_globals(&mut output, symbol, symbol, symbol, program);
     }
-    Ok(output)
+    Ok((output, generic_mixed_optimization))
 }
 
 pub use kiln_graph::{
@@ -5960,7 +6043,8 @@ fn unary_code(operator: UnaryOp) -> u16 {
 }
 
 /// Whether this proto's own code reads the per-frame globals directly, ignoring anything it
-/// calls or creates.
+/// calls or creates. The graph-aware form can discharge `LoadArguments` only when the exact
+/// graph lowering fact proves every reachable load is replaced by `argc`.
 ///
 /// `kiln_c99_invoke_closure_body` saves and restores `new_target`, `frame_args`, `frame_argc`,
 /// `captured_arguments` and the arrow flag around every call. Two instructions read them --
@@ -5980,15 +6064,16 @@ fn unary_code(operator: UnaryOp) -> u16 {
 /// creates is [`compute_publishes_frame`]'s fixpoint over the whole program, not this function --
 /// an arrow that only reads `this` does not need the frame at all, so `arrow` alone is
 /// deliberately not a term here (unlike the predicate this replaced).
-fn proto_reads_frame_directly(proto: &FunctionProto) -> bool {
+fn proto_reads_frame_directly_with_argument_facts(
+    proto: &FunctionProto,
+    arguments_reads_elided: bool,
+) -> bool {
     proto.generator
         || proto.asynchronous
         || proto.async_generator
         || proto.code.iter().any(|instruction| {
-            matches!(
-                instruction,
-                Instruction::LoadArguments | Instruction::LoadNewTarget
-            )
+            matches!(instruction, Instruction::LoadNewTarget)
+                || (matches!(instruction, Instruction::LoadArguments) && !arguments_reads_elided)
         })
 }
 
@@ -5998,7 +6083,7 @@ fn proto_reads_frame_directly(proto: &FunctionProto) -> bool {
 /// ->publishes_frame` write at `MakeFunction` -- rather than recomputed per call site. The result
 /// rides alongside `CallPlan::typed_entries` and friends, cloned into every function's plan.
 ///
-/// Proto `i` publishes when [`proto_reads_frame_directly`] says so, or when its code contains
+/// Proto `i` publishes when its local frame-use fact says so, or when its code contains
 /// `MakeFunction(j)` for an arrow `j` that itself publishes: `kiln_c99_make_closure` captures the
 /// *enclosing* frame's visible `arguments`/`new.target` into an arrow's closure unconditionally
 /// at construction time, so the frame must be live then whenever the new arrow will actually read
@@ -6010,10 +6095,23 @@ fn proto_reads_frame_directly(proto: &FunctionProto) -> bool {
 /// can only turn a `false` into a `true`, never back, so this settles in at most
 /// `program.functions.len()` passes.
 pub(crate) fn compute_publishes_frame(program: &Program) -> Vec<bool> {
+    compute_publishes_frame_with_argument_facts(program, &[])
+}
+
+fn compute_publishes_frame_with_argument_facts(
+    program: &Program,
+    argument_facts: &[emit_graph::ArgumentsLengthFact],
+) -> Vec<bool> {
     let mut publishes: Vec<bool> = program
         .functions
         .iter()
-        .map(proto_reads_frame_directly)
+        .enumerate()
+        .map(|(index, proto)| {
+            let reads_elided = argument_facts
+                .get(index)
+                .is_some_and(|fact| fact.reads_elided);
+            proto_reads_frame_directly_with_argument_facts(proto, reads_elided)
+        })
         .collect();
     loop {
         let mut changed = false;

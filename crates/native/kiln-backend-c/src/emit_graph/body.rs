@@ -10,142 +10,17 @@ use crate::graph::{
     proven_ints_with_assumptions, proven_numbers_with_assumptions,
 };
 use crate::prelude::lookup_speculation_invariant;
-use kiln_graph::suspended_local_liveness;
+use kiln_graph::{ArgumentsAnalysis, suspended_local_clear_slots};
 use kiln_ir::{BinaryOp, Constant, ExportBinding, FunctionProto, Instruction, Program, UnaryOp};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
+
+pub(crate) use kiln_graph::ArgumentsLengthFact;
 
 // Clang spends more on thousands of distinct local declarations than on one constant-indexed
 // frame. Below this point the brackets cost more source and object bytes than they save; above it
 // the indexed spelling keeps large generated bodies smaller and modestly faster to compile.
 const COMPACT_INDEXED_VALUE_THRESHOLD: u32 = 512;
-
-/// Return arguments-object loads whose only observed use is an own `length` read.
-/// The arguments object exposes a writable length and can be aliased, so this is safe only
-/// when every live load in the function has that exact use and no nested arrow closes over it.
-/// Those reads can then use the call frame's argc directly without allocating the exotic object.
-fn arguments_length_only_values(
-    graph: &FunctionGraph,
-    proto: &FunctionProto,
-    program: &Program,
-) -> HashSet<ValueId> {
-    if proto.arrow || proto.generator || proto.asynchronous || proto.async_generator {
-        return HashSet::new();
-    }
-    if proto
-        .code
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::DirectEval(_)))
-    {
-        return HashSet::new();
-    }
-    fn arrow_tree_uses_arguments(index: u32, program: &Program) -> bool {
-        let Some(proto) = program.functions.get(index as usize) else {
-            return false;
-        };
-        if proto
-            .code
-            .iter()
-            .any(|op| matches!(op, Instruction::LoadArguments | Instruction::DirectEval(_)))
-        {
-            return true;
-        }
-        proto.code.iter().any(|instruction| {
-            let Instruction::MakeFunction(child) = instruction else {
-                return false;
-            };
-            program
-                .functions
-                .get(*child as usize)
-                .is_some_and(|child_proto| {
-                    child_proto.arrow && arrow_tree_uses_arguments(*child, program)
-                })
-        })
-    }
-    for instruction in &proto.code {
-        let Instruction::MakeFunction(child) = instruction else {
-            continue;
-        };
-        if program
-            .functions
-            .get(*child as usize)
-            .is_some_and(|child_proto| {
-                child_proto.arrow && arrow_tree_uses_arguments(*child, program)
-            })
-        {
-            return HashSet::new();
-        }
-    }
-
-    let mut loads = HashSet::new();
-    let mut uses = HashMap::<ValueId, Vec<&GraphOp>>::new();
-    let mut terminator_uses = HashSet::new();
-    for block in &graph.blocks {
-        for (value, operation) in &block.operations {
-            if matches!(
-                operation,
-                GraphOp::Bridge {
-                    instruction: Instruction::LoadArguments,
-                    pushes: 1,
-                    ..
-                }
-            ) {
-                loads.insert(*value);
-            }
-            for input in operation.operands() {
-                uses.entry(input).or_default().push(operation);
-            }
-        }
-        match &block.terminator {
-            Terminator::Branch { condition, .. }
-            | Terminator::BranchNotNullish { condition, .. }
-            | Terminator::Throw(condition) => {
-                terminator_uses.insert(*condition);
-            }
-            Terminator::Return(Some(value)) => {
-                terminator_uses.insert(*value);
-            }
-            Terminator::Suspend {
-                value,
-                spilled,
-                delegate,
-                ..
-            } => {
-                terminator_uses.insert(*value);
-                terminator_uses.extend(spilled.iter().copied());
-                if let Some((iterator, _, _)) = delegate {
-                    terminator_uses.insert(*iterator);
-                }
-            }
-            Terminator::Jump(_) | Terminator::Return(None) | Terminator::Unreachable => {}
-        }
-    }
-    if loads.is_empty() {
-        return loads;
-    }
-
-    let mut optimized = HashSet::new();
-    for value in loads.iter().copied() {
-        if terminator_uses.contains(&value) {
-            return HashSet::new();
-        }
-        let Some(value_uses) = uses.get(&value) else {
-            return HashSet::new();
-        };
-        if value_uses.len() != 1 {
-            return HashSet::new();
-        }
-        let GraphOp::GetProperty { object, name, .. } = value_uses[0] else {
-            return HashSet::new();
-        };
-        let is_length = matches!(program.constants.get(*name as usize), Some(Constant::String(units)) if units.to_scalar_string().as_deref() == Ok("length"));
-        if *object != value || !is_length {
-            return HashSet::new();
-        }
-        optimized.insert(value);
-    }
-    optimized
-}
 
 /// Compact bodies use generic runtime calls rather than the optimized call paths. Determine
 /// their context needs from the rendered body, including tail bridges and suspension setup,
@@ -1131,6 +1006,7 @@ fn graph_value_use_counts(graph: &FunctionGraph) -> HashMap<ValueId, usize> {
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 *counts.entry(*value).or_insert(0) += 1;
@@ -1144,6 +1020,9 @@ fn graph_value_use_counts(graph: &FunctionGraph) -> HashMap<ValueId, usize> {
                 }
                 if let Some((iterator, _, _)) = delegate {
                     *counts.entry(*iterator).or_insert(0) += 1;
+                }
+                if let Some(wrapped) = delegate_wrapped {
+                    *counts.entry(*wrapped).or_insert(0) += 1;
                 }
             }
         }
@@ -1229,6 +1108,112 @@ fn await_resolve_fusion_arg(
     Some(args[0])
 }
 
+fn emit_resume_value_restore(
+    output: &mut String,
+    value: ValueId,
+    source: &str,
+    numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
+    live_numbers: &HashSet<ValueId>,
+    live_ints: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
+) {
+    writeln!(output, "        v{} = {source};", value.0).unwrap();
+    if live_numbers.contains(&value) && numbers.contains(&value) {
+        writeln!(
+            output,
+            "        if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{0}))) memcpy(&d{0}, &v{0}, sizeof(d{0})); else d{0} = kiln_c99_as_number(kiln_val_to_boundary(v{0}));",
+            value.0
+        )
+        .unwrap();
+    } else if live_ints.contains(&value) && ints.contains(&value) {
+        writeln!(
+            output,
+            "        {{ double tmp; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{0}))) memcpy(&tmp, &v{0}, sizeof(tmp)); else tmp = kiln_c99_as_number(kiln_val_to_boundary(v{0})); i{0} = (int64_t)tmp; }}",
+            value.0
+        )
+        .unwrap();
+    }
+    if booleans.contains(&value) {
+        writeln!(
+            output,
+            "        b{} = (v{} == KILN_VAL_TRUE);",
+            value.0, value.0
+        )
+        .unwrap();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_resume_exception_path(
+    output: &mut String,
+    graph: &FunctionGraph,
+    resume_block: BlockId,
+    handler: Option<BlockId>,
+    spilled: &[ValueId],
+    phis: &[u32],
+    numbers: &HashSet<ValueId>,
+    ints: &HashSet<ValueId>,
+    live_numbers: &HashSet<ValueId>,
+    live_ints: &HashSet<ValueId>,
+    booleans: &HashSet<ValueId>,
+    indexed_values: bool,
+    boxed: Option<&HashSet<ValueId>>,
+    landing_unwind: &str,
+) {
+    writeln!(output, "    if (frame->raising) {{").unwrap();
+    for (i, value) in spilled.iter().enumerate() {
+        emit_resume_value_restore(
+            output,
+            *value,
+            &format!("frame->stack[{i}]"),
+            numbers,
+            ints,
+            live_numbers,
+            live_ints,
+            booleans,
+        );
+    }
+    for (i, phi) in phis.iter().enumerate() {
+        let source = if i < spilled.len() {
+            format!("frame->stack[{i}]")
+        } else {
+            "kiln_val_from_boundary(frame->sent)".to_owned()
+        };
+        emit_resume_value_restore(
+            output,
+            ValueId(*phi),
+            &source,
+            numbers,
+            ints,
+            live_numbers,
+            live_ints,
+            booleans,
+        );
+    }
+    if let Some(handler) = handler {
+        let handler_phis: HashSet<ValueId> = graph
+            .block(handler)
+            .into_iter()
+            .flat_map(|handler_block| handler_block.operations.iter())
+            .filter_map(|(value, op)| matches!(op, GraphOp::Phi { .. }).then_some(*value))
+            .collect();
+        emit_phi_assignments(
+            output,
+            graph,
+            resume_block,
+            handler,
+            numbers,
+            ints,
+            booleans,
+            indexed_values,
+            &handler_phis,
+            boxed,
+        );
+    }
+    writeln!(output, "        *thrown = frame->sent; {landing_unwind} }}").unwrap();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_block_sequence(
     output: &mut String,
@@ -1272,9 +1257,9 @@ fn emit_block_sequence(
             _ => None,
         })
         .collect();
-    let suspended_locals =
+    let suspended_clear_slots =
         if matches!(site, Site::Function { .. }) && (proto.generator || proto.asynchronous) {
-            suspended_local_liveness(graph, proto, program)
+            suspended_local_clear_slots(graph, proto, program)
         } else {
             HashMap::new()
         };
@@ -1405,12 +1390,14 @@ fn emit_block_sequence(
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 used.insert(*value);
                 if let Some((iter, _, _)) = delegate {
                     used.insert(*iter);
                 }
+                used.extend(delegate_wrapped.iter().copied());
                 used.extend(spilled.iter().copied());
             }
             _ => {}
@@ -1468,14 +1455,29 @@ fn emit_block_sequence(
                 writeln!(output, "kiln_resume_{pc}:;").unwrap();
                 writeln!(
                     output,
-                    "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0;"
+                    "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0; frame->delegate_wrapped = 0;"
                 )
                 .unwrap();
-                writeln!(
+                // A throw injected while this frame is suspended takes the exceptional edge
+                // from the resumed block. Restore both the saved pre-suspend SSA values and
+                // the resume phis before assigning the handler edge: handler phis can consume
+                // either form, and the C locals from the previous invocation no longer exist.
+                emit_resume_exception_path(
                     output,
-                    "    if (frame->raising) {{ *thrown = frame->sent; {landing_unwind} }}"
-                )
-                .unwrap();
+                    graph,
+                    block.id,
+                    block.exception_handler,
+                    spilled,
+                    &phis,
+                    numbers,
+                    ints,
+                    live_numbers,
+                    live_ints,
+                    booleans,
+                    plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
+                    boxed.as_ref(),
+                    &landing_unwind,
+                );
                 for (i, phi) in phis.iter().enumerate() {
                     if i < spilled.len() {
                         writeln!(output, "    v{phi} = frame->stack[{i}];").unwrap();
@@ -1505,14 +1507,25 @@ fn emit_block_sequence(
                 writeln!(output, "kiln_resume_exit_{exit_pc}:;").unwrap();
                 writeln!(
                     output,
-                    "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0;"
+                    "    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0; frame->delegate_wrapped = 0;"
                 )
                 .unwrap();
-                writeln!(
+                emit_resume_exception_path(
                     output,
-                    "    if (frame->raising) {{ *thrown = frame->sent; {landing_unwind} }}"
-                )
-                .unwrap();
+                    graph,
+                    block.id,
+                    block.exception_handler,
+                    spilled,
+                    &phis,
+                    numbers,
+                    ints,
+                    live_numbers,
+                    live_ints,
+                    booleans,
+                    plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
+                    boxed.as_ref(),
+                    &landing_unwind,
+                );
                 for (i, phi) in phis.iter().enumerate() {
                     if i < spilled.len() {
                         writeln!(output, "    v{phi} = frame->stack[{i}];").unwrap();
@@ -1695,7 +1708,7 @@ fn emit_block_sequence(
             plan.compact && graph.next_value_id >= COMPACT_INDEXED_VALUE_THRESHOLD,
             &used,
             boxed.as_ref(),
-            &suspended_locals,
+            &suspended_clear_slots,
             proto.local_count,
         );
     }
@@ -1760,6 +1773,7 @@ fn route_exits_through_boxing(
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 let mut uses = vec![*value];
@@ -1767,6 +1781,7 @@ fn route_exits_through_boxing(
                 if let Some((iter, _, _)) = delegate {
                     uses.push(*iter);
                 }
+                uses.extend(delegate_wrapped.iter().copied());
                 uses
             }
             _ => Vec::new(),
@@ -2792,12 +2807,14 @@ fn boxed_uses(
                 value,
                 spilled,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 used.insert(*value);
                 if let Some((iter, _, _)) = delegate {
                     used.insert(*iter);
                 }
+                used.extend(delegate_wrapped.iter().copied());
                 used.extend(spilled.iter().copied());
             }
             _ => {}
@@ -3136,7 +3153,23 @@ fn emit_blocks(
         .iter()
         .flat_map(|b| b.operations.iter().map(|(v, op)| (*v, op)))
         .collect();
-    let argument_length_values = arguments_length_only_values(graph, proto, program);
+    let no_argument_length_values = HashSet::new();
+    let fallback_argument_fact = plan
+        .argument_length_values
+        .is_none()
+        .then(|| ArgumentsAnalysis::new(program).argument_length_fact_for(graph, proto));
+    let argument_length_values = if matches!(kind, EntryKind::Typed { .. }) {
+        // A typed entry has no argc and may be used by callback adapters with a different
+        // runtime arity from the proto's declared parameter count. Keep the object path there.
+        &no_argument_length_values
+    } else {
+        plan.argument_length_values.as_deref().unwrap_or_else(|| {
+            &fallback_argument_fact
+                .as_ref()
+                .expect("fallback graph fact was prepared")
+                .values
+        })
+    };
     let use_counts = graph_value_use_counts(graph);
     // A read of `length` bounds a loop below 2^32.
     let length_bounds: HashSet<ValueId> = ops
@@ -3760,7 +3793,7 @@ fn emit_terminator(
     indexed_values: bool,
     used: &HashSet<ValueId>,
     boxed: Option<&HashSet<ValueId>>,
-    suspended_locals: &HashMap<BlockId, HashSet<u32>>,
+    suspended_clear_slots: &HashMap<BlockId, HashSet<u32>>,
     local_count: u32,
 ) {
     match terminator {
@@ -4025,6 +4058,7 @@ fn emit_terminator(
             pc,
             awaiting,
             delegate,
+            delegate_wrapped,
             ..
         } => {
             let mut spill = String::new();
@@ -4038,17 +4072,19 @@ fn emit_terminator(
             // here, but the runtime's `return()` and `throw()` read this to decide whether the
             // body has a `finally` or `catch` to run, and so whether to re-enter it at all.
             let covered = i32::from(current_block.exception_handler.is_some());
-            let delegate_set = match delegate {
-                Some((iter, _, exit_pc)) => {
+            let delegate_set = match (delegate, delegate_wrapped) {
+                (Some((iter, _, exit_pc)), Some(wrapped)) => {
                     format!(
-                        " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_val_to_boundary(v{})); frame->delegate_exit = {};",
+                        " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_val_to_boundary(v{})); frame->delegate_exit = {}; frame->delegate_wrapped = (uint8_t)kiln_c99_val_truthy(v{});",
                         iter.0,
-                        delegate_exit_id(*exit_pc)
+                        delegate_exit_id(*exit_pc),
+                        wrapped.0
                     )
                 }
-                None => {
-                    " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0;".to_string()
+                (None, None) => {
+                    " kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined()); frame->delegate_exit = 0; frame->delegate_wrapped = 0;".to_string()
                 }
+                _ => unreachable!("delegated suspension must retain its wrapped flag"),
             };
             // The previous caller's sent value has already been consumed or copied into
             // live locals/spills. A new suspension waits for a new value; retaining the old
@@ -4056,9 +4092,9 @@ fn emit_terminator(
             output.push_str(
                 "    kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_undefined());\n",
             );
-            if let Some(live) = suspended_locals.get(&current_block.id) {
+            if let Some(clear) = suspended_clear_slots.get(&current_block.id) {
                 for slot in 0..local_count {
-                    if !live.contains(&slot) {
+                    if clear.contains(&slot) {
                         writeln!(
                             output,
                             "    kiln_c99_heap_store_val(frame, &frame->locals[{slot}], KILN_VAL_UNDEFINED);"
@@ -4361,9 +4397,13 @@ fn typed_receiver_row_safe(
 
 #[cfg(test)]
 mod tests {
-    use super::{index_large_ssa_values, retain_used_context, suspended_local_liveness};
+    use super::{
+        emit_resume_exception_path, index_large_ssa_values, retain_used_context,
+        suspended_local_clear_slots,
+    };
     use crate::BYTECODE_VERSION;
-    use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, Terminator, ValueId};
+    use crate::graph::{BasicBlock, BlockId, FunctionGraph, GraphOp, SiteId, Terminator, ValueId};
+    use kiln_graph::suspended_local_liveness;
     use kiln_ir::{FunctionProto, Program};
     use std::collections::HashSet;
 
@@ -4433,6 +4473,7 @@ mod tests {
             pc: 1,
             awaiting: false,
             delegate: None,
+            delegate_wrapped: None,
         }
     }
 
@@ -4451,6 +4492,77 @@ mod tests {
         ];
         let live = suspended_local_liveness(&graph, &generator_proto(3), &empty_program());
         assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([0])));
+        let clear = suspended_local_clear_slots(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([1, 2])));
+    }
+
+    #[test]
+    fn retained_local_is_cleared_after_it_becomes_dead_without_a_new_write() {
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(
+                0,
+                vec![(
+                    1,
+                    GraphOp::StoreLocal {
+                        slot: 0,
+                        value: ValueId(2),
+                    },
+                )],
+                suspend(1),
+                vec![1],
+                None,
+            ),
+            block(
+                1,
+                vec![(3, GraphOp::LoadLocal(0))],
+                suspend(2),
+                vec![2],
+                None,
+            ),
+            block(2, Vec::new(), Terminator::Return(None), vec![], None),
+        ];
+        let clear = suspended_local_clear_slots(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([1, 2])));
+        // Slots 1 and 2 were cleared at the first suspension and never written again.
+        assert_eq!(clear.get(&BlockId(1)), Some(&HashSet::from([0])));
+    }
+
+    #[test]
+    fn suspension_clear_dataflow_unions_branch_writes_and_tracks_resume_loops() {
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(
+                1,
+                Vec::new(),
+                Terminator::Branch {
+                    condition: ValueId(0),
+                    true_block: BlockId(2),
+                    false_block: BlockId(3),
+                },
+                vec![2, 3],
+                None,
+            ),
+            block(
+                2,
+                vec![(
+                    1,
+                    GraphOp::StoreLocal {
+                        slot: 1,
+                        value: ValueId(2),
+                    },
+                )],
+                Terminator::Jump(BlockId(4)),
+                vec![4],
+                None,
+            ),
+            block(3, Vec::new(), Terminator::Jump(BlockId(4)), vec![4], None),
+            block(4, Vec::new(), suspend(1), vec![1], None),
+        ];
+        let clear = suspended_local_clear_slots(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([0, 1, 2])));
+        assert_eq!(clear.get(&BlockId(4)), Some(&HashSet::from([1])));
     }
 
     #[test]
@@ -4469,6 +4581,111 @@ mod tests {
         ];
         let live = suspended_local_liveness(&graph, &generator_proto(3), &empty_program());
         assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([1])));
+        let clear = suspended_local_clear_slots(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([0, 2])));
+    }
+
+    #[test]
+    fn cells_and_mapped_argument_frames_use_conservative_clear_sets() {
+        let mut cell_graph = FunctionGraph::new(None, 0, 3);
+        cell_graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(
+                1,
+                vec![(1, GraphOp::MakeCell(0))],
+                suspend(2),
+                vec![2],
+                None,
+            ),
+            block(2, Vec::new(), Terminator::Return(None), vec![], None),
+        ];
+        let cell_clear =
+            suspended_local_clear_slots(&cell_graph, &generator_proto(3), &empty_program());
+        assert_eq!(cell_clear.get(&BlockId(0)), Some(&HashSet::from([1, 2])));
+        // The cell remains live; the other slots were already cleared at the first suspend.
+        assert_eq!(cell_clear.get(&BlockId(1)), Some(&HashSet::new()));
+
+        let mut mapped_proto = generator_proto(3);
+        mapped_proto.mapped_arguments = true;
+        let mut mapped_graph = FunctionGraph::new(None, 0, 3);
+        mapped_graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(1, Vec::new(), suspend(2), vec![2], None),
+            block(2, Vec::new(), Terminator::Return(None), vec![], None),
+        ];
+        let mapped_clear =
+            suspended_local_clear_slots(&mapped_graph, &mapped_proto, &empty_program());
+        assert_eq!(
+            mapped_clear.get(&BlockId(0)),
+            Some(&HashSet::from([0, 1, 2]))
+        );
+        assert_eq!(
+            mapped_clear.get(&BlockId(1)),
+            Some(&HashSet::from([0, 1, 2]))
+        );
+    }
+
+    #[test]
+    fn exception_handler_metadata_edge_preserves_prethrow_dirty_locals() {
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(
+                1,
+                vec![
+                    (
+                        1,
+                        GraphOp::StoreLocal {
+                            slot: 0,
+                            value: ValueId(2),
+                        },
+                    ),
+                    (
+                        3,
+                        GraphOp::Call {
+                            callee: ValueId(4),
+                            args: Vec::new(),
+                            site: SiteId(0),
+                            line: 0,
+                            column: 0,
+                        },
+                    ),
+                ],
+                Terminator::Jump(BlockId(3)),
+                vec![3],
+                Some(2),
+            ),
+            block(2, Vec::new(), suspend(4), vec![4], None),
+            block(3, Vec::new(), Terminator::Return(None), vec![], None),
+            block(4, Vec::new(), Terminator::Return(None), vec![], None),
+        ];
+        let clear = suspended_local_clear_slots(&graph, &generator_proto(3), &empty_program());
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([0, 1, 2])));
+        assert_eq!(clear.get(&BlockId(2)), Some(&HashSet::from([0])));
+    }
+
+    #[test]
+    fn excess_arguments_and_tdz_initialization_are_may_populated() {
+        let mut proto = generator_proto(3);
+        proto.parameter_count = 1;
+        let mut graph = FunctionGraph::new(None, 0, 3);
+        graph.blocks = vec![
+            block(0, Vec::new(), suspend(1), vec![1], None),
+            block(
+                1,
+                vec![(1, GraphOp::MarkUninitialized(2))],
+                suspend(2),
+                vec![2],
+                None,
+            ),
+            block(2, Vec::new(), Terminator::Return(None), vec![], None),
+        ];
+        let clear = suspended_local_clear_slots(&graph, &proto, &empty_program());
+        // The frame constructor copies extra actual arguments into any local slot, so the first
+        // suspension must retain the old all-slot cleanup. The second proves slots 0 and 1 were
+        // cleared, while MarkUninitialized makes slot 2 dirty again.
+        assert_eq!(clear.get(&BlockId(0)), Some(&HashSet::from([0, 1, 2])));
+        assert_eq!(clear.get(&BlockId(1)), Some(&HashSet::from([2])));
     }
 
     #[test]
@@ -4499,6 +4716,57 @@ mod tests {
         ];
         let live = suspended_local_liveness(&graph, &generator_proto(2), &empty_program());
         assert_eq!(live.get(&BlockId(0)), Some(&HashSet::from([0])));
+    }
+
+    #[test]
+    fn raising_resume_restores_spills_and_moves_handler_phis_before_unwind() {
+        let mut graph = FunctionGraph::new(None, 0, 21);
+        graph.blocks = vec![
+            block(
+                1,
+                vec![(11, GraphOp::Phi { inputs: Vec::new() })],
+                Terminator::Return(None),
+                vec![2],
+                Some(2),
+            ),
+            block(
+                2,
+                vec![(
+                    20,
+                    GraphOp::Phi {
+                        inputs: vec![(BlockId(1), ValueId(10))],
+                    },
+                )],
+                Terminator::Return(None),
+                Vec::new(),
+                None,
+            ),
+        ];
+        let mut output = String::new();
+        emit_resume_exception_path(
+            &mut output,
+            &graph,
+            BlockId(1),
+            Some(BlockId(2)),
+            &[ValueId(10)],
+            &[11],
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            false,
+            None,
+            "goto kiln_block_2;",
+        );
+
+        let spill = output.find("v10 = frame->stack[0]").unwrap();
+        let resume_phi = output.find("v11 = frame->stack[0]").unwrap();
+        let handler_phi = output.find("v20 = phi_t0").unwrap();
+        let unwind = output
+            .find("*thrown = frame->sent; goto kiln_block_2;")
+            .unwrap();
+        assert!(spill < resume_phi && resume_phi < handler_phi && handler_phi < unwind);
     }
 
     #[test]

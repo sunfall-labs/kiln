@@ -553,14 +553,514 @@ static void kiln_c99_publish_turn_refusal(int status, kiln_value produced, kiln_
                   : kiln_c99_control_diagnostic();
 }
 
+static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
+                                           int finished, int depth, kiln_value *thrown);
+static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
+                                         int rejected, int depth, kiln_value *thrown);
+static int kiln_c99_async_generator_delegate_result(kiln_host *host, kiln_value generator,
+                                                     kiln_value result, int rejected, int depth,
+                                                     kiln_value *thrown);
+static int kiln_c99_async_generator_delegate_value(kiln_host *host, kiln_value generator,
+                                                    kiln_value value, int done, int depth,
+                                                    kiln_value *thrown);
+static int kiln_c99_async_generator_deliver_yield(kiln_host *host, kiln_value generator,
+                                                   kiln_value produced, int depth,
+                                                   kiln_value *thrown);
+enum {
+    KILN_C99_ASYNC_REQUEST_NEXT,
+    KILN_C99_ASYNC_REQUEST_RETURN,
+    KILN_C99_ASYNC_REQUEST_THROW,
+    /* Internal only: the return operand has completed AsyncGenerator Await. */
+    KILN_C99_ASYNC_REQUEST_RETURN_READY
+};
+
+/* A delegated suspension has two resume points: the yield* operation itself (used while the
+ * delegate is still yielding) and the operation after yield* (used once an abrupt request
+ * completes the delegate). Preserve the latter before clearing the delegation record. */
+static void kiln_c99_async_generator_leave_delegate(kiln_generator *frame) {
+    if (frame->delegate_exit != 0) frame->resume = frame->delegate_exit;
+    kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
+    frame->delegate_exit = 0;
+    frame->delegate_wrapped = 0;
+}
+
+/* Request kinds are a compact internal discriminator. Keeping it beside each
+ * queued promise matters: return and throw are requests on the same serialized generator, not
+ * side channels that may mutate its active next(). */
+static int kiln_c99_async_generator_queue_push(kiln_generator *frame, kiln_value promise,
+                                                kiln_value sent, uint8_t request_kind) {
+    if (frame->queue_count >= frame->queue_capacity) {
+        size_t new_capacity = frame->queue_capacity == 0 ? 4 : frame->queue_capacity * 2;
+        kiln_value *promises;
+        kiln_value *values;
+        uint8_t *methods;
+        kiln_value *old_promises = frame->queue_promises;
+        kiln_value *old_values = frame->queue_sent;
+        uint8_t *old_methods = frame->queue_methods;
+        size_t index;
+        if (new_capacity < frame->queue_capacity || new_capacity > SIZE_MAX / sizeof(kiln_value))
+            return KILN_C99_OUT_OF_MEMORY;
+        promises = (kiln_value *)malloc(new_capacity * sizeof(kiln_value));
+        if (promises == NULL) return KILN_C99_OUT_OF_MEMORY;
+        values = (kiln_value *)malloc(new_capacity * sizeof(kiln_value));
+        methods = (uint8_t *)malloc(new_capacity * sizeof(uint8_t));
+        if (values == NULL || methods == NULL) {
+            free(promises);
+            free(values);
+            free(methods);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (index = 0; index < frame->queue_count; ++index) {
+            size_t old_slot = (frame->queue_head + index) % frame->queue_capacity;
+            promises[index] = frame->queue_promises[old_slot];
+            values[index] = frame->queue_sent[old_slot];
+            methods[index] = frame->queue_methods[old_slot];
+        }
+        kiln_c99_heap_store_pointer(frame, &frame->queue_promises, promises);
+        kiln_c99_heap_store_pointer(frame, &frame->queue_sent, values);
+        kiln_c99_heap_store_pointer(frame, &frame->queue_methods, methods);
+        frame->queue_capacity = new_capacity;
+        frame->queue_head = 0;
+        free(old_promises);
+        free(old_values);
+        free(old_methods);
+        for (index = 0; index < frame->queue_count; ++index) {
+            kiln_c99_heap_store_value(frame, &frame->queue_promises[index],
+                                      frame->queue_promises[index]);
+            kiln_c99_heap_store_value(frame, &frame->queue_sent[index], frame->queue_sent[index]);
+        }
+        /* The frame owns these malloc arrays from this point onward. */
+        kiln_c99_gc_note_finalizable(frame);
+    }
+    {
+        size_t slot = (frame->queue_head + frame->queue_count) % frame->queue_capacity;
+        kiln_c99_heap_store_value(frame, &frame->queue_promises[slot], promise);
+        kiln_c99_heap_store_value(frame, &frame->queue_sent[slot], sent);
+        frame->queue_methods[slot] = request_kind;
+    }
+    frame->queue_count++;
+    return KILN_C99_OK;
+}
+
+static void kiln_c99_async_generator_queue_pop(kiln_generator *frame, kiln_value *promise,
+                                               kiln_value *sent, uint8_t *request_kind) {
+    size_t slot = frame->queue_head;
+    *promise = frame->queue_promises[slot];
+    *sent = frame->queue_sent[slot];
+    *request_kind = frame->queue_methods[slot];
+    frame->queue_count--;
+    frame->queue_head = frame->queue_count == 0
+                            ? 0
+                            : (frame->queue_head + 1) % frame->queue_capacity;
+}
+
+static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value generator,
+                                                   kiln_value promise, kiln_value sent,
+                                                   uint8_t request_kind, int depth,
+                                                   kiln_value *thrown);
+
+static int kiln_c99_async_generator_drain_closed(kiln_host *host, kiln_generator *frame,
+                                                  int depth, kiln_value *thrown) {
+    while (frame->queue_count != 0) {
+        kiln_value promise;
+        kiln_value sent;
+        uint8_t request_kind;
+        int status;
+        kiln_c99_async_generator_queue_pop(frame, &promise, &sent, &request_kind);
+        if (request_kind == KILN_C99_ASYNC_REQUEST_RETURN) {
+            /* Return completion values are awaited even after the generator is closed. This
+             * request owns the lane until its operand settles; its continuation drains the rest. */
+            return kiln_c99_async_generator_start_request(host,
+                                                          kiln_c99_value(
+                                                              KILN_VALUE_GENERATOR,
+                                                              (uint64_t)(uintptr_t)frame, NULL, 0),
+                                                          promise, sent, request_kind, depth,
+                                                          thrown);
+        }
+        if (request_kind == KILN_C99_ASYNC_REQUEST_THROW) {
+            if (kiln_c99_is_reference(sent))
+                kiln_c99_gc_keep_alive((const void *)(uintptr_t)sent.bits);
+            if (promise.tag == KILN_VALUE_PROMISE)
+                kiln_c99_gc_keep_alive((const void *)(uintptr_t)promise.bits);
+            status = kiln_c99_settle(promise, sent, 1);
+        } else {
+            if (kiln_c99_is_reference(sent))
+                kiln_c99_gc_keep_alive((const void *)(uintptr_t)sent.bits);
+            if (promise.tag == KILN_VALUE_PROMISE)
+                kiln_c99_gc_keep_alive((const void *)(uintptr_t)promise.bits);
+            status = kiln_c99_async_generator_settle(
+                host, promise,
+                request_kind == KILN_C99_ASYNC_REQUEST_RETURN ||
+                        request_kind == KILN_C99_ASYNC_REQUEST_RETURN_READY
+                    ? sent
+                    : kiln_c99_undefined(),
+                1, depth, thrown);
+        }
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_gc_keep_alive(frame);
+        if (promise.tag == KILN_VALUE_PROMISE)
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)promise.bits);
+        /* A thenable result resolver can synchronously start a reentrant request. If it waits
+         * (notably a closed-generator return with a pending operand), it now owns the lane. */
+        if (frame->queue_executing) return KILN_C99_OK;
+    }
+    frame->queue_executing = 0;
+    return KILN_C99_OK;
+}
+
+/* Retire the completed request before making its result observable. Resolving the promise may
+ * synchronously run a then getter that starts another request on this closed frame. Keeping the
+ * current promise/value alive across step-object allocation also protects them if that getter
+ * reenters and replaces frame->promise. */
+static int kiln_c99_async_generator_finish_closed(kiln_host *host, kiln_generator *frame,
+                                                   kiln_value promise, kiln_value value,
+                                                   int rejected, int depth,
+                                                   kiln_value *thrown) {
+    int status;
+    frame->queue_executing = 0;
+    kiln_c99_gc_keep_alive(frame);
+    if (promise.tag == KILN_VALUE_PROMISE)
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)promise.bits);
+    if (kiln_c99_is_reference(value))
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)value.bits);
+    status = rejected ? kiln_c99_settle(promise, value, 1)
+                      : kiln_c99_async_generator_settle(host, promise, value, 1, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_gc_keep_alive(frame);
+    if (promise.tag == KILN_VALUE_PROMISE)
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)promise.bits);
+    if (kiln_c99_is_reference(value))
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)value.bits);
+    if (frame->queue_executing) return KILN_C99_OK;
+    return kiln_c99_async_generator_drain_closed(host, frame, depth, thrown);
+}
+
+static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value generator,
+                                                   kiln_value promise, kiln_value sent,
+                                                   uint8_t request_kind, int depth,
+                                                   kiln_value *thrown) {
+    kiln_generator *frame = kiln_c99_generator_of(generator);
+    int status;
+    frame->queue_executing = 1;
+    kiln_c99_gc_keep_alive(frame);
+    if (kiln_c99_is_reference(sent))
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)sent.bits);
+    if (promise.tag == KILN_VALUE_PROMISE)
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)promise.bits);
+    kiln_c99_heap_store_value(frame, &frame->promise, promise);
+    frame->async_request_kind = request_kind == KILN_C99_ASYNC_REQUEST_RETURN_READY
+                                    ? KILN_C99_ASYNC_REQUEST_RETURN
+                                    : request_kind;
+    if (request_kind == KILN_C99_ASYNC_REQUEST_RETURN) {
+        /* AsyncGeneratorResumeNext awaits the return completion's value before it injects the
+         * abrupt return into the suspended body (and does so even for an already-closed frame). */
+        return kiln_c99_await_suspend(host, generator, sent, 5, depth);
+    }
+    if (request_kind == KILN_C99_ASYNC_REQUEST_RETURN_READY)
+        request_kind = KILN_C99_ASYNC_REQUEST_RETURN;
+    if (frame->done) {
+        /* Resolving an already-completed generator step may run a synchronous `then` getter.
+         * Its reentrant request must begin at this handoff, rather than queue behind a step that
+         * is already complete. */
+        return kiln_c99_async_generator_finish_closed(
+            host, frame, promise,
+            request_kind == KILN_C99_ASYNC_REQUEST_THROW
+                ? sent
+                : request_kind == KILN_C99_ASYNC_REQUEST_RETURN ? sent : kiln_c99_undefined(),
+            request_kind == KILN_C99_ASYNC_REQUEST_THROW, depth, thrown);
+    }
+    frame->queue_executing = 1;
+    if (frame->delegate.tag != KILN_VALUE_UNDEFINED &&
+        request_kind != KILN_C99_ASYNC_REQUEST_NEXT) {
+        kiln_value method = kiln_c99_undefined();
+        kiln_value method_error = kiln_c99_undefined();
+        const char *name = request_kind == KILN_C99_ASYNC_REQUEST_RETURN ? "return" : "throw";
+        size_t name_len = request_kind == KILN_C99_ASYNC_REQUEST_RETURN ? 6 : 5;
+        status = kiln_c99_get(host, frame->delegate, name, name_len, &method, depth, &method_error);
+        if (status != KILN_C99_OK) {
+            kiln_c99_async_generator_leave_delegate(frame);
+            return kiln_c99_async_generator_step(host, generator,
+                                                  status == KILN_C99_THROWN ? method_error : sent,
+                                                  1, depth, thrown);
+        }
+        if (method.tag == KILN_VALUE_UNDEFINED || method.tag == KILN_VALUE_NULL) {
+            if (request_kind == KILN_C99_ASYNC_REQUEST_RETURN) {
+                kiln_c99_async_generator_leave_delegate(frame);
+                return kiln_c99_async_generator_start_request(
+                    host, generator, promise, sent, KILN_C99_ASYNC_REQUEST_RETURN_READY, depth,
+                    thrown);
+            }
+            /* Yield* closes the delegate before throwing when it has no throw method. The
+             * continuation validates/awaits the close result before injecting the TypeError. */
+            status = kiln_c99_get(host, frame->delegate, "return", 6, &method, depth, &method_error);
+            if (status != KILN_C99_OK) {
+                kiln_c99_async_generator_leave_delegate(frame);
+                return kiln_c99_async_generator_step(host, generator, method_error, 1, depth,
+                                                      thrown);
+            }
+            if (method.tag == KILN_VALUE_UNDEFINED || method.tag == KILN_VALUE_NULL) {
+                status = kiln_c99_throw_error(&method_error, KILN_C99_BUILTIN_TYPE_ERROR,
+                                              "Iterator does not have a throw method");
+                if (status != KILN_C99_THROWN) return status;
+                kiln_c99_async_generator_leave_delegate(frame);
+                return kiln_c99_async_generator_step(host, generator, method_error, 1, depth,
+                                                      thrown);
+            }
+            if (!kiln_c99_is_callable(method)) {
+                status = kiln_c99_throw_error(&method_error, KILN_C99_BUILTIN_TYPE_ERROR,
+                                              "Iterator method is not callable");
+                if (status != KILN_C99_THROWN) return status;
+                kiln_c99_async_generator_leave_delegate(frame);
+                return kiln_c99_async_generator_step(host, generator, method_error, 1, depth,
+                                                      thrown);
+            }
+            frame->async_delegate_close = 1;
+            {
+                kiln_value close_result = kiln_c99_undefined();
+                status = kiln_c99_call(host, &close_result, method, frame->delegate, NULL, 0,
+                                       depth, &method_error);
+                if (status != KILN_C99_OK) {
+                    frame->async_delegate_close = 0;
+                    kiln_c99_async_generator_leave_delegate(frame);
+                    return kiln_c99_async_generator_step(
+                        host, generator, status == KILN_C99_THROWN ? method_error : sent, 1,
+                        depth, thrown);
+                }
+                return kiln_c99_await_suspend(host, generator, close_result, 3, depth);
+            }
+        }
+        if (!kiln_c99_is_callable(method)) {
+            status = kiln_c99_throw_error(&method_error, KILN_C99_BUILTIN_TYPE_ERROR,
+                                          "Iterator method is not callable");
+            if (status != KILN_C99_THROWN) return status;
+            kiln_c99_async_generator_leave_delegate(frame);
+            return kiln_c99_async_generator_step(host, generator, method_error, 1, depth, thrown);
+        }
+        {
+            kiln_value delegated_result = kiln_c99_undefined();
+            status = kiln_c99_call(host, &delegated_result, method, frame->delegate, &sent, 1,
+                                   depth, &method_error);
+            if (status != KILN_C99_OK) {
+                kiln_c99_async_generator_leave_delegate(frame);
+                return kiln_c99_async_generator_step(
+                    host, generator, status == KILN_C99_THROWN ? method_error : sent, 1,
+                    depth, thrown);
+            }
+            return kiln_c99_await_suspend(host, generator, delegated_result, 3, depth);
+        }
+    }
+    if (request_kind == KILN_C99_ASYNC_REQUEST_THROW) {
+        frame->return_pending = 0;
+        kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
+        return kiln_c99_async_generator_step(host, generator, sent, 1, depth, thrown);
+    }
+    if (request_kind == KILN_C99_ASYNC_REQUEST_RETURN) {
+        frame->return_pending = 1;
+        kiln_c99_heap_store_value(frame, &frame->return_value, sent);
+        if (frame->handler_top != 0) {
+            kiln_closure *closure = kiln_c99_closure_of(frame->function);
+            kiln_val produced = KILN_VAL_UNDEFINED;
+            frame->raising = 1;
+            /* A return is an abrupt completion, not a thrown undefined value. In particular,
+             * catch blocks must not intercept it while finally blocks still run. */
+            kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_return_signal());
+            frame->running = 1;
+            status = kiln_c99_invoke_closure_body(host, &produced, closure,
+                                                  kiln_val_from_boundary(frame->receiver), NULL, 0,
+                                                  depth, thrown, frame, 0);
+            frame->running = 0;
+            frame->raising = 0;
+            if (status == KILN_C99_YIELDED) {
+                frame->started = 1;
+                return kiln_c99_async_generator_deliver_yield(
+                    host, generator, kiln_val_to_boundary(produced), depth, thrown);
+            }
+            if (status == KILN_C99_THROWN) {
+                frame->done = 1;
+                if (kiln_val_from_boundary(*thrown) == KILN_VAL_RETURN_SIGNAL) {
+                    kiln_value return_value = frame->return_value;
+                    frame->return_pending = 0;
+                    if (kiln_c99_is_reference(return_value))
+                        kiln_c99_gc_keep_alive((const void *)(uintptr_t)return_value.bits);
+                    kiln_c99_heap_store_value(frame, &frame->return_value,
+                                              kiln_c99_undefined());
+                    return kiln_c99_async_generator_finish_closed(host, frame, promise,
+                                                                   return_value, 0, depth,
+                                                                   thrown);
+                } else {
+                    frame->return_pending = 0;
+                    kiln_c99_heap_store_value(frame, &frame->return_value,
+                                              kiln_c99_undefined());
+                    return kiln_c99_async_generator_finish_closed(host, frame, promise, *thrown,
+                                                                   1, depth, thrown);
+                }
+            }
+            if (status != KILN_C99_OK) return status;
+            sent = kiln_val_to_boundary(produced);
+        }
+        frame->done = 1;
+        frame->return_pending = 0;
+        if (kiln_c99_is_reference(sent))
+            kiln_c99_gc_keep_alive((const void *)(uintptr_t)sent.bits);
+        kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
+        return kiln_c99_async_generator_finish_closed(host, frame, promise, sent, 0, depth,
+                                                       thrown);
+    }
+    return kiln_c99_async_generator_step(host, generator, sent, 0, depth, thrown);
+}
+
+static int kiln_c99_async_generator_request(kiln_host *host, kiln_value generator, kiln_value promise,
+                                     kiln_value sent, uint64_t method, int depth,
+                                     kiln_value *thrown) {
+    kiln_generator *frame = kiln_c99_generator_of(generator);
+    uint8_t request_kind;
+    int status;
+    if (method == KILN_C99_METHOD_GENERATOR_NEXT)
+        request_kind = KILN_C99_ASYNC_REQUEST_NEXT;
+    else if (method == KILN_C99_METHOD_GENERATOR_RETURN)
+        request_kind = KILN_C99_ASYNC_REQUEST_RETURN;
+    else if (method == KILN_C99_METHOD_GENERATOR_THROW)
+        request_kind = KILN_C99_ASYNC_REQUEST_THROW;
+    else
+        return KILN_C99_INVALID_ARGUMENT;
+    if (frame->queue_executing)
+        return kiln_c99_async_generator_queue_push(frame, promise, sent, request_kind);
+    if (frame->queue_count != 0) {
+        kiln_value ready_promise;
+        kiln_value ready_sent;
+        uint8_t ready_method;
+        /* A reentrant request can arrive while the previous result's `then` getter runs. Put
+         * that request behind existing work, then activate the oldest request immediately. */
+        status = kiln_c99_async_generator_queue_push(frame, promise, sent, request_kind);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_async_generator_queue_pop(frame, &ready_promise, &ready_sent, &ready_method);
+        return kiln_c99_async_generator_start_request(host, generator, ready_promise, ready_sent,
+                                                       ready_method, depth, thrown);
+    }
+    status = kiln_c99_async_generator_start_request(host, generator, promise, sent, request_kind,
+                                                    depth, thrown);
+    if (status != KILN_C99_OK && status != KILN_C99_THROWN && thrown != NULL)
+        kiln_c99_publish_turn_refusal(status, kiln_c99_undefined(), thrown);
+    return status;
+}
+
+/* Finish one yielded value and release the async-generator queue in the same job. This is shared
+ * by awaited yields and direct async-delegate values so the latter do not gain an extra turn. */
+static int kiln_c99_async_generator_finish_yield(kiln_host *host, kiln_value generator,
+                                                 kiln_value value, int depth,
+                                                 kiln_value *thrown) {
+    kiln_generator *frame = kiln_c99_generator_of(generator);
+    kiln_value step = frame->promise;
+    kiln_value shaped;
+    int status = kiln_c99_generator_step(host, value, 0, &shaped, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    /* The shaped result is complete and rooted before resolving. A synchronous then getter may
+     * reenter the generator, so expose the queued head only at this exact boundary. */
+    frame->queue_executing = 0;
+    status = kiln_c99_settle(step, shaped, 0);
+    kiln_c99_gc_keep_alive((const void *)(uintptr_t)generator.bits);
+    if (step.tag == KILN_VALUE_PROMISE)
+        kiln_c99_gc_keep_alive((const void *)(uintptr_t)step.bits);
+    if (status != KILN_C99_OK) return status;
+    /* Let a request made by the result's synchronous `then` getter activate the ready head.
+     * If it did not, activate that same FIFO head after settlement returns. */
+    if (!frame->queue_executing && frame->queue_count > 0) {
+        kiln_value next_p;
+        kiln_value next_s;
+        uint8_t next_method;
+        kiln_c99_async_generator_queue_pop(frame, &next_p, &next_s, &next_method);
+        return kiln_c99_async_generator_start_request(host, generator, next_p, next_s,
+                                                       next_method, 0, thrown);
+    }
+    return status;
+}
+
+static int kiln_c99_async_generator_deliver_yield(kiln_host *host, kiln_value generator,
+                                                   kiln_value produced, int depth,
+                                                   kiln_value *thrown) {
+    kiln_generator *frame = kiln_c99_generator_of(generator);
+    if (frame->awaiting) return kiln_c99_await_suspend(host, generator, produced, 1, depth);
+    if (frame->delegate.tag != KILN_VALUE_UNDEFINED) {
+        kiln_value value = kiln_c99_undefined();
+        kiln_value error = kiln_c99_undefined();
+        int status = kiln_c99_get(host, produced, "value", 5, &value, depth, &error);
+        if (status == KILN_C99_THROWN) {
+            kiln_c99_heap_store_value(frame, &frame->delegate, kiln_c99_undefined());
+            frame->delegate_exit = 0;
+            frame->delegate_wrapped = 0;
+            return kiln_c99_enqueue(generator, error, kiln_c99_undefined(), 1, 1);
+        }
+        if (status != KILN_C99_OK) return status;
+        if (frame->delegate_wrapped)
+            return kiln_c99_await_suspend(host, generator, value, 2, depth);
+        return kiln_c99_async_generator_finish_yield(host, generator, value, depth, thrown);
+    }
+    return kiln_c99_await_suspend(host, generator, produced, 2, depth);
+}
+
 /* Run one promise job. `task` is the drain's own copy, not a pointer into the ring: a handler
  * that enqueues can grow the array out from under it. */
 static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *thrown) {
     kiln_value produced = kiln_c99_undefined();
     int status;
     if (task->continuation) {
-        if (task->continuation == 2) {
+        if (task->continuation == 3) {
+            return kiln_c99_async_generator_delegate_result(host, task->handler, task->argument,
+                                                            task->rejected, 0, thrown);
+        }
+        if (task->continuation == 4) {
             kiln_generator *frame = kiln_c99_generator_of(task->handler);
+            kiln_value error = task->argument;
+            frame->async_delegate_close = 0;
+            kiln_c99_async_generator_leave_delegate(frame);
+            if (!task->rejected) {
+                status = kiln_c99_throw_error(&error, KILN_C99_BUILTIN_TYPE_ERROR,
+                                              "Iterator does not have a throw method");
+                if (status != KILN_C99_THROWN) return status;
+            }
+            return kiln_c99_async_generator_step(host, task->handler, error, 1, 0, thrown);
+        }
+        if (task->continuation == 5) {
+            kiln_generator *frame = kiln_c99_generator_of(task->handler);
+            if (task->rejected) {
+                kiln_value step = frame->promise;
+                /* AsyncGeneratorResumeNext turns a rejected return operand into a throw
+                 * completion at the suspended yield. The body may catch it; otherwise the
+                 * request rejects and closes the generator. A closed generator has no body to
+                 * resume, but the return request's awaited operand still rejects its promise. */
+                frame->return_pending = 0;
+                kiln_c99_heap_store_value(frame, &frame->return_value,
+                                          kiln_c99_undefined());
+                if (!frame->done) {
+                    /* A rejected return operand becomes a throw completion at the suspended
+                     * yield. With an active yield*, the throw completion is forwarded to the
+                     * delegate using the ordinary request path. */
+                    if (frame->delegate.tag != KILN_VALUE_UNDEFINED)
+                        return kiln_c99_async_generator_start_request(
+                            host, task->handler, frame->promise, task->argument,
+                            KILN_C99_ASYNC_REQUEST_THROW, 0, thrown);
+                    /* Without an active delegate, the rejection is thrown at the suspended
+                     * yield, where body catch/finally handlers can observe it. */
+                    return kiln_c99_async_generator_step(host, task->handler, task->argument, 1,
+                                                         0, thrown);
+                }
+                return kiln_c99_async_generator_finish_closed(host, frame, step,
+                                                               task->argument, 1, 0, thrown);
+            }
+            return kiln_c99_async_generator_start_request(
+                host, task->handler, frame->promise, task->argument,
+                KILN_C99_ASYNC_REQUEST_RETURN_READY, 0, thrown);
+        }
+        if (task->continuation == 6) {
+            kiln_generator *frame = kiln_c99_generator_of(task->handler);
+            if (task->rejected)
+                return kiln_c99_async_generator_step(host, task->handler, task->argument, 1, 0,
+                                                     thrown);
+            return kiln_c99_async_generator_delegate_value(
+                host, task->handler, task->argument, frame->async_delegate_result_done, 0,
+                thrown);
+        }
+        if (task->continuation == 2) {
             if (task->rejected) {
                 status = kiln_c99_async_generator_step(host, task->handler, task->argument,
                                                        1, 0, thrown);
@@ -568,28 +1068,8 @@ static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *t
                 kiln_c99_publish_turn_refusal(status, kiln_c99_undefined(), thrown);
                 return status;
             }
-            kiln_value step = frame->promise;
-            status = kiln_c99_async_generator_settle(host, step, task->argument, 0, 0, thrown);
-            if (status != KILN_C99_OK) return status;
-            frame->queue_executing = 0;
-            if (frame->queue_count > 0) {
-                kiln_value next_p = frame->queue_promises[0];
-                kiln_value next_s = frame->queue_sent[0];
-                size_t idx;
-                frame->queue_count--;
-                for (idx = 0; idx < frame->queue_count; ++idx) {
-                    kiln_c99_heap_store_value(frame, &frame->queue_promises[idx], frame->queue_promises[idx + 1]);
-                    kiln_c99_heap_store_value(frame, &frame->queue_sent[idx], frame->queue_sent[idx + 1]);
-                }
-                frame->queue_executing = 1;
-                kiln_c99_heap_store_value(frame, &frame->promise, next_p);
-                if (frame->done) {
-                    frame->queue_executing = 0;
-                    return kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, 0, thrown);
-                }
-                return kiln_c99_async_generator_step(host, task->handler, next_s, 0, 0, thrown);
-            }
-            return status;
+            return kiln_c99_async_generator_finish_yield(host, task->handler, task->argument, 0,
+                                                        thrown);
         }
         /* An await's value arriving at its frame: step it where `@@resume` bound to it used to. */
         status = kiln_c99_generator_of(task->handler)->async_generator
@@ -908,13 +1388,7 @@ static int kiln_c99_arm_timer(uint64_t code, double delay, kiln_realm_work_fn ru
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
                                            int finished, int depth, kiln_value *thrown) {
     kiln_value shaped;
-    int status = kiln_c99_new_object(&shaped);
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_put(host, shaped, "value", 5, value, depth, thrown);
-    }
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_put(host, shaped, "done", 4, kiln_c99_boolean(finished), depth, thrown);
-    }
+    int status = kiln_c99_generator_step(host, value, finished, &shaped, depth, thrown);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -935,11 +1409,13 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
     kiln_value produced;
     int status;
     if (frame->done) {
-        return kiln_c99_async_generator_settle(host, step, kiln_c99_undefined(), 1, depth, thrown);
+        return kiln_c99_async_generator_finish_closed(host, frame, step,
+                                                       kiln_c99_undefined(), 0, depth, thrown);
     }
     if (rejected && !frame->started) {
         frame->done = 1;
-        return kiln_c99_settle(step, sent, 1);
+        return kiln_c99_async_generator_finish_closed(host, frame, step, sent, 1, depth,
+                                                       thrown);
     }
     kiln_c99_heap_store_value(frame, &frame->sent, sent);
     frame->raising = rejected;
@@ -950,45 +1426,117 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
     produced = kiln_val_to_boundary(vproduced);
     if (status == KILN_C99_YIELDED) {
         frame->started = 1;
-        if (frame->awaiting) {
-            return kiln_c99_await_suspend(host, generator, produced, 1, depth);
-        }
-        return kiln_c99_await_suspend(host, generator, produced, 2, depth);
+        return kiln_c99_async_generator_deliver_yield(host, generator, produced, depth, thrown);
     }
     if (status == KILN_C99_THROWN) {
         frame->done = 1;
-        frame->queue_executing = 0;
-        status = kiln_c99_settle(step, *thrown, 1);
-        while (frame->queue_count > 0) {
-            kiln_value next_p = frame->queue_promises[0];
-            size_t idx;
-            frame->queue_count--;
-            for (idx = 0; idx < frame->queue_count; ++idx) {
-                kiln_c99_heap_store_value(frame, &frame->queue_promises[idx], frame->queue_promises[idx + 1]);
-                kiln_c99_heap_store_value(frame, &frame->queue_sent[idx], frame->queue_sent[idx + 1]);
-            }
-            (void)kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, depth, thrown);
+        if (frame->return_pending &&
+            kiln_val_from_boundary(*thrown) == KILN_VAL_RETURN_SIGNAL) {
+            kiln_value return_value = frame->return_value;
+            frame->return_pending = 0;
+            if (kiln_c99_is_reference(return_value))
+                kiln_c99_gc_keep_alive((const void *)(uintptr_t)return_value.bits);
+            kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
+            return kiln_c99_async_generator_finish_closed(host, frame, step, return_value, 0,
+                                                           depth, thrown);
+        } else {
+            frame->return_pending = 0;
+            kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
+            return kiln_c99_async_generator_finish_closed(host, frame, step, *thrown, 1, depth,
+                                                           thrown);
         }
-        return status;
     }
     if (status != KILN_C99_OK) {
         frame->queue_executing = 0;
         return status;
     }
     frame->done = 1;
-    status = kiln_c99_async_generator_settle(host, step, produced, 1, depth, thrown);
-    frame->queue_executing = 0;
-    while (frame->queue_count > 0) {
-        kiln_value next_p = frame->queue_promises[0];
-        size_t idx;
-        frame->queue_count--;
-        for (idx = 0; idx < frame->queue_count; ++idx) {
-            kiln_c99_heap_store_value(frame, &frame->queue_promises[idx], frame->queue_promises[idx + 1]);
-            kiln_c99_heap_store_value(frame, &frame->queue_sent[idx], frame->queue_sent[idx + 1]);
-        }
-        (void)kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, depth, thrown);
+    if (frame->return_pending) {
+        frame->return_pending = 0;
+        kiln_c99_heap_store_value(frame, &frame->return_value, kiln_c99_undefined());
     }
-    return status;
+    return kiln_c99_async_generator_finish_closed(host, frame, step, produced, 0, depth, thrown);
+}
+
+static int kiln_c99_async_generator_delegate_value(kiln_host *host, kiln_value generator,
+                                                    kiln_value value, int done, int depth,
+                                                    kiln_value *thrown) {
+    kiln_generator *frame = kiln_c99_generator_of(generator);
+    if (!done)
+        return kiln_c99_async_generator_finish_yield(host, generator, value, depth, thrown);
+    kiln_c99_async_generator_leave_delegate(frame);
+    if (frame->async_request_kind == KILN_C99_ASYNC_REQUEST_RETURN)
+        return kiln_c99_async_generator_start_request(
+            host, generator, frame->promise, value, KILN_C99_ASYNC_REQUEST_RETURN_READY, depth,
+            thrown);
+    return kiln_c99_async_generator_step(host, generator, value, 0, depth, thrown);
+}
+
+/* The delegated method's result is awaited before this continuation runs. For an
+ * AsyncFromSync delegate, its value is a second await; a real async iterator's value is yielded
+ * unchanged. The same routine handles an externally queued return/throw and the delegation
+ * completion it produces, keeping getter order and request serialization in one place. */
+static int kiln_c99_async_generator_delegate_result(kiln_host *host, kiln_value generator,
+                                                     kiln_value result, int rejected, int depth,
+                                                     kiln_value *thrown) {
+    kiln_generator *frame = kiln_c99_generator_of(generator);
+    kiln_value error = kiln_c99_undefined();
+    kiln_value done_value = kiln_c99_undefined();
+    kiln_value value = kiln_c99_undefined();
+    int status;
+    if (rejected) {
+        frame->async_delegate_close = 0;
+        kiln_c99_async_generator_leave_delegate(frame);
+        return kiln_c99_async_generator_step(host, generator, result, 1, depth, thrown);
+    }
+    if (!(kiln_c99_is_reference(result) || result.tag == KILN_VALUE_DATE)) {
+        status = kiln_c99_throw_error(&error, KILN_C99_BUILTIN_TYPE_ERROR,
+                                      "Iterator result is not an object");
+        if (status != KILN_C99_THROWN) return status;
+        frame->async_delegate_close = 0;
+        kiln_c99_async_generator_leave_delegate(frame);
+        return kiln_c99_async_generator_step(host, generator, error, 1, depth, thrown);
+    }
+    if (frame->async_delegate_close) {
+        frame->async_delegate_close = 0;
+        if (!frame->delegate_wrapped) {
+            status = kiln_c99_throw_error(&error, KILN_C99_BUILTIN_TYPE_ERROR,
+                                          "Iterator does not have a throw method");
+            if (status != KILN_C99_THROWN) return status;
+            kiln_c99_async_generator_leave_delegate(frame);
+            return kiln_c99_async_generator_step(host, generator, error, 1, depth, thrown);
+        }
+        status = kiln_c99_get(host, result, "done", 4, &done_value, depth, &error);
+        if (status != KILN_C99_OK) {
+            if (status != KILN_C99_THROWN) return status;
+            kiln_c99_async_generator_leave_delegate(frame);
+            return kiln_c99_async_generator_step(host, generator, error, 1, depth, thrown);
+        }
+        status = kiln_c99_get(host, result, "value", 5, &value, depth, &error);
+        if (status != KILN_C99_OK) {
+            if (status != KILN_C99_THROWN) return status;
+            kiln_c99_async_generator_leave_delegate(frame);
+            return kiln_c99_async_generator_step(host, generator, error, 1, depth, thrown);
+        }
+        return kiln_c99_await_suspend(host, generator, value, 4, depth);
+    }
+    status = kiln_c99_get(host, result, "done", 4, &done_value, depth, &error);
+    if (status != KILN_C99_OK) {
+        if (status != KILN_C99_THROWN) return status;
+        kiln_c99_async_generator_leave_delegate(frame);
+        return kiln_c99_async_generator_step(host, generator, error, 1, depth, thrown);
+    }
+    status = kiln_c99_get(host, result, "value", 5, &value, depth, &error);
+    if (status != KILN_C99_OK) {
+        if (status != KILN_C99_THROWN) return status;
+        kiln_c99_async_generator_leave_delegate(frame);
+        return kiln_c99_async_generator_step(host, generator, error, 1, depth, thrown);
+    }
+    frame->async_delegate_result_done = (uint8_t)kiln_c99_truthy(done_value);
+    if (frame->delegate_wrapped)
+        return kiln_c99_await_suspend(host, generator, value, 6, depth);
+    return kiln_c99_async_generator_delegate_value(
+        host, generator, value, frame->async_delegate_result_done, depth, thrown);
 }
 
 /* `args` and `argc` are the *call's* arguments, and only the entry that runs the prologue passes

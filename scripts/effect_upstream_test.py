@@ -1,6 +1,9 @@
 import importlib.util
 import copy
+import json
+import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -104,10 +107,209 @@ class NativeResourcePolicyTests(unittest.TestCase):
         defaults = runner.build_parser().parse_args(['--out', str(self.root / 'out')])
         enabled = runner.build_parser().parse_args([
             '--out', str(self.root / 'out'), '--compress-native-artifacts', '--cache-gc'])
+        hash_only = runner.build_parser().parse_args([
+            '--out', str(self.root / 'hash-out'), '--engine', 'native',
+            '--hash-only-native-artifacts'])
         self.assertFalse(defaults.compress_native_artifacts)
+        self.assertFalse(defaults.hash_only_native_artifacts)
         self.assertFalse(defaults.cache_gc)
+        self.assertIsNone(defaults.build_jobs)
         self.assertTrue(enabled.compress_native_artifacts)
         self.assertTrue(enabled.cache_gc)
+        self.assertTrue(hash_only.hash_only_native_artifacts)
+        self.assertFalse(hash_only.compress_native_artifacts)
+
+    def accepted_native_envelope(self):
+        return {
+            'build': {'exit_code': 0, 'timed_out': False},
+            'exit_code': 0,
+            'timed_out': False,
+            'complete': True,
+            'matches_expected_exit': True,
+            'native_binary_integrity': 'verified_before_and_after_execution',
+            'summary': {'discovered': 1, 'passed': 1, 'failed': 0, 'skipped': 0},
+            'errors': [],
+            'matches_reference_inventory': None,
+            'matches_reference_modes': None,
+            'matches_reference_outcomes': None,
+            'node_vitest': {'complete': True, 'matches_modes': True, 'matches_outcomes': True},
+        }
+
+    def test_hash_only_disposes_only_after_complete_native_and_oracle_acceptance(self):
+        binary = self.root / 'native.bin'
+        binary.write_bytes(b'exact generated executable')
+        identity = runner.native_binary_identity(binary)
+        envelope = self.accepted_native_envelope()
+        receipt_path = self.root / 'native-artifact-retention.json'
+
+        receipt = runner.finalize_native_hash_only(
+            binary, receipt_path, envelope, identity, identity,
+            {'source_file_sha256': 'source-digest', 'kiln_binary_sha256': 'cli-digest'})
+
+        self.assertTrue(runner.native_hash_only_acceptance(envelope))
+        self.assertEqual(receipt['status'], 'deleted')
+        self.assertFalse(binary.exists())
+        saved = json.loads(receipt_path.read_text())
+        self.assertEqual(saved['status'], 'deleted')
+        self.assertFalse(saved['binary_retained'])
+        self.assertEqual(saved['binary_sha256'], identity['sha256'])
+        self.assertEqual(saved['binary_size_bytes'], identity['size_bytes'])
+        self.assertEqual(saved['provenance']['source_file_sha256'], 'source-digest')
+
+    def test_hash_only_retains_binary_when_any_native_oracle_check_fails(self):
+        cases = [
+            ('case failure', lambda e: e.update(summary={**e['summary'], 'failed': 1})),
+            ('incomplete inventory', lambda e: e.update(complete=False)),
+            ('node mode mismatch', lambda e: e['node_vitest'].update(matches_modes=False)),
+            ('node outcome mismatch', lambda e: e['node_vitest'].update(matches_outcomes=False)),
+            ('build failure', lambda e: e['build'].update(exit_code=1)),
+        ]
+        for name, change in cases:
+            with self.subTest(name=name):
+                binary = self.root / (name.replace(' ', '-') + '.bin')
+                binary.write_bytes(b'keep failed or unmatched executable')
+                identity = runner.native_binary_identity(binary)
+                envelope = self.accepted_native_envelope()
+                change(envelope)
+
+                receipt = runner.finalize_native_hash_only(
+                    binary, binary.with_suffix('.retention.json'), envelope, identity, identity, {})
+
+                self.assertFalse(runner.native_hash_only_acceptance(envelope))
+                self.assertEqual(receipt['status'], 'retained-unaccepted-run')
+                self.assertTrue(binary.is_file())
+                self.assertTrue(receipt['binary_retained'])
+
+    def test_hash_only_retains_binary_if_its_content_changes_during_execution(self):
+        binary = self.root / 'mutated-native.bin'
+        binary.write_bytes(b'built executable')
+        identity_before = runner.native_binary_identity(binary)
+        envelope = self.accepted_native_envelope()
+        binary.write_bytes(b'changed during run')
+        identity_after = runner.native_binary_identity(binary)
+
+        receipt = runner.finalize_native_hash_only(
+            binary, self.root / 'mutated.retention.json', envelope,
+            identity_before, identity_after, {})
+
+        self.assertEqual(receipt['status'], 'retained-integrity-mismatch')
+        self.assertTrue(binary.is_file())
+        self.assertFalse(receipt['acceptance']['native_hash_only_acceptance'])
+
+    def test_hash_only_does_not_delete_binary_if_pending_receipt_cannot_be_written(self):
+        binary = self.root / 'receipt-protected.bin'
+        binary.write_bytes(b'keep if the receipt cannot be made durable')
+        identity = runner.native_binary_identity(binary)
+        envelope = self.accepted_native_envelope()
+        receipt_path = self.root / 'missing-parent' / 'native-artifact-retention.json'
+
+        receipt = runner.finalize_native_hash_only(
+            binary, receipt_path, envelope, identity, identity, {})
+
+        self.assertEqual(receipt['status'], 'receipt-write-failed')
+        self.assertTrue(receipt['resource_error'])
+        self.assertTrue(binary.is_file())
+
+    def test_hash_only_reports_deletion_failure_and_retains_the_binary(self):
+        binary = self.root / 'unlink-protected.bin'
+        binary.write_bytes(b'keep when deletion fails')
+        identity = runner.native_binary_identity(binary)
+        envelope = self.accepted_native_envelope()
+
+        with mock.patch.object(Path, 'unlink', side_effect=PermissionError('fixture denies unlink')):
+            receipt = runner.finalize_native_hash_only(
+                binary, self.root / 'unlink-retention.json', envelope, identity, identity, {})
+
+        self.assertEqual(receipt['status'], 'deletion-failed')
+        self.assertTrue(receipt['resource_error'])
+        self.assertTrue(binary.is_file())
+        saved = json.loads((self.root / 'unlink-retention.json').read_text())
+        self.assertEqual(saved['status'], 'deletion-failed')
+
+    def test_native_build_job_override_preserves_runtime_worker_setting(self):
+        entry = self.root / 'entry.ts'
+        entry.write_text('')
+        fake_kiln = self.root / 'fake-kiln'
+        fake_kiln.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+trace = pathlib.Path(os.environ["BUILD_JOBS_TRACE"])
+def record(phase):
+    with trace.open("a") as out:
+        out.write(json.dumps({"phase": phase, "kiln_jobs": os.environ["KILN_JOBS"],
+                              "rayon_threads": os.environ["RAYON_NUM_THREADS"]}) + "\\n")
+if "build" in sys.argv:
+    record("native-build")
+    binary = pathlib.Path(sys.argv[sys.argv.index("--output") + 1])
+    binary.write_text("""#!/usr/bin/env python3
+import json, os, pathlib
+with pathlib.Path(os.environ["BUILD_JOBS_TRACE"]).open("a") as out:
+    out.write(json.dumps({"phase": "native-run", "kiln_jobs": os.environ["KILN_JOBS"],
+                          "rayon_threads": os.environ["RAYON_NUM_THREADS"]}) + "\\\\n")
+print('KILN_EFFECT ' + json.dumps({"kind":"inventory", "tests":[{"id":"X > case", "mode":"run"}]}))
+print('KILN_EFFECT ' + json.dumps({"kind":"case", "id":"X > case", "outcome":"pass"}))
+print('KILN_EFFECT ' + json.dumps({"kind":"summary", "discovered":1, "passed":1, "failed":0, "skipped":0}))
+""")
+    binary.chmod(0o755)
+    raise SystemExit(0)
+''')
+        fake_kiln.chmod(0o755)
+
+        source = self.root / 'source'
+        source_test = source / runner.PIN['directory'] / 'X.test.ts'
+        source_test.parent.mkdir(parents=True)
+        source_test.write_text('// pinned-fixture stand-in\n')
+
+        for label, build_flag, expected_build_jobs in (
+                ('default', [], '1'), ('override', ['--build-jobs', '4'], '4'),
+                ('hash-only', ['--hash-only-native-artifacts'], '1')):
+            with self.subTest(label=label):
+                workspace = self.root / (label + '-workspace')
+                workspace.mkdir()
+                out = self.root / (label + '-out')
+                trace = self.root / (label + '-trace.jsonl')
+                args = runner.build_parser().parse_args([
+                    '--workspace', str(workspace), '--out', str(out), '--engine', 'native',
+                    '--path', 'X', '--kiln', str(fake_kiln), '--runtime-jobs', '1', *build_flag])
+
+                def fake_check_output(command, **_kwargs):
+                    return 'fake version or source revision\n'
+
+                with mock.patch.dict(os.environ, {'BUILD_JOBS_TRACE': str(trace)}), \
+                     mock.patch.object(runner, 'prepare_provider', return_value={'manifest': '/fixture/provider.json'}), \
+                     mock.patch.object(runner, 'prepare', return_value=source), \
+                     mock.patch.object(runner, 'entry_for', return_value=entry), \
+                     mock.patch.object(runner, 'RUNTIME_TARGETS', {}), \
+                     mock.patch.object(runner, 'compare_node_vitest', return_value={
+                         'complete': True, 'matches_modes': True, 'matches_outcomes': True,
+                         'mapped_cases': 1, 'unmapped_cases': [], 'official_unmapped_cases': [],
+                         'mode_mismatches': [], 'outcome_mismatches': []}), \
+                     mock.patch.object(runner.subprocess, 'check_output', side_effect=fake_check_output):
+                    status = runner._run_suite(
+                        args, ['native'], ['X'], workspace, out, fake_kiln, fake_kiln, 'fake-kiln-sha', None)
+
+                self.assertEqual(status, 0)
+                observed = [json.loads(line) for line in trace.read_text().splitlines()]
+                self.assertEqual(observed, [
+                    {'phase': 'native-build', 'kiln_jobs': expected_build_jobs,
+                     'rayon_threads': expected_build_jobs},
+                    {'phase': 'native-run', 'kiln_jobs': '1', 'rayon_threads': '1'},
+                ])
+                report = json.loads((out / 'report.json').read_text())
+                self.assertEqual(report['native_build_jobs'], int(expected_build_jobs))
+                self.assertEqual(report['runtime_jobs'], 1)
+                self.assertEqual(report['resource_policy']['native_build_jobs'], int(expected_build_jobs))
+                self.assertEqual(report['resource_policy']['runtime_jobs'], 1)
+                native = report['files'][0]['engines']['native']
+                self.assertTrue(native['complete'])
+                binary = out / 'X' / 'native.bin'
+                if args.hash_only_native_artifacts:
+                    self.assertEqual(native['native_binary_integrity'],
+                                     'verified_before_and_after_execution')
+                    self.assertEqual(native['native_artifact_retention']['status'], 'deleted')
+                    self.assertFalse(binary.exists())
+                    self.assertEqual(len(native['binary_sha256']), 64)
+                else:
+                    self.assertTrue(binary.is_file())
 
     def test_cache_gc_uses_first_writable_shared_layer_and_same_gc_root(self):
         workspace = self.root / 'workspace'

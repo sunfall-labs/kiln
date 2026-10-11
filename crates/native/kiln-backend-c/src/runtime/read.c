@@ -55,7 +55,7 @@ static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
 
 /* Resolve a constructor's species through its actual prototype chain. Accessors receive
  * the constructor that started the read, including an inherited intrinsic accessor. */
-static int kiln_c99_function_species(kiln_host *host, kiln_value target,
+static int kiln_c99_function_species(kiln_host *host, kiln_value target, kiln_value receiver,
                                       const kiln_string *key, const kiln_string *ikey,
                                       kiln_value *out, int depth, kiln_value *thrown) {
     kiln_value current = target;
@@ -69,7 +69,7 @@ static int kiln_c99_function_species(kiln_host *host, kiln_value target,
         }
         if (current.tag == KILN_VALUE_PROXY) {
             return kiln_c99_get_with_receiver(host, current, kiln_c99_key_value(key, NULL),
-                                              target, out, depth, thrown);
+                                              receiver, out, depth, thrown);
         }
         if (current.tag != KILN_VALUE_OBJECT) {
             status = kiln_c99_callable_store(current, &store, 0);
@@ -82,7 +82,7 @@ static int kiln_c99_function_species(kiln_host *host, kiln_value target,
             if (property.getter.tag == KILN_VALUE_UNDEFINED) {
                 KILN_C99_ABSENT("a species accessor without a getter", out);
             }
-            return kiln_c99_call(host, out, property.getter, target, NULL, 0, depth, thrown);
+            return kiln_c99_call(host, out, property.getter, receiver, NULL, 0, depth, thrown);
         }
         if (current.tag == KILN_VALUE_BUILTIN) {
             kiln_typed_kind kind;
@@ -94,7 +94,7 @@ static int kiln_c99_function_species(kiln_host *host, kiln_value target,
                 current.bits == KILN_C99_BUILTIN_ARRAY_BUFFER ||
                 current.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER ||
                 kiln_c99_builtin_typed_kind(current.bits, &kind)) {
-                *out = target;
+                *out = receiver;
                 return KILN_C99_OK;
             }
         }
@@ -113,21 +113,23 @@ static int kiln_c99_function_species(kiln_host *host, kiln_value target,
  * `RegExp.prototype[k]` answer alike. `*found` says whether the store had the key; when it did
  * not, the caller goes on to its own refusal or absence, whichever the name deserves. */
 static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
-                                         const kiln_string *key, const kiln_string *ikey,
+                                         kiln_value receiver, const kiln_string *key,
+                                         const kiln_string *ikey,
                                          kiln_value *out, int depth, kiln_value *thrown,
                                          int *found) {
     kiln_value store;
+    kiln_property property;
     int status = kiln_c99_callable_store(kiln_c99_builtin(prototype), &store, 0);
     *found = 0;
     if (status != KILN_C99_OK) return status;
-    if (store.tag == KILN_VALUE_OBJECT) {
-        kiln_property property;
-        if (kiln_c99_property_read_own_value(store, key, ikey, &property)) {
-            *found = 1;
-            return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-        }
-    }
-    return KILN_C99_OK;
+    if (store.tag != KILN_VALUE_OBJECT ||
+        !kiln_c99_property_read_own_value(store, key, ikey, &property)) return KILN_C99_OK;
+    *found = 1;
+    if (property.refused) KILN_C99_REFUSE("a member this backend declares and has not implemented");
+    if (!property.accessor) return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
+    if (property.getter.tag == KILN_VALUE_UNDEFINED)
+        KILN_C99_ABSENT("an own accessor descriptor whose getter is undefined", out);
+    return kiln_c99_call(host, out, property.getter, receiver, NULL, 0, depth, thrown);
 }
 
 /* Accessors installed on a native prototype must observe the original receiver, not the hidden
@@ -136,49 +138,32 @@ static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
 static int kiln_c99_prototype_store_read_with_receiver(
     kiln_host *host, uint64_t prototype, kiln_value receiver, const kiln_string *key,
     const kiln_string *ikey, kiln_value *out, int depth, kiln_value *thrown, int *found) {
-    kiln_value store;
-    kiln_property property;
-    int status = kiln_c99_callable_store(kiln_c99_builtin(prototype), &store, 0);
-    *found = 0;
-    if (status != KILN_C99_OK || store.tag != KILN_VALUE_OBJECT) return status;
-    if (!kiln_c99_property_read_own_value(store, key, ikey, &property)) return KILN_C99_OK;
-    *found = 1;
-    if (!property.accessor) return kiln_c99_get_key(host, store, key, ikey, out, depth, thrown);
-    if (property.getter.tag == KILN_VALUE_UNDEFINED) {
-        KILN_C99_ABSENT("an own accessor descriptor whose getter is undefined", out);
-    }
-    return kiln_c99_call(host, out, property.getter, receiver, NULL, 0, depth, thrown);
+    return kiln_c99_prototype_store_read(host, prototype, receiver, key, ikey,
+                                         out, depth, thrown, found);
 }
 
-/* A builtin's intrinsic members are resolved by the readers below, but a program may relink the
- * callable object itself. Before reporting an intrinsic absence, consult that explicit parent
- * with the builtin as receiver, so accessors and inherited members observe the real [[Get]]. */
-static int kiln_c99_builtin_custom_prototype_read_with_receiver(
+/* Call only after the builtin's own lookup is complete and the caller's surface/backlog authority
+ * proves this key is absent there. The replacement parent then owns the rest of [[Get]], including
+ * absence; do not preflight with HasProperty, which can disagree with a Proxy's get trap. */
+static int kiln_c99_builtin_replacement_parent_get_after_own_absence(
     kiln_host *host, kiln_value target, kiln_value receiver, const kiln_string *key,
-    const kiln_string *ikey, kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    kiln_value *out, int depth, kiln_value *thrown, int *found) {
     kiln_value store;
     kiln_value prototype;
-    int present = 0;
     int status = kiln_c99_callable_store(target, &store, 0);
     *found = 0;
     if (status != KILN_C99_OK || store.tag != KILN_VALUE_OBJECT) return status;
     prototype = kiln_c99_object_prototype_read(store);
-    if (prototype.tag == KILN_VALUE_UNDEFINED || prototype.tag == KILN_VALUE_NULL) {
-        return KILN_C99_OK;
-    }
-    status = kiln_c99_has_property_key(host, prototype, key, ikey, &present, depth, thrown);
-    if (status != KILN_C99_OK || !present) return status;
+    if (prototype.tag == KILN_VALUE_UNDEFINED) return KILN_C99_OK;
     *found = 1;
+    if (prototype.tag == KILN_VALUE_NULL) {
+        KILN_C99_ABSENT("the caller proved the builtin has no own member and its replacement "
+                        "prototype is explicitly null", out);
+    }
     return kiln_c99_get_with_receiver(host, prototype, kiln_c99_key_value(key, NULL), receiver,
                                       out, depth, thrown);
 }
 
-static int kiln_c99_builtin_custom_prototype_read(
-    kiln_host *host, kiln_value target, const kiln_string *key, const kiln_string *ikey,
-    kiln_value *out, int depth, kiln_value *thrown, int *found) {
-    return kiln_c99_builtin_custom_prototype_read_with_receiver(
-        host, target, target, key, ikey, out, depth, thrown, found);
-}
 
 /* The Array prototype's mutable parent replaces its implicit Object.prototype link. Once that
  * parent is explicit, it owns the remainder of lookup even when the requested member is absent;
@@ -210,20 +195,23 @@ static int kiln_c99_array_custom_parent_read(
  * realm has written onto it (including the shared bootstrap), which in a realm that has never
  * written onto a built-in is one compare. */
 static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
-                                           const kiln_string *key, const kiln_string *ikey,
+                                           kiln_value receiver, const kiln_string *key,
+                                           const kiln_string *ikey,
                                            kiln_value *out, int depth, kiln_value *thrown,
                                            int *found) {
     *found = 0;
     const kiln_gc_heap *heap = kiln_c99_gc_heap_if_cached();
     if (heap != NULL && !kiln_c99_realm_marked_builtin(heap, (uint32_t)prototype))
         return KILN_C99_OK;
-    return kiln_c99_prototype_store_read(host, prototype, key, ikey, out, depth, thrown, found);
+    return kiln_c99_prototype_store_read(host, prototype, receiver, key, ikey,
+                                         out, depth, thrown, found);
 }
-#define KILN_C99_WRITTEN_MEMBER_FIRST(prototype)                                                   \
+#define KILN_C99_WRITTEN_MEMBER_FIRST(prototype, receiver)                                         \
     do {                                                                                           \
         int written_found_;                                                                        \
-        int written_status_ = kiln_c99_written_prototype_read(host, (prototype), key, ikey, out,  \
-                                                              depth, thrown, &written_found_);     \
+        int written_status_ = kiln_c99_written_prototype_read(host, (prototype), (receiver), key,  \
+                                                              ikey, out, depth, thrown,            \
+                                                              &written_found_);                    \
         if (written_status_ != KILN_C99_OK || written_found_) return written_status_;              \
     } while (0)
 
@@ -231,12 +219,13 @@ static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
  * to Object.prototype, as `GetV` does -- `"x".hasOwnProperty`, `(1).isPrototypeOf`. What the
  * program stored there comes first, then the members the runtime answers for it. `*found` says
  * whether either had the name. */
-static int kiln_c99_primitive_object_prototype_read(kiln_host *host, const kiln_string *key,
+static int kiln_c99_primitive_object_prototype_read(kiln_host *host, kiln_value receiver,
+                                                    const kiln_string *key,
                                                     const kiln_string *ikey, const char *intrinsic_key,
                                                     size_t intrinsic_len, kiln_value *out, int depth,
                                                     kiln_value *thrown, int *found) {
-    int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE, key, ikey,
-                                               out, depth, thrown, found);
+    int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                               receiver, key, ikey, out, depth, thrown, found);
     uint64_t code;
     if (status != KILN_C99_OK || *found) return status;
     if (kiln_c99_same_name_key(key, "__proto__")) return KILN_C99_OK;
@@ -498,7 +487,7 @@ static int kiln_c99_namespace_cell_read(kiln_value value, kiln_value *out,
 }
 
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
-                                 const kiln_string *ikey, kiln_value *out, int depth,
+                                 kiln_value receiver, const kiln_string *ikey, kiln_value *out, int depth,
                                  kiln_value *thrown) {
     /* `length` only means anything special to an array or a string; every other kind -- and an
      * ordinary object, the one a request or response property read is, most of all -- paid for
@@ -524,7 +513,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         if (node.array) {
-            status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_PROTOTYPE,
+            status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_PROTOTYPE, receiver,
                                                    key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
             if (kiln_c99_same_name_key(key, "constructor")) {
@@ -539,7 +528,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             code = kiln_c99_array_method(intrinsic_key, intrinsic_len);
             if (code != 0) { *out = kiln_c99_method(code); return KILN_C99_OK; }
         }
-        status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+        status = kiln_c99_primitive_object_prototype_read(host, receiver, key, ikey, intrinsic_key,
                                                             intrinsic_len, out, depth, thrown,
                                                             &found);
         if (status != KILN_C99_OK || found) return status;
@@ -582,7 +571,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         /* Own properties first, then the chain. Iterative and bounded rather than recursive:
          * the walk is on the C stack, and a program can build a chain long enough to exhaust
          * it. */
-        for (steps = 0; walk && steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
             /* A constructor's statics live in its own store, so a chain that reaches one
              * continues *into* that store rather than stopping at the function. */
             if (current.tag == KILN_VALUE_FUNCTION) {
@@ -598,7 +587,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 if (current.tag == KILN_VALUE_BUILTIN) {
                     int found = 0;
                     int status = kiln_c99_prototype_store_read_with_receiver(
-                        host, current.bits, target, key, ikey, out, depth, thrown, &found);
+                        host, current.bits, receiver, key, ikey, out, depth, thrown, &found);
                     if (status != KILN_C99_OK || found) return status;
                     /* AggregateError.prototype inherits Error.prototype. The former is a
                      * builtin-backed prototype, so that link is not represented by an ordinary
@@ -607,7 +596,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                      * intrinsic toString method when no override exists. */
                     if (current.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE) {
                         status = kiln_c99_prototype_store_read_with_receiver(
-                            host, KILN_C99_BUILTIN_ERROR_PROTOTYPE, target, key, ikey,
+                            host, KILN_C99_BUILTIN_ERROR_PROTOTYPE, receiver, key, ikey,
                             out, depth, thrown, &found);
                         if (status != KILN_C99_OK || found) return status;
                         if (kiln_c99_same_name_key(key, "toString")) {
@@ -617,9 +606,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     }
                 }
                 if (current.tag != KILN_VALUE_UNDEFINED && current.tag != KILN_VALUE_NULL) {
-                    return kiln_c99_get_key(host, current, key, ikey, out, depth, thrown);
+                    return kiln_c99_get_key_with_receiver(host, current, key, ikey, receiver, out, depth, thrown);
                 }
                 break;
+            }
+            /* A key absent from the canonical table cannot be in an ordinary own-property
+             * store, so avoid scanning those stores. It may still cross a Proxy or a built-in
+             * prototype with table-backed members; those nodes must receive the actual Get. */
+            if (!walk) {
+                current = kiln_c99_object_prototype_read(current);
+                continue;
             }
             getter = kiln_c99_undefined();
             {
@@ -651,7 +647,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                     "definition",
                                     out);
                 }
-                return kiln_c99_call(host, out, getter, target, NULL, 0, depth, thrown);
+                return kiln_c99_call(host, out, getter, receiver, NULL, 0, depth, thrown);
             }
         }
         /* An iterator helper's chain ends at `Iterator.prototype`, which is a method table rather
@@ -669,7 +665,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         if (target_prototype.tag == KILN_VALUE_BUILTIN &&
             target_prototype.bits == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE) {
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ITERATOR_PROTOTYPE,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ITERATOR_PROTOTYPE, receiver,
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
@@ -713,7 +709,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                     return KILN_C99_OK;
                 }
             }
-            KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+            if (kiln_c99_program_wrote_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE)) {
+                int found;
+                int status = kiln_c99_prototype_store_read_with_receiver(
+                    host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE, receiver, key, ikey, out, depth,
+                    thrown, &found);
+                if (status != KILN_C99_OK || found) return status;
+            }
             inherited = kiln_c99_namespace_method(KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
                                                   intrinsic_key, intrinsic_len);
             if (inherited != 0) {
@@ -722,8 +724,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             }
             {
                 int found;
-                int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
-                                                           key, ikey, out, depth, thrown, &found);
+                int status = kiln_c99_prototype_store_read_with_receiver(
+                    host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE, receiver, key, ikey, out, depth,
+                    thrown, &found);
                 if (status != KILN_C99_OK || found) return status;
             }
             if (kiln_c99_same_name_key(key, "constructor")) {
@@ -765,7 +768,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             kiln_value store = kiln_c99_closure_store(closure);
             kiln_value property_key = kiln_c99_key_value(key, &ikey);
             if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-            return kiln_c99_get_with_receiver(host, store, property_key, target, out, depth,
+            return kiln_c99_get_with_receiver(host, store, property_key, receiver, out, depth,
                                               thrown);
         }
         if (kiln_c99_same_name_key(key, "prototype") &&
@@ -784,7 +787,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             return KILN_C99_OK;
         }
         if (kiln_c99_same_name_key(key, "@@species")) {
-            return kiln_c99_function_species(host, target, key, ikey, out, depth, thrown);
+            return kiln_c99_function_species(host, target, receiver, key, ikey, out, depth, thrown);
         }
         if (kiln_c99_store_has(kiln_c99_closure_store(closure), key, ikey)) {
             /* An assigned property wins, exactly as an own property shadows an
@@ -794,7 +797,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             kiln_value store = kiln_c99_closure_store(closure);
             kiln_value property_key = kiln_c99_key_value(key, &ikey);
             if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-            return kiln_c99_get_with_receiver(host, store, property_key, target, out, depth,
+            return kiln_c99_get_with_receiver(host, store, property_key, receiver, out, depth,
                                               thrown);
         }
         kiln_value store = kiln_c99_closure_store(closure);
@@ -810,7 +813,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         kiln_value property_key = kiln_c99_key_value(key, &ikey);
         if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-        return kiln_c99_get_with_receiver(host, parent, property_key, target, out, depth,
+        return kiln_c99_get_with_receiver(host, parent, property_key, receiver, out, depth,
                                           thrown);
     }
 #if KILN_RETAIN_GROUP_TEMPORAL
@@ -934,7 +937,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         kiln_regexp *regexp = kiln_c99_regexp_of(target);
         int found = 0;
         size_t index;
-        int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+        int status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown, &found);
         if (status != KILN_C99_OK || found) return status;
         /* The flag letters, in the order the specification lists their accessors. */
         static const char known[] = "dgimsuvy";
@@ -970,7 +973,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_boolean(present);
             return KILN_C99_OK;
         }
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_REGEXP_PROTOTYPE);
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_REGEXP_PROTOTYPE, receiver);
         {
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
@@ -983,7 +986,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         {
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_REGEXP_PROTOTYPE, key,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_REGEXP_PROTOTYPE, receiver, key,
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
@@ -993,7 +996,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         {
             int found;
-            int status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+            int status = kiln_c99_primitive_object_prototype_read(host, receiver, key, ikey, intrinsic_key,
                                                                   intrinsic_len, out, depth,
                                                                   thrown, &found);
             if (status != KILN_C99_OK || found) return status;
@@ -1031,7 +1034,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             }
             {
                 int found;
-                int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE,
+                int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER_PROTOTYPE, receiver,
                                                            key, ikey, out, depth, thrown, &found);
                 if (status != KILN_C99_OK || found) return status;
             }
@@ -1056,7 +1059,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         {
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE, key,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_BUFFER_PROTOTYPE, receiver, key,
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
@@ -1097,7 +1100,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         {
             int found;
             int status = kiln_c99_prototype_store_read_with_receiver(
-                host, KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE, target, key, ikey,
+                host, KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE, receiver, key, ikey,
                 out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
@@ -1136,7 +1139,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
         if (view->properties.tag == KILN_VALUE_OBJECT) {
             int found;
-            int own_status = kiln_c99_store_get_key(host, target, key, ikey, out, depth,
+            int own_status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth,
                                                     thrown, &found);
             if (own_status != KILN_C99_OK || found) return own_status;
         }
@@ -1189,10 +1192,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         {
             int found;
-            int status = kiln_c99_prototype_store_read(host, kiln_c99_typed_prototype(view->kind),
+            int status = kiln_c99_prototype_store_read(host, kiln_c99_typed_prototype(view->kind), receiver,
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
-            status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE,
+            status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE, receiver,
                                                    key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
@@ -1224,7 +1227,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * non-default data descriptors share the same value/attribute record with reflection. */
         if (element_index >= 0.0 && elements->properties.tag == KILN_VALUE_OBJECT) {
             int found = 0;
-            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
+            int status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown,
                                                 &found);
             if (status != KILN_C99_OK || found) return status;
         }
@@ -1243,7 +1246,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * program has never modified Array.prototype. Site-less method reads use this path. */
         if (kiln_c99_array_of(target)->properties.tag != KILN_VALUE_UNDEFINED) {
             int found;
-            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            int status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
         if (kiln_c99_same_name_key(key, "constructor")) {
@@ -1261,14 +1264,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         if (kiln_c99_same_name_key(key, "@@unscopables")) {
             return kiln_c99_get_array_unscopables(out);
         }
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_ARRAY_PROTOTYPE);
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_ARRAY_PROTOTYPE, receiver);
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         code = kiln_c99_array_method(intrinsic_key, intrinsic_len);
         if (code != 0) {
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
         }
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE, receiver);
         code = kiln_c99_same_name_key(key, "isPrototypeOf")
                    ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                : kiln_c99_same_name_key(key, "propertyIsEnumerable")
@@ -1286,7 +1289,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * actually holds is answered, so a *missing* name is still the error below rather
              * than undefined. */
             int found;
-            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
+            int status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown,
                                             &found);
             if (status != KILN_C99_OK || found) {
                 return status;
@@ -1306,7 +1309,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 if (kiln_c99_same_name_key(key, "groups")) {
                     int found;
                     kiln_c99_materialize_match_properties(arr);
-                    return kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
+                    return kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown,
                                               &found);
                 }
             }
@@ -1319,7 +1322,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * `[].x()` is "undefined is not a function" about a method `Array.prototype.x`
              * demonstrably has. */
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_PROTOTYPE, key,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_ARRAY_PROTOTYPE, receiver, key,
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
@@ -1329,7 +1332,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * after those answers miss, and retain the original array as the receiver. */
             int found = 0;
             int status = kiln_c99_array_custom_parent_read(
-                host, target, key, ikey, out, depth, thrown, &found);
+                host, receiver, key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
         if (kiln_c99_same_name_key(key, "toLocaleString")) {
@@ -1348,7 +1351,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         KILN_C99_REFUSE("an Array.prototype member this backend has not implemented");
     }
     case KILN_VALUE_BOOLEAN: {
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE);
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, receiver);
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                             &intrinsic_len);
         uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, intrinsic_key,
@@ -1367,10 +1370,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         {
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, key,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_BOOLEAN_PROTOTYPE, receiver, key,
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
-            status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+            status = kiln_c99_primitive_object_prototype_read(host, receiver, key, ikey, intrinsic_key,
                                                               intrinsic_len, out, depth, thrown,
                                                               &found);
             if (status != KILN_C99_OK || found) return status;
@@ -1386,7 +1389,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         /* `length` is the string's own; every other name here is String.prototype's, where a
          * member the program wrote comes first. */
         if (!kiln_c99_same_name_key(key, "length")) {
-            KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_STRING_PROTOTYPE);
+            KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_STRING_PROTOTYPE, receiver);
         }
         if (kiln_c99_same_name_key(key, "@@iterator")) {
             *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
@@ -1416,7 +1419,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         {
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_STRING_PROTOTYPE,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_STRING_PROTOTYPE, receiver,
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
@@ -1425,7 +1428,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         {
             int found;
-            int status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+            int status = kiln_c99_primitive_object_prototype_read(host, receiver, key, ikey, intrinsic_key,
                                                                   intrinsic_len, out, depth, thrown,
                                                                   &found);
             if (status != KILN_C99_OK || found) return status;
@@ -1442,7 +1445,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         int found;
         int status = kiln_c99_timer_materialize(target);
         if (status != KILN_C99_OK) return status;
-        status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+        status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown, &found);
         if (status != KILN_C99_OK || found) return status;
         KILN_C99_ABSENT("not a member of the timer's store or Timeout.prototype", out);
     }
@@ -1450,13 +1453,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         {
             int found;
-            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
+            int status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown,
                                             &found);
             if (status != KILN_C99_OK || found) {
                 return status;
             }
         }
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_PROMISE_PROTOTYPE);
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_PROMISE_PROTOTYPE, receiver);
         uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_PROMISE_PROTOTYPE, intrinsic_key,
                                                   intrinsic_len);
         if (code != 0) {
@@ -1490,7 +1493,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * silently making subclasses behave like plain Maps. */
         {
             int found;
-            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
+            int status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown,
                                                 &found);
             if (status != KILN_C99_OK || found) return status;
         }
@@ -1501,7 +1504,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             uint64_t prototype = collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE
                                                     : KILN_C99_BUILTIN_SET_PROTOTYPE;
             int status = kiln_c99_prototype_store_read_with_receiver(
-                host, prototype, target, key, ikey, out, depth, thrown, &found);
+                host, prototype, receiver, key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
             *out = kiln_c99_number((double)collection->live);
             return KILN_C99_OK;
@@ -1518,7 +1521,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         KILN_C99_WRITTEN_MEMBER_FIRST(
             collection->is_weak
                 ? (collection->is_map ? KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE : KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE)
-                : (collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE : KILN_C99_BUILTIN_SET_PROTOTYPE));
+                : (collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE : KILN_C99_BUILTIN_SET_PROTOTYPE), receiver);
         code = kiln_c99_lookup_method(
             intrinsic_key, intrinsic_len, KILN_C99_METHOD_COLLECTION_GET,
             collection->is_weak ? KILN_C99_METHOD_COLLECTION_DELETE
@@ -1533,7 +1536,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * declared put on the prototype -- and only then the refusal that names a member
              * this backend has not grown. */
             int found;
-            int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown,
+            int status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown,
                                             &found);
             if (status != KILN_C99_OK || found) {
                 return status;
@@ -1542,7 +1545,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * be resolved here rather than fall to the absent answer below: turning
              * `m.hasOwnProperty` into undefined would replace a refusal with a wrong answer,
              * which is the trade this whole path exists to avoid. */
-            KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+            KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE, receiver);
             code = kiln_c99_same_name_key(key, "isPrototypeOf")
                        ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                    : kiln_c99_same_name_key(key, "propertyIsEnumerable")
@@ -1561,7 +1564,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 int in_store;
                 status = kiln_c99_prototype_store_read(
                     host,
-                    collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE : KILN_C99_BUILTIN_SET_PROTOTYPE,
+                    collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE : KILN_C99_BUILTIN_SET_PROTOTYPE, receiver,
                     key, ikey, out, depth, thrown, &in_store);
                 if (status != KILN_C99_OK || in_store) return status;
             }
@@ -1589,7 +1592,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     }
     case KILN_VALUE_DATE: {
         int found;
-        int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+        int status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown, &found);
         if (status != KILN_C99_OK || found) return status;
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key, &intrinsic_len);
         if (kiln_c99_same_name_key(key, "constructor")) {
@@ -1598,7 +1601,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         {
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_DATE_PROTOTYPE, key,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_DATE_PROTOTYPE, receiver, key,
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
@@ -1622,7 +1625,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     case KILN_VALUE_GENERATOR: {
         kiln_generator *frame = kiln_c99_generator_of(target);
         int found;
-        int status = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+        int status = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown, &found);
         if (status != KILN_C99_OK || found) return status;
         kiln_value function_prototype = frame->prototype;
         if (frame->properties.tag == KILN_VALUE_OBJECT &&
@@ -1701,7 +1704,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             if (kiln_c99_store_has(store, key, ikey)) {
                 kiln_value property_key = kiln_c99_key_value(key, &ikey);
                 if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-                return kiln_c99_get_with_receiver(host, store, property_key, target, out,
+                return kiln_c99_get_with_receiver(host, store, property_key, receiver, out,
                                                   depth, thrown);
             }
             if (kiln_c99_same_name_key(key, "name")) {
@@ -1735,14 +1738,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             }
             kiln_value property_key = kiln_c99_key_value(key, &ikey);
             if (property_key.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-            return kiln_c99_get_with_receiver(host, parent, property_key, target, out,
+            return kiln_c99_get_with_receiver(host, parent, property_key, receiver, out,
                                               depth, thrown);
         }
         stored = kiln_c99_callable_store(target, &store, 0);
         if (stored != KILN_C99_OK) return stored;
         {
             int found = 0;
-            stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            stored = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown, &found);
             if (stored != KILN_C99_OK || found) return stored;
         }
         /* Only registered native constructors synthesize an own prototype. Other methods
@@ -1757,7 +1760,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
             return KILN_C99_OK;
         }
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, receiver);
         callable = kiln_c99_callable_method(intrinsic_key, intrinsic_len);
         if (callable != 0) {
             *out = kiln_c99_method(callable);
@@ -1773,7 +1776,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * `kiln_c99_callable_method`. `Object.prototype.valueOf` hands back the receiver, so it
          * shadows nothing -- `ToPrimitive` gets a non-primitive from it and falls through to
          * `toString` exactly as it does for a plain object. */
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_OBJECT_PROTOTYPE, receiver);
         {
             uint64_t borrowed =
                 kiln_c99_same_name_key(key, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
@@ -1837,12 +1840,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         {
             int found;
             int status = kiln_c99_prototype_store_read(host,
-                                                       KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
+                                                       KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, receiver,
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
             /* Native callables inherit Object.prototype through Function.prototype too. */
             status = kiln_c99_prototype_store_read(host,
-                                                  KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                                                  KILN_C99_BUILTIN_OBJECT_PROTOTYPE, receiver,
                                                   key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
@@ -1865,7 +1868,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         if (stored != KILN_C99_OK) return stored;
         {
             int found = 0;
-            stored = kiln_c99_store_get_key(host, target, key, ikey, out, depth, thrown, &found);
+            stored = kiln_c99_store_get_key_with_receiver(host, target, receiver, key, ikey, out, depth, thrown, &found);
             if (stored != KILN_C99_OK || found) return stored;
         }
         /* `Temporal` first, because the namespace tables below are keyed by method name and every
@@ -2002,11 +2005,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 }
                 {
                     int found;
-                    int status = kiln_c99_prototype_store_read(host, target.bits, key,
+                    int status = kiln_c99_prototype_store_read(host, target.bits, receiver, key,
                                                                ikey, out, depth, thrown, &found);
                     if (status != KILN_C99_OK || found) return status;
                     if (concrete) {
-                        status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE,
+                        status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE, receiver,
                                                                key, ikey, out, depth, thrown, &found);
                         if (status != KILN_C99_OK || found) return status;
                     }
@@ -2048,11 +2051,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         if (code == 0) {
             int found = 0;
-            int status = kiln_c99_prototype_store_read(host, target.bits,
+            int status = kiln_c99_prototype_store_read(host, target.bits, receiver,
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
             if (target.bits != KILN_C99_BUILTIN_OBJECT_PROTOTYPE) {
-                status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE,
+                status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_OBJECT_PROTOTYPE, receiver,
                                                        key, ikey, out, depth, thrown, &found);
                 if (status != KILN_C99_OK || found) return status;
             }
@@ -2122,25 +2125,24 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 if (kiln_c99_same_name_key(key, "from") ||
                     kiln_c99_same_name_key(key, "of") ||
                     kiln_c99_same_name_key(key, "@@species")) {
-                    int found = 0;
-                    int status = kiln_c99_builtin_custom_prototype_read(
-                        host, target, key, ikey, out, depth, thrown, &found);
-                    if (status != KILN_C99_OK || found) return status;
+                    kiln_value store;
+                    int status = kiln_c99_callable_store(target, &store, 0);
+                    if (status != KILN_C99_OK) return status;
                     /* These statics are inherited through the constructor's current
                      * [[Prototype]]. The intrinsic fallback below is valid only while that
                      * link is the default implicit one; after Object.setPrototypeOf, a missing
                      * member on the replacement chain is genuinely absent. */
-                    {
-                        kiln_value store;
-                        if (kiln_c99_callable_store(target, &store, 0) == KILN_C99_OK &&
-                            store.tag == KILN_VALUE_OBJECT) {
-                            kiln_value parent = kiln_c99_object_prototype_read(store);
-                            if (parent.tag != KILN_VALUE_UNDEFINED &&
-                                !(parent.tag == KILN_VALUE_BUILTIN &&
-                                  parent.bits == KILN_C99_BUILTIN_TYPED_ARRAY)) {
-                                KILN_C99_ABSENT("not in the current typed-array constructor prototype chain",
-                                                out);
-                            }
+                    if (store.tag == KILN_VALUE_OBJECT) {
+                        kiln_value parent = kiln_c99_object_prototype_read(store);
+                        if (parent.tag != KILN_VALUE_UNDEFINED &&
+                            !(parent.tag == KILN_VALUE_BUILTIN &&
+                              parent.bits == KILN_C99_BUILTIN_TYPED_ARRAY)) {
+                            int found = 0;
+                            status = kiln_c99_builtin_replacement_parent_get_after_own_absence(
+                                host, target, receiver, key, out, depth, thrown, &found);
+                            if (status != KILN_C99_OK || found) return status;
+                            KILN_C99_ABSENT("not in the current typed-array constructor prototype chain",
+                                            out);
                         }
                     }
                 }
@@ -2151,7 +2153,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                      * shared bootstrap methods still shadow the intrinsic fallback below. */
                     int found = 0;
                     int status = kiln_c99_prototype_store_read_with_receiver(
-                        host, KILN_C99_BUILTIN_TYPED_ARRAY, target, key, ikey,
+                        host, KILN_C99_BUILTIN_TYPED_ARRAY, receiver, key, ikey,
                         out, depth, thrown, &found);
                     if (status != KILN_C99_OK || found) return status;
                 }
@@ -2178,10 +2180,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
          * way on its own read path above. */
         if (kiln_c99_same_name_key(key, "@@species")) {
             kiln_typed_kind species_kind;
+            kiln_value species;
             if (target.bits == KILN_C99_BUILTIN_SET ||
                 target.bits == KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER ||
-                kiln_c99_builtin_typed_kind(target.bits, &species_kind)) {
-                *out = target;
+                kiln_c99_builtin_typed_kind(target.bits, &species_kind) ||
+                kiln_c99_surface_value(target.bits, intrinsic_key, intrinsic_len, &species)) {
+                *out = receiver;
                 return KILN_C99_OK;
             }
         }
@@ -2322,7 +2326,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         if (!kiln_c99_is_namespace(target.bits) &&
             target.bits != KILN_C99_BUILTIN_FUNCTION_PROTOTYPE) {
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, receiver,
                                                        key, ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
@@ -2332,8 +2336,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * prototype (handled above). In particular, feature tests such as kind-of's
              * `Set.isBuffer` must receive undefined instead of a backend refusal. */
             int found = 0;
-            int status = kiln_c99_builtin_custom_prototype_read(
-                host, target, key, ikey, out, depth, thrown, &found);
+            int status = kiln_c99_builtin_replacement_parent_get_after_own_absence(
+                host, target, receiver, key, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
             KILN_C99_ABSENT("Set constructor has no other string-named statics", out);
         }
@@ -2343,8 +2347,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * shared surface above. Other names such as the feature probe BigInt.isBuffer are
              * absent by the complete constructor definition. */
             int found = 0;
-            int status = kiln_c99_builtin_custom_prototype_read(
-                host, target, key, ikey, out, depth, thrown, &found);
+            int status = kiln_c99_builtin_replacement_parent_get_after_own_absence(
+                host, target, receiver, key, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
             KILN_C99_ABSENT("BigInt constructor has no other string-named statics", out);
         }
@@ -2359,12 +2363,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
              * built-in whose surface is not table-driven has no list to consult, so it keeps
              * refusing; that is the honest answer for a question we cannot yet ask. */
             int owned = 0;
-            (void)kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned);
+            const kiln_builtin_member *member =
+                kiln_c99_builtin_member(target.bits, intrinsic_key, intrinsic_len, &owned);
             if ((owned || kiln_c99_has_surface(target.bits)) &&
+                member == NULL &&
                 !kiln_c99_backlog_names(kiln_c99_builtin_owner_name(target.bits), intrinsic_key, intrinsic_len)) {
                 int found = 0;
-                int status = kiln_c99_builtin_custom_prototype_read(
-                    host, target, key, ikey, out, depth, thrown, &found);
+                int status = kiln_c99_builtin_replacement_parent_get_after_own_absence(
+                    host, target, receiver, key, out, depth, thrown, &found);
                 if (status != KILN_C99_OK || found) return status;
                 KILN_C99_ABSENT("not a member of this built-in; BUILTIN_SURFACE and "
                                 "BUILTIN_SURFACE_BACKLOG hold every one that is",
@@ -2380,7 +2386,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 {
                     int found;
                     int status = kiln_c99_prototype_store_read(
-                        host, target.bits, key, ikey, out, depth, thrown, &found);
+                        host, target.bits, receiver, key, ikey, out, depth, thrown, &found);
                     if (status != KILN_C99_OK || found) return status;
                 }
                 if (kiln_c99_same_name_key(key, "slice")) {
@@ -2498,12 +2504,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                 KILN_C99_ABSENT("not an Iterator.prototype member: absent from the shared helper table and installed store", out);
             }
         }
-        {
-            int found = 0;
-            int status = kiln_c99_builtin_custom_prototype_read(
-                host, target, key, ikey, out, depth, thrown, &found);
-            if (status != KILN_C99_OK || found) return status;
-        }
         KILN_C99_REFUSE("a member the language puts on this built-in and this backend has not "
                         "built");
     }
@@ -2514,7 +2514,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                                         ? "Cannot read properties of null"
                                         : "Cannot read properties of undefined");
     case KILN_VALUE_BIGINT: {
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_BIGINT_PROTOTYPE);
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_BIGINT_PROTOTYPE, receiver);
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                             &intrinsic_len);
         uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_BIGINT_PROTOTYPE, intrinsic_key,
@@ -2537,10 +2537,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         {
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_BIGINT_PROTOTYPE, key,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_BIGINT_PROTOTYPE, receiver, key,
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
-            status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+            status = kiln_c99_primitive_object_prototype_read(host, receiver, key, ikey, intrinsic_key,
                                                               intrinsic_len, out, depth, thrown,
                                                               &found);
             if (status != KILN_C99_OK || found) return status;
@@ -2550,7 +2550,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
                         out);
     }
     case KILN_VALUE_NUMBER: {
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_NUMBER_PROTOTYPE);
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_NUMBER_PROTOTYPE, receiver);
         (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                             &intrinsic_len);
         uint64_t code = kiln_c99_namespace_method(KILN_C99_BUILTIN_NUMBER_PROTOTYPE, intrinsic_key,
@@ -2565,10 +2565,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         {
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_NUMBER_PROTOTYPE, key,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_NUMBER_PROTOTYPE, receiver, key,
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
-            status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+            status = kiln_c99_primitive_object_prototype_read(host, receiver, key, ikey, intrinsic_key,
                                                               intrinsic_len, out, depth, thrown,
                                                               &found);
             if (status != KILN_C99_OK || found) return status;
@@ -2576,7 +2576,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         KILN_C99_ABSENT("not a member of Number.prototype, its store or Object.prototype", out);
     }
     case KILN_VALUE_SYMBOL: {
-        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_SYMBOL_PROTOTYPE);
+        KILN_C99_WRITTEN_MEMBER_FIRST(KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, receiver);
         if (kiln_c99_same_name_key(key, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL);
             return KILN_C99_OK;
@@ -2602,7 +2602,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
         }
         {
             int found;
-            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, key,
+            int status = kiln_c99_prototype_store_read(host, KILN_C99_BUILTIN_SYMBOL_PROTOTYPE, receiver, key,
                                                        ikey, out, depth, thrown, &found);
             if (status != KILN_C99_OK || found) return status;
         }
@@ -2611,7 +2611,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
             int status;
             (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
                                                 &intrinsic_len);
-            status = kiln_c99_primitive_object_prototype_read(host, key, ikey, intrinsic_key,
+            status = kiln_c99_primitive_object_prototype_read(host, receiver, key, ikey, intrinsic_key,
                                                               intrinsic_len, out, depth, thrown,
                                                               &found);
             if (status != KILN_C99_OK || found) return status;
@@ -2626,9 +2626,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
 
 /* A read, with one rule about the machine's own keys layered over it. This headed form is the
  * semantic implementation; fixed compiler names below are borrowed Latin1 adapters. */
-static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_string *key,
-                            const kiln_string *ikey, kiln_value *out, int depth,
-                            kiln_value *thrown) {
+static int kiln_c99_get_key_with_receiver(kiln_host *host, kiln_value target, const kiln_string *key,
+                                          const kiln_string *ikey, kiln_value receiver,
+                                          kiln_value *out, int depth, kiln_value *thrown) {
     int status;
     if (key == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (target.tag == KILN_VALUE_PROXY && (key->flags & KILN_STRING_PRIVATE_KEY)) {
@@ -2639,7 +2639,7 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
             *out = private_store;
             return KILN_C99_OK;
         }
-        return kiln_c99_get_key(host, private_store, key, ikey, out, depth, thrown);
+        return kiln_c99_get_key_with_receiver(host, private_store, key, ikey, receiver, out, depth, thrown);
     }
     if (kiln_c99_private_hook_read(target, key, out)) return KILN_C99_OK;
     if (kiln_c99_is_node_hidden_key_key(key)) {
@@ -2648,9 +2648,9 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
     if (target.tag == KILN_VALUE_PROXY) {
         kiln_value key_value = kiln_c99_key_value(key, &ikey);
         if (key_value.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-        return kiln_c99_proxy_get(host, target, key_value, target, out, depth, thrown);
+        return kiln_c99_proxy_get(host, target, key_value, receiver, out, depth, thrown);
     }
-    status = kiln_c99_get_own_kind(host, target, key, ikey, out, depth, thrown);
+    status = kiln_c99_get_own_kind(host, target, key, receiver, ikey, out, depth, thrown);
     /* Namespace descriptors retain their export cell instead of copying its value. This makes
      * reads observe later writes and lets the same object be published before a cyclic module is
      * evaluated. */
@@ -2671,6 +2671,12 @@ static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_strin
                         out);
     }
     return status;
+}
+
+static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_string *key,
+                            const kiln_string *ikey, kiln_value *out, int depth,
+                            kiln_value *thrown) {
+    return kiln_c99_get_key_with_receiver(host, target, key, ikey, target, out, depth, thrown);
 }
 
 /* The machine's own read of a well-known symbol: `kiln_c99_to_primitive` asks every reference for

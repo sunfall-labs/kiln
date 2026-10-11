@@ -1,5 +1,47 @@
 use super::*;
 
+#[test]
+fn call_catching_retains_generator_throw_identity_across_the_native_boundary() {
+    let mut program = generator_receiver_program();
+    program.constants[0] = Constant::Number(42.0_f64.to_bits());
+    program.code = vec![
+        Instruction::MakeFunction(0),
+        Instruction::Call { argc: 0 },
+        Instruction::Return,
+    ];
+    program.functions[0].code = vec![
+        Instruction::Const(0),
+        Instruction::Yield,
+        Instruction::Return,
+    ];
+    let generator = run(&program).expect("create generator");
+    let mut host = TestHost {
+        calls: Vec::new(),
+        clock_now: None,
+        entropy: std::collections::VecDeque::new(),
+        timezone: None,
+        locale: None,
+    };
+    let mut vm = test_vm(&program, &mut host);
+    let next = Value::Callback(CallbackMethod::GeneratorNext, RealmId::PRIMARY);
+    vm.call_value(&next, generator.clone(), vec![], 0)
+        .expect("suspend at the first yield");
+    let token = object(&[("marker", Value::Number(1.0))]);
+    let throw = Value::Callback(CallbackMethod::GeneratorThrow, RealmId::PRIMARY);
+    let result = vm
+        .call_catching(&throw, generator.clone(), vec![token.clone()], 0)
+        .expect("a catchable throw must not escape the host catcher");
+    assert_eq!(result, Err(token));
+    assert!(vm.caught.is_none(), "the catcher consumes the thrown value");
+    let completed = vm
+        .call_value(&next, generator, vec![], 0)
+        .expect("the throwing generator is completed");
+    assert_eq!(
+        vm.read_property(&completed, "done", 0).unwrap(),
+        Value::Boolean(true)
+    );
+}
+
 /// Every native the machine must dispatch has a route to it.
 ///
 /// `call_native` is a free function with no VM, so a built-in that can run program code --

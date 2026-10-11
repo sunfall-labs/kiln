@@ -318,6 +318,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction: self.instruction,
             stack_base,
         });
+        self.reset_arguments_marker_for_current_frame();
         self.program = context.program;
         self.strictness = context.strictness;
         self.strict = context.strict;

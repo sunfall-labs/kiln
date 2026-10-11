@@ -1,6 +1,256 @@
 use super::*;
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    pub(super) fn enqueue_async_generator_request(
+        &mut self,
+        generator: &Rc<GeneratorData>,
+        kind: AsyncGeneratorRequestKind,
+        value: Value,
+        step: Rc<PromiseData>,
+    ) -> Result<(), ExecutionError> {
+        let request = AsyncGeneratorRequest { kind, value, step };
+        let start = {
+            let mut state = generator.borrow_mut();
+            let requests = state
+                .async_requests
+                .get_or_insert_with(|| Box::new(AsyncGeneratorRequests::default()));
+            if requests.current.is_none() {
+                if requests.pending.is_empty() {
+                    requests.current = Some(request);
+                } else {
+                    requests.pending.push_back(request);
+                    requests.current = requests.pending.pop_front();
+                }
+                requests.current_started = false;
+                true
+            } else {
+                requests.pending.push_back(request);
+                false
+            }
+        };
+        if start {
+            self.start_async_generator_request(generator)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn start_async_generator_request(
+        &mut self,
+        generator: &Rc<GeneratorData>,
+    ) -> Result<(), ExecutionError> {
+        enum StartMode {
+            Drain,
+            Reentrant(AsyncGeneratorRequest),
+            None,
+        }
+        let mode = {
+            let mut state = generator.borrow_mut();
+            let Some(requests) = state.async_requests.as_mut() else {
+                return Ok(());
+            };
+            if requests.current.is_none() {
+                requests.current = requests.pending.pop_front();
+                requests.current_started = false;
+            }
+            if requests.current.is_none() || requests.current_started {
+                StartMode::None
+            } else if requests.draining {
+                if requests.resolving > 0 {
+                    requests.current_started = true;
+                    let request = requests.current.as_ref().expect("checked above");
+                    StartMode::Reentrant(AsyncGeneratorRequest {
+                        kind: request.kind,
+                        value: request.value.clone(),
+                        step: Rc::clone(&request.step),
+                    })
+                } else {
+                    StartMode::None
+                }
+            } else {
+                requests.draining = true;
+                StartMode::Drain
+            }
+        };
+        match mode {
+            StartMode::None => return Ok(()),
+            StartMode::Reentrant(request) => {
+                return self.start_current_async_generator_request(generator, &request);
+            }
+            StartMode::Drain => {}
+        }
+
+        loop {
+            let request = {
+                let mut state = generator.borrow_mut();
+                let requests = state
+                    .async_requests
+                    .as_mut()
+                    .expect("request state remains installed while draining");
+                if requests.current.is_none() {
+                    requests.current = requests.pending.pop_front();
+                    requests.current_started = false;
+                }
+                let Some(current) = requests.current.as_ref() else {
+                    requests.draining = false;
+                    return Ok(());
+                };
+                if requests.current_started {
+                    // A reentrant call already handed this item to the generator body.
+                    requests.draining = false;
+                    return Ok(());
+                }
+                requests.current_started = true;
+                AsyncGeneratorRequest {
+                    kind: current.kind,
+                    value: current.value.clone(),
+                    step: Rc::clone(&current.step),
+                }
+            };
+
+            let started = self.start_current_async_generator_request(generator, &request);
+            if let Err(error) = started {
+                if let Some(requests) = generator.borrow_mut().async_requests.as_mut() {
+                    requests.draining = false;
+                }
+                return Err(error);
+            }
+
+            let mut state = generator.borrow_mut();
+            let requests = state
+                .async_requests
+                .as_mut()
+                .expect("request state remains installed while draining");
+            let still_current = requests
+                .current
+                .as_ref()
+                .is_some_and(|current| Rc::ptr_eq(&current.step, &request.step));
+            if still_current {
+                // The request suspended on a promise. Its eventual completion will restart the
+                // drain after this frame has unwound.
+                requests.draining = false;
+                return Ok(());
+            }
+            // The request completed synchronously. `current` may be empty, in which case the
+            // next pending request is promoted by the next loop iteration. A request activated
+            // reentrantly during result resolution is already marked started and is left alone.
+        }
+    }
+
+    fn start_current_async_generator_request(
+        &mut self,
+        generator: &Rc<GeneratorData>,
+        request: &AsyncGeneratorRequest,
+    ) -> Result<(), ExecutionError> {
+        let (started, done) = {
+            let state = generator.borrow();
+            (state.started, state.done)
+        };
+        match request.kind {
+            AsyncGeneratorRequestKind::Next => self.drive_async_generator(
+                generator,
+                &request.step,
+                Resume::Send(request.value.clone()),
+            ),
+            AsyncGeneratorRequestKind::Return if started && !done => {
+                // AsyncGeneratorResumeNext awaits the return completion's value before it
+                // injects that completion into the suspended body. A rejection is thrown into
+                // the suspended body so its catch/finally handlers can observe it.
+                let target = match request.value.clone() {
+                    Value::Promise(inner) => inner,
+                    other => {
+                        let pending = PromiseState::pending();
+                        self.resolve_promise(&pending, other);
+                        pending
+                    }
+                };
+                self.react(
+                    &target,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::AsyncGeneratorReturnActive(generator.clone(), Rc::clone(&request.step)),
+                    false,
+                );
+                Ok(())
+            }
+            AsyncGeneratorRequestKind::Throw if started && !done => self.drive_async_generator(
+                generator,
+                &request.step,
+                Resume::Throw(request.value.clone()),
+            ),
+            AsyncGeneratorRequestKind::Return => {
+                generator.borrow_mut().complete();
+                let target = match request.value.clone() {
+                    Value::Promise(inner) => inner,
+                    other => {
+                        let pending = PromiseState::pending();
+                        self.resolve_promise(&pending, other);
+                        pending
+                    }
+                };
+                self.react(
+                    &target,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::AsyncGeneratorReturn(generator.clone(), Rc::clone(&request.step)),
+                    false,
+                );
+                Ok(())
+            }
+            AsyncGeneratorRequestKind::Throw => {
+                generator.borrow_mut().complete();
+                self.finish_async_generator_request(
+                    generator,
+                    &request.step,
+                    Settled::Rejected(request.value.clone()),
+                )
+            }
+        }
+    }
+
+    pub(super) fn finish_async_generator_request(
+        &mut self,
+        generator: &Rc<GeneratorData>,
+        step: &Rc<PromiseData>,
+        outcome: Settled,
+    ) -> Result<(), ExecutionError> {
+        {
+            let mut state = generator.borrow_mut();
+            let Some(requests) = state.async_requests.as_mut() else {
+                return Ok(());
+            };
+            debug_assert!(
+                requests
+                    .current
+                    .as_ref()
+                    .is_some_and(|current| Rc::ptr_eq(&current.step, step))
+            );
+            // AsyncGeneratorCompleteStep removes the completed request before calling its
+            // promise's resolve function. That resolve may run a user `then` getter which
+            // reentrantly enqueues and starts the next request.
+            requests.current = None;
+            requests.current_started = false;
+            requests.resolving += 1;
+        }
+        match &outcome {
+            Settled::Fulfilled(value) => self.resolve_promise(step, value.clone()),
+            Settled::Rejected(_) => self.settle(step, &outcome),
+        }
+        let draining = {
+            let mut state = generator.borrow_mut();
+            let Some(requests) = state.async_requests.as_mut() else {
+                return Ok(());
+            };
+            debug_assert!(requests.resolving > 0);
+            requests.resolving -= 1;
+            requests.draining
+        };
+        if !draining {
+            self.start_async_generator_request(generator)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn delegate_async_generator_return(
         &mut self,
         generator: &Rc<GeneratorData>,
@@ -238,14 +488,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // what the marker means, so that is what it does.
                 if matches!(thrown, Value::Native(Native::ReturnSignal, _)) {
                     let result = iteration_result(Value::Undefined, true);
-                    self.resolve_promise(step, result);
+                    self.finish_async_generator_request(
+                        generator,
+                        step,
+                        Settled::Fulfilled(result),
+                    )?;
                 } else {
-                    self.settle(step, &Settled::Rejected(thrown));
+                    self.finish_async_generator_request(
+                        generator,
+                        step,
+                        Settled::Rejected(thrown),
+                    )?;
                 }
             }
             Ok((value, true)) => {
                 let result = iteration_result(value, true);
-                self.resolve_promise(step, result);
+                self.finish_async_generator_request(generator, step, Settled::Fulfilled(result))?;
             }
             Ok((iterator_result, false))
                 if generator.borrow().delegate.is_some() && !generator.borrow().awaiting =>
@@ -290,7 +548,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     );
                 } else {
                     let result = iteration_result(value, false);
-                    self.resolve_promise(step, result);
+                    self.finish_async_generator_request(
+                        generator,
+                        step,
+                        Settled::Fulfilled(result),
+                    )?;
                 }
             }
             Ok((value, false)) if !generator.borrow().awaiting => {
@@ -333,5 +595,238 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod return_operand_tests {
+    use super::*;
+
+    struct NullHost;
+
+    impl HostOps for NullHost {
+        fn call(
+            &mut self,
+            _operation: HostOp,
+            _arguments: &[HostValue],
+        ) -> Result<HostValue, kiln_host_abi::HostError> {
+            Ok(HostValue::Undefined)
+        }
+    }
+
+    fn generator_program(code: Vec<Instruction>, local_count: u32) -> Program {
+        Program {
+            source: "".into(),
+            template_sites: Vec::new(),
+            debug_call_sites: Vec::new(),
+            version: kiln_ir::BYTECODE_VERSION,
+            source_origin: None,
+            static_source_identity: None,
+            static_source_provenance: None,
+            constants: vec![
+                Constant::String("first".to_owned().into()),
+                Constant::String("second".to_owned().into()),
+                Constant::String("caught".to_owned().into()),
+                Constant::String("after-catch".to_owned().into()),
+            ],
+            code: Vec::new(),
+            local_count: 0,
+            functions: vec![kiln_ir::FunctionProto {
+                inferred_name: None,
+                span: kiln_ir::Span::default(),
+                prologue_end: 0,
+                asynchronous: true,
+                name: Some("returnOperand".to_owned()),
+                arrow: false,
+                generator: true,
+                async_generator: true,
+                is_method: false,
+                is_class: false,
+                parameter_count: 0,
+                declared_length: 0,
+                mapped_arguments: false,
+                local_count,
+                code,
+                upvalues: Vec::new(),
+                type_annotations: None,
+            }],
+        }
+    }
+
+    fn vm_and_generator<'host>(
+        program: &Program,
+        host: &'host mut NullHost,
+    ) -> (Vm<'host, NullHost>, Rc<GeneratorData>) {
+        let program = Rc::new(program.clone());
+        let strictness = Rc::new(Strictness::sloppy(&program));
+        let mut vm = Vm::with_entropy_seed(
+            Rc::clone(&program),
+            strictness,
+            host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            &RealmCapabilities::default(),
+            ExecutionCapabilities::default(),
+        )
+        .expect("test VM initializes");
+        let closure = vm.make_closure(0).expect("async generator closure");
+        let Value::Generator(generator) = vm
+            .call_value(&Value::Function(closure), Value::Undefined, Vec::new(), 0)
+            .expect("async generator call")
+        else {
+            panic!("async generator call returns a generator");
+        };
+        (vm, generator)
+    }
+
+    fn request(
+        vm: &mut Vm<'_, NullHost>,
+        generator: &Rc<GeneratorData>,
+        kind: AsyncGeneratorRequestKind,
+        value: Value,
+    ) -> Rc<PromiseData> {
+        let callback = match kind {
+            AsyncGeneratorRequestKind::Next => CallbackMethod::AsyncGeneratorNext,
+            AsyncGeneratorRequestKind::Return => CallbackMethod::AsyncGeneratorReturn,
+            AsyncGeneratorRequestKind::Throw => CallbackMethod::AsyncGeneratorThrow,
+        };
+        let Value::Promise(step) = vm
+            .call_value(
+                &Value::Callback(callback, RealmId::PRIMARY),
+                Value::Generator(Rc::clone(generator)),
+                vec![value],
+                0,
+            )
+            .expect("async generator request")
+        else {
+            panic!("async generator request returns a promise");
+        };
+        // This test observes settlement directly instead of installing a JS catch handler.
+        step.state.borrow_mut().handled = true;
+        step
+    }
+
+    fn rejected_promise(vm: &mut Vm<'_, NullHost>, reason: Value) -> Rc<PromiseData> {
+        let promise = PromiseState::pending();
+        vm.settle(&promise, &Settled::Rejected(reason));
+        promise
+    }
+
+    fn result_value(outcome: &Option<Settled>) -> Option<(Value, bool)> {
+        let Settled::Fulfilled(Value::Object(result)) = outcome.as_ref()? else {
+            return None;
+        };
+        let object = result.borrow();
+        let value = object.get_own("value")?.clone();
+        let done = matches!(object.get_own("done"), Some(Value::Boolean(true)));
+        Some((value, done))
+    }
+
+    #[test]
+    fn rejected_active_return_is_thrown_into_the_generator_body() {
+        let program = generator_program(
+            vec![
+                Instruction::Const(0),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::Const(1),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            0,
+        );
+        let mut host = NullHost;
+        let (mut vm, generator) = vm_and_generator(&program, &mut host);
+
+        let first = request(
+            &mut vm,
+            &generator,
+            AsyncGeneratorRequestKind::Next,
+            Value::Undefined,
+        );
+        vm.drain_microtask_jobs().expect("first yield settles");
+        assert!(matches!(
+            result_value(&first.state.borrow().settled),
+            Some((Value::String(value), false)) if value.to_lossy_string() == "first"
+        ));
+
+        let reason = Value::String("return-operand-rejected".to_owned().into());
+        let rejected = rejected_promise(&mut vm, reason.clone());
+        let returned = request(
+            &mut vm,
+            &generator,
+            AsyncGeneratorRequestKind::Return,
+            Value::Promise(rejected),
+        );
+        vm.drain_microtask_jobs()
+            .expect("rejected return is delivered");
+        assert_eq!(
+            returned.state.borrow().settled,
+            Some(Settled::Rejected(reason))
+        );
+
+        let next = request(
+            &mut vm,
+            &generator,
+            AsyncGeneratorRequestKind::Next,
+            Value::Undefined,
+        );
+        vm.drain_microtask_jobs()
+            .expect("closed generator answers next");
+        assert!(matches!(
+            result_value(&next.state.borrow().settled),
+            Some((Value::Undefined, true))
+        ));
+    }
+
+    #[test]
+    fn rejected_active_return_reaches_generator_catch_handler() {
+        let program = generator_program(
+            vec![
+                Instruction::PushHandler(10),
+                Instruction::Const(0),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::Const(1),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::PopHandler,
+                Instruction::Const(0),
+                Instruction::Return,
+                Instruction::StoreLocal(0),
+                Instruction::LoadLocal(0),
+                Instruction::Yield,
+                Instruction::Pop,
+                Instruction::Const(3),
+                Instruction::Return,
+            ],
+            1,
+        );
+        let mut host = NullHost;
+        let (mut vm, generator) = vm_and_generator(&program, &mut host);
+        let first = request(
+            &mut vm,
+            &generator,
+            AsyncGeneratorRequestKind::Next,
+            Value::Undefined,
+        );
+        vm.drain_microtask_jobs().expect("first yield settles");
+        assert!(first.state.borrow().settled.is_some());
+
+        let reason: kiln_string::StringUnits = "caught-return-rejection".to_owned().into();
+        let rejected = rejected_promise(&mut vm, Value::String(reason.clone()));
+        let returned = request(
+            &mut vm,
+            &generator,
+            AsyncGeneratorRequestKind::Return,
+            Value::Promise(rejected),
+        );
+        vm.drain_microtask_jobs()
+            .expect("generator catches rejected return value");
+        assert!(matches!(
+            result_value(&returned.state.borrow().settled),
+            Some((Value::String(value), false)) if value == reason
+        ));
     }
 }

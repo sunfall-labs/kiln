@@ -145,6 +145,30 @@ pub(super) fn run(source: &str) -> Output {
 }
 
 #[test]
+fn async_generator_continuation_modes_round_trip_in_reactions_and_jobs() {
+    let source = format!(
+        "{}\nint main(void) {{\n\
+         kiln_reaction reaction = {{0}};\n\
+         kiln_microtask task = {{0}};\n\
+         for (uint8_t mode = 0; mode <= 6; ++mode) {{\n\
+             reaction.continuation = mode;\n\
+             task.continuation = mode;\n\
+             if (reaction.continuation != mode) return (int)mode + 1;\n\
+             if (task.continuation != mode) return (int)mode + 8;\n\
+         }}\n\
+         return 0;\n\
+         }}\n",
+        super::runtime_prelude_header()
+    );
+    let output = run(&source);
+    assert!(
+        output.status.success(),
+        "continuation values 0..6 must survive both C storage paths: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn cached_objects_reexecute_and_track_source_headers_and_compiler_identity() {
     let toolchain = Toolchain::discover().unwrap();
     let directory = Directory::new();

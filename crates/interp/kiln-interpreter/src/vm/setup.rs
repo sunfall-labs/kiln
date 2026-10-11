@@ -36,6 +36,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             handlers: Vec::new(),
             arguments: Vec::new(),
             arguments_object: None,
+            arguments_length_markers: vec![None],
             // The module body has no `arguments` at all, mapped or not.
             mapped_arguments: false,
             current_realm: RealmId::PRIMARY,

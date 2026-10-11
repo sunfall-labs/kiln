@@ -577,6 +577,7 @@ pub fn eliminate_dead_code(graph: &mut FunctionGraph) {
                 spilled,
                 resume,
                 delegate,
+                delegate_wrapped,
                 ..
             } => {
                 live.insert(*value);
@@ -584,6 +585,7 @@ pub fn eliminate_dead_code(graph: &mut FunctionGraph) {
                     live.insert(*iter);
                     resumes.insert(*exit);
                 }
+                live.extend(delegate_wrapped.iter().copied());
                 live.extend(spilled.iter().copied());
                 resumes.insert(*resume);
             }

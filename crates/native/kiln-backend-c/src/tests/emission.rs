@@ -1,5 +1,312 @@
 use super::*;
 
+fn emitted_function_body<'a>(source: &'a str, symbol: &str, index: usize) -> &'a str {
+    let needle = format!("{symbol}_fn_{index}(");
+    let mut search_from = 0;
+    loop {
+        let relative = source[search_from..]
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing emitted function {symbol}_fn_{index}"));
+        let start = search_from + relative;
+        let suffix = &source[start..];
+        let open = suffix.find('{');
+        let semicolon = suffix.find(';');
+        if let Some(open) = open.filter(|open| semicolon.is_none_or(|semicolon| *open < semicolon))
+        {
+            let body_start = start + open;
+            let close = source[body_start..]
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("missing end of emitted function {symbol}_fn_{index}"));
+            return &source[start..body_start + close + 3];
+        }
+        search_from = start + needle.len();
+    }
+}
+
+fn emitted_proto_flags(source: &str, symbol: &str, index: usize) -> u8 {
+    let marker = format!("(kiln_body_fn){symbol}_fn_{index},");
+    let line = source
+        .lines()
+        .find(|line| line.contains(&marker))
+        .unwrap_or_else(|| panic!("missing emitted proto metadata for {symbol}_fn_{index}"));
+    let metadata_prefix = line
+        .split(", {0}")
+        .next()
+        .expect("proto metadata has its trailing reserved field");
+    metadata_prefix
+        .rsplit(", ")
+        .next()
+        .expect("proto metadata contains flags")
+        .trim()
+        .parse::<u8>()
+        .expect("proto flags are a byte")
+}
+
+#[test]
+fn generic_computed_reads_dispatch_string_and_symbol_keys_to_the_keyed_site() {
+    let hir = kiln_frontend_oxc::parse(
+        "fixture/computed-string-site.ts",
+        "export function read(receiver: object, key: PropertyKey) { return receiver[key]; }",
+    );
+    let program = kiln_ir::compile_module(&hir)
+        .expect("computed property fixture compiles")
+        .program;
+    let emitted = emit_with_policy(
+        &program,
+        EmissionPolicy {
+            generic_only: true,
+            compact: true,
+            ..Default::default()
+        },
+    )
+    .expect("computed property fixture emits");
+
+    assert!(
+        emitted.source.contains("kiln_c99_val_read_string_key"),
+        "generic computed string keys should take the keyed read helper"
+    );
+    assert!(
+        emitted.source.contains("kiln_c99_val_read_symbol")
+            && emitted.source.contains("kiln_c99_val_read_element"),
+        "symbols and other computed-key types keep their existing paths"
+    );
+}
+
+#[test]
+fn optimized_computed_reads_dispatch_strings_symbols_and_fallbacks_correctly() {
+    let hir = kiln_frontend_oxc::parse(
+        "fixture/optimized-computed-string-site.ts",
+        r#"
+function read(receiver: any, key: any): any { return receiver[key]; }
+const symbol = Symbol("key");
+const symbolObject = {};
+symbolObject[symbol] = 41;
+let proxyGets = 0;
+const proxy = new Proxy({ value: 17 }, {
+  get(target, key, receiver) {
+    proxyGets += 1;
+    return target[key];
+  }
+});
+let accessorGets = 0;
+const accessor = { get value() { accessorGets += 1; return 23; } };
+let dynamicKey = "val";
+dynamicKey += "ue";
+globalThis.__picFailure = 0;
+try { if (read({ value: 11 }, dynamicKey) !== 11 && globalThis.__picFailure === 0) globalThis.__picFailure = 1; }
+catch { if (globalThis.__picFailure === 0) globalThis.__picFailure = 11; }
+try { if (read([31, 37], 1) !== 37 && globalThis.__picFailure === 0) globalThis.__picFailure = 2; }
+catch { if (globalThis.__picFailure === 0) globalThis.__picFailure = 12; }
+try { if (read(symbolObject, symbol) !== 41 && globalThis.__picFailure === 0) globalThis.__picFailure = 3; }
+catch { if (globalThis.__picFailure === 0) globalThis.__picFailure = 13; }
+try { if ((read(proxy, "value") !== 17 || proxyGets !== 1) && globalThis.__picFailure === 0) globalThis.__picFailure = 4; }
+catch { if (globalThis.__picFailure === 0) globalThis.__picFailure = 14; }
+try { if ((read(accessor, "value") !== 23 || accessorGets !== 1) && globalThis.__picFailure === 0) globalThis.__picFailure = 5; }
+catch { if (globalThis.__picFailure === 0) globalThis.__picFailure = 15; }
+"#,
+    );
+    let program = kiln_ir::compile_module(&hir)
+        .expect("optimized computed property fixture compiles")
+        .program;
+    let read_index = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::GetComputed))
+        })
+        .expect("read function is present");
+    let emitted = emit(&program).expect("optimized computed property fixture emits");
+    let read_body = emitted_function_body(&emitted.source, &emitted.symbol, read_index);
+
+    assert!(
+        read_body.contains("kiln_c99_val_read_string_key"),
+        "optimized string keys should use the keyed PIC helper in the read body"
+    );
+    assert!(
+        read_body.contains("kiln_c99_val_read_symbol")
+            && read_body.contains("kiln_c99_val_read_element"),
+        "symbol and non-keyed fallback paths remain in the optimized read body"
+    );
+
+    let wrapper = format!(
+        r#"
+static int run_module(void *context) {{
+    kiln_value result;
+    kiln_value failure;
+    int found = 0;
+    (void)context;
+    int status = {symbol}(NULL, &result);
+    if (status != KILN_C99_OK) fprintf(stderr, "module entry status=%d\n", status);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_global_binding(NULL, &failure, "__picFailure", 12, &found, 0, NULL);
+    if (status != KILN_C99_OK || !found || failure.tag != KILN_VALUE_NUMBER) return 5;
+    int code = (int)kiln_c99_as_number(failure);
+    if (code != 0) fprintf(stderr, "computed-read assertion code=%d\n", code);
+    return code;
+}}
+int main(void) {{
+    uint64_t realm;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 2;
+    int status = kiln_realm_enter(realm, run_module, NULL);
+    if (status != KILN_C99_OK) return 3;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 4;
+}}
+"#,
+        symbol = emitted.symbol
+    );
+    let linked = linked_source(&emitted.source, &wrapper);
+    if let Ok(path) = std::env::var("KILN_TEST_SAVE_LINKED_SOURCE") {
+        std::fs::write(path, &linked).expect("save linked fixture source when requested");
+    }
+    let run = fixture_cache::run(&linked);
+    assert!(
+        run.status.success(),
+        "optimized computed read diverged: status={:?}, stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn argc_only_arguments_length_emits_without_publishing_an_arguments_frame() {
+    let hir = kiln_frontend_oxc::parse(
+        "fixture/arguments-length-emission.ts",
+        "function argcOnly() { return arguments.length; }\n\
+         function capturesArguments() { return () => arguments.length; }\n\
+         function capturesObjectAfterLength() { const before = arguments.length; return () => arguments[0]; }\n\
+         argcOnly(1, 2, 3); capturesArguments(); capturesObjectAfterLength();",
+    );
+    let program = kiln_ir::compile_module(&hir)
+        .expect("arguments-length fixture compiles")
+        .program;
+    let emitted = emit_with_policy(
+        &program,
+        EmissionPolicy {
+            generic_only: true,
+            compact: true,
+            ..Default::default()
+        },
+    )
+    .expect("arguments-length module emits");
+
+    let argc_only = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|name| name.to_lossy_string() == "argcOnly")
+        })
+        .expect("argcOnly proto");
+    let captures_arguments = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|name| name.to_lossy_string() == "capturesArguments")
+        })
+        .expect("capturesArguments proto");
+    let captures_object_after_length = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|name| name.to_lossy_string() == "capturesObjectAfterLength")
+        })
+        .expect("capturesObjectAfterLength proto");
+    let body = emitted_function_body(&emitted.source, &emitted.symbol, argc_only);
+    assert!(
+        body.contains("(double)argc"),
+        "the proven length read comes from the actual call argc"
+    );
+    assert!(
+        !body.contains("kiln_c99_visible_arguments"),
+        "the exact argc-only body does not materialize the visible arguments array"
+    );
+    assert!(
+        !body.contains("kiln_c99_frame_mapped_arguments ="),
+        "the exact argc-only body does not publish an observable arguments object"
+    );
+    assert_eq!(
+        emitted_proto_flags(&emitted.source, &emitted.symbol, argc_only) & (1 << 6),
+        0,
+        "the exact argcOnly proto metadata clears publishes_frame"
+    );
+    for index in [captures_arguments, captures_object_after_length] {
+        assert_ne!(
+            emitted_proto_flags(&emitted.source, &emitted.symbol, index) & (1 << 6),
+            0,
+            "an arrow that captures the parent arguments keeps that exact parent frame published"
+        );
+    }
+}
+
+#[test]
+fn mixed_arguments_members_guard_the_own_object_in_a_native_release_plan() {
+    let hir = kiln_frontend_oxc::parse(
+        "fixture/equal-equals-arguments.ts",
+        "function equals() { if (arguments.length === 1) return (self) => [self, arguments[0]]; return [arguments[0], arguments[1]]; }\nfunction discard() { arguments[1]; }\n",
+    );
+    let program = kiln_ir::compile_module(&hir)
+        .expect("Equal.equals-shaped fixture compiles")
+        .program;
+    let equals = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|name| name.to_lossy_string() == "equals")
+        })
+        .expect("equals proto");
+    let emitted = emit_with_policy(&program, EmissionPolicy::default())
+        .expect("native release policy emits the fixture");
+    let body = emitted_function_body(&emitted.source, &emitted.symbol, equals);
+    assert!(
+        body.contains("kiln_c99_frame_arguments_object.tag == KILN_VALUE_OBJECT"),
+        "the mixed member fast paths must guard an already materialized object"
+    );
+    assert!(
+        body.contains("(size_t)0 < argc") && body.contains("(size_t)1 < argc"),
+        "both indices read the invocation's actual argv, including extra arguments"
+    );
+    assert!(
+        body.contains("(double)argc"),
+        "length uses argc only when no observable arguments object exists"
+    );
+    assert!(
+        body.contains("kiln_c99_visible_arguments(&given)"),
+        "the missing-index fallback materializes the current frame's own object"
+    );
+    let member_guard = body
+        .find("kiln_c99_frame_arguments_object.tag == KILN_VALUE_OBJECT")
+        .expect("member guard occurs in the shared two-argument path");
+    assert!(
+        !body[..member_guard].contains("kiln_c99_visible_arguments(&given)"),
+        "the two-argument path must not eagerly materialize arguments before checking its members"
+    );
+    let discard = program
+        .functions
+        .iter()
+        .position(|proto| {
+            proto
+                .effective_name_units()
+                .is_some_and(|name| name.to_lossy_string() == "discard")
+        })
+        .expect("discard proto");
+    let discard_body = emitted_function_body(&emitted.source, &emitted.symbol, discard);
+    assert!(
+        discard_body.contains("kiln_c99_val_read_element")
+            && discard_body.contains("kiln_c99_visible_arguments(&given)"),
+        "an unused out-of-range index still executes its inherited-property read"
+    );
+}
+
 #[test]
 fn generated_closures_retain_their_host_context_without_rebinding_plain_closures() {
     let mut closure_program = program(

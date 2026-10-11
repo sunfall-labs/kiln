@@ -872,9 +872,7 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
     }
     // Every intrinsic kind answers `constructor` with the built-in that makes it, so `in` has to
     // agree with the read rather than only with the property store.
-    if name == "constructor"
-        && (intrinsic_constructor(target).is_some() || matches!(target, Value::Object(_)))
-    {
+    if name == "constructor" && intrinsic_constructor(target).is_some() {
         return true;
     }
     match target {
@@ -883,30 +881,37 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
         // feature-detects in the wild are written as. Answering from the own store alone made
         // both false, which is a wrong answer that reads like a deliberate one.
         Value::Object(object) => {
-            object.borrow().lookup(&name).is_some()
-                || string_exotic(target, &name).is_some()
-                // The chain may end at a built-in's method table -- a wrapper's does, and so
-                // does a class that extends one -- which `lookup` cannot walk into. `in` has to
-                // agree with the read that does. `own_attributes` rather than the table's own
-                // `property`, because a program may have *added* a name to `String.prototype`
-                // and the table alone answers only for what it was built with: `new String()`
-                // read `String.prototype.zz` correctly and denied it to `in`.
-                || object
-                    .borrow()
-                    .prototype_table()
-                    .is_some_and(|(table, realm)| {
-                        has_property_ascii(
-                            intrinsics,
-                            &Value::Native(
-                                Native::PrototypeOf(table),
-                                realm.unwrap_or(RealmId::PRIMARY),
-                            ),
-                            &name,
-                        )
-                    })
+            let object = object.borrow();
+            if object.lookup(&name).is_some() || string_exotic(target, &name).is_some() {
+                return true;
+            }
+            if has_explicit_null_prototype_chain(target) {
+                return false;
+            }
+            if name == "constructor" {
+                return true;
+            }
+            // The chain may end at a built-in's method table -- a wrapper's does, and so
+            // does a class that extends one -- which `lookup` cannot walk into. `in` has to
+            // agree with the read that does. `own_attributes` rather than the table's own
+            // `property`, because a program may have *added* a name to `String.prototype`
+            // and the table alone answers only for what it was built with: `new String()`
+            // read `String.prototype.zz` correctly and denied it to `in`.
+            object
+                .prototype_table()
+                .is_some_and(|(table, realm)| {
+                    has_property_ascii(
+                        intrinsics,
+                        &Value::Native(
+                            Native::PrototypeOf(table),
+                            realm.unwrap_or(RealmId::PRIMARY),
+                        ),
+                        &name,
+                    )
+                })
                 // An iterator this realm made inherits `%IteratorPrototype%`, as the read does.
-                || ((object.borrow().get_own("@@iterated").is_some()
-                    || object.borrow().get_own(HELPER_SOURCE).is_some())
+                || ((object.get_own("@@iterated").is_some()
+                    || object.get_own(HELPER_SOURCE).is_some())
                     && !matches!(
                         iterator_prototype_property(intrinsics, &name, value_realm(target)),
                         Value::Undefined
@@ -1038,6 +1043,29 @@ pub(super) fn has_property_ascii(intrinsics: &Intrinsics, target: &Value, name: 
                 || has_property_ascii(intrinsics, &prototype_of_in(intrinsics, target), name)
         }
         _ => false,
+    }
+}
+
+/// Whether an ordinary object reaches an explicit `null` before an intrinsic prototype.
+///
+/// Objects whose custom prototype chain ends at `null` do not inherit the fallback
+/// `Object.prototype` answers below. The chain walk mirrors ordinary object lookup, but only needs
+/// to distinguish the explicit terminal from the implicit intrinsic link.
+fn has_explicit_null_prototype_chain(target: &Value) -> bool {
+    let mut current = target.clone();
+    loop {
+        match current {
+            Value::Object(object) => {
+                let prototype = object.borrow().prototype().cloned();
+                match prototype {
+                    Some(prototype) => current = prototype,
+                    None => return false,
+                }
+            }
+            Value::Shared(facade) => current = facade.prototype(),
+            Value::Null => return true,
+            _ => return false,
+        }
     }
 }
 

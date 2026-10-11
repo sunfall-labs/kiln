@@ -40,6 +40,146 @@ def digest(path):
     return hasher.hexdigest()
 
 
+def native_binary_identity(path):
+    """Return a stable content identity for a just-built native executable."""
+    path = Path(path)
+    before = path.stat()
+    sha256 = digest(path)
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns, before.st_ino) != (
+            after.st_size, after.st_mtime_ns, after.st_ino):
+        raise RuntimeError(f'native binary changed while hashing: {path}')
+    return {'sha256': sha256, 'size_bytes': after.st_size}
+
+
+def engine_result_accepted(engine, envelope):
+    """Apply the same per-file correctness verdict used for the final suite result."""
+    node = envelope.get('node_vitest') or {}
+    return (
+        envelope.get('exit_code') == 0 and not envelope.get('timed_out')
+        and envelope.get('complete') is True
+        and (envelope.get('summary') or {}).get('failed') == 0
+        and envelope.get('matches_reference_inventory') is not False
+        and envelope.get('matches_reference_modes') is not False
+        and envelope.get('matches_reference_outcomes') is not False
+        and (engine == 'bun' or (
+            node.get('complete') is True
+            and node.get('matches_modes') is True
+            and node.get('matches_outcomes') is True))
+    )
+
+
+def native_hash_only_acceptance(envelope):
+    """Require the final native verdict plus build, exit, and artifact integrity."""
+    build = envelope.get('build') or {}
+    return (
+        build.get('exit_code') == 0 and not build.get('timed_out')
+        and envelope.get('matches_expected_exit') is True
+        and envelope.get('native_binary_integrity') == 'verified_before_and_after_execution'
+        and not envelope.get('errors')
+        and engine_result_accepted('native', envelope)
+    )
+
+
+def finalize_native_hash_only(binary, receipt_path, envelope, identity_before,
+                              identity_after, provenance):
+    """Discard only a verified binary whose complete per-file result is accepted.
+
+    A pending receipt is atomically retained before unlinking, so an interrupted
+    finalization can never be mistaken for a completed deletion.
+    """
+    binary = Path(binary)
+    receipt_path = Path(receipt_path)
+    identity_matches = (identity_before is not None and identity_after is not None
+                        and identity_before == identity_after)
+    integrity_verified = (identity_matches and envelope.get('native_binary_integrity')
+                          == 'verified_before_and_after_execution')
+    accepted = integrity_verified and native_hash_only_acceptance(envelope)
+    if not binary.is_file():
+        disposition = 'not-produced' if identity_before is None else 'missing'
+        reason = ('native build did not produce an executable' if identity_before is None
+                  else 'native executable disappeared before retention finalization')
+        accepted = False
+    elif identity_before is None:
+        disposition = 'retained-unverified'
+        reason = 'native executable exists but its pre-run identity could not be recorded'
+        accepted = False
+    elif identity_before is not None and identity_after is not None and not identity_matches:
+        disposition = 'retained-integrity-mismatch'
+        reason = 'native executable content or size changed during execution'
+        accepted = False
+    elif not integrity_verified:
+        disposition = 'retained-unaccepted-run'
+        reason = 'native executable was not verified across a completed execution'
+    elif not accepted:
+        disposition = 'retained-unaccepted-run'
+        reason = 'build, runtime, inventory, or oracle checks did not all pass'
+    else:
+        disposition = 'deletion-pending'
+        reason = 'all per-file acceptance checks passed'
+
+    receipt = {
+        'schema': 1,
+        'policy': 'hash-only-after-accepted-native-run',
+        'status': disposition,
+        'binary_path': str(binary),
+        'binary_sha256': identity_before['sha256'] if identity_before else None,
+        'binary_size_bytes': identity_before['size_bytes'] if identity_before else None,
+        'identity_matches_after_run': identity_matches,
+        'identity_verified_after_run': integrity_verified,
+        'reason': reason,
+        'acceptance': {
+            'native_hash_only_acceptance': accepted,
+            'build_exit_code': (envelope.get('build') or {}).get('exit_code'),
+            'run_exit_code': envelope.get('exit_code'),
+            'timed_out': envelope.get('timed_out'),
+            'complete': envelope.get('complete'),
+            'matches_expected_exit': envelope.get('matches_expected_exit'),
+            'summary': envelope.get('summary'),
+            'matches_reference_inventory': envelope.get('matches_reference_inventory'),
+            'matches_reference_modes': envelope.get('matches_reference_modes'),
+            'matches_reference_outcomes': envelope.get('matches_reference_outcomes'),
+            'node_vitest': envelope.get('node_vitest'),
+            'errors': envelope.get('errors', []),
+        },
+        'provenance': provenance,
+    }
+
+    if disposition == 'deletion-pending':
+        try:
+            write_json(receipt_path, receipt)
+        except OSError as exc:
+            return {**receipt, 'status': 'receipt-write-failed',
+                    'error': f'could not persist pre-deletion receipt: {exc}',
+                    'resource_error': True}
+        try:
+            binary.unlink()
+            if binary.exists():
+                raise OSError('native executable still exists after unlink')
+        except OSError as exc:
+            receipt.update({'status': 'deletion-failed', 'reason': str(exc),
+                            'resource_error': True})
+        else:
+            receipt.update({'status': 'deleted', 'binary_retained': False})
+        try:
+            write_json(receipt_path, receipt)
+        except OSError as exc:
+            # The durable pending receipt remains and explicitly does not claim
+            # deletion. The caller marks the file as an incomplete resource result.
+            return {**receipt, 'status': 'final-receipt-write-failed',
+                    'error': f'could not persist final retention receipt: {exc}',
+                    'resource_error': True}
+    else:
+        receipt['binary_retained'] = binary.is_file()
+        try:
+            write_json(receipt_path, receipt)
+        except OSError as exc:
+            receipt.update({'status': 'receipt-write-failed',
+                            'error': f'could not persist retention receipt: {exc}',
+                            'resource_error': True})
+    return receipt
+
+
 class NativeArtifactError(RuntimeError):
     pass
 
@@ -194,7 +334,7 @@ def snapshot_provider(manifest_path, toolchain):
             'rust_target': manifest.get('rust_target')}
 
 
-def prepare_provider(explicit, kiln_source, out, timeout, runtime_jobs, memory_mb):
+def prepare_provider(explicit, kiln_source, out, timeout, build_jobs, memory_mb):
     candidates = [explicit, os.environ.get('KILN_NATIVE_PROVIDER_MANIFEST'),
                   os.environ.get('KILN_NATIVE_NUMBER_PROVIDER_MANIFEST')]
     supplied = next((Path(p) for p in candidates if p is not None), None)
@@ -211,7 +351,7 @@ def prepare_provider(explicit, kiln_source, out, timeout, runtime_jobs, memory_m
                    'mise', 'exec', '--', str(REPO / 'scripts/package-native-number-provider.sh'),
                    str(package)]
         preparation = execute(command, REPO, out / 'provider-preparation.log',
-                              max(300, timeout), runtime_jobs)
+                              max(300, timeout), build_jobs)
         if preparation['exit_code'] != 0:
             raise RuntimeError('provider preparation failed; see ' + preparation['log'])
         supplied = package / 'kiln-native-provider.json'
@@ -359,11 +499,11 @@ def entry_for(workspace, source, name):
     return entry
 
 
-def execute(args, cwd, log, timeout, runtime_jobs, extra_env=None):
+def execute(args, cwd, log, timeout, worker_jobs, extra_env=None):
     started = time.monotonic()
     timed_out = False
     with log.open('wb') as output:
-        process = subprocess.Popen(args, cwd=cwd, env={**os.environ, 'TZ': 'UTC', 'KILN_JOBS': str(runtime_jobs), 'RAYON_NUM_THREADS': str(runtime_jobs), **(extra_env or {})},
+        process = subprocess.Popen(args, cwd=cwd, env={**os.environ, 'TZ': 'UTC', 'KILN_JOBS': str(worker_jobs), 'RAYON_NUM_THREADS': str(worker_jobs), **(extra_env or {})},
                                    stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             code = process.wait(timeout=timeout)
@@ -878,8 +1018,9 @@ def main():
         validate_node_vitest_policy()
     except ValueError as exc:
         parser.error(str(exc))
-    if args.jobs < 1 or args.timeout <= 0 or args.kiln_memory_mb < 1 or args.runtime_jobs < 1:
-        parser.error('jobs and timeout must be positive')
+    if (args.jobs < 1 or args.timeout <= 0 or args.kiln_memory_mb < 1 or args.runtime_jobs < 1 or
+            (args.build_jobs is not None and args.build_jobs < 1)):
+        parser.error('jobs, timeout, memory limit, and worker counts must be positive')
     workspace = args.workspace.resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     out = args.out.resolve()
@@ -887,8 +1028,10 @@ def main():
     engines = args.engine or ['bun', 'native']
     if len(set(engines)) != len(engines):
         parser.error('engines must be distinct')
-    if (args.compress_native_artifacts or args.cache_gc) and 'native' not in engines:
-        parser.error('--compress-native-artifacts and --cache-gc require the native engine')
+    if (args.compress_native_artifacts or args.hash_only_native_artifacts or args.cache_gc) and 'native' not in engines:
+        parser.error('--compress-native-artifacts, --hash-only-native-artifacts, and --cache-gc require the native engine')
+    if args.compress_native_artifacts and args.hash_only_native_artifacts:
+        parser.error('--compress-native-artifacts and --hash-only-native-artifacts are mutually exclusive')
     try:
         zstd = preflight_zstd() if args.compress_native_artifacts else None
     except RuntimeError as exc:
@@ -937,10 +1080,14 @@ def build_parser():
     parser.add_argument('--provider-manifest', type=Path, help='native provider to snapshot; defaults to an installed package or one built from this repository')
     parser.add_argument('--jobs', type=int, default=min(2, max(1, int(os.environ.get('KILN_JOBS', '2')))))
     parser.add_argument('--runtime-jobs', type=int, default=1, help='compiler/interpreter workers within each process')
+    parser.add_argument('--build-jobs', type=int,
+                        help='workers for native AOT and fallback provider builds (default: --runtime-jobs)')
     parser.add_argument('--native-profile', choices=['native-dev', 'native-release'], default='native-dev',
                         help='native compilation profile (recorded in the report; case timeouts are unchanged)')
     parser.add_argument('--compress-native-artifacts', action='store_true',
                         help='zstd-compress verified native binaries after execution (requires zstd)')
+    parser.add_argument('--hash-only-native-artifacts', action='store_true',
+                        help='discard a native binary only after the complete per-file result passes all acceptance checks; retain failures')
     parser.add_argument('--cache-gc', action='store_true',
                         help='run `kiln cache gc` in the native project workspace after each completed native file')
     parser.add_argument('--timeout', type=float, default=180)
@@ -949,7 +1096,8 @@ def build_parser():
 
 
 def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_sha, zstd):
-    provider = prepare_provider(args.provider_manifest, kiln_source, out, args.timeout, args.runtime_jobs, args.kiln_memory_mb) if 'native' in engines else None
+    native_build_jobs = (args.build_jobs if args.build_jobs is not None else args.runtime_jobs)
+    provider = prepare_provider(args.provider_manifest, kiln_source, out, args.timeout, native_build_jobs, args.kiln_memory_mb) if 'native' in engines else None
     native_env = native_resource_env(provider, workspace, args.cache_gc)
     with (workspace / '.runner.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -980,7 +1128,13 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
                   'clock_policy': {e: 'wall' for e in engines},
                   'native_profile': args.native_profile if 'native' in engines else None,
                   'resource_policy': {
+                      'native_build_jobs': native_build_jobs if 'native' in engines else None,
+                      'runtime_jobs': args.runtime_jobs,
                       'compress_native_artifacts': bool(args.compress_native_artifacts),
+                      'native_artifact_retention': (
+                          'hash-only-after-accepted-native-run' if args.hash_only_native_artifacts
+                          else 'compressed-after-run' if args.compress_native_artifacts
+                          else 'raw-binary'),
                       'zstd': zstd,
                       'cache_gc': bool(args.cache_gc),
                       'cache_gc_shared_layer': str(workspace / '.kiln/cache') if args.cache_gc else None,
@@ -992,7 +1146,8 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
                   'runner_sha256': digest(Path(__file__).resolve()),
                   'runner_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip(),
                   'deferred': len(PIN['files']) - len(selected), 'jobs': args.jobs,
-                  'kiln_memory_mb': args.kiln_memory_mb, 'timeout_s': args.timeout, 'runtime_jobs': args.runtime_jobs,
+                  'kiln_memory_mb': args.kiln_memory_mb, 'timeout_s': args.timeout,
+                  'runtime_jobs': args.runtime_jobs, 'native_build_jobs': native_build_jobs if 'native' in engines else None,
                   'harness_sha256': {p.name: digest(p) for p in HARNESS.iterdir() if p.is_file()},
                   'source_sha256': {n: digest(source / PIN['directory'] / (n + '.test.ts')) for n in selected},
                   'files': []}
@@ -1013,6 +1168,7 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
             directory = out / name
             directory.mkdir(parents=True, exist_ok=True)
             row = {'file': name, 'engines': {}}
+            native_hash_context = None
             for engine in engines:
                 if engine == 'bun':
                     cmd = ['bun', '--preload', str(workspace / 'bun-support.mjs'), '--tsconfig-override', str(workspace / 'tsconfig.json'), str(entries[name])]
@@ -1031,7 +1187,7 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
                         if specifier.startswith('.'):
                             specifier = str((source / PIN['directory'] / (name + '.test.ts')).parent.joinpath(specifier).resolve())
                         build_cmd.extend(['--include', specifier])
-                    build = execute(build_cmd, workspace, directory / 'native-build.log', args.timeout, args.runtime_jobs, native_env)
+                    build = execute(build_cmd, workspace, directory / 'native-build.log', args.timeout, native_build_jobs, native_env)
                     if build['exit_code'] != 0 or not binary.is_file():
                         envelope = {**build, 'build': build, 'inventory': None, 'cases': [],
                                     'summary': None, 'errors': [{'kind': 'runner_error', 'error': 'native build failed'}], 'complete': False}
@@ -1043,14 +1199,60 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
                                     'error': 'cache gc failed; see ' + gc_result['log']})
                         row['engines'][engine] = envelope
                         write_json(directory / (engine + '.json'), envelope)
+                        if engine == 'native' and args.hash_only_native_artifacts:
+                            try:
+                                failed_identity = native_binary_identity(binary) if binary.is_file() else None
+                            except (OSError, RuntimeError):
+                                failed_identity = None
+                            native_hash_context = {
+                                'binary': binary,
+                                'identity_before': failed_identity,
+                                'identity_after': failed_identity,
+                            }
+                            if failed_identity is not None:
+                                envelope['binary_sha256'] = failed_identity['sha256']
+                                envelope['binary_size_bytes'] = failed_identity['size_bytes']
                         continue
+                    if engine == 'native' and args.hash_only_native_artifacts:
+                        try:
+                            identity_before = native_binary_identity(binary)
+                            identity_error = None
+                        except (OSError, RuntimeError) as exc:
+                            identity_before = None
+                            identity_error = str(exc)
+                        native_hash_context = {
+                            'binary': binary,
+                            'identity_before': identity_before,
+                            'identity_after': None,
+                            'identity_error': identity_error,
+                        }
                     cmd = [*limiter, str(binary)]
                 log = directory / (engine + '.log')
                 envelope = execute(cmd, workspace, log, args.timeout, args.runtime_jobs,
                                    native_env if engine != 'bun' else None)
                 if build is not None:
                     envelope['build'] = build
-                    envelope['binary_sha256'] = digest(binary)
+                    if args.hash_only_native_artifacts:
+                        try:
+                            identity_after = native_binary_identity(binary) if binary.is_file() else None
+                        except (OSError, RuntimeError) as exc:
+                            identity_after = None
+                            native_hash_context['identity_error'] = str(exc)
+                        native_hash_context['identity_after'] = identity_after
+                        identity_before = native_hash_context['identity_before']
+                        if identity_before is not None:
+                            envelope['binary_sha256'] = identity_before['sha256']
+                            envelope['binary_size_bytes'] = identity_before['size_bytes']
+                        if identity_before is None or identity_after != identity_before:
+                            detail = native_hash_context.get('identity_error')
+                            envelope.setdefault('_resource_errors', []).append({
+                                'kind': 'runner_error',
+                                'error': 'native binary identity could not be verified across execution'
+                                         + (': ' + detail if detail else '')})
+                        else:
+                            envelope['native_binary_integrity'] = 'verified_before_and_after_execution'
+                    else:
+                        envelope['binary_sha256'] = digest(binary)
                     if args.compress_native_artifacts:
                         try:
                             envelope['native_artifact'] = compress_native_artifact(
@@ -1099,6 +1301,38 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
                     envelope['node_vitest'] = compare_node_vitest(
                         envelope, name, report['source_sha256'].get(name))
                 write_json(out / name / (engine + '.json'), envelope)
+            if args.hash_only_native_artifacts and native_hash_context is not None:
+                native = row['engines'].get('native')
+                if native is not None:
+                    receipt = finalize_native_hash_only(
+                        native_hash_context['binary'],
+                        directory / 'native-artifact-retention.json',
+                        native,
+                        native_hash_context['identity_before'],
+                        native_hash_context['identity_after'],
+                        {
+                            'runner_sha256': report['runner_sha256'],
+                            'runner_commit': report['runner_commit'],
+                            'kiln_binary_sha256': report['kiln_binary_sha256'],
+                            'kiln_binary_source': report['kiln_binary_source'],
+                            'kiln_binary_snapshot': report['kiln_binary_snapshot'],
+                            'source_file_sha256': report['source_sha256'].get(name),
+                            'source_sha256_by_file': report['source_sha256'],
+                            'harness_sha256': report['harness_sha256'],
+                            'node_vitest_oracle': report['node_vitest_oracle'],
+                            'engine_mode_policy': report['engine_mode_policy'],
+                            'native_provider': report['native_provider'],
+                            'native_build_command': native.get('build', {}).get('command'),
+                            'native_build_log': native.get('build', {}).get('log'),
+                            'native_run_log': native.get('log'),
+                        })
+                    native['native_artifact_retention'] = receipt
+                    if receipt.get('resource_error'):
+                        native['complete'] = False
+                        native.setdefault('errors', []).append({
+                            'kind': 'runner_error',
+                            'error': receipt.get('error', 'native artifact retention failed')})
+                    write_json(directory / 'native.json', native)
             return row
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures = {pool.submit(run, name): name for name in selected}
@@ -1109,14 +1343,7 @@ def _run_suite(args, engines, selected, workspace, out, kiln_source, kiln, kiln_
                 report['aggregate'] = aggregate(report, engines)
                 write_json(out / 'report.json', report)
                 print(row['file'], {e: r['summary'] if r['complete'] else 'INCOMPLETE' for e, r in row['engines'].items()}, flush=True)
-        clean = all(r['complete'] and r['exit_code'] == 0 and r['summary']['failed'] == 0
-                    and r['matches_reference_inventory'] is not False
-                    and r['matches_reference_modes'] is not False
-                    and r['matches_reference_outcomes'] is not False
-                    and (engine == 'bun' or (
-                        r.get('node_vitest', {}).get('complete') is True
-                        and r.get('node_vitest', {}).get('matches_modes') is True
-                        and r.get('node_vitest', {}).get('matches_outcomes') is True))
+        clean = all(engine_result_accepted(engine, r)
                     for row in report['files'] for engine, r in row['engines'].items())
         report['passed'] = clean and len(report['files']) == len(selected) and \
             {row['file'] for row in report['files']} == set(selected)

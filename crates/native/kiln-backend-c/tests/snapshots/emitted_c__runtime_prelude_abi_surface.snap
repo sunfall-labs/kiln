@@ -1,5 +1,6 @@
 ---
 source: crates/native/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 823
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1827,6 +1828,7 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
 static int kiln_c99_reflect_set(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_reflect_define_property(kiln_host *host, kiln_value target,
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_get_computed_with_receiver(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_definition_store(kiln_value target, kiln_value *out);
 static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, size_t argc,
 static int kiln_c99_object_constructor(kiln_value *out, const kiln_value *args, size_t argc);
@@ -1850,7 +1852,9 @@ static int kiln_c99_construct_val(kiln_host *host, kiln_val *result, kiln_val ca
 static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent,
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
+static int kiln_c99_store_get_key_with_receiver(kiln_host *host, kiln_value target,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_string *key,
+static int kiln_c99_get_key_with_receiver(kiln_host *host, kiln_value target,
 static int kiln_c99_array_reserve(kiln_array *array, size_t needed);
 static void kiln_c99_bytes_retire(uint8_t *bytes, size_t size);
 static void kiln_c99_gc_note_external(size_t size);
@@ -1975,6 +1979,7 @@ static int kiln_c99_promise_add_reaction(kiln_promise *promise, const kiln_react
 static int kiln_c99_react(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected);
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
 static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
+static int kiln_c99_async_generator_request(kiln_host *host, kiln_value generator,
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
@@ -3518,6 +3523,7 @@ typedef char kiln_c99_tag_prototypes_fit_the_bitmap[KILN_C99_BUILTIN_BIG_UINT64_
 static int kiln_c99_realm_tag_method_compute(const kiln_gc_heap *heap, uint64_t code) {
 static int kiln_c99_realm_tag_method_pristine_in(kiln_gc_heap *heap, uint8_t tag, uint64_t code) {
 static __attribute__((noinline, pure)) KILN_C99_RARE_CALL int kiln_c99_realm_tag_method_pristine(uint8_t tag,
+static int kiln_c99_store_get_key_with_receiver(
 static int kiln_c99_store_get_key(kiln_host *host, kiln_value target,
 static int kiln_c99_object_prototype_lacks(const kiln_string *key) {
 static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,
@@ -3546,15 +3552,14 @@ static int kiln_c99_intrinsic_ascii_view(const kiln_string *key, char buffer[256
 static kiln_value kiln_c99_key_value(const kiln_string *view, const kiln_string **canonical) {
 #include <assert.h>
 static kiln_value kiln_c99_stable_key_value(const kiln_string *stable) {
-static int kiln_c99_function_species(kiln_host *host, kiln_value target,
+static int kiln_c99_function_species(kiln_host *host, kiln_value target, kiln_value receiver,
 static int kiln_c99_prototype_store_read(kiln_host *host, uint64_t prototype,
 static int kiln_c99_prototype_store_read_with_receiver(
-static int kiln_c99_builtin_custom_prototype_read_with_receiver(
-static int kiln_c99_builtin_custom_prototype_read(
+static int kiln_c99_builtin_replacement_parent_get_after_own_absence(
 static int kiln_c99_array_custom_parent_read(
 static int kiln_c99_written_prototype_read(kiln_host *host, uint64_t prototype,
-#define KILN_C99_WRITTEN_MEMBER_FIRST(prototype)                                                   \
-static int kiln_c99_primitive_object_prototype_read(kiln_host *host, const kiln_string *key,
+#define KILN_C99_WRITTEN_MEMBER_FIRST(prototype, receiver)                                         \
+static int kiln_c99_primitive_object_prototype_read(kiln_host *host, kiln_value receiver,
 static int kiln_c99_shared_field_value(uint64_t lease, uint64_t index,
 static int kiln_c99_shared_arena_bytes(const kiln_shared_arena_view *view, uint64_t offset,
 static int kiln_c99_shared_arena_node(const kiln_shared_facade *facade,
@@ -3570,6 +3575,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
 #endif
 #if KILN_RETAIN_GROUP_TEMPORAL
 #endif
+static int kiln_c99_get_key_with_receiver(kiln_host *host, kiln_value target, const kiln_string *key,
 static int kiln_c99_get_key(kiln_host *host, kiln_value target, const kiln_string *key,
 static int kiln_c99_probe_symbol(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -3585,6 +3591,7 @@ static const kiln_string *kiln_c99_par_intern(const kiln_string *key) {
 static int kiln_c99_put_site_key(kiln_host *host, kiln_value target, const kiln_string *key,
 static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_get_computed_with_receiver(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_write_would_accept_key(kiln_value target, const kiln_string *key,
@@ -3908,6 +3915,7 @@ static int kiln_c99_collection_iterator_prototype(int is_map, kiln_value *out) {
 static int kiln_c99_builtin_iterator_prototype(int kind, kiln_value *out) {
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_generator_step(kiln_host *host, kiln_value produced, int done, kiln_value *result,
+static int kiln_c99_generator_resolve_return(kiln_generator *frame, int status,
 static int kiln_c99_is_object(kiln_value val) {
 static int kiln_c99_create_argument_list(kiln_host *host, kiln_value list, kiln_value *out,
 static int kiln_c99_generator_raise(kiln_host *host, kiln_generator *frame, kiln_value error,
@@ -4207,6 +4215,23 @@ static int kiln_c99_then_continue_mode(kiln_value promise, kiln_value generator,
 static int kiln_c99_then_continue(kiln_value promise, kiln_value generator) {
 static int kiln_c99_await_suspend(kiln_host *host, kiln_value generator, kiln_value produced,
 static void kiln_c99_publish_turn_refusal(int status, kiln_value produced, kiln_value *thrown) {
+static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
+static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
+static int kiln_c99_async_generator_delegate_result(kiln_host *host, kiln_value generator,
+static int kiln_c99_async_generator_delegate_value(kiln_host *host, kiln_value generator,
+static int kiln_c99_async_generator_deliver_yield(kiln_host *host, kiln_value generator,
+enum {
+static void kiln_c99_async_generator_leave_delegate(kiln_generator *frame) {
+static int kiln_c99_async_generator_queue_push(kiln_generator *frame, kiln_value promise,
+static void kiln_c99_async_generator_queue_pop(kiln_generator *frame, kiln_value *promise,
+static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value generator,
+static int kiln_c99_async_generator_drain_closed(kiln_host *host, kiln_generator *frame,
+KILN_VALUE_GENERATOR,
+static int kiln_c99_async_generator_finish_closed(kiln_host *host, kiln_generator *frame,
+static int kiln_c99_async_generator_start_request(kiln_host *host, kiln_value generator,
+static int kiln_c99_async_generator_request(kiln_host *host, kiln_value generator, kiln_value promise,
+static int kiln_c99_async_generator_finish_yield(kiln_host *host, kiln_value generator,
+static int kiln_c99_async_generator_deliver_yield(kiln_host *host, kiln_value generator,
 static int kiln_c99_run_job(kiln_microtask *task, kiln_host *host, kiln_value *thrown) {
 static int kiln_c99_jobs_pending_raw(kiln_value *out) {
 static int kiln_c99_promise_jobs_pending(void *context) {
@@ -4230,6 +4255,8 @@ static kiln_c99_timer_run_fn kiln_c99_timer_direct_run(kiln_value callback, void
 static int kiln_c99_arm_timer(uint64_t code, double delay, kiln_realm_work_fn run,
 static int kiln_c99_async_generator_settle(kiln_host *host, kiln_value step, kiln_value value,
 static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, kiln_value sent,
+static int kiln_c99_async_generator_delegate_value(kiln_host *host, kiln_value generator,
+static int kiln_c99_async_generator_delegate_result(kiln_host *host, kiln_value generator,
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
 static double kiln_c99_parse_date(kiln_value source) {
 static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, size_t argc,
@@ -4534,13 +4561,15 @@ static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value 
 static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val key,
 static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val key,
-static __attribute__((noinline)) kiln_c99_site *kiln_c99_symbol_site(kiln_c99_symbol_cell *cell) {
-static void kiln_c99_symbol_site_remember(kiln_c99_symbol_cell *cell, kiln_c99_pic_entry *given,
-static inline __attribute__((always_inline)) kiln_object *kiln_c99_symbol_receiver(kiln_val target) {
-static __attribute__((noinline)) int kiln_c99_val_read_symbol_miss(kiln_host *host, kiln_val target,
+static __attribute__((noinline)) kiln_c99_site *kiln_c99_key_site(kiln_c99_symbol_cell *cell) {
+static void kiln_c99_key_site_remember(kiln_c99_symbol_cell *cell, kiln_c99_pic_entry *given,
+static inline __attribute__((always_inline)) kiln_object *kiln_c99_keyed_receiver(kiln_val target) {
+static __attribute__((noinline)) int kiln_c99_val_read_key_miss(kiln_host *host, kiln_val target,
 static __attribute__((noinline)) int kiln_c99_val_write_symbol_miss(kiln_host *host,
 static int kiln_c99_val_read_symbol(kiln_host *host, kiln_val target, kiln_val key, int depth,
+int kiln_c99_val_read_string_key(kiln_host *host, kiln_val target, kiln_val key, int depth,
 static int kiln_c99_val_write_symbol(kiln_host *host, kiln_val target, kiln_val key,
+int kiln_c99_val_write_string_key(kiln_host *host, kiln_val target, kiln_val key,
 static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_code, kiln_val receiver,
 static int kiln_c99_val_prepare_method_view(kiln_host *host, kiln_val receiver,
 int kiln_c99_val_prepare_method_key(kiln_host *host, kiln_val receiver,
