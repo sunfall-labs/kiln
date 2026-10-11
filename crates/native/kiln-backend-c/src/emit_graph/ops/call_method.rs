@@ -2181,7 +2181,8 @@ pub(super) fn emit_call_method(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                              {guard0}{{ \
                                  {load0} \
-                                 double r = isfinite(d) ? floor(d + 0.5) : d; \
+                                 double r = isfinite(d) ? floor(d) : d; \
+                                 if (isfinite(d) && d - r >= 0.5) r += 1.0; \
                                  if (r == 0.0 && signbit(d)) r = -0.0; \
                                  v{v} = kiln_c99_val_from_double(r); \
                                  handled = 1; \
@@ -2285,7 +2286,7 @@ pub(super) fn emit_call_method(
                 "if (KILN_LIKELY(KILN_VAL_IS_BUILTIN(v{o}) && KILN_VAL_BUILTIN_ID(v{o}) == KILN_C99_BUILTIN_MATH)) {{ \
                              {guard2}{{ \
                                  {load2} \
-                                 v{v} = kiln_c99_val_from_double(pow(ma0, ma1)); \
+                                 v{v} = kiln_c99_val_from_double((isnan(ma1) || (fabs(ma0) == 1.0 && isinf(ma1))) ? NAN : pow(ma0, ma1)); \
                                  handled = 1; \
                              }} \
                          }}",
@@ -4241,6 +4242,65 @@ pub(super) fn emit_call_method(
             .unwrap();
 }
 
+/// The C that computes a `Math.*` function over already-checked number operands: `d` for one
+/// operand, `ma0`/`ma1` for two, assigning `RES`. `None` for anything not listed (variadic
+/// forms, `random`, other arities). Semantics are the language's, not libm's, where they differ:
+/// `round` is floor-then-adjust (no `d + 0.5` double rounding), `pow(1, +-Infinity)` and
+/// `pow(1, NaN)` are NaN, `min`/`max` order -0 below +0 and propagate NaN.
+fn prepared_math_body(name: &str, argc: usize) -> Option<(&'static str, String)> {
+    let libm1 = |c: &'static str, f: &str| Some((c, format!("RES = {f}(d);")));
+    match (name, argc) {
+        ("sqrt", 1) => libm1("KILN_C99_METHOD_MATH_SQRT", "sqrt"),
+        ("floor", 1) => libm1("KILN_C99_METHOD_MATH_FLOOR", "floor"),
+        ("ceil", 1) => libm1("KILN_C99_METHOD_MATH_CEIL", "ceil"),
+        ("trunc", 1) => libm1("KILN_C99_METHOD_MATH_TRUNC", "trunc"),
+        ("abs", 1) => libm1("KILN_C99_METHOD_MATH_ABS", "fabs"),
+        ("sin", 1) => libm1("KILN_C99_METHOD_MATH_SIN", "sin"),
+        ("cos", 1) => libm1("KILN_C99_METHOD_MATH_COS", "cos"),
+        ("tan", 1) => libm1("KILN_C99_METHOD_MATH_TAN", "tan"),
+        ("exp", 1) => libm1("KILN_C99_METHOD_MATH_EXP", "exp"),
+        ("log", 1) => libm1("KILN_C99_METHOD_MATH_LOG", "log"),
+        ("log2", 1) => libm1("KILN_C99_METHOD_MATH_LOG2", "log2"),
+        ("log10", 1) => libm1("KILN_C99_METHOD_MATH_LOG10", "log10"),
+        ("atan", 1) => libm1("KILN_C99_METHOD_MATH_ATAN", "atan"),
+        ("cbrt", 1) => libm1("KILN_C99_METHOD_MATH_CBRT", "cbrt"),
+        ("round", 1) => Some((
+            "KILN_C99_METHOD_MATH_ROUND",
+            "RES = isfinite(d) ? floor(d) : d; if (isfinite(d) && d - RES >= 0.5) RES += 1.0; if (RES == 0.0 && signbit(d)) RES = -0.0;"
+                .to_owned(),
+        )),
+        ("sign", 1) => Some((
+            "KILN_C99_METHOD_MATH_SIGN",
+            "RES = (isnan(d) || d == 0.0) ? d : (d < 0.0 ? -1.0 : 1.0);".to_owned(),
+        )),
+        ("fround", 1) => Some(("KILN_C99_METHOD_MATH_FROUND", "RES = (double)(float)d;".to_owned())),
+        ("atan2", 2) => Some((
+            "KILN_C99_METHOD_MATH_ATAN2",
+            "RES = atan2(ma0, ma1);".to_owned(),
+        )),
+        ("pow", 2) => Some((
+            "KILN_C99_METHOD_MATH_POW",
+            "RES = (isnan(ma1) || (fabs(ma0) == 1.0 && isinf(ma1))) ? NAN : pow(ma0, ma1);"
+                .to_owned(),
+        )),
+        ("min", 2) => Some((
+            "KILN_C99_METHOD_MATH_MIN",
+            "RES = (isnan(ma0) || isnan(ma1)) ? NAN : ((ma0 < ma1 || (ma0 == 0.0 && ma1 == 0.0 && signbit(ma0))) ? ma0 : ma1);"
+                .to_owned(),
+        )),
+        ("max", 2) => Some((
+            "KILN_C99_METHOD_MATH_MAX",
+            "RES = (isnan(ma0) || isnan(ma1)) ? NAN : ((ma0 > ma1 || (ma0 == 0.0 && ma1 == 0.0 && !signbit(ma0))) ? ma0 : ma1);"
+                .to_owned(),
+        )),
+        ("hypot", 2) => Some((
+            "KILN_C99_METHOD_MATH_HYPOT",
+            "RES = hypot(ma0, ma1);".to_owned(),
+        )),
+        _ => None,
+    }
+}
+
 /// Emit a named call with its property value already resolved before argument evaluation.
 /// Static candidates still enter their generated body directly, but the saved value is always
 /// the authority: arguments may have replaced the property's current value by this point.
@@ -4453,21 +4513,48 @@ fn emit_call_prepared_method(
             "if (KILN_LIKELY({guard} && KILN_VAL_IS_BUILTIN(recv) && KILN_VAL_BUILTIN_ID(recv) == KILN_C99_BUILTIN_PROMISE && KILN_VAL_IS_METHOD(method) && KILN_VAL_METHOD_ID(method) == KILN_C99_METHOD_PROMISE_RESOLVE && KILN_VAL_IS_NUMBER(v{argument}))) {{ {store} handled = 1; }} "
         ));
     }
-    if key_str == "sqrt" && argc == 1 {
-        let argument = args[0].0;
-        let guard = static_member_guard(&[("MATH", "sqrt")]);
+    // A Math function whose callee, read before the arguments, is the original method: the
+    // method value itself is the proof (`KILN_VAL_METHOD_ID` names exactly this function, whatever
+    // property it was read from), so no built-in member guard is asked and nothing here is a
+    // speculation. A non-number argument leaves for the generic call, which converts it.
+    if let Some((method_const, body)) = prepared_math_body(&key_str, argc) {
+        let loads: String = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let name = if argc == 1 {
+                    "d".to_owned()
+                } else {
+                    format!("ma{i}")
+                };
+                if ctx.live_numbers.contains(a) {
+                    format!("double {name} = d{};", a.0)
+                } else if ctx.live_ints.contains(a) {
+                    format!("double {name} = (double)i{};", a.0)
+                } else {
+                    format!("double {name}; memcpy(&{name}, &v{}, sizeof({name}));", a.0)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let number_checks: String = args
+            .iter()
+            .filter(|a| !ctx.live_numbers.contains(a) && !ctx.live_ints.contains(a))
+            .map(|a| format!(" && KILN_VAL_IS_NUMBER(v{})", a.0))
+            .collect();
         let store = if ctx.live_numbers.contains(&vid) {
             let box_value = ctx
                 .boxed
                 .map_or(true, |boxed| boxed.contains(&vid))
                 .then(|| format!(" v{v} = kiln_c99_val_from_double(d{v});"))
                 .unwrap_or_default();
-            format!("d{v} = sqrt(prepared_arg_{v});{box_value} kiln_twin = 1;")
+            format!("d{v} = prepared_res_{v};{box_value} kiln_twin = 1;")
         } else {
-            format!("v{v} = kiln_c99_val_from_double(sqrt(prepared_arg_{v}));")
+            format!("v{v} = kiln_c99_val_from_double(prepared_res_{v});")
         };
         prepared_intrinsics.push_str(&format!(
-            "{TYPED_RELIES_MARK} if (KILN_LIKELY({guard})) {{ if (KILN_VAL_IS_BUILTIN(recv) && KILN_VAL_BUILTIN_ID(recv) == KILN_C99_BUILTIN_MATH && KILN_VAL_IS_METHOD(method) && KILN_VAL_METHOD_ID(method) == KILN_C99_METHOD_MATH_SQRT && KILN_VAL_IS_NUMBER(v{argument})) {{ double prepared_arg_{v}; memcpy(&prepared_arg_{v}, &v{argument}, sizeof(prepared_arg_{v})); {store} handled = 1; }} }} "
+            "if (KILN_VAL_IS_BUILTIN(recv) && KILN_VAL_BUILTIN_ID(recv) == KILN_C99_BUILTIN_MATH && KILN_VAL_IS_METHOD(method) && KILN_VAL_METHOD_ID(method) == {method_const}{number_checks}) {{ {loads} double prepared_res_{v}; {body} {store} handled = 1; }} ",
+            body = body.replace("RES", &format!("prepared_res_{v}")),
         ));
     }
 
