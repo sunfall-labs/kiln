@@ -23,6 +23,7 @@ selected inventory before exiting nonzero on any package non-pass.
       tests/               361 smoke tests (3-8 real API calls each, deterministic output)
       run.sh               the harness: node baseline vs kiln native, byte comparison
       results/
+        2026-10-11.tsv            per-package results of the current run (361/361 pass)
         baseline-2026-09-30.md    head-to-head report vs porffor's 2026-09-30 dashboard run
         baseline-2026-09-30.tsv   per-package machine-readable results
         raw/                      per-run stdout/stderr (gitignored)
@@ -39,7 +40,8 @@ TIMEOUT_S=300 ./run.sh       # per-package timeout (default 600s)
 
 Each invocation retains a unique directory under `results/raw/` with full Node,
 compiler, and native stdout/stderr, a TSV, and `results.json`. Built executables are deleted once
-they have run (their sizes stay in `results.json`); `--keep-binaries` keeps them. Unknown filters,
+they have run (their sizes stay in `results.json`); `--keep-binaries` keeps them. The runner sweeps
+the project's artifact cache after each package, which otherwise grows past 40 GB over a full run. Unknown filters,
 duplicate inventory names, and missing tests are infrastructure errors. Package
 failures remain informational. Compilation and binary execution have separate
 600-second limits and separate durations; `compile-timeout` and `runtime-timeout`
@@ -79,9 +81,18 @@ Node, compilation and binary execution with `NODE_ENV=production`. The original
 it remains visible as `node-baseline-failed` and makes `--require-pass` fail. A
 Release inventory with that result is not complete passing acceptance.
 
-## Baseline (2026-09-30)
+## Current (2026-10-11)
 
-kiln release build, Node v24 baseline:
+**361 of 361 packages pass**: every smoke test's native binary prints exactly what Node v26.8.1
+prints (`runner.py`, `native-dev` profile, `--node`). Per-package results are in
+`results/2026-10-11.tsv`. The last seven to pass needed fixes to the native runtime's
+`new Function`/`eval` parser (zod, arktype, uglify-js, eta), to chunked C emission after
+liveness pruning (@babel/core, prettier), and to rooting `Array.prototype.sort`'s merge scratch
+for the collector (mathjs).
+
+## Baseline (2026-09-30, historical)
+
+kiln release build, Node v24 baseline, before the runner correction described above:
 
 | Status | kiln | porffor (same 360) |
 |---|---|---:|
