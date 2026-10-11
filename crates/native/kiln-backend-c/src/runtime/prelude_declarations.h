@@ -33,6 +33,7 @@ extern void *__kiln_transfer_region(void *ptr);
 extern void kiln_c99_gc_result_roots(void *opaque, void *context, int phase);
 extern char *kiln_c99_gc_alloc_text(size_t len);
 extern kiln_val kiln_c99_val_from_text(const char *bytes, size_t len);
+extern int kiln_c99_actor_candidate_ever;
 extern kiln_val kiln_c99_candidate_literal(const kiln_string *source);
 extern kiln_val kiln_c99_val_from_ascii(const char *bytes, size_t len);
 extern kiln_val kiln_c99_val_from_unit(uint16_t unit);

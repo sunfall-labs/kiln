@@ -338,7 +338,7 @@ pub(super) fn emit_graph_op(
             Constant::String(_) => {
                 writeln!(
                     output,
-                    "    v{v} = kiln_c99_candidate_literal(&{symbol}_string_{index}); if (KILN_UNLIKELY(v{v} == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;"
+                    "    v{v} = KILN_UNLIKELY(__atomic_load_n(&kiln_c99_actor_candidate_ever, __ATOMIC_RELAXED)) ? kiln_c99_candidate_literal(&{symbol}_string_{index}) : KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &{symbol}_string_{index}); if (KILN_UNLIKELY(v{v} == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;"
                 )
                 .unwrap();
             }

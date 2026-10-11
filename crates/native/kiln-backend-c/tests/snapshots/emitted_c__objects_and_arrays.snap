@@ -62,10 +62,10 @@ static int kiln_module_2968f676c2cfaa73c555c19e4261f72a_body(kiln_host *host, ki
     double d6_f_1 = 0.0;
     int64_t i6_f_1 = 0;
 kiln_block_0:;
-    v2 = kiln_c99_candidate_literal(&kiln_module_2968f676c2cfaa73c555c19e4261f72a_string_0); if (KILN_UNLIKELY(v2 == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;
+    v2 = KILN_UNLIKELY(__atomic_load_n(&kiln_c99_actor_candidate_ever, __ATOMIC_RELAXED)) ? kiln_c99_candidate_literal(&kiln_module_2968f676c2cfaa73c555c19e4261f72a_string_0) : KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_2968f676c2cfaa73c555c19e4261f72a_string_0); if (KILN_UNLIKELY(v2 == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;
     v3 = UINT64_C(4607182418800017408);
     i3 = 1LL;
-    v4 = kiln_c99_candidate_literal(&kiln_module_2968f676c2cfaa73c555c19e4261f72a_string_2); if (KILN_UNLIKELY(v4 == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;
+    v4 = KILN_UNLIKELY(__atomic_load_n(&kiln_c99_actor_candidate_ever, __ATOMIC_RELAXED)) ? kiln_c99_candidate_literal(&kiln_module_2968f676c2cfaa73c555c19e4261f72a_string_2) : KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_2968f676c2cfaa73c555c19e4261f72a_string_2); if (KILN_UNLIKELY(v4 == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;
     v5 = UINT64_C(4611686018427387904);
     i5 = 2LL;
     v6_f_0 = v3;
