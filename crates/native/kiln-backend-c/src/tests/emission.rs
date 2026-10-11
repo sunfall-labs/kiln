@@ -2064,3 +2064,17 @@ fn split_instantiation_call_sites_use_declared_shared_receiver_helper() {
         "extern int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure);"
     ));
 }
+
+#[test]
+fn direct_method_calls_push_their_frame_and_test_the_receiver_inline() {
+    let header = runtime_prelude_header();
+    // The frame is still pushed and popped (stack traces keep the method), only not through three
+    // out-of-line calls; and the receiver is compared inline before the one case that needs the
+    // out-of-line substitution.
+    assert!(header.contains("kiln_c99_js_frame_enter_named(kiln_js_frame *frame"));
+    assert!(header.contains("kiln_c99_js_frame_leave_inline(kiln_js_frame *frame)"));
+    assert!(header.contains("#define KILN_C99_NORMALIZE_RECEIVER(RECEIVER, CLOSURE)"));
+    assert!(header.contains(
+        "extern int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure);"
+    ));
+}

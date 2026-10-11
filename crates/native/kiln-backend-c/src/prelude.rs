@@ -2610,6 +2610,10 @@ pub const SPECULATION_INVARIANTS: &[SpeculationInvariant] = &[
         name: "call_return_number",
         language_rule: "ECMA-262 §13.15.3 ApplyStringOrNumericBinaryOperator: an operand that is a Number takes the numeric branch; a call to a function declared to return number that answered anything else (the declaration is a guess, not a proof) leaves for the generic clone after that same call, which does not run again",
     },
+    SpeculationInvariant {
+        name: "method_shape_cache",
+        language_rule: "ECMA-262 §10.1.8.1 OrdinaryGet / §7.3.3 GetV: a method read on an ordinary object finds the first data property of that name along the prototype chain; a site's remembered answer is the receiver's shape (its own key set and attributes) plus, for an inherited member, each prototype level's shape up to the holder, read live, so any own write, delete, redefinition, method replacement or [[SetPrototypeOf]] that could change the answer changes a shape on the path and misses",
+    },
 ];
 
 pub const fn assert_speculation_invariants(rows: &[SpeculationInvariant]) -> usize {
@@ -2650,6 +2654,7 @@ pub const fn lookup_speculation_invariant(name: &str) -> &'static SpeculationInv
 
 const _: usize = assert_speculation_invariants(SPECULATION_INVARIANTS);
 const _: &SpeculationInvariant = lookup_speculation_invariant("parameter_number");
+const _: &SpeculationInvariant = lookup_speculation_invariant("method_shape_cache");
 const _: &SpeculationInvariant = lookup_speculation_invariant("loop_speculation_exit");
 const _: &SpeculationInvariant = lookup_speculation_invariant("upvalue_array");
 const _: &SpeculationInvariant = lookup_speculation_invariant("parameter_array");
