@@ -101,14 +101,16 @@ static inline int kiln_c99_gc_kind_finalized(uint32_t kind) {
     return masked < 64 && ((KILN_GC_FINALIZED_KINDS >> masked) & 1u) != 0;
 }
 
-/* The finalised kinds whose finaliser has work from the moment they are made. The other three --
- * a closure, a promise, a generator -- own nothing outside their block until a rarer path gives
+/* The finalised kinds whose finaliser has work from the moment they are made. The other four --
+ * a closure, a promise, a generator and a plain object (whose side buffers -- properties, owned
+ * slots, elements, sealed values, dictionary index -- are all installed through the sites listed
+ * with `kiln_c99_object_note_buffers` users in shapes.c/properties.c/lib.rs) -- own nothing outside their block until a rarer path gives
  * them something (more than four captures, a second reaction, an async generator's request
  * queue), and that path calls `kiln_c99_gc_note_finalizable`. Until then their finaliser is a
  * no-op by construction, which is what lets a nursery collection skip a dead one unread. */
 #define KILN_GC_FINALIZED_AT_ALLOC                                                                 \
     (KILN_GC_FINALIZED_KINDS & ~((UINT64_C(1) << KILN_GC_CLOSURE) | (UINT64_C(1) << KILN_GC_PROMISE) | \
-                                 (UINT64_C(1) << KILN_GC_GENERATOR)))
+                                 (UINT64_C(1) << KILN_GC_GENERATOR) | (UINT64_C(1) << KILN_GC_OBJECT)))
 
 static inline int kiln_c99_gc_kind_finalized_at_alloc(uint32_t kind) {
     uint32_t masked = kind & KILN_GC_KIND_MASK;
@@ -6866,8 +6868,14 @@ static void kiln_c99_graph_candidate_close(kiln_c99_par_arena *arena) {
  * treating any escaped object as movable. Standalone blocks carry cold owner metadata;
  * slab and tenured allocations remain outside the candidate and fail outgoing closure.
  * A nested factory keeps working as JavaScript but cannot make a separate candidate. */
+/* Set (never cleared) before the first candidate factory scope starts anywhere in the process.
+ * While it is 0 no heap has an `actor_candidate_id`, so `kiln_c99_candidate_literal` is exactly
+ * the static string address and emitted code skips the call and its realm lookup. */
+static int kiln_c99_actor_candidate_ever = 0;
+
 static int kiln_c99_actor_candidate_begin(kiln_gc_heap *heap) {
     uint64_t id;
+    __atomic_store_n(&kiln_c99_actor_candidate_ever, 1, __ATOMIC_RELEASE);
     if (heap == NULL || heap->fallback || !heap->nursery.active || heap->nursery.region == NULL ||
         heap->actor_candidate_id != 0 || heap->actor_candidate_pending_id != 0) return 0;
     id = kiln_c99_graph_candidate_new_id();
@@ -8676,6 +8684,18 @@ static void kiln_c99_shared_facade_remove(kiln_gc_heap *heap, kiln_shared_facade
 
 /* Inner growth buffers are the owner's, never a value's, so they are released here and only
  * here. A kind whose payload owns a provider handle releases it here too. */
+/* A plain object (inline-shaped literal) owns nothing a finaliser would free. The nursery
+ * settle asks this before the call so a dead literal costs no call. Same predicate as the
+ * early exit in the KILN_GC_OBJECT case of `kiln_c99_gc_finalize`. */
+static KILN_ALWAYS_INLINE inline int kiln_c99_gc_object_block_is_plain(const kiln_gc_block *block) {
+    const kiln_object *object;
+    if ((block->kind & KILN_GC_KIND_MASK) != KILN_GC_OBJECT) return 0;
+    object = (const kiln_object *)(block + 1);
+    return object->properties == NULL && object->dictionary_index == NULL &&
+           object->sealed == NULL && !kiln_c99_object_slots_owned(object) &&
+           object->elements == NULL;
+}
+
 static void kiln_c99_gc_finalize(kiln_gc_heap *heap, kiln_gc_block *block) {
     void *payload = block + 1;
     switch (block->kind & KILN_GC_KIND_MASK) {
@@ -9454,7 +9474,7 @@ static size_t kiln_c99_nursery_settle(kiln_gc_heap *heap, kiln_nursery_chunk *ch
             kiln_gc_block *b = (kiln_gc_block *)(chunk->base + bit_idx * 16);
             finals &= finals - 1;
             if ((b->kind & KILN_GC_FLAG_DEAD) == 0) {
-                kiln_c99_gc_finalize(heap, b);
+                if (!kiln_c99_gc_object_block_is_plain(b)) kiln_c99_gc_finalize(heap, b);
                 b->kind |= KILN_GC_FLAG_DEAD;
             }
         }

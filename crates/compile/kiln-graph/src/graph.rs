@@ -2734,7 +2734,7 @@ pub fn compute_dominator_tree(
     dom_children
 }
 
-fn remap_graph_operands(graph: &mut FunctionGraph, map: impl Fn(ValueId) -> ValueId) {
+pub fn remap_graph_operands(graph: &mut FunctionGraph, map: impl Fn(ValueId) -> ValueId) {
     for block in &mut graph.blocks {
         for (_, op) in &mut block.operations {
             op.map_operands(&map);
@@ -3046,7 +3046,7 @@ fn simplify_trivial_phis(graph: &mut FunctionGraph) {
 /// Pruning must shrink the backing SSA array too. Renumber surviving definitions and all
 /// references in old-ID order, retaining even an undefined reference for the verifier to reject.
 /// Site IDs, local slots, suspension order and bytecode diagnostic origins are preserved.
-fn compact_value_ids(graph: &mut FunctionGraph) {
+pub fn compact_value_ids(graph: &mut FunctionGraph) {
     let mut present = vec![false; graph.next_value_id as usize];
     for value in &graph.initial_locals {
         present[value.0 as usize] = true;

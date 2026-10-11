@@ -2217,3 +2217,163 @@ fn large_generic_units_share_planning_tables_and_publish_updates() {
             .all(|p| Arc::ptr_eq(&p.typed_entries, &plans.entry.typed_entries))
     );
 }
+
+fn leaf_proto(
+    name: &str,
+    parameter_count: u32,
+    local_count: u32,
+    code: Vec<Instruction>,
+) -> FunctionProto {
+    FunctionProto {
+        inferred_name: None,
+        span: kiln_ir::Span::default(),
+        prologue_end: 0,
+        declared_length: parameter_count,
+        name: Some(name.into()),
+        parameter_count,
+        local_count,
+        code,
+        arrow: false,
+        generator: false,
+        asynchronous: false,
+        async_generator: false,
+        is_method: false,
+        is_class: false,
+        mapped_arguments: false,
+        upvalues: Vec::new(),
+        type_annotations: None,
+    }
+}
+
+/// `function one(i) { return { a: i, b: 2 }; }` and `function caller(x) { return one(x).a; }`:
+/// the call and the literal disappear and the caller returns its own parameter. A read of a key
+/// the literal does not define keeps the call.
+#[test]
+fn leaf_literal_read_drops_the_call_and_the_allocation() {
+    let constants = vec![
+        Constant::String("a".into()),
+        Constant::Number(2),
+        Constant::String("b".into()),
+        Constant::String("c".into()),
+        Constant::Undefined,
+    ];
+    let one = leaf_proto(
+        "one",
+        1,
+        1,
+        vec![
+            Instruction::Const(0),
+            Instruction::LoadLocal(0),
+            Instruction::Const(2),
+            Instruction::Const(1),
+            Instruction::NewObject { count: 2 },
+            Instruction::Return,
+        ],
+    );
+    let read = |callee: u32, name: u32| {
+        leaf_proto(
+            "caller",
+            1,
+            1,
+            vec![
+                Instruction::MakeFunction(callee),
+                Instruction::LoadLocal(0),
+                Instruction::Call { argc: 1 },
+                Instruction::GetProperty(name),
+                Instruction::Return,
+            ],
+        )
+    };
+    let mut program = Program {
+        source: "".into(),
+        version: BYTECODE_VERSION,
+        source_origin: None,
+        static_source_identity: None,
+        static_source_provenance: None,
+        constants,
+        code: vec![Instruction::Const(4), Instruction::Return],
+        local_count: 0,
+        functions: vec![
+            one.clone(),
+            one.clone(),
+            one,
+            read(0, 0),
+            read(1, 3),
+            read(2, 2),
+        ],
+        template_sites: Vec::new(),
+        debug_call_sites: Vec::new(),
+    };
+    let build = |program: &Program| {
+        let graphs: Vec<_> = program
+            .functions
+            .iter()
+            .map(|proto| build_function_graph(proto, program).unwrap())
+            .collect();
+        let entry = build_function_graph(
+            &FunctionProto {
+                code: program.code.clone(),
+                ..leaf_proto("entry", 0, 0, Vec::new())
+            },
+            program,
+        )
+        .unwrap();
+        (graphs, entry)
+    };
+    let (mut graphs, mut entry) = build(&program);
+    let rewritten =
+        crate::leaf_literal::inline_leaf_literal_reads(&program, &mut graphs, &mut entry);
+    assert_eq!(
+        rewritten, 2,
+        "`.a` (a parameter) and `.b` (a constant) are rewritten"
+    );
+    let ops = |graph: &FunctionGraph| -> Vec<GraphOp> {
+        graph
+            .blocks
+            .iter()
+            .flat_map(|b| b.operations.iter().map(|(_, op)| op.clone()))
+            .collect()
+    };
+    // `.a`: no call, no read; the function returns its parameter.
+    let a = &graphs[3];
+    assert!(
+        !ops(a)
+            .iter()
+            .any(|op| matches!(op, GraphOp::Call { .. } | GraphOp::GetProperty { .. }))
+    );
+    assert!(
+        matches!(a.blocks[0].terminator, Terminator::Return(Some(v)) if v == a.initial_locals[0])
+    );
+    verify_function_graph(a).unwrap();
+    // `.c`: not a key of the literal -- the call stays.
+    assert!(
+        ops(&graphs[4])
+            .iter()
+            .any(|op| matches!(op, GraphOp::Call { .. }))
+    );
+    // `.b`: the constant itself.
+    let b = &graphs[5];
+    assert!(
+        !ops(b)
+            .iter()
+            .any(|op| matches!(op, GraphOp::Call { .. } | GraphOp::GetProperty { .. }))
+    );
+    assert!(ops(b).iter().any(|op| matches!(
+        op,
+        GraphOp::Const {
+            constant: Constant::Number(2),
+            ..
+        }
+    )));
+    verify_function_graph(b).unwrap();
+
+    // A callee that does anything else (here a getter-free but non-literal body) is left alone.
+    for proto in &mut program.functions[..3] {
+        proto.code = vec![Instruction::LoadLocal(0), Instruction::Return];
+    }
+    let (mut graphs, mut entry) = build(&program);
+    assert_eq!(
+        crate::leaf_literal::inline_leaf_literal_reads(&program, &mut graphs, &mut entry),
+        0
+    );
+}

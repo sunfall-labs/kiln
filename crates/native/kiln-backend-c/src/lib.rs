@@ -1155,6 +1155,7 @@ mod direct;
 pub mod emit_graph;
 pub mod facts;
 pub mod graph;
+mod leaf_literal;
 mod module_cells;
 pub mod parallel;
 pub mod parallel_heap;
@@ -3022,7 +3023,7 @@ fn plan_unit(
     ),
     EmitError,
 > {
-    let graphs = program
+    let mut graphs = program
         .functions
         .iter()
         .enumerate()
@@ -3037,6 +3038,12 @@ fn plan_unit(
         .collect::<Result<Vec<_>, _>>()?;
     let body = entry_proto(program);
     let mut entry_graph = graph_for(&body, program, "the module body", diagnostic_site)?;
+    // Reads of a small leaf function's fresh literal (`one(i).a`) need neither the call nor the
+    // object; see `leaf_literal`. A proof rather than a guess, but `speculate: Some(false)`
+    // keeps the unit on the plain graphs, and the all-generic dev profile stays untouched.
+    if !generic_only && speculate != Some(false) {
+        leaf_literal::inline_leaf_literal_reads(program, &mut graphs, &mut entry_graph);
+    }
     if let Some(extra) = extra_entry_slots {
         entry_graph.mark_non_escaping_objects_with_extra_slots(program, Some(extra));
     }
@@ -4563,6 +4570,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
                 goto namespace_entry_done;
             }}
         }}
+        kiln_c99_gc_note_finalizable(data);
         status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
                                   sizeof *data->properties);
         if (status != KILN_C99_OK) {{
@@ -4994,16 +5002,7 @@ static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *o
     if (KILN_LIKELY(shape != NULL && count <= KILN_C99_INLINE_SLOTS)) {\n\
         uint32_t mask = ku_compute_literal_mask(pairs, count);\n\
         if (KILN_LIKELY(shape->double_slots_mask == mask)) {\n\
-            kiln_value built;\n\
-            int status = kiln_c99_new_object(&built);\n\
-            if (KILN_UNLIKELY(status != KILN_C99_OK)) return status;\n\
-            kiln_object *obj = kiln_c99_object_of(built);\n\
-            obj->shape = (kiln_shape *)shape;\n\
-            for (size_t i = 0; i < count; ++i) {\n\
-                kiln_c99_heap_store_val(obj, &obj->inline_slots[i], pairs[i * 2 + 1]);\n\
-            }\n\
-            *out = kiln_val_from_boundary(built);\n\
-            return KILN_C99_OK;\n\
+            return kiln_c99_new_object_literal_shaped(out, shape, pairs, count);\n\
         }\n\
     }\n\
     int status = kiln_c99_val_new_object_literal(out, pairs, count);\n\

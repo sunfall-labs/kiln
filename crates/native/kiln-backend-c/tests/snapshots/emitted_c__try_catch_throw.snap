@@ -29,7 +29,7 @@ static int kiln_module_4cada2f00ec3a6c82d8f868542f7114d_body(kiln_host *host, ki
     for (size_t slot = 0; slot < (size_t)1; ++slot) locals[slot] = KILN_VAL_UNDEFINED;
     kiln_val v0 = KILN_VAL_UNDEFINED, v1 = KILN_VAL_UNDEFINED, v2 = KILN_VAL_UNDEFINED, v3 = KILN_VAL_UNDEFINED;
 kiln_block_0:;
-    v2 = kiln_c99_candidate_literal(&kiln_module_4cada2f00ec3a6c82d8f868542f7114d_string_1); if (KILN_UNLIKELY(v2 == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;
+    v2 = KILN_UNLIKELY(__atomic_load_n(&kiln_c99_actor_candidate_ever, __ATOMIC_RELAXED)) ? kiln_c99_candidate_literal(&kiln_module_4cada2f00ec3a6c82d8f868542f7114d_string_1) : KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, &kiln_module_4cada2f00ec3a6c82d8f868542f7114d_string_1); if (KILN_UNLIKELY(v2 == KILN_VAL_UNDEFINED)) return KILN_C99_OUT_OF_MEMORY;
     *thrown = kiln_val_to_boundary(v2); goto kiln_block_6;
 kiln_block_6:;
     kiln_c99_forget_handled_throw(); v1 = kiln_val_from_boundary(*thrown);

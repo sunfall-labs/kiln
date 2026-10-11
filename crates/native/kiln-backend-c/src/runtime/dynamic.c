@@ -9445,6 +9445,7 @@ static int kiln_dyn_module_namespace(kiln_dyn_module_export *exports, size_t cou
             }
         }
     }
+    kiln_c99_gc_note_finalizable(object);
     status = kiln_c99_reserve((void **)&object->properties, &object->capacity,
                               count + 1, sizeof *object->properties);
     if (status != KILN_C99_OK) return status;
