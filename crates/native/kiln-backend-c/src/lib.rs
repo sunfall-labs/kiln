@@ -4699,7 +4699,9 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
                 *has_call = true;
                 *has_status = true;
             }
-            Instruction::CallMethod { .. } => {
+            // A prepared call can lower to a by-name `CallMethod` once its lookup folds
+            // (`foldable_prepared_lookup`), so it needs the same helpers.
+            Instruction::CallMethod { .. } | Instruction::CallMethodPrepared { .. } => {
                 *has_call_method = true;
                 *has_read_property = true;
                 *has_status = true;

@@ -108,27 +108,6 @@ extern void kiln_c99_js_frame_set_method_name(const kiln_string *method_name);
 extern void kiln_c99_js_frame_enter(kiln_js_frame *frame, const kiln_closure *closure);
 extern void kiln_c99_js_frame_leave(kiln_js_frame *frame);
 extern void kiln_c99_js_frame_note_instruction(const char *source, size_t instruction, size_t line, size_t column);
-/* The frame a direct method call pushes, inline. Exactly `kiln_c99_js_frame_set_method_name(name)`
- * followed by `kiln_c99_js_frame_enter(frame, closure)` -- the pending name is consumed by that
- * enter, so naming the frame directly leaves the pending slot as it was (empty) -- and
- * `kiln_c99_js_frame_leave`, without three out-of-line calls and two thread-local stores per
- * call. The frame is still pushed and popped, so `Error.captureStackTrace` and a thrown error's
- * stack see this method exactly as before. */
-static KILN_ALWAYS_INLINE inline void kiln_c99_js_frame_enter_named(kiln_js_frame *frame,
-                                                                    const kiln_closure *closure,
-                                                                    const kiln_string *method_name) {
-    frame->previous = kiln_c99_js_frame_top;
-    frame->closure = closure;
-    frame->method_name = method_name;
-    frame->instruction_source = closure != NULL ? closure->diagnostic_source : NULL;
-    frame->instruction = 0;
-    frame->line = 0;
-    frame->column = 0;
-    kiln_c99_js_frame_top = frame;
-}
-static KILN_ALWAYS_INLINE inline void kiln_c99_js_frame_leave_inline(kiln_js_frame *frame) {
-    if (kiln_c99_js_frame_top == frame) kiln_c99_js_frame_top = frame->previous;
-}
 extern int kiln_c99_error_capture_stack_trace(kiln_host *host, kiln_value *result,
                                               const kiln_value *args, size_t argc, int depth,
                                               kiln_value *thrown);
@@ -290,17 +269,6 @@ extern int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result, kiln_
 extern int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result, kiln_closure *closure, kiln_val receiver, const kiln_val *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame, int inherit_new_target);
 extern void kiln_c99_attribute_direct_body_result(const kiln_closure *closure, int depth, int status);
 extern int kiln_c99_normalize_closure_receiver(kiln_val *receiver, const kiln_closure *closure);
-/* `kiln_c99_normalize_closure_receiver` only ever changes a receiver that is undefined or null,
- * and only for a sloppy non-arrow function (it substitutes the global object). A call site that has
- * a closure and a receiver tests that inline and leaves the call to the one case that needs it;
- * a class method is strict, so its receiver is never even compared. The status is not needed:
- * the substitution cannot fail on a realm that has a global object. */
-#define KILN_C99_NORMALIZE_RECEIVER(RECEIVER, CLOSURE)                                           \
-    do {                                                                                          \
-        if (KILN_UNLIKELY(!(CLOSURE)->strict && !(CLOSURE)->arrow &&                              \
-                          ((RECEIVER) == KILN_VAL_UNDEFINED || (RECEIVER) == KILN_VAL_NULL)))     \
-            (void)kiln_c99_normalize_closure_receiver(&(RECEIVER), (CLOSURE));                    \
-    } while (0)
 extern int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
 extern kiln_value kiln_c99_number(double value);
 extern kiln_value kiln_c99_number_bits(uint64_t bits);
