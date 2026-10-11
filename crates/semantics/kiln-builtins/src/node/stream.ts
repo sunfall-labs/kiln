@@ -223,6 +223,26 @@ function legacyStreamConstructor(Implementation: any, publicName: string): any {
   return Constructor;
 }
 
+// The state a Readable starts with. `node:http` builds it directly for the messages its host
+// allocates (`Readable[READABLE_STATE]` below), so the shape has exactly one definition.
+function createReadableState(options?: any): any {
+  const hwm = (options && typeof options.highWaterMark === "number") ? options.highWaterMark : 16 * 1024;
+  const enc = (options && typeof options.encoding === "string") ? options.encoding : null;
+  return {
+    buffer: [],
+    length: 0,
+    pipes: [],
+    flowing: null,
+    ended: false,
+    endEmitted: false,
+    reading: false,
+    destroyed: false,
+    highWaterMark: hwm,
+    encoding: enc,
+    objectMode: !!(options && (options.objectMode || options.readableObjectMode)),
+  };
+}
+
 class ReadableImplementation extends Stream {
   _readableState: {
     buffer: any[];
@@ -243,21 +263,7 @@ class ReadableImplementation extends Stream {
 
   constructor(options?: any) {
     super();
-    const hwm = (options && typeof options.highWaterMark === "number") ? options.highWaterMark : 16 * 1024;
-    const enc = (options && typeof options.encoding === "string") ? options.encoding : null;
-    this._readableState = {
-      buffer: [],
-      length: 0,
-      pipes: [],
-      flowing: null,
-      ended: false,
-      endEmitted: false,
-      reading: false,
-      destroyed: false,
-      highWaterMark: hwm,
-      encoding: enc,
-      objectMode: !!(options && (options.objectMode || options.readableObjectMode)),
-    };
+    this._readableState = createReadableState(options);
     (this as any).readableObjectMode = this._readableState.objectMode;
     this.readable = true;
     this.readableEnded = false;
@@ -522,6 +528,9 @@ ReadableImplementation.prototype.on = ReadableImplementation.prototype.addListen
 
 export interface Readable extends ReadableImplementation {}
 export const Readable: any = legacyStreamConstructor(ReadableImplementation, "Readable");
+Object.defineProperty(Readable, Symbol.for("kiln.stream.createReadableState"), {
+  value: createReadableState,
+});
 
 class WritableImplementation extends Stream {
   _writableState: {

@@ -1,8 +1,9 @@
 // A server request's body end reaches its Readable only once something reads the stream, so a
 // request nobody streams never builds Readable state. Every way of reading must still see the
 // end exactly once: an `end` listener alone, a listener and resume() added after the body has
-// ended, a POST body through `data`, and a request nobody reads at all. (Async iteration over a
-// server request is left out: the interpreter's request is not a Readable yet --
+// ended, `data` then `end` on an empty body, a POST body through `data`, and a request nobody
+// reads at all. (An empty body read only after it ended, and async iteration, are left out
+// while the interpreter's request is not a Readable --
 // docs/issues/interpreter-incoming-message-readable.md.)
 import http from "node:http";
 
@@ -22,6 +23,10 @@ const server = http.createServer((req, res) => {
       });
       req.resume();
     }, 20);
+  } else if (path === "/empty") {
+    let chunks = 0;
+    req.on("data", () => { chunks++; });
+    req.on("end", () => res.end(`empty chunks=${chunks}`));
   } else if (path === "/post") {
     let body = "";
     req.setEncoding("utf8");
@@ -49,6 +54,8 @@ function request(method, path, body) {
 server.listen(0, "127.0.0.1", async () => {
   log.push(await request("GET", "/end-only"));
   log.push(await request("GET", "/late"));
+  log.push(await request("GET", "/empty"));
+  log.push(await request("POST", "/empty", ""));
   log.push(await request("POST", "/post", "posted"));
   log.push(await request("GET", "/unread"));
   log.push(await request("POST", "/unread", "ignored"));

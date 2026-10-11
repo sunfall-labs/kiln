@@ -60,20 +60,22 @@ if (incomingMessagePrototype && typeof Readable === "function") {
   if (IncomingMessage.prototype !== incomingMessagePrototype) {
     IncomingMessage.prototype = incomingMessagePrototype;
   }
-  // The host ends a request body with `push(null)`. Readable state for a message that nobody
-  // streams would be built only to record that, on every request, so the end waits on the
-  // message instead: the `_readableState` getter below replays it the first time anything
-  // reads the stream, and adding a listener the end would reach asks for the state.
-  const pendingEnd = Symbol("kiln.http.pendingEnd");
+  // The host marks a server request `complete` and then ends its body with `push(null)`.
+  // Readable state for a request that nobody streams would be built only to record that, on
+  // every request, so a complete request without state skips the push: the `_readableState`
+  // getter below replays it when anything first reads the stream, and adding a listener the end
+  // would reach asks for the state. The replay waits a tick, as the host's own push did, so
+  // listeners registered in the same turn (`data`, then `end`) all see it.
+  const createReadableState = Readable[Symbol.for("kiln.stream.createReadableState")];
   const readablePush = Readable.prototype.push;
+  const hasOwnProperty = Object.prototype.hasOwnProperty;
+  const endDeferred = (message: any): boolean =>
+    message.complete === true && !hasOwnProperty.call(message, "_readableState");
   Object.defineProperty(incomingMessagePrototype, "push", {
     configurable: true,
     writable: true,
     value: function push(this: any, chunk: any, encoding?: any): boolean {
-      if (chunk === null && !Object.prototype.hasOwnProperty.call(this, "_readableState")) {
-        this[pendingEnd] = true;
-        return false;
-      }
+      if (chunk === null && endDeferred(this)) return false;
       return readablePush.call(this, chunk, encoding);
     },
   });
@@ -89,7 +91,7 @@ if (incomingMessagePrototype && typeof Readable === "function") {
         const result = nativeRegister.call(this, event, listener);
         if (event === "data") {
           if (this._readableState.flowing !== false) this.resume();
-        } else if (this[pendingEnd] && (event === "end" || event === "readable" || event === "close")) {
+        } else if ((event === "end" || event === "readable" || event === "close") && endDeferred(this)) {
           void this._readableState;
         }
         return result;
@@ -102,12 +104,15 @@ if (incomingMessagePrototype && typeof Readable === "function") {
     Object.defineProperty(incomingMessagePrototype, "emit", {
       configurable: true,
       writable: true,
-      value: function (this: any, event: any, ...args: any[]): any {
+      value: function emit(this: any, event: any): any {
+        // Only `end` completes the native message; every other event (`data` per chunk,
+        // `resume`, `readable`) goes straight to the native emitter.
+        if (event !== "end") return Reflect.apply(nativeEmit, this, arguments);
         let result: any;
         let listenerError: any;
         let listenerFailed = false;
         try {
-          result = nativeEmit.call(this, event, ...args);
+          result = Reflect.apply(nativeEmit, this, arguments);
         } catch (error) {
           listenerFailed = true;
           listenerError = error;
@@ -140,14 +145,12 @@ if (incomingMessagePrototype && typeof Readable === "function") {
     });
   }
   // Native IncomingMessage objects are allocated by the HTTP host rather than by the
-  // TypeScript Readable constructor. Run that constructor's existing initializer lazily so
+  // TypeScript Readable constructor. Build the state Readable's constructor would, lazily, so
   // native-created instances get the same state and public flags as ordinary Readables.
   Object.defineProperty(incomingMessagePrototype, "_readableState", {
     configurable: true,
     get: function (this: object): any {
-      const initialized: any = {};
-      Readable.call(initialized);
-      const state = initialized._readableState;
+      const state = createReadableState();
       Object.defineProperty(this, "_readableState", {
         configurable: true,
         enumerable: true,
@@ -155,12 +158,13 @@ if (incomingMessagePrototype && typeof Readable === "function") {
         value: state,
       });
       const incoming: any = this;
-      if (incoming.readable === undefined) incoming.readable = initialized.readable;
-      if (incoming.readableEnded === undefined) incoming.readableEnded = initialized.readableEnded;
-      if (incoming.destroyed === undefined) incoming.destroyed = initialized.destroyed;
-      if (incoming[pendingEnd]) {
-        incoming[pendingEnd] = false;
-        readablePush.call(incoming, null);
+      if (incoming.readable === undefined) incoming.readable = true;
+      if (incoming.readableEnded === undefined) incoming.readableEnded = false;
+      if (incoming.destroyed === undefined) incoming.destroyed = false;
+      if (incoming.complete === true) {
+        const replay = () => readablePush.call(incoming, null);
+        if (typeof process !== "undefined" && typeof process.nextTick === "function") process.nextTick(replay);
+        else setTimeout(replay, 0);
       }
       return state;
     },
@@ -203,6 +207,7 @@ const NativeServerResponse: any =
     ? nativeModule.ServerResponse
     : null;
 const legacyResponseReceivers = new WeakSet<object>();
+let legacyResponseMethodsInstalled = false;
 
 function legacyResponseMethod(name: string, fallback: Function): void {
   const prototype = NativeServerResponse && NativeServerResponse.prototype;
@@ -212,11 +217,11 @@ function legacyResponseMethod(name: string, fallback: Function): void {
     ? descriptor.value
     : prototype[name];
   const delegatedMethod = typeof nativeMethod === "function" ? nativeMethod : null;
-  const method = function (this: any, ...args: any[]) {
+  const method = function (this: any) {
     if (!delegatedMethod || (this && legacyResponseReceivers.has(this))) {
-      return fallback.apply(this, args);
+      return Reflect.apply(fallback, this, arguments);
     }
-    return delegatedMethod.apply(this, args);
+    return Reflect.apply(delegatedMethod, this, arguments);
   };
   Object.defineProperty(method, "name", { value: name, configurable: true });
   Object.defineProperty(method, "length", {
@@ -237,6 +242,7 @@ export const ServerResponse: any = function ServerResponse(this: any, req?: any,
   // Native response prototypes do not inherit Writable.prototype. The legacy adapter
   // delegates write/end to Writable, so retain its default hook when the subclass has none.
   if (typeof this._write !== "function") this._write = Writable.prototype._write;
+  installLegacyResponseMethods();
   legacyResponseReceivers.add(this);
   this.req = req;
   this.socket = null;
@@ -253,7 +259,15 @@ if (NativeServerResponse) {
   Object.defineProperty(ServerResponse.prototype, "constructor", {
     value: ServerResponse, writable: true, configurable: true,
   });
+}
 
+// A response initialized the legacy way, `ServerResponse.call(this)`, is not a host response, so
+// the prototype's methods must route it to the Writable-backed fallbacks below. The routing
+// wraps every method, so it is installed only once such a response exists: a server that never
+// makes one keeps the host's methods on its per-request path.
+function installLegacyResponseMethods(): void {
+  if (legacyResponseMethodsInstalled || !NativeServerResponse) return;
+  legacyResponseMethodsInstalled = true;
   legacyResponseMethod("setHeader", function (this: any, name: any, value: any) {
     this._legacyHeaders[String(name).toLowerCase()] = value;
     return this;
@@ -294,7 +308,8 @@ if (NativeServerResponse) {
   legacyResponseMethod("destroy", function (this: any, error?: any) {
     return Writable.prototype.destroy.call(this, error);
   });
-} else {
+}
+if (!NativeServerResponse) {
   ServerResponse.prototype = Object.create(Writable.prototype);
   Object.defineProperty(ServerResponse.prototype, "constructor", {
     value: ServerResponse, writable: true, configurable: true,
