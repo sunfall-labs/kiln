@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 360" role="img" aria-labelledby="title desc"><title id="title">Warmed JSON pipeline</title><desc id="desc">Lower is better. Zero baseline. Node: 0.0566 ms / call; Bun: 0.0437 ms / call; kiln native: 0.1807 ms / call; Perry: 0.6172 ms / call; Porffor: 0.3223 ms / call; Static Hermes native: 0.0767 ms / call</desc>
+<text x="0" y="32" fill="#292d24" font-family="sans-serif" font-size="13">Node</text>
+<rect x="170" y="15" width="290" height="24" fill="#ebece3"/>
+<rect x="170" y="15" width="24.1945" height="24" fill="#73796b"/>
+<text x="610" y="32" text-anchor="end" fill="#292d24" font-family="monospace" font-size="13">0.0566</text>
+<text x="0" y="77" fill="#292d24" font-family="sans-serif" font-size="13">Bun</text>
+<rect x="170" y="60" width="290" height="24" fill="#ebece3"/>
+<rect x="170" y="60" width="18.6673" height="24" fill="#73796b"/>
+<text x="610" y="77" text-anchor="end" fill="#292d24" font-family="monospace" font-size="13">0.0437</text>
+<text x="0" y="122" fill="#292d24" font-family="sans-serif" font-size="13">kiln native</text>
+<rect x="170" y="105" width="290" height="24" fill="#ebece3"/>
+<rect x="170" y="105" width="77.1720" height="24" fill="#b6462b"/>
+<text x="610" y="122" text-anchor="end" fill="#292d24" font-family="monospace" font-size="13">0.1807</text>
+<text x="0" y="167" fill="#292d24" font-family="sans-serif" font-size="13">Perry</text>
+<rect x="170" y="150" width="290" height="24" fill="#ebece3"/>
+<rect x="170" y="150" width="263.6364" height="24" fill="#73796b"/>
+<text x="610" y="167" text-anchor="end" fill="#292d24" font-family="monospace" font-size="13">0.6172</text>
+<text x="0" y="212" fill="#292d24" font-family="sans-serif" font-size="13">Porffor</text>
+<rect x="170" y="195" width="290" height="24" fill="#ebece3"/>
+<rect x="170" y="195" width="137.6582" height="24" fill="#73796b"/>
+<text x="610" y="212" text-anchor="end" fill="#292d24" font-family="monospace" font-size="13">0.3223</text>
+<text x="0" y="257" fill="#292d24" font-family="sans-serif" font-size="13">Static Hermes native</text>
+<rect x="170" y="240" width="290" height="24" fill="#ebece3"/>
+<rect x="170" y="240" width="32.7460" height="24" fill="#73796b"/>
+<text x="610" y="257" text-anchor="end" fill="#292d24" font-family="monospace" font-size="13">0.0767</text>
+<path d="M170 320H460" stroke="#a9ad9f"/>
+<text x="170" y="338" fill="#73796b" font-family="monospace" font-size="11">0</text>
+<text x="460" y="338" text-anchor="end" fill="#73796b" font-family="monospace" font-size="11">0.6789 ms / call</text>
+</svg>

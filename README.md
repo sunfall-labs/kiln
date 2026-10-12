@@ -65,11 +65,18 @@ After editing or regenerating any HTML, run:
 ```sh
 python3 scripts/render-conformance.py
 python3 scripts/render-comparisons.py
+python3 scripts/render-runtime-results.py
 python3 scripts/render-seo.py
 ```
 
 The last command adds unique canonical URLs, Open Graph/Twitter metadata, WebPage and breadcrumb
 structured data, and `sitemap.xml`. Use the public GitHub Pages base URL until the site actually
 moves to another domain; a project-level robots.txt cannot control the host's root robots policy.
-Verify all three renderers together are idempotent, and review comparisons at mobile and desktop
+Verify all four renderers together are idempotent, and review comparisons at mobile and desktop
 widths. No search rankings or rich-result eligibility are implied by the metadata.
+
+The shared comparison suite and frozen profiles are described in `benchmarks/README.md`.
+`data/runtime-comparison-2026-10-12.json` retains all selected outcomes and raw timing samples;
+`render-runtime-results.py` turns it into charts, a compatibility matrix and pairwise recommendations.
+Never count a compile failure as a passing capability or display a time for wrong output. The
+24-probe denominator is the selected shared suite, not Test262 or the 361-package corpus.

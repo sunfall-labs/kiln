@@ -1,0 +1,122 @@
+[
+  {
+    "id": "closure",
+    "group": "language",
+    "path": "benchmarks/compat/closure.ts"
+  },
+  {
+    "id": "private-fields",
+    "group": "language",
+    "path": "benchmarks/compat/private-fields.ts"
+  },
+  {
+    "id": "prototype-accessor",
+    "group": "language",
+    "path": "benchmarks/compat/prototype-accessor.ts"
+  },
+  {
+    "id": "proxy-trap",
+    "group": "language",
+    "path": "benchmarks/compat/proxy-trap.ts"
+  },
+  {
+    "id": "dynamic-eval",
+    "group": "language",
+    "path": "benchmarks/compat/dynamic-eval.ts"
+  },
+  {
+    "id": "new-function",
+    "group": "language",
+    "path": "benchmarks/compat/new-function.ts"
+  },
+  {
+    "id": "map-set",
+    "group": "language",
+    "path": "benchmarks/compat/map-set.ts"
+  },
+  {
+    "id": "sparse-array",
+    "group": "language",
+    "path": "benchmarks/compat/sparse-array.ts"
+  },
+  {
+    "id": "regexp-unicode",
+    "group": "language",
+    "path": "benchmarks/compat/regexp-unicode.ts"
+  },
+  {
+    "id": "json-reviver",
+    "group": "language",
+    "path": "benchmarks/compat/json-reviver.ts"
+  },
+  {
+    "id": "typed-array",
+    "group": "language",
+    "path": "benchmarks/compat/typed-array.ts"
+  },
+  {
+    "id": "bigint",
+    "group": "language",
+    "path": "benchmarks/compat/bigint.ts"
+  },
+  {
+    "id": "promise-order",
+    "group": "language",
+    "path": "benchmarks/compat/promise-order.ts"
+  },
+  {
+    "id": "error-cause",
+    "group": "language",
+    "path": "benchmarks/compat/error-cause.ts"
+  },
+  {
+    "id": "structured-clone",
+    "group": "host",
+    "path": "benchmarks/compat/structured-clone.ts"
+  },
+  {
+    "id": "utf8",
+    "group": "host",
+    "path": "benchmarks/compat/utf8.ts"
+  },
+  {
+    "id": "url-search",
+    "group": "host",
+    "path": "benchmarks/compat/url-search.ts"
+  },
+  {
+    "id": "node-path",
+    "group": "host",
+    "path": "benchmarks/compat/node-path.ts"
+  },
+  {
+    "id": "node-buffer",
+    "group": "host",
+    "path": "benchmarks/compat/node-buffer.ts"
+  },
+  {
+    "id": "node-fs",
+    "group": "host",
+    "path": "benchmarks/compat/node-fs.ts"
+  },
+  {
+    "id": "npm-semver",
+    "group": "npm",
+    "path": "benchmarks/compat/npm-semver.ts"
+  },
+  {
+    "id": "npm-lodash-get",
+    "group": "npm",
+    "path": "benchmarks/compat/npm-lodash-get.ts"
+  },
+  {
+    "id": "npm-zod",
+    "group": "npm",
+    "path": "benchmarks/compat/npm-zod.ts"
+  },
+  {
+    "id": "npm-effect",
+    "group": "npm",
+    "path": "benchmarks/compat/npm-effect.ts"
+  }
+]

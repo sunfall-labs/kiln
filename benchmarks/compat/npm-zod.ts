@@ -1,0 +1,1 @@
+import { z } from 'zod'; const schema=z.object({name:z.string(),age:z.number().int().min(0)}); console.log(JSON.stringify([schema.parse({name:'Ada',age:42}),schema.safeParse({name:'Ada',age:-1}).success]));
