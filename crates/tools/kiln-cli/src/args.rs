@@ -31,9 +31,17 @@ const DEFAULT_WATCH_INTERVAL: Duration = Duration::from_millis(25);
 const MIN_WATCH_INTERVAL_MS: u64 = 1;
 const MAX_WATCH_INTERVAL_MS: u64 = 2_000;
 
+/// What `kiln build` compiles with when `--profile` is not given. A build is the thing that gets
+/// shipped, so it is optimized (a hello-world is 9 MB here and 28 MB at `native-dev`);
+/// `kiln run --native` is the edit-run loop and keeps the fast-to-compile `native-dev` default.
+const BUILD_PROFILE: NativeProfile = NativeProfile::Release;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Parsed {
+    /// `kiln --help`, `kiln help`: the overview of every command.
     Help,
+    /// `kiln <command> --help`, `kiln help <command>`: that command's usage and only its flags.
+    CommandHelp(&'static str),
     Version,
     Run(Invocation),
 }
@@ -163,7 +171,10 @@ where
     let mut changed = false;
     let mut parse_only = false;
     let mut node = false;
-    let mut wall_clock = false;
+    // `kiln run` shows real time unless `--clock virtual` asks for the deterministic clock
+    // (ADR 0044); every other command that runs code (`test`, the harnesses) keeps the virtual
+    // clock because it never reaches this flag.
+    let mut wall_clock = true;
     let mut clock_specified = false;
     let mut native = false;
     let mut output: Option<PathBuf> = None;
@@ -184,6 +195,7 @@ where
     let mut list = false;
     let mut cases = None;
     let mut only_positional = false;
+    let mut help_requested = false;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -198,14 +210,14 @@ where
         match flag.as_str() {
             "--" => only_positional = true,
             "-h" | "--help" => {
-                if positional.len() >= 2 && positional[0] == "run" {
+                if passes_arguments_through(&positional) {
                     positional.push(arg);
                 } else {
-                    return Ok(Parsed::Help);
+                    help_requested = true;
                 }
             }
             "-V" | "--version" => {
-                if positional.len() >= 2 && positional[0] == "run" {
+                if passes_arguments_through(&positional) {
                     positional.push(arg);
                 } else {
                     return Ok(Parsed::Version);
@@ -322,30 +334,42 @@ where
                 pgo_use = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
             }
             _ => {
-                if positional.len() >= 2 && positional[0] == "run" {
+                if passes_arguments_through(&positional) {
                     positional.push(arg);
                 } else {
-                    return Err(Error::usage(format!("unknown option `{arg}`")));
+                    return Err(unknown_option(&flag, &arg));
                 }
             }
         }
+    }
+
+    if help_requested {
+        return match positional.first().map(String::as_str) {
+            None => Ok(Parsed::Help),
+            // `kiln nonsense --help` has always printed the overview rather than complaining.
+            Some(name) => Ok(command_topic(name).map_or(Parsed::Help, Parsed::CommandHelp)),
+        };
     }
 
     let mut positional = positional.into_iter();
     let Some(name) = positional.next() else {
         return Err(Error::usage("no command given"));
     };
+    if name == "help" {
+        return match positional.next() {
+            None => Ok(Parsed::Help),
+            Some(topic) => match command_topic(&topic) {
+                Some(topic) => Ok(Parsed::CommandHelp(topic)),
+                None => Err(unknown_command(&topic)),
+            },
+        };
+    }
 
     if native && name != "run" {
         return Err(Error::usage("--native only applies to `kiln run`"));
     }
     if clock_specified && name != "run" {
         return Err(Error::usage("--clock only applies to `kiln run`"));
-    }
-    if wall_clock && !node {
-        return Err(Error::usage(
-            "--clock wall requires --node for host-clock scheduling",
-        ));
     }
     if shared && name != "build" {
         return Err(Error::usage("--shared only applies to `kiln build`"));
@@ -474,7 +498,7 @@ where
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             node,
             // The default is `kiln build`'s, so the two explain the same build unless told not to.
-            explain_parallel: explain_parallel.then(|| profile.unwrap_or_default()),
+            explain_parallel: explain_parallel.then(|| profile.unwrap_or(BUILD_PROFILE)),
         },
         "run" => {
             let Some(path) = positional.next() else {
@@ -500,7 +524,7 @@ where
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             includes,
             output,
-            profile: profile.unwrap_or_default(),
+            profile: profile.unwrap_or(BUILD_PROFILE),
             shared,
             node,
             march_native,
@@ -568,9 +592,7 @@ where
             let args = positional.collect();
             Command::Exec { binary, args }
         }
-        other => {
-            return Err(Error::usage(format!("unknown command `{other}`")));
-        }
+        other => return Err(unknown_command(other)),
     };
 
     // Flags that cannot mean anything for the chosen command are rejected rather than
@@ -738,76 +760,379 @@ where
     }
 }
 
-pub const HELP: &str = "\
-kiln - an incremental compiler for JavaScript and TypeScript
+/// Everything that follows `kiln run <file>` or `kiln x <binary>` belongs to that program, so a
+/// flag kiln does not know (and `--help` / `--version`) is theirs, not a mistake.
+fn passes_arguments_through(positional: &[String]) -> bool {
+    positional.len() >= 2 && matches!(positional[0].as_str(), "run" | "x" | "exec")
+}
 
-kiln runs a deliberately growing JavaScript/TypeScript subset through an incremental
-compiler and interpreter. `check` accepts the full syntax understood by the frontend;
-`run` reports source-ranged diagnostics for execution features not implemented yet.
+/// Every command name the parser accepts, for "did you mean" and for `kiln help <command>`.
+const COMMANDS: &[&str] = &[
+    "run", "build", "check", "watch", "x", "exec", "test", "project", "cache", "daemon", "stats",
+    "help",
+];
+
+/// Every flag the parser accepts, for "did you mean".
+const FLAGS: &[&str] = &[
+    "--help",
+    "--version",
+    "--one-shot",
+    "--socket",
+    "--interval",
+    "--changed",
+    "--list",
+    "--cases",
+    "--parse-only",
+    "--node",
+    "--clock",
+    "--native",
+    "--shared",
+    "--dry-run",
+    "--output",
+    "--include",
+    "--out",
+    "--profile",
+    "--march",
+    "--max-steps",
+    "--workers",
+    "--explain",
+    "--no-kiln-extensions",
+    "--explain-parallel",
+    "--static",
+    "--pgo-generate",
+    "--pgo-use",
+];
+
+/// The help topic a command name selects. `exec` is `x`; `help` has no page of its own.
+fn command_topic(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "run" => "run",
+        "build" => "build",
+        "check" => "check",
+        "watch" => "watch",
+        "x" | "exec" => "x",
+        "test" => "test",
+        "project" => "project",
+        "cache" => "cache",
+        "daemon" => "daemon",
+        "stats" => "stats",
+        _ => return None,
+    })
+}
+
+fn unknown_command(name: &str) -> Error {
+    match closest(name, COMMANDS) {
+        Some(suggestion) => Error::usage(format!(
+            "unknown command `{name}`; did you mean `{suggestion}`?"
+        )),
+        None => Error::usage(format!("unknown command `{name}`")),
+    }
+}
+
+fn unknown_option(flag: &str, original: &str) -> Error {
+    match closest(flag, FLAGS) {
+        Some(suggestion) => Error::usage(format!(
+            "unknown option `{original}`; did you mean `{suggestion}`?"
+        )),
+        None => Error::usage(format!("unknown option `{original}`")),
+    }
+}
+
+/// The candidate nearest to `input`, if any is near enough to be a plausible typo: within an
+/// edit (a transposition counts as one) per three characters, or a prefix the person stopped
+/// typing at. Nothing is suggested for a word that is simply unrelated.
+fn closest<'a>(input: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    let shown = input.trim_start_matches('-');
+    if shown.is_empty() {
+        return None;
+    }
+    let allowed = (shown.chars().count() / 3).clamp(1, 3);
+    candidates
+        .iter()
+        .copied()
+        .filter_map(|candidate| {
+            let name = candidate.trim_start_matches('-');
+            if shown.len() >= 2 && name.starts_with(shown) && name != shown {
+                return Some((0, candidate));
+            }
+            let distance = edit_distance(input, candidate);
+            (distance <= allowed).then_some((distance, candidate))
+        })
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, candidate)| candidate)
+}
+
+/// Optimal-string-alignment distance: insertions, deletions, substitutions, and swapping two
+/// adjacent characters (the commonest typo, `biuld`) each cost one.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut rows = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in rows.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for j in 0..=b.len() {
+        rows[0][j] = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (rows[i - 1][j] + 1)
+                .min(rows[i][j - 1] + 1)
+                .min(rows[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(rows[i - 2][j - 2] + 1);
+            }
+            rows[i][j] = best;
+        }
+    }
+    rows[a.len()][b.len()]
+}
+
+pub const HELP: &str = "\
+kiln - compile JavaScript and TypeScript to native executables; run them instantly with the
+built-in interpreter
 
 usage:
-    kiln [options] <command>
+    kiln <command> [options] [file]
 
-commands:
-    run <file>         compile and execute one module (or use --native)
-    build <file>       compile and link a native executable or shared library
-    check <file>       check one file and report what was recomputed
-    test <directory>   run a Test262 tree or Kiln's local conformance corpus
-    project            summarise the whole project
+everyday commands:
+    run <file> [args]  run a program now (add --native to compile it first)
+    build <file>       compile a program to a native executable, ./<name> by default
+    check <file>       type-check a file and report what is wrong with it
+    watch <file>       run <file> now, and again whenever it changes
+    x <binary> [args]  run a package binary from node_modules/.bin or PATH
+
+project commands:
+    test <directory>   run a directory of tests (Test262 or a kiln conformance corpus)
+    project            summarise every source file in the project
+    cache gc           trim the build cache back under its size budget
+    daemon <action>    start | stop | status the background compile server
     stats              print the daemon's recompute counters
-    watch <file>       run <file> now and rerun it whenever its bytes change on disk
-    daemon <action>    start | stop | status | serve
-    cache <action>     gc
-    x <binary> [args]  execute a package binary from node_modules/.bin or PATH
 
-options:
-    --one-shot         run the pipeline in this process; never contact a daemon.
-                       Slower per invocation, but reproducible and self-contained,
-                       which is what CI wants.
-    --socket <path>    daemon socket to use. Defaults to a path under $TMPDIR
-                       derived from the working directory, so one daemon serves
-                       one project. $KILN_SOCKET sets the same thing.
-    --interval <ms>    how long `watch` waits for a file to stop changing before it
-                       reruns it (default 25, min 1, max 2000). `watch` is
-                       event-driven, so this coalesces one save's burst of writes;
-                       it is not a polling cadence.
-    --list             with `test`, list file/variant IDs without running tests
-    --cases <json>     with `test`, run exactly the file IDs in a JSON array
-    --changed          with `test`, run failures, smoke, and affected tests only
-    --parse-only       with `test`, classify parser outcomes without interpreting
-    --node             with `run`, `build`, or `test`, install the Tokio-owned Node compatibility Adapter
-    --clock <policy>   choose `virtual` (default) or `wall` timer scheduling for `run`
-    --native           with `run`, execute through the native backend
-    --shared            with `build`, write a shared library for embedding
-    --include <module>  with `build`, retain an additional lazy module (repeatable)
-    --dry-run          with `cache gc`, report the sweep without deleting anything
-    --output <path>    with `build`, write the native executable or shared library here
-    --explain-parallel with `build` or `check`, report every parallelMap call site and whether
-                       it runs in parallel, or the rule that kept it sequential.
-                       `check` answers without compiling; --profile picks the build
-    --out <path>       with `test`, write schema-1 conformance results here
-    --profile <name>   native-dev, native-check, native-release, native-release-size,
-                       or native-profile (native-profile is native-release plus gprof
-                       instrumentation; see scripts/profile-native.sh)
-    --march=native     with `build` or native `run`, generate host-specific CPU
-                       instructions rather than a portable baseline
-    --static           with `build` or native `run`, link a static binary (Linux only)
-    --pgo-generate <dir> with `build` or native `run`, instrument binary to generate PGO profiles
-    --pgo-use <path>   with `build` or native `run`, optimize binary using Clang PGO profile
-    --max-steps <n>    with `run`, refuse after n interpreter steps. Unbounded by
-                       default: a program you are running yourself is not one this
-                       tool needs protecting from. The conformance corpus keeps its
-                       own bound, which is where the guarantee is actually needed.
+global options:
+    --one-shot         do the work in this process and never contact the daemon: slower
+                       per invocation, but self-contained, which is what CI wants
+    --socket <path>    daemon socket to use (default: derived from the working directory,
+                       one daemon per project; $KILN_SOCKET sets the same thing)
     -h, --help         show this help
-    -V, --version      show version and protocol information
+    -V, --version      show the version
 
-run, check, test, project, stats, watch and cache gc start the daemon if it is not already
-running: the everyday loop should not need a separate step.
+The everyday commands (run, build, check, watch, ...) start the daemon automatically when it
+is not running. It exits after 15 minutes with no client connected; set
+KILN_DAEMON_IDLE_SECS to change the period, 0 to disable.
+
+run `kiln <command> --help` for a command's options.
 
 exit status:
     0    success; for `daemon status`, the daemon is running
     1    failure; for `daemon status`, no daemon is running
     2    the command line was wrong
+";
+
+/// The `--help` page of one command: its usage and only the flags that apply to it.
+pub fn command_help(topic: &str) -> String {
+    let (body, node_note) = match topic {
+        "run" => (RUN_HELP, true),
+        "build" => (BUILD_HELP, true),
+        "check" => (CHECK_HELP, true),
+        "watch" => (WATCH_HELP, true),
+        "test" => (TEST_HELP, false),
+        "x" => (X_HELP, false),
+        "project" => (PROJECT_HELP, false),
+        "cache" => (CACHE_HELP, false),
+        "daemon" => (DAEMON_HELP, false),
+        "stats" => (STATS_HELP, false),
+        _ => return HELP.to_owned(),
+    };
+    let mut out = body.to_owned();
+    if node_note {
+        out.push_str(NODE_HELP);
+    }
+    out.push_str(COMMON_HELP);
+    out
+}
+
+const NODE_HELP: &str = "
+node compatibility:
+    kiln turns the Node layer on by itself when the program (or a file it imports) uses a
+    Node built-in -- `node:fs`, `import \"path\"`, `require(\"http\")` -- or when the project
+    has a package.json, tsconfig.json, jsconfig.json or node_modules directory. The layer
+    adds `process`, `require`, `Buffer`, the `node:` modules, CommonJS and node_modules
+    package resolution (package.json `exports`/`main`). --node forces it on.
+";
+
+const COMMON_HELP: &str = "
+global options:
+    --one-shot            do the work in this process; never contact the daemon
+    --socket <path>       daemon socket to use ($KILN_SOCKET sets the same thing)
+    -h, --help            show this help
+";
+
+const RUN_HELP: &str = "\
+kiln run - run a program now
+
+usage:
+    kiln run [options] <file> [args...]
+
+Runs <file> with the built-in interpreter: no build step. Arguments after the file go to the
+program. Output is streamed as it is written, so a server's \"listening\" line appears at once.
+Time is real time: `Date`, `performance.now` and timers (`setTimeout`) behave as they would
+under node.
+
+options:
+    --native              compile the program to native code first and run that; slower to
+                          start, much faster to run
+    --node                force the Node compatibility layer on
+    --clock <policy>      `wall` (default) for real time, or `virtual` for the deterministic
+                          clock, where time only moves when a timer fires and every run
+                          prints the same thing
+    --max-steps <n>       stop with an error after n interpreter steps (default: no limit)
+    --workers <n>         run n copies of the program at once on one thread each, sharing
+                          listening sockets
+    --profile <name>      with --native: native-dev (default, quickest to compile),
+                          native-check, native-release, native-release-size, native-profile
+    --march=native        with --native: use the host CPU's instructions, not a portable baseline
+    --static              with --native: link a static binary (Linux only)
+    --pgo-generate <dir>  with --native: instrument the binary to write PGO profiles
+    --pgo-use <path>      with --native: optimize with a Clang PGO profile
+";
+
+const BUILD_HELP: &str = "\
+kiln build - compile a program to a native executable
+
+usage:
+    kiln build [options] <file>
+
+Compiles <file> and everything it imports into one native executable and prints where it went.
+The default output is ./<name> in the current directory (src/main.ts -> ./main); the default
+profile is native-release.
+
+options:
+    --output <path>       write the executable (or library) here instead of ./<name>
+    --profile <name>      native-release (default), native-release-size (smaller),
+                          native-dev (fastest to compile), native-check, or native-profile
+                          (release plus gprof instrumentation; see scripts/profile-native.sh)
+    --shared              write a shared library for embedding (lib<name>.so, .dylib or .dll)
+                          instead of an executable
+    --node                force the Node compatibility layer on
+    --include <module>    also link a module the program loads lazily (repeatable; implies --node)
+    --workers <n|auto>    worker count the executable uses when KILN_WORKERS is unset
+    --march=native        use the host CPU's instructions, not a portable baseline
+    --static              link a static binary (Linux only)
+    --explain             print what the compiler decided: the cache, then each parallelMap site
+    --explain-parallel    print only the parallelMap section of the explanation
+    --no-kiln-extensions  build a binary without kiln's own prototype extensions
+    --pgo-generate <dir>  instrument the binary to write PGO profiles
+    --pgo-use <path>      optimize with a Clang PGO profile
+";
+
+const CHECK_HELP: &str = "\
+kiln check - type-check a file
+
+usage:
+    kiln check [options] <file>
+
+Reports diagnostics for <file> and what had to be recomputed to find them. Exits 1 when there
+are diagnostics.
+
+options:
+    --node                force the Node compatibility layer on
+    --explain-parallel    after the check, report every parallelMap site of the native build
+                          and what it decided (nothing is compiled)
+    --profile <name>      with --explain-parallel: the build profile to explain
+                          (default native-release, as `kiln build`)
+";
+
+const WATCH_HELP: &str = "\
+kiln watch - run a program, and again whenever it changes
+
+usage:
+    kiln watch [options] <file>
+
+options:
+    --interval <ms>       how long to wait for a file to stop changing before rerunning
+                          (default 25, min 1, max 2000); this coalesces one save's burst of
+                          writes, it is not a polling cadence
+    --node                force the Node compatibility layer on
+";
+
+const TEST_HELP: &str = "\
+kiln test - run a directory of tests
+
+usage:
+    kiln test [options] <directory>
+
+Runs a Test262 tree or a kiln conformance corpus (a directory with a manifest.toml). Time is
+virtual, so every run of a test gives the same answer.
+
+options:
+    --node                install the Node compatibility layer (corpora that need it say so)
+    --list                list file/variant IDs without running anything
+    --cases <json>        run exactly the file IDs in a JSON array
+    --changed             run failures, smoke tests and tests affected by changes only
+    --parse-only          classify parser outcomes without interpreting
+    --out <path>          write the results as JSON here
+";
+
+const X_HELP: &str = "\
+kiln x - run a package binary
+
+usage:
+    kiln x <binary> [args...]
+
+Runs <binary> from node_modules/.bin (searching upward from the current directory), or from
+PATH. Everything after the binary name goes to it.
+";
+
+const PROJECT_HELP: &str = "\
+kiln project - summarise the project
+
+usage:
+    kiln project
+
+Reads every JavaScript and TypeScript source under the project root and prints a summary.
+";
+
+const CACHE_HELP: &str = "\
+kiln cache - manage the build cache
+
+usage:
+    kiln cache gc [--dry-run]
+
+actions:
+    gc                 sweep the project's build cache back under its size budget
+
+options:
+    --dry-run          report what the sweep would delete, and delete nothing
+";
+
+const DAEMON_HELP: &str = "\
+kiln daemon - the background compile server
+
+usage:
+    kiln daemon <start | stop | status | serve>
+
+The daemon keeps compiler state warm between commands, and the everyday commands start it when
+it is not running, so you rarely need this. One daemon serves one project.
+
+The daemon exits after 15 minutes with no client connected; set KILN_DAEMON_IDLE_SECS to
+change the period, 0 to disable.
+
+actions:
+    start              start the daemon
+    stop               stop it
+    status             exit 0 if it is running, 1 if not
+    serve              run the accept loop in the foreground (what `start` spawns)
+";
+
+const STATS_HELP: &str = "\
+kiln stats - the daemon's recompute counters
+
+usage:
+    kiln stats
+
+Prints how much parsing and compiling the daemon has done and how much it avoided.
 ";
 
 /// `kiln run --workers <n>`: how many realms the command itself runs.
@@ -984,7 +1309,7 @@ mod tests {
             run(&["build", "src/main.ts", "--shared"]).command,
             Command::Build {
                 shared: true,
-                profile: NativeProfile::Dev,
+                profile: NativeProfile::Release,
                 ..
             }
         ));
@@ -1001,7 +1326,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 args: Vec::new(),
                 node: false,
-                wall_clock: false,
+                wall_clock: true,
                 native: true,
                 profile: NativeProfile::Check,
                 steps: StepBudget::Unmetered,
@@ -1029,31 +1354,112 @@ mod tests {
     }
 
     #[test]
-    fn wall_clock_requires_its_host_adapter() {
-        assert!(
-            parse(
-                ["run", "main.ts", "--clock", "wall"]
-                    .into_iter()
-                    .map(str::to_owned)
-            )
-            .is_err()
+    fn build_defaults_to_release_and_run_native_keeps_dev() {
+        assert!(matches!(
+            run(&["build", "a.ts"]).command,
+            Command::Build {
+                profile: NativeProfile::Release,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["build", "a.ts", "--profile", "native-dev"]).command,
+            Command::Build {
+                profile: NativeProfile::Dev,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["run", "a.ts", "--native"]).command,
+            Command::Run {
+                profile: NativeProfile::Dev,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn per_command_help_is_selected_by_flag_or_by_help_command() {
+        assert_eq!(
+            parse_args(&["build", "--help"]).unwrap(),
+            Parsed::CommandHelp("build")
         );
-        assert!(
-            parse(
-                ["run", "main.ts", "--clock", "wall", "--node"]
-                    .into_iter()
-                    .map(str::to_owned)
-            )
-            .is_ok()
+        assert_eq!(
+            parse_args(&["--help", "build"]).unwrap(),
+            Parsed::CommandHelp("build")
         );
-        assert!(
-            parse(
-                ["run", "main.ts", "--clock", "virtual"]
-                    .into_iter()
-                    .map(str::to_owned)
-            )
-            .is_ok()
+        assert_eq!(
+            parse_args(&["help", "build"]).unwrap(),
+            Parsed::CommandHelp("build")
         );
+        assert_eq!(
+            parse_args(&["help", "exec"]).unwrap(),
+            Parsed::CommandHelp("x")
+        );
+        assert_eq!(
+            parse_args(&["run", "-h"]).unwrap(),
+            Parsed::CommandHelp("run")
+        );
+        assert_eq!(parse_args(&["help"]).unwrap(), Parsed::Help);
+        assert_eq!(parse_args(&["--help"]).unwrap(), Parsed::Help);
+        // After the program, `--help` belongs to the program.
+        assert!(matches!(
+            run(&["run", "a.ts", "--help"]).command,
+            Command::Run { ref args, .. } if args == &["--help"]
+        ));
+        assert!(usage_error(&["help", "biuld"]).contains("did you mean `build`?"));
+    }
+
+    #[test]
+    fn mistyped_commands_and_flags_suggest_the_closest_valid_one() {
+        assert!(usage_error(&["biuld"]).contains("did you mean `build`?"));
+        assert!(usage_error(&["chek", "a.ts"]).contains("did you mean `check`?"));
+        assert!(usage_error(&["wach", "a.ts"]).contains("did you mean `watch`?"));
+        assert!(usage_error(&["bui", "a.ts"]).contains("did you mean `build`?"));
+        assert!(
+            usage_error(&["build", "a.ts", "--outptu", "x"]).contains("did you mean `--output`?")
+        );
+        assert!(usage_error(&["build", "a.ts", "--shard"]).contains("did you mean `--shared`?"));
+        // Unrelated words get no guess.
+        assert!(!usage_error(&["frobnicate"]).contains("did you mean"));
+        assert!(!usage_error(&["build", "a.ts", "--zzzzzz"]).contains("did you mean"));
+        assert_eq!(edit_distance("biuld", "build"), 1);
+        assert_eq!(edit_distance("", "run"), 3);
+    }
+
+    #[test]
+    fn run_uses_the_wall_clock_unless_virtual_is_asked_for() {
+        // Real time is the default in every mode, with or without the Node adapter.
+        for extra in [&[][..], &["--node"][..], &["--native"][..]] {
+            let mut argv = vec!["run", "main.ts"];
+            argv.extend_from_slice(extra);
+            assert!(
+                matches!(
+                    run(&argv).command,
+                    Command::Run {
+                        wall_clock: true,
+                        ..
+                    }
+                ),
+                "{argv:?}"
+            );
+        }
+        // `--clock wall` no longer needs `--node`.
+        assert!(matches!(
+            run(&["run", "main.ts", "--clock", "wall"]).command,
+            Command::Run {
+                node: false,
+                wall_clock: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            run(&["run", "main.ts", "--clock", "virtual"]).command,
+            Command::Run {
+                wall_clock: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1141,7 +1547,7 @@ mod tests {
             run(&["run", "a.mjs", "--node"]).command,
             Command::Run {
                 node: true,
-                wall_clock: false,
+                wall_clock: true,
                 native: false,
                 ..
             }
@@ -1269,7 +1675,7 @@ mod tests {
             run(&["run", "server.mjs", "--node"]).command,
             Command::Run {
                 node: true,
-                wall_clock: false,
+                wall_clock: true,
                 native: false,
                 ..
             }
@@ -1279,7 +1685,7 @@ mod tests {
             run(&["run", "server.mjs", "--node", "--native"]).command,
             Command::Run {
                 node: true,
-                wall_clock: false,
+                wall_clock: true,
                 native: true,
                 ..
             }
@@ -1429,7 +1835,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 includes: Vec::new(),
                 output: None,
-                profile: NativeProfile::Dev,
+                profile: NativeProfile::Release,
                 shared: false,
                 node: false,
                 march_native: true,
@@ -1448,7 +1854,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 includes: Vec::new(),
                 output: None,
-                profile: NativeProfile::Dev,
+                profile: NativeProfile::Release,
                 shared: false,
                 node: false,
                 march_native: true,
@@ -1467,7 +1873,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 args: Vec::new(),
                 node: false,
-                wall_clock: false,
+                wall_clock: true,
                 native: true,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,
@@ -1516,7 +1922,7 @@ mod tests {
         assert_eq!(check(&["check", "a.ts"]), None);
         assert_eq!(
             check(&["check", "a.ts", "--explain-parallel"]),
-            Some(NativeProfile::default())
+            Some(NativeProfile::Release)
         );
         assert_eq!(
             check(&[
@@ -1557,7 +1963,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 includes: Vec::new(),
                 output: None,
-                profile: NativeProfile::Dev,
+                profile: NativeProfile::Release,
                 shared: false,
                 node: false,
                 march_native: false,
@@ -1581,7 +1987,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 includes: Vec::new(),
                 output: None,
-                profile: NativeProfile::Dev,
+                profile: NativeProfile::Release,
                 shared: false,
                 node: false,
                 march_native: false,
@@ -1608,7 +2014,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 args: Vec::new(),
                 node: false,
-                wall_clock: false,
+                wall_clock: true,
                 native: true,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,
@@ -1631,7 +2037,7 @@ mod tests {
                 path: PathBuf::from("src/main.ts"),
                 includes: Vec::new(),
                 output: None,
-                profile: NativeProfile::Dev,
+                profile: NativeProfile::Release,
                 shared: false,
                 node: false,
                 march_native: false,
@@ -1668,7 +2074,7 @@ mod tests {
                 path: PathBuf::from("cli.ts"),
                 args: vec!["--version".to_string()],
                 node: true,
-                wall_clock: false,
+                wall_clock: true,
                 native: false,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,
@@ -1685,7 +2091,7 @@ mod tests {
                 path: PathBuf::from("app.ts"),
                 args: vec!["cmd".to_string(), "--flag".to_string(), "val".to_string()],
                 node: false,
-                wall_clock: false,
+                wall_clock: true,
                 native: false,
                 profile: NativeProfile::Dev,
                 steps: StepBudget::Unmetered,

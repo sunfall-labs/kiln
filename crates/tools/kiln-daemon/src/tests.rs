@@ -2567,6 +2567,76 @@ fn production_wall_clock_reads_system_time_across_immediate_turns() {
     within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
 }
 
+#[test]
+fn wall_clock_runs_without_the_node_adapter() {
+    let fixture = Fixture::empty();
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let epoch_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current epoch")
+            .as_secs_f64()
+            * 1000.0
+    };
+    // A module (graph path) and a script (single-program path), both without `node`.
+    for (path, text) in [
+        (
+            "plain-clock.mjs",
+            "export {};\nconsole.log(Date.now());\nsetTimeout(() => console.log(Date.now()), 40);\n",
+        ),
+        (
+            "plain-clock.js",
+            "console.log(Date.now());\nsetTimeout(function () { console.log(Date.now()); }, 40);\n",
+        ),
+    ] {
+        std::fs::write(fixture.dir.join(path), text).expect("write clock source");
+        client
+            .request(&Request::SetSource {
+                source_view: client.source_view(),
+                path: path.to_owned(),
+                text: text.to_owned(),
+            })
+            .expect("set clock source");
+        let before = epoch_ms().floor();
+        let response = client
+            .request(&Request::Run {
+                stream_output: false,
+                steps: StepBudget::Unmetered,
+                source_view: client.source_view(),
+                path: path.to_owned(),
+                project_root: fixture.dir.to_string_lossy().into_owned(),
+                node: false,
+                wall_clock: true,
+                args: Vec::new(),
+            })
+            .expect("run clock source");
+        let after = epoch_ms().ceil();
+        let Response::Ran(summary) = response else {
+            panic!("expected run response, got {response:?}");
+        };
+        assert!(summary.succeeded, "{path}: {:?}", summary.diagnostics);
+        let readings: Vec<f64> = summary
+            .stdout
+            .lines()
+            .map(|line| line.parse().expect("numeric epoch time"))
+            .collect();
+        assert_eq!(readings.len(), 2, "{path}: {}", summary.stdout);
+        for reading in &readings {
+            assert!(
+                *reading >= before && *reading <= after,
+                "{path}: epoch {reading} outside {before}..={after}"
+            );
+        }
+        assert!(readings[1] - readings[0] >= 30.0, "{path}: {readings:?}");
+    }
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
 #[cfg(unix)]
 #[test]
 fn node_launch_evaluates_preloads_and_runtime_created_esm_in_one_module_realm() {
@@ -3987,4 +4057,100 @@ fn interpreted_argv_names_the_interpreter_then_the_entry() {
     assert_eq!(argv_with_args[1], "/projects/app/main.mjs");
     assert_eq!(argv_with_args[2], "--flag");
     assert_eq!(argv_with_args[3], "arg");
+}
+
+fn serve_with_idle(fixture: &Fixture, idle: Option<Duration>) -> JoinHandle<()> {
+    let daemon = Daemon::bind_with(&fixture.socket, StubEngine::default())
+        .expect("bind")
+        .with_idle_timeout(idle);
+    std::thread::spawn(move || daemon.serve())
+}
+
+fn wait_until_finished(serving: &JoinHandle<()>, limit: Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        if serving.is_finished() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    serving.is_finished()
+}
+
+#[test]
+fn an_idle_daemon_exits_and_unlinks_its_socket() {
+    let fixture = Fixture::empty();
+    let serving = serve_with_idle(&fixture, Some(Duration::from_millis(300)));
+    // Served a request first: idleness is measured from the last client, not from startup.
+    fixture.client().handshake().expect("handshake");
+    assert!(
+        wait_until_finished(&serving, Duration::from_secs(10)),
+        "an idle daemon must exit"
+    );
+    serving.join().expect("clean exit");
+    assert!(!fixture.socket.exists(), "the socket must be unlinked");
+    assert!(
+        Client::connect(&fixture.socket).is_err(),
+        "nothing may answer after the exit"
+    );
+}
+
+#[test]
+fn a_daemon_that_never_had_a_client_still_goes_idle() {
+    let fixture = Fixture::empty();
+    let serving = serve_with_idle(&fixture, Some(Duration::from_millis(200)));
+    assert!(wait_until_finished(&serving, Duration::from_secs(10)));
+    assert!(!fixture.socket.exists());
+}
+
+#[test]
+fn an_open_connection_keeps_the_daemon_alive() {
+    // A `watch` session holds one connection open between saves and sends nothing for as long as
+    // the files do not change.
+    let fixture = Fixture::empty();
+    let idle = Duration::from_millis(300);
+    let serving = serve_with_idle(&fixture, Some(idle));
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+
+    std::thread::sleep(idle * 4);
+    assert!(!serving.is_finished(), "exited under an open connection");
+    client.handshake().expect("the daemon still answers");
+
+    // The clock starts when the last client leaves, not before.
+    drop(client);
+    assert!(
+        wait_until_finished(&serving, Duration::from_secs(10)),
+        "the daemon must go idle once the last client is gone"
+    );
+    assert!(!fixture.socket.exists());
+}
+
+#[test]
+fn a_new_request_restarts_the_idle_clock() {
+    let fixture = Fixture::empty();
+    let idle = Duration::from_millis(600);
+    let serving = serve_with_idle(&fixture, Some(idle));
+    for _ in 0..4 {
+        std::thread::sleep(idle / 3);
+        fixture.client().handshake().expect("still serving");
+    }
+    assert!(!serving.is_finished());
+    assert!(wait_until_finished(&serving, Duration::from_secs(10)));
+}
+
+#[test]
+fn a_zero_idle_period_disables_the_exit() {
+    let mut fixture = Fixture::empty();
+    fixture.serving = Some(serve_with_idle(&fixture, Some(Duration::ZERO)));
+    fixture.stop = None;
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!fixture.serving.as_ref().unwrap().is_finished());
+    fixture.client().handshake().expect("still serving");
+    // `Fixture::stop` needs a handle; ask for the shutdown the way a client would.
+    fixture
+        .client()
+        .raw_request(&Request::Shutdown)
+        .expect("shutdown");
+    fixture.stop();
 }

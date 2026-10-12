@@ -325,7 +325,8 @@ pub(crate) fn run_source_with_manifest(
         node,
         steps,
         stream,
-        false,
+        // `watch` is a run the person is looking at: real time, as for `kiln run`.
+        true,
     )
 }
 
@@ -421,7 +422,7 @@ pub(crate) fn run_watched_source_at_view(
         SourceUpdate::Stale(current) => return Err(ViewError::Stale(current)),
     };
     let summary = match backend
-        .run_at_view(
+        .run_at_view_with_clock(
             canonical.to_owned(),
             project_root_string(project_root)?,
             Vec::new(),
@@ -431,6 +432,7 @@ pub(crate) fn run_watched_source_at_view(
             StepBudget::Unmetered,
             source_view,
             false,
+            true,
         )
         .map_err(ViewError::Other)?
     {
@@ -592,13 +594,13 @@ pub fn build(
             source_view,
         )?;
     }
-    // The daemon owns omitted output naming because only it has selected and probed the native
-    // toolchain target. Explicit paths are resolved here as before and remain caller-controlled.
-    let output = requested_output
-        .map(|requested| {
-            native_output_path(Path::new(&canonical), project_root, Some(requested), shared)
-        })
-        .transpose()?;
+    // `kiln build` publishes next to where it was run -- `src/main.ts` becomes `./main` -- rather
+    // than under the hidden `.kiln/bin` that `kiln run --native` uses for its throwaway binaries.
+    let output = Some(native_output_path(
+        Path::new(&canonical),
+        requested_output,
+        shared,
+    )?);
     if let Some(output) = output.as_deref()
         && (Path::new(output) == Path::new(&canonical)
             || std::fs::canonicalize(output)
@@ -639,7 +641,11 @@ pub fn build(
             }
         };
         return Ok(Output {
-            text: render::native_shared_build(&display, &summary),
+            text: if explain {
+                render::native_shared_build(&display, &summary)
+            } else {
+                render::native_shared_build_brief(&summary, render::profile_name(profile))
+            },
             error_text: String::new(),
             notes: project_notes,
             exit_code: 0,
@@ -696,7 +702,11 @@ pub fn build(
         project_notes.push(fixed_worker_count_warning(count));
     }
     Ok(Output {
-        text: render::native_build(&display, &summary),
+        text: if explain {
+            render::native_build(&display, &summary)
+        } else {
+            render::native_build_brief(&summary, render::profile_name(profile))
+        },
         error_text: String::new(),
         notes: project_notes,
         exit_code: 0,
@@ -827,27 +837,61 @@ fn project_root_string(root: &Path) -> Result<String> {
         .ok_or_else(|| Error::BadInput(format!("path is not valid UTF-8: {}", root.display())))
 }
 
-fn native_output_path(
-    source: &Path,
-    root: &Path,
-    requested: Option<&Path>,
-    shared: bool,
-) -> Result<String> {
-    let output = if let Some(requested) = requested {
-        if requested.is_absolute() {
-            requested.to_path_buf()
-        } else {
-            root.join(requested)
-        }
-    } else if shared {
-        kiln_daemon::default_native_shared_output(root, source)
-    } else {
-        kiln_daemon::default_native_output(root, source)
+/// Where `kiln build` writes: `--output` (relative to the current directory, as in any shell
+/// tool), else `./<stem>` -- with the platform's executable suffix, or for `--shared` the
+/// platform's library naming (`lib<stem>.so`, `lib<stem>.dylib`, `<stem>.dll`).
+fn native_output_path(source: &Path, requested: Option<&Path>, shared: bool) -> Result<String> {
+    let cwd = std::env::current_dir()
+        .map_err(|source| Error::io("cannot read the current directory", source))?;
+    let output = match requested {
+        Some(requested) if requested.is_absolute() => requested.to_path_buf(),
+        Some(requested) => cwd.join(requested),
+        None => cwd.join(default_build_file_name(source, shared)),
     };
+    if output.is_dir() {
+        return Err(Error::BadInput(format!(
+            "cannot write the build to {}: it is a directory (use --output to choose another name)",
+            output.display()
+        )));
+    }
     output
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| Error::BadInput(format!("path is not valid UTF-8: {}", output.display())))
+}
+
+fn default_build_file_name(source: &Path, shared: bool) -> String {
+    let stem = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("main");
+    // The suffix the daemon would give a default output, so both agree on the platform's naming.
+    let suffix_of = |path: PathBuf| {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_owned)
+    };
+    if shared {
+        let extension = suffix_of(kiln_daemon::default_native_shared_output(
+            Path::new("/"),
+            Path::new("x"),
+        ))
+        .unwrap_or_else(|| "so".to_owned());
+        if extension == "dll" {
+            format!("{stem}.{extension}")
+        } else {
+            format!("lib{stem}.{extension}")
+        }
+    } else {
+        match suffix_of(kiln_daemon::default_native_output(
+            Path::new("/"),
+            Path::new("x"),
+        )) {
+            Some(extension) => format!("{stem}.{extension}"),
+            None => stem.to_owned(),
+        }
+    }
 }
 
 /// The everyday `kiln check`: [`check_explaining`] without the parallel report.
@@ -2233,69 +2277,54 @@ mod tests {
     }
 
     #[test]
-    fn native_output_defaults_preserve_project_relative_directories_and_explicit_paths() {
-        let root = Path::new("/tmp/project");
-        let executable = if cfg!(windows) {
-            "main.ts.exe"
-        } else {
-            "main.ts"
-        };
+    fn build_output_defaults_to_the_stem_in_the_current_directory() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let executable = if cfg!(windows) { "main.exe" } else { "main" };
+        // `src/main.ts` and `tests/main.ts` both become `./main`: the name is the stem, not a
+        // mirror of the source tree (the old `.kiln/bin/src/main.ts`).
+        for source in ["src/main.ts", "main.ts", "/elsewhere/main.js"] {
+            assert_eq!(
+                native_output_path(Path::new(source), None, false).expect("default output"),
+                cwd.join(executable).to_str().expect("utf-8"),
+                "{source}"
+            );
+        }
         assert_eq!(
-            native_output_path(Path::new("src/main.ts"), root, None, false)
-                .expect("default output"),
-            root.join(".kiln")
-                .join("bin")
-                .join("src")
-                .join(executable)
-                .to_str()
-                .expect("utf-8")
+            native_output_path(Path::new("src/main.ts"), Some(Path::new("bin/app")), false)
+                .expect("requested output"),
+            cwd.join("bin").join("app").to_str().expect("utf-8")
         );
+        let absolute = std::env::temp_dir().join("app");
         assert_eq!(
-            native_output_path(Path::new("main.ts"), root, None, false)
-                .expect("root default output"),
-            root.join(".kiln")
-                .join("bin")
-                .join(executable)
-                .to_str()
-                .expect("utf-8")
-        );
-        assert_ne!(
-            native_output_path(Path::new("src/main.ts"), root, None, false)
-                .expect("source default output"),
-            native_output_path(Path::new("tests/main.ts"), root, None, false)
-                .expect("test default output")
-        );
-        assert_eq!(
-            native_output_path(
-                Path::new("src/main.ts"),
-                root,
-                Some(Path::new("bin/app")),
-                false,
-            )
-            .expect("requested output"),
-            root.join("bin").join("app").to_str().expect("utf-8")
+            native_output_path(Path::new("main.ts"), Some(&absolute), false).expect("absolute"),
+            absolute.to_str().expect("utf-8")
         );
     }
 
     #[test]
-    fn shared_native_output_defaults_to_project_lib() {
-        let root = Path::new("/tmp/project");
-        let expected_extension = if cfg!(target_os = "macos") {
-            "dylib"
+    fn shared_build_output_uses_the_platform_library_name() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let expected = if cfg!(target_os = "macos") {
+            "libmain.dylib"
         } else if cfg!(windows) {
-            "dll"
+            "main.dll"
         } else {
-            "so"
+            "libmain.so"
         };
-        let expected = root
-            .join(".kiln")
-            .join("lib")
-            .join("src")
-            .join(format!("main.ts.{expected_extension}"));
         assert_eq!(
-            native_output_path(Path::new("src/main.ts"), root, None, true).expect("shared output"),
-            expected.to_str().expect("utf-8")
+            native_output_path(Path::new("src/main.ts"), None, true).expect("shared output"),
+            cwd.join(expected).to_str().expect("utf-8")
         );
+    }
+
+    #[test]
+    fn build_refuses_to_replace_a_directory() {
+        let dir = std::env::temp_dir().join(format!("kiln-cli-outdir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create fixture");
+        let error = native_output_path(Path::new("main.ts"), Some(&dir), false)
+            .expect_err("a directory is not an output file");
+        assert!(format!("{error}").contains("is a directory"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2315,7 +2344,7 @@ mod tests {
             NativeProfile::Dev,
             true,
             false,
-            false,
+            true,
             false,
             None,
             false,
@@ -2340,7 +2369,36 @@ mod tests {
         else {
             panic!("last request must be NativeSharedBuild");
         };
-        assert!(output.is_none(), "omitted output is daemon-resolved");
+        let output = output.as_deref().expect("the CLI names the output");
+        assert!(
+            Path::new(output).starts_with(std::env::current_dir().expect("cwd")),
+            "{output}"
+        );
+        assert!(output.contains("main"), "{output}");
+
+        // Without --explain the report is the one line, then the header that goes with it.
+        let mut backend = Fake::new();
+        let brief = build(
+            &mut backend,
+            &entry,
+            &root,
+            None,
+            NativeProfile::Release,
+            true,
+            false,
+            false,
+            false,
+            None,
+            false,
+            None,
+            None,
+            &[],
+        )
+        .expect("brief shared build");
+        assert!(brief.text.starts_with("built "), "{}", brief.text);
+        assert!(brief.text.contains("native-release"), "{}", brief.text);
+        assert!(brief.text.contains("\nheader "), "{}", brief.text);
+        assert!(!brief.text.contains("loader"), "{}", brief.text);
         let _ = std::fs::remove_dir_all(&root);
     }
 

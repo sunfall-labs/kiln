@@ -552,12 +552,17 @@ static int kiln_c99_construct_with_new_target(kiln_host *host, kiln_value *resul
         return KILN_C99_OK;
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_DATE) {
-        /* `new Date()` is the current instant, which is virtual here and never advances; one
-         * argument is either milliseconds or an instant written down; more than one is the field
+        /* `new Date()` is the current instant: the realm's clock, which is the virtual epoch (0)
+         * in a deterministic realm and Unix time in a host-clock one, exactly as `Date.now()`
+         * answers. One argument is either milliseconds or an instant written down; more than one is the field
          * form, where the month is zero-based and the day defaults to 1. */
         double time;
         if (argc == 0) {
-            time = 0.0;
+            status = kiln_c99_wall_clock_milliseconds(host, &time);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            time = trunc(time);
         } else if (argc == 1) {
             if (args[0].tag == KILN_VALUE_DATE) {
                 time = kiln_c99_date_time(args[0]);

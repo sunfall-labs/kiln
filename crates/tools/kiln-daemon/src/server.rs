@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::dispatch::{
     GraphRunPlan, Next, PreparedRun, build_graph_from_snapshot, dispatch, dispatch_source,
@@ -102,7 +103,78 @@ struct Shared {
     /// Without this a client that connects and says nothing keeps `serve` from ever returning.
     live: Mutex<HashMap<u64, UnixStream>>,
     next_connection: AtomicU64,
+    activity: Activity,
     tests: crate::testing::ConformanceCoordinator,
+}
+
+/// What the idle watcher needs to know: how many client connections are open, and since when
+/// there have been none. A connection is open from accept until its thread finishes, so a request
+/// in flight (a long build, a streaming run) and a `watch` session parked between saves both
+/// count; only a daemon with no clients at all can go idle.
+struct Activity {
+    state: Mutex<ActivityState>,
+    changed: std::sync::Condvar,
+}
+
+struct ActivityState {
+    open: usize,
+    /// When `open` last became zero (or the daemon started).
+    idle_since: Instant,
+    /// The watcher has decided to exit: nothing may be admitted any more.
+    retired: bool,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ActivityState {
+                open: 0,
+                idle_since: Instant::now(),
+                retired: false,
+            }),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ActivityState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Admit a connection, unless the daemon has already decided to exit. Deciding and admitting
+    /// happen under one lock, so a client is either served or refused, never half-accepted.
+    fn admit(&self) -> bool {
+        let mut state = self.lock();
+        if state.retired {
+            return false;
+        }
+        state.open += 1;
+        true
+    }
+
+    fn release(&self) {
+        let mut state = self.lock();
+        state.open = state.open.saturating_sub(1);
+        if state.open == 0 {
+            state.idle_since = Instant::now();
+        }
+        self.changed.notify_all();
+    }
+
+    fn stop_watching(&self) {
+        // Under the lock, so the wake-up cannot land between the watcher's check of `stop` and
+        // its wait.
+        let _state = self.lock();
+        self.changed.notify_all();
+    }
+}
+
+/// Decrements the open-connection count when a connection thread ends, however it ends.
+struct OpenConnection(Arc<Shared>);
+
+impl Drop for OpenConnection {
+    fn drop(&mut self) {
+        self.0.activity.release();
+    }
 }
 
 impl Shared {
@@ -176,6 +248,7 @@ pub struct Daemon<E: QueryEngine = MemoEngine> {
     listener: UnixListener,
     shared: Arc<Shared>,
     state: Arc<Mutex<DaemonState<E>>>,
+    idle_timeout: Option<Duration>,
     _socket: SocketGuard,
 }
 
@@ -522,6 +595,7 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
                 socket: socket.to_path_buf(),
                 live: Mutex::new(HashMap::new()),
                 next_connection: AtomicU64::new(0),
+                activity: Activity::new(),
                 tests: crate::testing::ConformanceCoordinator::default(),
             }),
             state: Arc::new(Mutex::new(DaemonState {
@@ -531,8 +605,21 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
                 graph_cache: GraphCache::default(),
                 source_digests: HashMap::new(),
             })),
+            idle_timeout: None,
             _socket: SocketGuard(socket.to_path_buf()),
         })
+    }
+
+    /// Exit once no client has been connected for `idle`. `None` (the default, and what
+    /// in-process users get) serves until told to stop.
+    ///
+    /// "Connected" is the whole definition of activity: a connection that is open keeps the daemon
+    /// alive, whether it is mid-request or parked between requests like a `watch` session's, so
+    /// the daemon never exits under a client. The exit is the same one `Request::Shutdown` takes,
+    /// so the socket is unlinked on the way out.
+    pub fn with_idle_timeout(mut self, idle: Option<Duration>) -> Self {
+        self.idle_timeout = idle.filter(|idle| !idle.is_zero());
+        self
     }
 
     /// Run every program this daemon hosts as a process of its own: a virtual `process.pid`,
@@ -563,6 +650,10 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
         let _ = crate::build_identity();
         SERVING.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut workers: Vec<JoinHandle<()>> = Vec::new();
+        let watcher = self.idle_timeout.map(|idle| {
+            let shared = Arc::clone(&self.shared);
+            thread::spawn(move || watch_idle(&shared, idle))
+        });
 
         for incoming in self.listener.incoming() {
             if self.shared.stop.load(Ordering::SeqCst) {
@@ -570,6 +661,10 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
             }
             match incoming {
                 Ok(stream) => {
+                    if !self.shared.activity.admit() {
+                        // The idle watcher retired the daemon between accept and here.
+                        break;
+                    }
                     workers.push(self.spawn_connection(stream));
                     workers = reap(workers);
                 }
@@ -590,11 +685,17 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
         for worker in workers {
             let _ = worker.join();
         }
+        if let Some(watcher) = watcher {
+            self.shared.activity.stop_watching();
+            let _ = watcher.join();
+        }
     }
 
     fn spawn_connection(&self, stream: UnixStream) -> JoinHandle<()> {
         let state = Arc::clone(&self.state);
         let shared = Arc::clone(&self.shared);
+        // Admitted by the accept loop; released when this thread ends, wherever it ends.
+        let open = OpenConnection(Arc::clone(&shared));
 
         // Built rather than `spawn`ed, for the stack: see `crate::SERVE_STACK_BYTES`. A default
         // 2 MiB thread overflows on an ordinary project, and a stack overflow here aborts the
@@ -602,6 +703,7 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
         thread::Builder::new()
             .stack_size(crate::SERVE_STACK_BYTES)
             .spawn(move || {
+                let _open = open;
                 // A clone of the socket, not the socket, so the thread keeps sole ownership of the
                 // one it reads and writes.
                 let handle = match stream.try_clone() {
@@ -634,6 +736,42 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
             // A thread that cannot be created is not a connection that can be served, and the
             // accept loop has no better answer than the one it already gives an unservable peer.
             .expect("spawn a connection thread")
+    }
+}
+
+/// Shut the daemon down once it has had no open connection for `idle`.
+fn watch_idle(shared: &Arc<Shared>, idle: Duration) {
+    let activity = &shared.activity;
+    let mut state = activity.lock();
+    loop {
+        if shared.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let wait = if state.open > 0 {
+            // Woken by `release`; the timeout is only a backstop.
+            idle
+        } else {
+            let elapsed = state.idle_since.elapsed();
+            if elapsed >= idle {
+                state.retired = true;
+                drop(state);
+                eprintln!(
+                    "kiln-daemon: no client for {}s; exiting",
+                    idle.as_secs_f64()
+                );
+                ShutdownHandle {
+                    shared: Arc::clone(shared),
+                }
+                .shutdown();
+                return;
+            }
+            idle - elapsed
+        };
+        state = activity
+            .changed
+            .wait_timeout(state, wait)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0;
     }
 }
 
@@ -1318,6 +1456,7 @@ fn handle<E: QueryEngine>(
                         path,
                         project_root,
                         profile,
+                        wall_clock,
                         static_link,
                         pgo_gen,
                         pgo_u,

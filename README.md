@@ -10,6 +10,20 @@ from one core than Node, Bun or Deno do with all of theirs, in a third of Node's
 interpreter that ships alongside the compiler runs the same program immediately, so the edit-run
 loop never waits for a native build.
 
+## Quick start
+
+```sh
+curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install.sh | sh
+kiln run hello.ts                      # run it now, with the built-in interpreter
+kiln build hello.ts && ./hello         # compile it to a native executable
+```
+
+`kiln run` needs nothing else; `kiln build` needs a C compiler (Clang, GCC, cc or Zig) on `PATH`.
+`kiln --help` lists the commands and `kiln <command> --help` the options of each. A program that
+imports `node:http`, `node:fs` and the like gets the Node compatibility layer automatically.
+The first `kiln build` on a machine compiles kiln's built-in library into the build cache and
+can take a minute or more; builds after that reuse it and take seconds.
+
 ## Status
 
 kiln is at v0 and under active development, with a strong focus on high ECMAScript conformance, real-world library compatibility, and native performance:
@@ -142,7 +156,7 @@ curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install
 
 That unpacks the release into `~/.kiln/<version>/` and links `kiln` into `~/.local/bin`.
 `KILN_VERSION`, `KILN_INSTALL_DIR` and `KILN_BIN_DIR` override the defaults, and `GITHUB_TOKEN` is
-used for the GitHub API requests when set (and is required if the repository is private). A release carries the binary and every native provider
+used for the GitHub API requests when set. A release carries the binary and every native provider
 archive (`lib/kiln/`), so `kiln build` needs only a C compiler -- Clang, GCC, cc or Zig -- and no
 Rust toolchain; `kiln run` needs neither. Each archive is checked against the release's
 `SHA256SUMS` before it is unpacked. To unpack one by hand, keep its `bin/` and `lib/` together:
@@ -167,11 +181,13 @@ Day-to-day development goes through `mbx` and `mise` (see `AGENTS.md`); bare `ca
 cargo build
 cargo run -p kiln-cli -- --one-shot run examples/hello.ts                    # interpret
 cargo run -p kiln-cli -- --one-shot run examples/hello.ts --native           # compile and run
-cargo run -p kiln-cli -- --one-shot build server.mjs --node --profile native-release --output server
+cargo run -p kiln-cli -- --one-shot build server.mjs --output server      # native-release by default
 ./server
 ```
 
-`--node` selects Node's module resolution and installs the Tokio-owned adapter for `node:*`.
+`--node` selects Node's module resolution and installs the Node compatibility layer (`node:*`,
+`process`, `require`). kiln turns it on by itself when the program imports a Node built-in or the
+project has a `package.json`, `tsconfig.json` or `node_modules`; the flag forces it.
 When a worker or another loader receives a module path at run time, declare that module in the
 project's `package.json` so the native build can compile it:
 
@@ -186,6 +202,10 @@ file URL. See [ADR 0067](docs/adr/0067-what-kiln-build-does-when-a-program-is-no
 for the closed-world policy.
 `kiln watch` re-runs an entry in the interpreter on every save. `kiln test <dir>` runs a
 conformance corpus; the corpora and the runner each one needs are listed in `AGENTS.md`.
+
+The resident daemon exits on its own after 15 minutes with no client connected (an open
+connection, such as a `kiln watch` session, keeps it alive); `KILN_DAEMON_IDLE_SECS` sets the
+period in seconds and `0` disables the exit, and the next command starts a fresh daemon.
 
 Without `--one-shot`, `kiln run` interprets the program inside the resident daemon, and the
 program is a process of its own there (realms issue 26; `kiln_runtime::signals`). Its
@@ -236,9 +256,10 @@ follows from it.
 - **The native heap is collected at the turn boundary.** A precise mark-sweep collector runs
   between callbacks; every allocation a value can point at is a tagged block, and marking never
   trusts a pointer it cannot look up.
-- **A shipped realm keeps wall time; a measured one keeps virtual time.** `kiln build` gives the
-  program the host's clock, so timers fire on schedule under load; `kiln run --native` and the
-  conformance harness keep the deterministic clock that makes two engines comparable.
+- **A shipped realm keeps wall time; a measured one keeps virtual time.** `kiln build` and
+  `kiln run` give the program the host's clock, so `Date` shows the real date and timers fire on
+  schedule under load; `kiln run --clock virtual`, `kiln test` and the conformance harnesses keep
+  the deterministic clock that makes two engines comparable.
 
 Every decision of that kind is an ADR under `docs/adr/`, numbered and never edited in place;
 `docs/design.md` is the founding document, kept as written.
