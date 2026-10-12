@@ -8,6 +8,7 @@
 //! was reused, so that report is part of the normal output rather than a verbose mode.
 
 use std::fmt::Write as _;
+use std::path::Path;
 use std::time::Duration;
 
 use annotate_snippets::{AnnotationKind, Level, Renderer, Snippet};
@@ -235,6 +236,71 @@ pub fn native_build(source: &str, summary: &NativeBuildSummary) -> String {
         out.push_str(explanation);
     }
     out
+}
+
+/// `kiln build` output without `--explain`: one line saying where the executable went.
+///
+/// The cache-layer table [`native_build`] prints is a diagnostic for someone investigating the
+/// build; what a person running `kiln build` wants to know is the file name and that it is done.
+pub fn native_build_brief(summary: &NativeBuildSummary, profile: &str) -> String {
+    format!(
+        "built {}  ({}, {profile}, {})\n",
+        display_output_path(&summary.output_path),
+        human_bytes(summary.executable_bytes),
+        human_millis(summary.total_millis)
+    )
+}
+
+/// `kiln build --shared` output without `--explain`: the library and the header that goes with it.
+pub fn native_shared_build_brief(summary: &NativeSharedLibrarySummary, profile: &str) -> String {
+    format!(
+        "built {}  ({}, {profile}, {})\nheader {}\n",
+        display_output_path(&summary.output_path),
+        human_bytes(summary.library_bytes),
+        human_millis(summary.total_millis),
+        display_output_path(&summary.header_path)
+    )
+}
+
+/// A path under the current directory as `./relative`, so the line can be pasted into a shell;
+/// anything else as it is.
+pub fn profile_name(profile: kiln_proto::NativeProfile) -> &'static str {
+    use kiln_proto::NativeProfile;
+    match profile {
+        NativeProfile::Dev => "native-dev",
+        NativeProfile::Check => "native-check",
+        NativeProfile::Release => "native-release",
+        NativeProfile::ReleaseSize => "native-release-size",
+        NativeProfile::Profile => "native-profile",
+    }
+}
+
+fn display_output_path(path: &str) -> String {
+    let path = Path::new(path);
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(relative) = path.strip_prefix(&cwd)
+        && !relative.as_os_str().is_empty()
+    {
+        return format!("./{}", relative.display());
+    }
+    path.display().to_string()
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / MIB)
+    } else {
+        format!("{} KB", bytes.div_ceil(1024))
+    }
+}
+
+fn human_millis(millis: u64) -> String {
+    if millis >= 1000 {
+        format!("{:.1}s", millis as f64 / 1000.0)
+    } else {
+        format!("{millis}ms")
+    }
 }
 
 /// `kiln build --explain-parallel`: the build summary, then the explanation's `parallel:`
