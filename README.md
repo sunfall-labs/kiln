@@ -10,6 +10,20 @@ from one core than Node, Bun or Deno do with all of theirs, in a third of Node's
 interpreter that ships alongside the compiler runs the same program immediately, so the edit-run
 loop never waits for a native build.
 
+## Quick start
+
+```sh
+curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install.sh | sh
+kiln run hello.ts                      # run it now, with the built-in interpreter
+kiln build hello.ts && ./hello         # compile it to a native executable
+```
+
+`kiln run` needs nothing else; `kiln build` needs a C compiler (Clang, GCC, cc or Zig) on `PATH`.
+`kiln --help` lists the commands and `kiln <command> --help` the options of each. A program that
+imports `node:http`, `node:fs` and the like gets the Node compatibility layer automatically.
+The first `kiln build` on a machine compiles kiln's built-in library into the build cache and
+can take a minute or more; builds after that reuse it and take seconds.
+
 ## Status
 
 kiln is at v0 and under active development, with a strong focus on high ECMAScript conformance, real-world library compatibility, and native performance:
@@ -132,18 +146,6 @@ kernels, and any kernel or seccomp profile that refuses a ring, use epoll. `KILN
 epoll anywhere and `KILN_IO=uring` asks for the ring below the floor. See
 `crates/host/kiln-runtime/src/uring.rs` for the design and the measurements behind that default.
 
-## Quick start
-
-```sh
-curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install.sh | sh
-kiln run hello.ts                      # run it now, with the built-in interpreter
-kiln build hello.ts && ./hello         # compile it to a native executable
-```
-
-`kiln run` needs nothing else; `kiln build` needs a C compiler (Clang, GCC, cc or Zig) on `PATH`.
-`kiln --help` lists the commands and `kiln <command> --help` the options of each. A program that
-imports `node:http`, `node:fs` and the like gets the Node compatibility layer automatically.
-
 ## Installing
 
 Each release is a binary for macOS on Apple silicon and Linux (glibc) on x86_64 and arm64:
@@ -154,7 +156,7 @@ curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install
 
 That unpacks the release into `~/.kiln/<version>/` and links `kiln` into `~/.local/bin`.
 `KILN_VERSION`, `KILN_INSTALL_DIR` and `KILN_BIN_DIR` override the defaults, and `GITHUB_TOKEN` is
-used for the GitHub API requests when set (and is required if the repository is private). A release carries the binary and every native provider
+used for the GitHub API requests when set. A release carries the binary and every native provider
 archive (`lib/kiln/`), so `kiln build` needs only a C compiler -- Clang, GCC, cc or Zig -- and no
 Rust toolchain; `kiln run` needs neither. Each archive is checked against the release's
 `SHA256SUMS` before it is unpacked. To unpack one by hand, keep its `bin/` and `lib/` together:
