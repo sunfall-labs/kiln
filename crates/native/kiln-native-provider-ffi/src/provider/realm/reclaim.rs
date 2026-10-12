@@ -21,7 +21,8 @@
 //!
 //! A single-realm process pays a load and a store per turn and nothing else: with no other
 //! thread online, a retirement is safe at once (tag 0), which is exactly the in-place overwrite
-//! the caches did before realms could run concurrently.
+//! the caches did before realms could run concurrently. With several online, asking whether a
+//! tag is safe scans the threads only when one of them has advanced since the last scan.
 
 use core::ffi::c_void;
 use kiln_shared_graph::Handle;
@@ -55,6 +56,14 @@ struct Domain {
     /// A lower bound on the seen epoch of every online thread, as last computed: a tag below it
     /// is safe without looking at the threads again. Only grows.
     safe_below: AtomicU64,
+    /// Counts the events that can raise the lowest seen epoch: a thread passing a turn boundary,
+    /// going offline or unregistering. (Coming online can only lower it.)
+    advances: AtomicU64,
+    /// `advances` as it was when `safe_below` was last computed. While the two are equal no
+    /// thread has moved since, so a tag at or above `safe_below` is still unsafe and a cache
+    /// miss asking about one answers without taking the `threads` lock. A busy worker sitting in
+    /// one long turn would otherwise make every miss beside it scan every thread under a mutex.
+    computed_at: AtomicU64,
     /// Every registered thread, by the word it publishes its seen epoch in.
     threads: Mutex<Vec<Arc<AtomicU64>>>,
     /// Records handed to [`kiln_realm_retire`] and not yet freed, with their tags.
@@ -75,6 +84,8 @@ impl Domain {
             epoch: AtomicU64::new(1),
             online: AtomicUsize::new(0),
             safe_below: AtomicU64::new(1),
+            advances: AtomicU64::new(0),
+            computed_at: AtomicU64::new(u64::MAX),
             threads: Mutex::new(Vec::new()),
             retired: Mutex::new(Vec::new()),
             pending: AtomicUsize::new(0),
@@ -101,6 +112,7 @@ impl Domain {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|seen| !Arc::ptr_eq(seen, &participant.seen));
+        self.advances.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Offline to online: announce, then fence, so the thread's reads of shared cache state that
@@ -119,6 +131,7 @@ impl Domain {
     fn leave(&self, participant: &Participant) {
         participant.seen.store(OFFLINE, Ordering::Release);
         self.online.fetch_sub(1, Ordering::SeqCst);
+        self.advances.fetch_add(1, Ordering::SeqCst);
     }
 
     /// A turn boundary: nothing retired until now is in the thread's hands.
@@ -127,6 +140,7 @@ impl Domain {
             participant
                 .seen
                 .store(self.epoch.load(Ordering::SeqCst), Ordering::Release);
+            self.advances.fetch_add(1, Ordering::SeqCst);
         }
         if self.pending.load(Ordering::Relaxed) != 0 {
             self.free_safe_records();
@@ -146,6 +160,9 @@ impl Domain {
 
     /// The lowest epoch any online thread has seen, recorded as the new safe bound.
     fn lowest_seen(&self) -> u64 {
+        // Read before the scan: an advance during it leaves `computed_at` behind, so the next
+        // question scans again rather than trusting a bound that may already be stale.
+        let advances = self.advances.load(Ordering::SeqCst);
         let lowest = self
             .threads
             .lock()
@@ -156,11 +173,19 @@ impl Domain {
             .unwrap_or(OFFLINE)
             .min(self.epoch.load(Ordering::SeqCst));
         self.safe_below.fetch_max(lowest, Ordering::AcqRel);
+        self.computed_at.store(advances, Ordering::Release);
         lowest
     }
 
     fn is_safe(&self, tag: u64) -> bool {
-        tag == 0 || self.safe_below.load(Ordering::Acquire) > tag || self.lowest_seen() > tag
+        if tag == 0 || self.safe_below.load(Ordering::Acquire) > tag {
+            return true;
+        }
+        // Nobody has advanced since the bound was computed, and it did not clear this tag.
+        if self.computed_at.load(Ordering::Acquire) == self.advances.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.lowest_seen() > tag
     }
 
     fn retire(&self, tag: u64, record: *mut c_void) {
@@ -358,6 +383,34 @@ mod tests {
         );
         domain.quiesce(&me);
         assert!(domain.is_safe(tag));
+    }
+
+    #[test]
+    fn an_unsafe_answer_is_reused_until_a_thread_advances() {
+        let domain = Domain::new();
+        let (me, other) = (domain.register(), domain.register());
+        for participant in [&me, &other] {
+            participant.depth.set(1);
+            domain.arrive(participant);
+        }
+        let tag = domain.retire_tag(true);
+        domain.quiesce(&me);
+        assert!(
+            !domain.is_safe(tag),
+            "the other thread has not passed a boundary"
+        );
+        let scanned = domain.computed_at.load(Ordering::SeqCst);
+        assert!(!domain.is_safe(tag));
+        assert_eq!(
+            domain.computed_at.load(Ordering::SeqCst),
+            scanned,
+            "no thread moved, so the answer came without a scan"
+        );
+        domain.quiesce(&other);
+        assert!(
+            domain.is_safe(tag),
+            "an advance makes the next question scan"
+        );
     }
 
     #[test]
