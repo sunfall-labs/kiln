@@ -1,0 +1,36 @@
+<?xml version='1.0' encoding='utf-8'?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/</loc>
+  </url>
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/reference/builtins.html</loc>
+  </url>
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/reference/concurrency.html</loc>
+  </url>
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/reference/conformance.html</loc>
+  </url>
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/reference/</loc>
+  </url>
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/reference/npm-compatibility.html</loc>
+  </url>
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/reference/type-checking.html</loc>
+  </url>
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/compare/</loc>
+  </url>
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/compare/kiln-vs-perry.html</loc>
+  </url>
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/compare/kiln-vs-porffor.html</loc>
+  </url>
+  <url>
+    <loc>https://sunfall-labs.github.io/kiln/compare/kiln-vs-static-hermes.html</loc>
+  </url>
+</urlset>

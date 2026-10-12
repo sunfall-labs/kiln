@@ -58,6 +58,7 @@ def document(path,title,intro,body):
 
 links='<div class="reference-links"><a href="type-checking.html"><strong>TypeScript checking</strong><span>Commands, TS7 evidence and compiler architecture →</span></a><a href="conformance.html"><strong>Conformance evidence</strong><span>Every chunk, match levels and reproducible baselines →</span></a><a href="concurrency.html"><strong>Concurrency and ownership</strong><span>Typed actors, parallel collections and shared graphs →</span></a></div>'
 links=links.replace('</div>', '<a href="npm-compatibility.html"><strong>npm compatibility</strong><span>361 pinned package results, test scope and resolution →</span></a><a href="builtins.html"><strong>Built-in modules</strong><span>Actors, sharing, subprocesses, native GUI and extensions →</span></a></div>')
+links=links.replace('</div>', '<a href="../compare/"><strong>Runtime comparisons</strong><span>kiln vs Perry, Static Hermes and Porffor →</span></a></div>')
 document('index.html','TypeScript, down to the details.','Reference material for the compiler, compatibility evidence and runtime extensions.',links)
 checker=f'''<section><h2>Check source before you compile.</h2><pre><code>kiln check hello.ts
 kiln check --explain-parallel parallel.ts

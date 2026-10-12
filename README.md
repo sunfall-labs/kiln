@@ -54,3 +54,22 @@ available. Keep its native-dev profile, Node reference version and production-pr
 `reference/builtins.html` lists public modules and global extensions, with process, server and JSX
 samples. Linux release archives have no GUI provider; type checking the GUI sample is portable,
 but interactive execution must be checked with the Apple Silicon macOS release.
+
+Comparison prose is maintained in `scripts/render-comparisons.py`. Keep competitor claims linked
+to primary documentation and dated; recheck them before updating the review date. The pages
+compare workflows and documented capabilities, not matched performance. The existing Hermes
+benchmark lane runs HBC through hvm and cannot support Static Hermes native-AOT rankings.
+
+After editing or regenerating any HTML, run:
+
+```sh
+python3 scripts/render-conformance.py
+python3 scripts/render-comparisons.py
+python3 scripts/render-seo.py
+```
+
+The last command adds unique canonical URLs, Open Graph/Twitter metadata, WebPage and breadcrumb
+structured data, and `sitemap.xml`. Use the public GitHub Pages base URL until the site actually
+moves to another domain; a project-level robots.txt cannot control the host's root robots policy.
+Verify all three renderers together are idempotent, and review comparisons at mobile and desktop
+widths. No search rankings or rich-result eligibility are implied by the metadata.
