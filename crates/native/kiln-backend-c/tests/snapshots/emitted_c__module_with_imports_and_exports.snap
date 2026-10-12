@@ -209,6 +209,17 @@ namespace_failure_without_order:
 
 
 
+static int kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_invoke_body(kiln_host *host, kiln_value *result,
+    const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {
+    kiln_js_frame module_frame;
+    kiln_c99_js_frame_enter(&module_frame, NULL);
+    kiln_c99_js_frame_note_instruction("kiln_module_cdf1457dad1baa8a87f394fbf3af89b9", 0, 0, 0);
+    int status = kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_body(host, result, imports, import_count, exports, export_count);
+    kiln_c99_js_frame_leave(&module_frame);
+    return status;
+}
+
+
 typedef struct kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_realm_context {
     kiln_host *host;
     kiln_value *result;
@@ -233,7 +244,7 @@ static int kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_realm_entry(void *opaque
     kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_realm_context *context = (kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_realm_context *)opaque;
     int status;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
-    status = kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_body(context->host, context->result, context->imports,
+    status = kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_invoke_body(context->host, context->result, context->imports,
                            context->import_count, context->exports, context->export_count);
     /* A graph is linked from one C translation unit per JavaScript module. Diagnostic state is
      * deliberately private to each unit, so the module that owns the refusing instruction must
@@ -253,7 +264,7 @@ int kiln_module_cdf1457dad1baa8a87f394fbf3af89b9(kiln_host *host, kiln_value *re
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     if (kiln_realm_is_active()) {
         (void)kiln_realm_diagnostic_reset();
-        status = kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_body(host, result, imports, import_count, exports, export_count);
+        status = kiln_module_cdf1457dad1baa8a87f394fbf3af89b9_invoke_body(host, result, imports, import_count, exports, export_count);
         if (status == KILN_C99_CONTROL_ERROR)
             *result = kiln_c99_control_diagnostic();
         return status;

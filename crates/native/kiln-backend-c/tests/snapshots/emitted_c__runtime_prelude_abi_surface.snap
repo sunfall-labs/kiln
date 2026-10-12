@@ -4247,6 +4247,8 @@ static int kiln_c99_rejection_track(kiln_value promise, kiln_value reason) {
 static int kiln_c99_promise_observe(kiln_promise *state) {
 static int kiln_c99_promise_rejections_raw(kiln_value *result, const kiln_value *args,
 static kiln_value kiln_c99_rejection_take(uint32_t slot_key) {
+static _Thread_local int kiln_c99_uncaught_in_promise = 0;
+int kiln_c99_uncaught_in_promise_take(void) {
 static int kiln_c99_process_rejections(kiln_gc_heap *heap, kiln_host *host, kiln_value *thrown) {
 static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver,
 static int kiln_c99_bind(kiln_value *out, kiln_value target, kiln_value receiver) {
