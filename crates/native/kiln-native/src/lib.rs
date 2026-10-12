@@ -882,13 +882,22 @@ fn emit_graph_module_for_profile(
     }
 }
 
-fn configure_release_prelude_compile(options: &mut CompileOptions) {
+fn configure_release_prelude_compile(options: &mut CompileOptions, kind: CompilerKind) {
     // Vectorizing this branch-heavy runtime unit accounts for seconds of cold compile time while
     // its generated numeric loops live in application units. Leave scalar inlining enabled: it
     // materially improves collection-heavy runtime workloads.
+    //
+    // The two families spell it differently, and GCC rejects Clang's spelling outright: passing
+    // it unconditionally failed every release build on a Linux machine whose `cc` is GCC. A
+    // driver of unknown family gets neither; the flags only save compile time.
+    let flags: &[&str] = match kind {
+        CompilerKind::Clang | CompilerKind::Zig => &["-fno-vectorize", "-fno-slp-vectorize"],
+        CompilerKind::Gcc => &["-fno-tree-vectorize"],
+        CompilerKind::Cc => &[],
+    };
     options
         .extra_args
-        .extend(["-fno-vectorize".into(), "-fno-slp-vectorize".into()]);
+        .extend(flags.iter().map(|flag| (*flag).into()));
 }
 
 fn configure_release_module_compile(
@@ -1655,7 +1664,7 @@ impl NativeBuilder {
         }
         let mut prelude_compile_options = compile_options.clone();
         if matches!(profile, NativeProfile::Release | NativeProfile::ReleaseSize) {
-            configure_release_prelude_compile(&mut prelude_compile_options);
+            configure_release_prelude_compile(&mut prelude_compile_options, identity.kind);
         }
         let compile_started = Instant::now();
         let (((application_result, prelude_result), runtime_result), launcher_result) = rayon::join(
@@ -3190,7 +3199,7 @@ impl NativeBuilder {
                 .push("-DKILN_NODE_ENV_PRODUCTION=1".into());
         }
         if matches!(profile, NativeProfile::Release | NativeProfile::ReleaseSize) {
-            configure_release_prelude_compile(&mut prelude_compile_options);
+            configure_release_prelude_compile(&mut prelude_compile_options, identity.kind);
         }
         // Dispatch groups the program cannot reach compile out of the prelude
         // (see the `#if KILN_RETAIN_GROUP_*` guards). A full mask yields no
