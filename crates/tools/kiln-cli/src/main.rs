@@ -11,6 +11,7 @@
 mod args;
 mod backend;
 mod client;
+mod code_frame;
 mod commands;
 mod env;
 mod error;
