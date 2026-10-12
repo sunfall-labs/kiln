@@ -82,7 +82,7 @@ pub fn math_expression(name: &str, a: &str, b: &str) -> Option<String> {
             "({{ double r = isfinite({a}) ? ({a} - floor({a}) >= 0.5 ? floor({a}) + 1.0 : floor({a})) : {a}; if (r == 0.0 && signbit({a})) r = -0.0; r; }})"
         ),
         "sign" => format!("(isnan({a}) || {a} == 0.0 ? {a} : ({a} < 0.0 ? -1.0 : 1.0))"),
-        "pow" => format!("pow({a}, {b})"),
+        "pow" => format!("kiln_c99_js_pow({a}, {b})"),
         "min" => format!(
             "((isnan({a}) || isnan({b})) ? NAN : (({a} < {b} || ({a} == 0.0 && {b} == 0.0 && signbit({a}))) ? {a} : {b}))"
         ),
@@ -713,7 +713,7 @@ pub fn emit_heap_clone(
                         BinaryOp::Subtract => numeric("kiln_c99_val_from_double(a - b)"),
                         BinaryOp::Multiply => numeric("kiln_c99_val_from_double(a * b)"),
                         BinaryOp::Divide => numeric("kiln_c99_val_from_double(a / b)"),
-                        BinaryOp::Exponentiate => numeric("kiln_c99_val_from_double(pow(a, b))"),
+                        BinaryOp::Exponentiate => numeric("kiln_c99_val_from_double(kiln_c99_js_pow(a, b))"),
                         BinaryOp::Remainder => numeric(
                             "kiln_c99_val_from_double((b > 0.0 && b <= 9007199254740992.0 && a >= 0.0 && a <= 9007199254740992.0 && a == (double)(int64_t)a && b == (double)(int64_t)b) ? (double)((int64_t)a % (int64_t)b) : fmod(a, b))",
                         ),

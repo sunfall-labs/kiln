@@ -782,6 +782,25 @@ fn math_min_operands_are_not_shadowed_by_their_temporaries() {
     assert!(failure.is_none(), "{failure:?}");
 }
 
+/// The property test's find of 2026-10-11: the parallel lowering computed `Math.pow` with C's
+/// `pow`, which answers 1 for `pow(1, NaN)` and `pow(+-1, +-Infinity)` where JS answers NaN.
+/// `map` used the JS-correct expression, so `parallelMap` and `map` disagreed on those edges.
+#[test]
+fn math_pow_of_unit_base_with_nan_or_infinite_exponent_is_nan_in_both() {
+    let exponents = [
+        Expr::Number(f64::NAN),
+        Expr::Number(f64::INFINITY),
+        Expr::Number(f64::NEG_INFINITY),
+        Expr::Capture(0),
+    ];
+    let callbacks: Vec<(Expr, u32)> = exponents
+        .into_iter()
+        .map(|exponent| (Expr::Math2("pow", Box::new(Expr::Element), Box::new(exponent)), 2))
+        .collect();
+    let failure = compare(&callbacks, &[1.0, -1.0, 2.0, 0.5], [f64::NAN, 0.0]);
+    assert!(failure.is_none(), "{failure:?}");
+}
+
 /// Integer operands do not make a remainder an integer: a zero divisor yields NaN,
 /// and an exact division of a negative dividend yields negative zero. Exercise both
 /// the boxed return and double consumers (reciprocals expose the sign of zero).

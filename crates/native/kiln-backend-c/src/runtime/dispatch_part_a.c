@@ -606,11 +606,78 @@ static size_t kiln_c99_timsort_min_run_length(size_t n) {
     return n + r;
 }
 
+/* The merge scratch for `val` elements is a collected array, not `malloc` memory. A merge
+ * copies one run out of the sorted array and then overwrites its slots with the other run, so
+ * between the copy and the final placement an element may be reachable from nowhere but the
+ * scratch -- and every comparison calls back into the program, which allocates and can collect.
+ * A `malloc`ed scratch is invisible to the collector: an element parked there was reclaimed, the
+ * slot read back as `undefined`, and typed-function's `sort(compareSignatures)` over 1215
+ * signatures handed its comparator `undefined`. The owner array lives in the sort state on the C
+ * stack, which the conservative scan reads; its count covers every slot so the elements are
+ * traced, and copies in go through the store barrier like any other write into a heap block. */
+static int kiln_c99_timsort_scratch_reserve_val(kiln_value *owner, kiln_val **scratch,
+                                                size_t *capacity, size_t need) {
+    kiln_value fresh;
+    kiln_array *array;
+    size_t index;
+    int status = kiln_c99_new_array_with_capacity(&fresh, need, 0);
+    if (status != KILN_C99_OK) return status;
+    array = kiln_c99_array_of(fresh);
+    status = kiln_c99_array_reserve(array, need);
+    if (status != KILN_C99_OK) return status;
+    for (index = 0; index < array->capacity; ++index) kiln_c99_heap_store_val(array, &array->elements[index], KILN_VAL_UNDEFINED);
+    array->count = array->capacity;
+    *owner = fresh;
+    *scratch = array->elements;
+    *capacity = array->capacity;
+    return KILN_C99_OK;
+}
+
+static void kiln_c99_timsort_scratch_load_val(kiln_value owner, kiln_val *dst, const kiln_val *src,
+                                              size_t count) {
+    kiln_array *array = kiln_c99_array_of(owner);
+    size_t index;
+    for (index = 0; index < count; ++index) kiln_c99_heap_store_val(array, &dst[index], src[index]);
+}
+
+static void kiln_c99_timsort_scratch_release_val(kiln_value *owner, kiln_val **scratch) {
+    *owner = kiln_c99_undefined();
+    *scratch = NULL;
+}
+
+/* boxed.c instantiates the same sort over its own comparator context. */
+#define kiln_c99_timsort_scratch_reserve_val_fast kiln_c99_timsort_scratch_reserve_val
+#define kiln_c99_timsort_scratch_load_val_fast kiln_c99_timsort_scratch_load_val
+#define kiln_c99_timsort_scratch_release_val_fast kiln_c99_timsort_scratch_release_val
+
+static int kiln_c99_timsort_scratch_reserve_typed(kiln_value *owner, double **scratch,
+                                                  size_t *capacity, size_t need) {
+    double *grown = (double *)realloc(*scratch, need * sizeof(double));
+    (void)owner;
+    if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
+    *scratch = grown;
+    *capacity = need;
+    return KILN_C99_OK;
+}
+
+static void kiln_c99_timsort_scratch_load_typed(kiln_value owner, double *dst, const double *src,
+                                                size_t count) {
+    (void)owner;
+    memcpy(dst, src, count * sizeof(double));
+}
+
+static void kiln_c99_timsort_scratch_release_typed(kiln_value *owner, double **scratch) {
+    (void)owner;
+    free(*scratch);
+    *scratch = NULL;
+}
+
 #define KILN_DEF_TIMSORT(SUFFIX, TYPE, CTX_TYPE, CMP_FUNC)                                         \
     typedef struct {                                                                               \
         CTX_TYPE *ctx;                                                                             \
         TYPE *a;                                                                                   \
         TYPE *scratch;                                                                             \
+        kiln_value scratch_owner;                                                                  \
         size_t scratch_capacity;                                                                   \
         size_t min_gallop;                                                                         \
         kiln_c99_timsort_run stack[85];                                                            \
@@ -815,13 +882,12 @@ static size_t kiln_c99_timsort_min_run_length(size_t n) {
                                                   size_t base1, size_t len1, size_t base2,         \
                                                   size_t len2) {                                   \
         if (len1 > ts->scratch_capacity) {                                                         \
-            TYPE *new_scratch = (TYPE *)realloc(ts->scratch, len1 * sizeof(TYPE));                 \
-            if (new_scratch == NULL)                                                               \
-                return KILN_C99_OUT_OF_MEMORY;                                                     \
-            ts->scratch = new_scratch;                                                             \
-            ts->scratch_capacity = len1;                                                           \
+            int reserved = kiln_c99_timsort_scratch_reserve_##SUFFIX(                              \
+                &ts->scratch_owner, &ts->scratch, &ts->scratch_capacity, len1);                    \
+            if (reserved != KILN_C99_OK)                                                           \
+                return reserved;                                                                   \
         }                                                                                          \
-        memcpy(ts->scratch, &ts->a[base1], len1 * sizeof(TYPE));                                   \
+        kiln_c99_timsort_scratch_load_##SUFFIX(ts->scratch_owner, ts->scratch, &ts->a[base1], len1); \
         size_t cursor1 = 0;                                                                        \
         size_t cursor2 = base2;                                                                    \
         size_t dest = base1;                                                                       \
@@ -915,13 +981,12 @@ static size_t kiln_c99_timsort_min_run_length(size_t n) {
                                                   size_t base1, size_t len1, size_t base2,         \
                                                   size_t len2) {                                   \
         if (len2 > ts->scratch_capacity) {                                                         \
-            TYPE *new_scratch = (TYPE *)realloc(ts->scratch, len2 * sizeof(TYPE));                 \
-            if (new_scratch == NULL)                                                               \
-                return KILN_C99_OUT_OF_MEMORY;                                                     \
-            ts->scratch = new_scratch;                                                             \
-            ts->scratch_capacity = len2;                                                           \
+            int reserved = kiln_c99_timsort_scratch_reserve_##SUFFIX(                              \
+                &ts->scratch_owner, &ts->scratch, &ts->scratch_capacity, len2);                    \
+            if (reserved != KILN_C99_OK)                                                           \
+                return reserved;                                                                   \
         }                                                                                          \
-        memcpy(ts->scratch, &ts->a[base2], len2 * sizeof(TYPE));                                   \
+        kiln_c99_timsort_scratch_load_##SUFFIX(ts->scratch_owner, ts->scratch, &ts->a[base2], len2); \
         size_t cursor1 = base1 + len1 - 1;                                                         \
         size_t cursor2 = len2 - 1;                                                                 \
         size_t dest = base2 + len2 - 1;                                                            \
@@ -1098,10 +1163,12 @@ static size_t kiln_c99_timsort_min_run_length(size_t n) {
         ts.ctx = ctx;                                                                              \
         ts.a = a;                                                                                  \
         ts.min_gallop = 7;                                                                         \
-        ts.scratch_capacity = (len >> 1) + 1;                                                      \
-        ts.scratch = (TYPE *)malloc(ts.scratch_capacity * sizeof(TYPE));                            \
-        if (ts.scratch == NULL)                                                                    \
-            return KILN_C99_OUT_OF_MEMORY;                                                         \
+        {                                                                                          \
+            int reserved = kiln_c99_timsort_scratch_reserve_##SUFFIX(                              \
+                &ts.scratch_owner, &ts.scratch, &ts.scratch_capacity, (len >> 1) + 1);            \
+            if (reserved != KILN_C99_OK)                                                           \
+                return reserved;                                                                   \
+        }                                                                                          \
         size_t min_run = kiln_c99_timsort_min_run_length(len);                                     \
         size_t lo = 0;                                                                             \
         int status = KILN_C99_OK;                                                                  \
@@ -1128,7 +1195,7 @@ static size_t kiln_c99_timsort_min_run_length(size_t n) {
         if (status == KILN_C99_OK) {                                                               \
             status = kiln_c99_timsort_merge_force_collapse_##SUFFIX(&ts);                          \
         }                                                                                          \
-        free(ts.scratch);                                                                          \
+        kiln_c99_timsort_scratch_release_##SUFFIX(&ts.scratch_owner, &ts.scratch);                 \
         return status;                                                                             \
     }
 
@@ -3861,7 +3928,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_SQRT: *result = kiln_c99_number(sqrt(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_CBRT: *result = kiln_c99_number(cbrt(first)); return KILN_C99_OK;
-        case KILN_C99_METHOD_MATH_POW: *result = kiln_c99_number((isnan(second) || (fabs(first) == 1.0 && isinf(second))) ? NAN : pow(first, second)); return KILN_C99_OK;
+        case KILN_C99_METHOD_MATH_POW: *result = kiln_c99_number(kiln_c99_js_pow(first, second)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_LOG: *result = kiln_c99_number(log(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_LOG2: *result = kiln_c99_number(log2(first)); return KILN_C99_OK;
         case KILN_C99_METHOD_MATH_LOG10: *result = kiln_c99_number(log10(first)); return KILN_C99_OK;

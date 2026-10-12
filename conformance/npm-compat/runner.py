@@ -165,6 +165,11 @@ def main():
                     if not args.keep_binaries:
                         binary.unlink(missing_ok=True)
             result['status'] = status
+            # One-shot builds never sweep the project's artifact cache; across 361 packages it
+            # grows past 40 GB. Sweep it back under its budget after each package (the sweep
+            # keeps recently used records, so concurrent shards are safe).
+            subprocess.run([kiln, '--one-shot', 'cache', 'gc'], cwd=HERE, env=environment,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             evidence['results'].append(result)
             evidence['completed'] = len(evidence['results'])
             # Persist after every package so interruption does not lose completed evidence.

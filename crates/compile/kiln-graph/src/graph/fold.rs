@@ -106,7 +106,7 @@ fn fold_binary(op: BinaryOp, left: &Constant, right: &Constant) -> Option<Consta
         },
         BinaryOp::Exponentiate => match (left, right) {
             (Constant::Number(a), Constant::Number(b)) => {
-                let val = f64::from_bits(*a).powf(f64::from_bits(*b));
+                let val = kiln_ir::js_exponentiate(f64::from_bits(*a), f64::from_bits(*b));
                 Some(Constant::Number(val.to_bits()))
             }
             _ => None,

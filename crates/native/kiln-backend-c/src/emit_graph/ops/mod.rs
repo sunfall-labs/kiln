@@ -110,7 +110,7 @@ pub(super) fn binary_raw_body(op: BinaryOp) -> Option<&'static str> {
         BinaryOp::Subtract => "a - b",
         BinaryOp::Multiply => "a * b",
         BinaryOp::Divide => "a / b",
-        BinaryOp::Exponentiate => "pow(a, b)",
+        BinaryOp::Exponentiate => "kiln_c99_js_pow(a, b)",
         _ => return None,
     })
 }
@@ -121,7 +121,7 @@ pub(super) fn binary_fast_body(op: BinaryOp) -> Option<&'static str> {
         BinaryOp::Subtract => "kiln_c99_val_from_double(a - b)",
         BinaryOp::Multiply => "kiln_c99_val_from_double(a * b)",
         BinaryOp::Divide => "kiln_c99_val_from_double(a / b)",
-        BinaryOp::Exponentiate => "kiln_c99_val_from_double(pow(a, b))",
+        BinaryOp::Exponentiate => "kiln_c99_val_from_double(kiln_c99_js_pow(a, b))",
         // `%` on two integers in the exact range is an integer remainder; anything else is fmod,
         // which is what the language specifies for every double.
         BinaryOp::Remainder => {

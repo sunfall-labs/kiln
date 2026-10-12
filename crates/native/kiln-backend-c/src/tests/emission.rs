@@ -1527,6 +1527,68 @@ fn generic_mixed_tier_budget_is_spent_after_module_liveness() {
 }
 
 #[test]
+fn chunked_units_declare_every_retained_function_after_liveness_pruning() {
+    // Functions 0..4 are dead and emit no body, so a body's position in the chunked list is
+    // not its function index. Each chunk must still prototype the functions it defines (a
+    // call site may precede the definition) -- keyed by function index, not body position.
+    let mut prog = program(
+        Vec::new(),
+        vec![
+            Instruction::MakeFunction(4),
+            Instruction::MakeFunction(5),
+            Instruction::MakeFunction(6),
+            Instruction::MakeFunction(7),
+            Instruction::MakeFunction(8),
+            Instruction::Return,
+        ],
+        0,
+    );
+    prog.functions = (0..9)
+        .map(|_| function(vec![Instruction::Return]))
+        .collect();
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module(prog, Vec::new(), Vec::new()),
+        "pruned-chunks.js",
+        EmissionPolicy {
+            compact: true,
+            generic_only: true,
+            live_module_slots: Some(std::sync::Arc::new(Default::default())),
+            unit_chunk_bytes: Some(1),
+            ..Default::default()
+        },
+    )
+    .expect("module emits");
+    assert!(
+        emitted.chunks.len() >= 2,
+        "the budget forces several chunks"
+    );
+    let mut defined_in_later_chunks = 0;
+    for chunk in emitted.chunks.iter().skip(1) {
+        for line in chunk.lines() {
+            let Some(rest) = line.strip_prefix("int ") else {
+                continue;
+            };
+            let Some(signature) = rest.strip_suffix("(KU_PARAMS) {") else {
+                continue;
+            };
+            if !signature.contains("_fn_") || signature.ends_with("_f") {
+                continue;
+            }
+            defined_in_later_chunks += 1;
+            let prototype = format!("int {signature}(KU_PARAMS);");
+            let at_definition = chunk
+                .find(&format!("int {signature}(KU_PARAMS) {{"))
+                .unwrap();
+            assert!(
+                chunk[..at_definition].contains(&prototype),
+                "chunk defines {signature} without declaring it first"
+            );
+        }
+    }
+    assert!(defined_in_later_chunks > 0);
+}
+
+#[test]
 fn generic_mixed_tier_metadata_tracks_each_emitted_chunk() {
     let selected = function(vec![Instruction::Return]);
     let mut unsupported = function(vec![Instruction::Return]);

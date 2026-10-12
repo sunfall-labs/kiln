@@ -2,6 +2,14 @@
 struct kiln_gc_heap;
 void kiln_c99_gc_mark_symbol_key(struct kiln_gc_heap *heap, const kiln_string *key);
 
+/* `**` and `Math.pow` (ECMA-262 Number::exponentiate). C's pow answers 1 where the language
+ * answers NaN: a NaN exponent, and an infinite exponent with a base of magnitude one. Every
+ * emitter and runtime path computes exponentiation through this one function. */
+static inline double kiln_c99_js_pow(double base, double exponent) {
+    if (isnan(exponent) || (isinf(exponent) && fabs(base) == 1.0)) return NAN;
+    return pow(base, exponent);
+}
+
 static inline int kiln_c99_key_is_reserved(const kiln_string *key) {
     return key != NULL &&
            (key->flags & (KILN_STRING_SYMBOL_KEY | KILN_STRING_PRIVATE_KEY)) != 0;

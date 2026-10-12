@@ -1233,7 +1233,13 @@ fn runtime_prelude_size() {
     // Reviewed 2026-10-11: sealed Map and Set (ADR 0073 amendment) add the arena entry reader,
     // its SameValueZero probe, the sealed method kernel and the shared iterator constructor,
     // 87,534 lines in all; each appears once and extends the existing collection kernels.
-    const CEILING_LINES: usize = 88_000;
+    // Reviewed 2026-10-11: the dynamic-code parser gains template literals (interpolation and
+    // tagged calls), one shared binding-pattern walker (declarations, parameters, for-of heads,
+    // catch bindings), `**` and the logical assignments, accessor/async/numeric object members
+    // and `new.target`. All of it is private static code in runtime/dynamic.c, appearing once;
+    // no builtin ID or public C builtin was added. The minimal unit is 88,437 lines.
+    // Together the two bring it to 89,137 lines.
+    const CEILING_LINES: usize = 90_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

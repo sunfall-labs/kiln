@@ -839,7 +839,7 @@ static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln
             case 3:  return kiln_c99_val_from_double(a * b);
             case 4:  return kiln_c99_val_from_double(a / b);
             case 5:  return kiln_c99_val_from_double(fmod(a, b));
-            case 6:  return kiln_c99_val_from_double(pow(a, b));
+            case 6:  return kiln_c99_val_from_double(kiln_c99_js_pow(a, b));
             case 7:  return (a == b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
             case 8:  return (a != b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
             case 9:  return (a < b)  ? KILN_VAL_TRUE : KILN_VAL_FALSE;
