@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">kiln</title>
+  <desc id="desc">Three rising terracotta forms, kiln's mark, set in a warm ivory field.</desc>
+  <defs>
+    <radialGradient id="heat"><stop stop-color="#dc8c55" stop-opacity=".19"/><stop offset="1" stop-color="#dc8c55" stop-opacity="0"/></radialGradient>
+    <linearGradient id="clay" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#c55b38"/><stop offset="1" stop-color="#a83d27"/></linearGradient>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#282b25" opacity=".08"/></pattern>
+  </defs>
+  <rect width="1200" height="360" rx="12" fill="#f5f2eb"/>
+  <rect x="48" y="40" width="1104" height="280" fill="url(#grid)"/>
+  <ellipse cx="600" cy="198" rx="260" ry="185" fill="url(#heat)"/>
+  <path d="M48 312h1104" stroke="#ded8cc"/>
+  <path d="M467 278h69l46 34h-69zm105 0h69l46 34h-69zm105 0h49l46 34h-49z" fill="#282b25" opacity=".06"/>
+  <path d="M467 278V167l69-78v189zm105 0V105l69-78v251zm105 0v-63l49-55v118z" fill="url(#clay)"/>
+  <path d="m536 89 15 9v171l-15 9zm105-62 15 9v233l-15 9zm85 133 15 9v100l-15 9z" fill="#8f3424"/>
+  <path d="m467 167 69-78 15 9-69 78zm105-62 69-78 15 9-69 78zm105 110 49-55 15 9-49 55z" fill="#e5a076"/>
+</svg>
