@@ -66,9 +66,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install --no-self-update
-      - uses: Swatinem/rust-cache@v2
+      # mbx, the build cache this repository uses everywhere (AGENTS.md), backed by the GitHub
+      # Actions cache: a release after the first reuses the compiled workspace instead of building
+      # every crate and provider variant cold. Tag pushes restore; manual dispatches also save.
+      - uses: jdx/mr-boxington-action@v1
         with:
-          key: release-${{ matrix.target }}
+          toolchain: nightly-2026-09-15
+          save-on-workflow-dispatch: true
       # The packager re-execs under bash 4 (macOS ships 3.2) and the provider build links a
       # probe with the system C compiler, which every runner image already has.
       - if: runner.os == 'macOS'
