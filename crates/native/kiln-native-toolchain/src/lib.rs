@@ -429,8 +429,25 @@ impl BuildProfile {
             Self::NativeCheck => &["-O0", "-g", "-fsanitize=undefined"],
             // No `errno` from `sqrt` and friends: the language has none, and the check for a
             // negative operand before every square root is a branch the loop pays for it.
-            Self::NativeRelease => &["-O3", "-ffp-contract=off", "-fno-math-errno"],
-            Self::NativeReleaseSize => &["-Oz", "-ffp-contract=off", "-fno-math-errno"],
+            // Shipped binaries carry the distro-standard hardening whatever the user's compiler
+            // defaults to: stack canaries on frames with arrays, and checked libc calls. The
+            // `-U` keeps a compiler that already defines `_FORTIFY_SOURCE` from warning.
+            Self::NativeRelease => &[
+                "-O3",
+                "-ffp-contract=off",
+                "-fno-math-errno",
+                "-fstack-protector-strong",
+                "-U_FORTIFY_SOURCE",
+                "-D_FORTIFY_SOURCE=2",
+            ],
+            Self::NativeReleaseSize => &[
+                "-Oz",
+                "-ffp-contract=off",
+                "-fno-math-errno",
+                "-fstack-protector-strong",
+                "-U_FORTIFY_SOURCE",
+                "-D_FORTIFY_SOURCE=2",
+            ],
             Self::NativeProfile => &["-O3", "-ffp-contract=off", "-fno-math-errno", "-pg"],
         }
     }
@@ -491,6 +508,24 @@ fn release_dead_strip_flag(
         TargetPlatform::Linux => Some("-Wl,--gc-sections"),
         TargetPlatform::Macos => Some("-Wl,-dead_strip"),
         TargetPlatform::Windows | TargetPlatform::Other | TargetPlatform::Unknown => None,
+    }
+}
+
+/// Full RELRO for shipped ELF executables: the GOT is resolved at load and then made read-only,
+/// so a memory-corruption bug cannot redirect a library call through it. Mach-O has no
+/// equivalent flag (its lazy-binding pointers are already protected by the loader).
+fn release_hardening_link_flags(
+    profile: BuildProfile,
+    platform: TargetPlatform,
+) -> &'static [&'static str] {
+    if matches!(
+        profile,
+        BuildProfile::NativeRelease | BuildProfile::NativeReleaseSize
+    ) && platform == TargetPlatform::Linux
+    {
+        &["-Wl,-z,relro", "-Wl,-z,now"]
+    } else {
+        &[]
     }
 }
 
@@ -1357,6 +1392,9 @@ impl Toolchain {
             release_dead_strip_flag(options.profile, self.identity.target_platform())
         {
             args.push(OsString::from(flag));
+        }
+        for flag in release_hardening_link_flags(options.profile, self.identity.target_platform()) {
+            args.push(OsString::from(*flag));
         }
         if let Some(flag) = release_debug_strip_flag(
             options.profile,
@@ -2511,10 +2549,31 @@ mod tests {
     }
 
     #[test]
+    fn release_links_are_full_relro_on_linux_only() {
+        for profile in [BuildProfile::NativeRelease, BuildProfile::NativeReleaseSize] {
+            assert_eq!(
+                release_hardening_link_flags(profile, TargetPlatform::Linux),
+                &["-Wl,-z,relro", "-Wl,-z,now"]
+            );
+            assert!(release_hardening_link_flags(profile, TargetPlatform::Macos).is_empty());
+        }
+        assert!(
+            release_hardening_link_flags(BuildProfile::NativeDev, TargetPlatform::Linux).is_empty()
+        );
+    }
+
+    #[test]
     fn release_profile_uses_fp_contract_off_and_portable_baseline() {
         assert_eq!(
             BuildProfile::NativeRelease.compile_flags(),
-            &["-O3", "-ffp-contract=off", "-fno-math-errno"]
+            &[
+                "-O3",
+                "-ffp-contract=off",
+                "-fno-math-errno",
+                "-fstack-protector-strong",
+                "-U_FORTIFY_SOURCE",
+                "-D_FORTIFY_SOURCE=2",
+            ]
         );
         assert_eq!(
             BuildProfile::NativeProfile.compile_flags(),

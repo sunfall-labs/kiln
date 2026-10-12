@@ -8,6 +8,9 @@ name: Release
 # C compiler and no Rust toolchain can `kiln build`. The script smoke-tests the unpacked archive
 # with no cargo or rustc on PATH before it writes it.
 #
+# Actions are pinned to commit SHAs (the tag is in the comment beside each): a release must not
+# change because someone moved a tag. Bump a pin deliberately, in its own commit.
+#
 # Targets are the ones the project measures: macOS on Apple silicon and Linux (glibc) on x86_64
 # and arm64. Intel macOS and Windows are not built: no one measures them, and ADR 0018's target
 # matrix was never adopted. Linux archives carry no GUI provider (the bridge is AppKit today).
@@ -36,7 +39,7 @@ jobs:
     outputs:
       version: ${{ steps.read.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: read
         run: |
           version=$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -1)
@@ -48,9 +51,20 @@ jobs:
             exit 1
           fi
 
+  # A release ships only a dependency tree that passes deny.toml: no known advisory (each ignore
+  # carries its reason there), no licence outside the allow list, no source but crates.io.
+  supply-chain:
+    name: Supply chain (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check advisories bans licenses sources
+
   package:
     name: Package ${{ matrix.target }}
-    needs: version
+    needs: [version, supply-chain]
     strategy:
       fail-fast: false
       matrix:
@@ -64,12 +78,12 @@ jobs:
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install --no-self-update
       # mbx, the build cache this repository uses everywhere (AGENTS.md), backed by the GitHub
       # Actions cache: a release after the first reuses the compiled workspace instead of building
       # every crate and provider variant cold. Tag pushes restore; manual dispatches also save.
-      - uses: jdx/mr-boxington-action@v1
+      - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1
         with:
           toolchain: nightly-2026-09-15
           save-on-workflow-dispatch: true
@@ -78,7 +92,7 @@ jobs:
       - if: runner.os == 'macOS'
         run: brew install bash
       - run: scripts/package-release.sh --target ${{ matrix.target }} dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: kiln-${{ matrix.target }}
           path: dist/*
@@ -92,8 +106,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true

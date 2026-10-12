@@ -986,6 +986,11 @@ fn prelude_object_options(base: Digest, profile: NativeProfile) -> Digest {
 /// build could link the oracle's slower objects.
 fn object_flag_identity(options: &NativeBuildOptions) -> String {
     let mut identity = String::new();
+    // Release objects carry stack-protector and FORTIFY flags (`kiln-native-toolchain`); an
+    // object cached before them must not be linked into a binary that claims them.
+    if matches!(options.profile, NativeProfile::Release | NativeProfile::ReleaseSize) {
+        identity.push_str("\0hardened-v1");
+    }
     if options.march_native {
         identity.push_str("\0march-native");
     }
@@ -1050,9 +1055,15 @@ fn executable_link_options_digest_with_symbols(
         } else {
             ""
         };
+    // Release links add full RELRO on Linux; a binary linked before that is a different artifact.
+    let hardening_opt = if matches!(profile, NativeProfile::Release | NativeProfile::ReleaseSize) {
+        "\0relro-now-v1"
+    } else {
+        ""
+    };
     Digest::hash(
         format!(
-            "{}\0system-math\0system-entropy-v1{static_opt}{pgo_opt}{symbols_opt}\0provider-link-args={}",
+            "{}\0system-math\0system-entropy-v1{static_opt}{pgo_opt}{symbols_opt}{hardening_opt}\0provider-link-args={}",
             profile.as_str(),
             provider_link_arguments_digest(provider_link_arguments),
         )

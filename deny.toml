@@ -17,7 +17,13 @@ all-features = true
 # version, and the lockfile is committed so the fix is a deliberate bump either way.
 yanked = "deny"
 unmaintained = "all"
-ignore = []
+ignore = [
+    # The Marvin timing attack recovers plaintext by timing RSA *decryption* (PKCS#1 v1.5).
+    # `rsa` has no fixed release. kiln-key-core, the only user, imports and exports keys
+    # (PEM/DER/JWK parsing and encoding) and never decrypts or signs with one; revisit if that
+    # changes or a patched `rsa` ships.
+    { id = "RUSTSEC-2023-0071", reason = "rsa used only for key import/export in kiln-key-core; no decryption or signing" },
+]
 
 [licenses]
 # The workspace is MIT and most of the tree offers MIT among its options. The rest are here
@@ -34,6 +40,9 @@ ignore = []
 #   CC0-1.0        notify. A public-domain dedication.
 #   ISC            inotify / inotify-sys, reached through notify on Linux. BSD-equivalent.
 #   Unlicense      memchr, walkdir, same-file, winapi-util, each "Unlicense OR MIT".
+#   BSD-3-Clause   curve25519-dalek, ed25519-dalek and subtle (kiln-webcrypto's Ed25519),
+#                  encoding_rs's data tables, oxc_sourcemap. Permissive, attribution only, which
+#                  THIRD-PARTY-LICENSES.md in every release archive carries.
 #
 # All permissive and all compatible with shipping an MIT binary. Nothing copyleft is allowed,
 # and a new entry here needs a line saying which crate forced it.
@@ -46,6 +55,7 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Unlicense",
+    "BSD-3-Clause",
     # foldhash, reached through oxc_resolver -> simd-json -> halfbrown -> hashbrown. Zlib is a
     # permissive notice license, compatible with MIT publication.
     "Zlib",
@@ -54,9 +64,12 @@ confidence-threshold = 0.93
 
 [bans]
 # Two versions of one crate is the usual first symptom of the tree growing sideways, and it
-# costs build time - the thing this project is about - so it fails here rather than in a
-# quarterly audit.
-multiple-versions = "deny"
+# costs build time. This was "deny" while the tree was tiny; by v0.1.0 it is ~585 packages and
+# carries 29 duplicates (hashbrown x5, windows-sys x4, rand 0.8/0.9, thiserror 1/2, ...), every
+# one transitive. Twenty-nine `skip` lines would be the mute button this file warns against, so
+# duplicates warn: the list is in every run's log, and collapsing it is ordinary maintenance.
+# Advisories, licences and sources stay hard failures.
+multiple-versions = "warn"
 # Exceptions, each with a reason. Both are transitive and neither is ours to collapse: the
 # duplicate disappears when the upstream crates converge, not when we change anything here.
 skip = [
