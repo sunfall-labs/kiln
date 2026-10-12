@@ -1,15 +1,30 @@
 # kiln website
 
-Static landing page for kiln v0.1.0. This independent `gh-pages` branch contains only site files.
+Static feature and measurement site for kiln v0.1.0. This independent `gh-pages` branch contains only site files.
 
 GitHub Pages source: **Deploy from a branch → gh-pages → / (root)**. `.nojekyll` publishes the
-HTML, CSS, JavaScript and SVG directly; there is no dependency installation or custom build.
+HTML, CSS, JavaScript and data directly; there is no dependency installation or deployment build.
 The default address is `https://sunfall-labs.github.io/kiln/`.
 
 Preview locally with `python3 -m http.server 8765` and open `http://localhost:8765/`.
 Edit `index.html`, `style.css` and `site.js`, then commit and push this branch to update the site.
+The quantitative source of truth is `data/benchmarks.json`, transcribed from the v0.1.0
+README measurement record. It includes the machine, date, runtime versions and workload/client
+conditions. Do not invent speedups for parallel collections or actors: their diagrams describe
+execution and ownership, not measured performance.
+
+After editing measurement data, run `python3 scripts/render-benchmarks.py`. This refreshes the
+initial bars, full accessible tables and the embedded dataset used by chart controls. Check its
+output is unchanged on a second run. Keep chart axes and headings aligned if changing the data.
+The page includes complete, downloadable programs under `examples/`; keep visible excerpts
+consistent with them and check both execution modes when changing those examples.
+
 Keep platform badges, archive links and status aligned with the published release. Do not
 advertise an unreleased binary as available.
 
 GitHub Free supports Pages from public repositories. A private organization repository needs a
 paid plan. Repository visibility must only change with the owner's explicit approval.
+
+Charts and explanatory diagrams are SVG. The benchmark renderer also writes standalone charts
+under `assets/charts/`, offered as downloads on the page. Interactive charts update SVG bar widths
+and accessible descriptions from the same JSON data; ordinary HTML tables retain every measurement.

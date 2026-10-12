@@ -46,3 +46,51 @@ document.querySelectorAll('[data-copy]').forEach((button) => {
     toastTimer = setTimeout(() => status.classList.remove('visible'), 4000);
   });
 });
+
+const measurements = JSON.parse(document.getElementById('benchmark-data').textContent);
+document.documentElement.classList.add('js-charts');
+
+function selectChart(button, selector) {
+  document.querySelectorAll(selector).forEach((item) => {
+    item.setAttribute('aria-pressed', String(item === button));
+  });
+}
+
+function setBars(container, values, maximum) {
+  container.querySelectorAll('.chart-row').forEach((row, index) => {
+    row.querySelector('.bar').setAttribute('width', values[index] / maximum * 172);
+    row.querySelector('.chart-value').textContent = `${values[index].toFixed(1)}k`;
+  });
+  const svg = container.querySelector('svg');
+  svg.querySelector('desc').textContent = [...container.querySelectorAll('.chart-row')].map(row => `${row.querySelector('.chart-label').textContent}: ${row.querySelector('.chart-value').textContent}`).join('; ');
+  svg.querySelector('title').textContent = container.id === 'throughput-bars' ? 'HTTP throughput measurements' : 'Worker scaling measurements';
+
+}
+
+document.querySelectorAll('[data-workload]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const workload = measurements.workloads.find((item) => item.id === button.dataset.workload);
+    selectChart(button, '[data-workload]');
+    setBars(document.getElementById('throughput-bars'),
+      measurements.runtimes.map((runtime) => runtime.throughput[workload.id]),
+      measurements.axes.throughput);
+    document.querySelector('#throughput-bars svg title').textContent = `${workload.label}: HTTP throughput`;
+    document.getElementById('throughput-title').textContent = workload.label;
+    document.getElementById('workload-description').textContent = workload.description;
+    document.getElementById('throughput-takeaway').textContent = workload.takeaway;
+  });
+});
+
+document.querySelectorAll('[data-scaling]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const workload = button.dataset.scaling;
+    selectChart(button, '[data-scaling]');
+    setBars(document.getElementById('scaling-bars'),
+      measurements.scaling.workers.map((worker) => worker[workload]),
+      measurements.axes.scaling);
+    document.querySelector('#scaling-bars svg title').textContent = `${workload === 'service' ? 'Small service' : 'Hello world'}: worker scaling`;
+    document.getElementById('scaling-title').textContent = workload === 'service'
+      ? 'More capacity for the small service.' : 'More workers are not always faster.';
+    document.getElementById('scaling-takeaway').textContent = measurements.scaling.takeaways[workload];
+  });
+});

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="chart-svg" viewBox="0 0 360 220" role="img" aria-labelledby="throughput-svg-title throughput-svg-desc">
+<title id="throughput-svg-title">Hello-world HTTP throughput</title>
+<desc id="throughput-svg-desc">Bars start at zero. kiln native: 65.7k; Bun: 60.6k; Node: 45.6k; Deno: 43.9k. Exact values are also available in the result table.</desc>
+<defs><pattern id="throughput-range" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="2" height="4" fill="#ffffff" fill-opacity=".5"/></pattern></defs>
+<g class="chart-row" data-series="kiln"><text class="chart-label" x="0" y="32" fill="#b6462b" font-family="sans-serif" font-size="12">kiln native</text><rect x="87" y="17" width="172" height="22" fill="#ebece3"/><rect class="bar" x="87" y="17" width="161.4343" height="22" fill="#b6462b"/><text class="chart-value" x="357" y="32" text-anchor="end" fill="#b6462b" font-family="monospace" font-size="12">65.7k</text></g>
+<g class="chart-row" data-series="bun"><text class="chart-label" x="0" y="77" fill="#73796b" font-family="sans-serif" font-size="12">Bun</text><rect x="87" y="62" width="172" height="22" fill="#ebece3"/><rect class="bar" x="87" y="62" width="148.9029" height="22" fill="#73796b"/><text class="chart-value" x="357" y="77" text-anchor="end" fill="#73796b" font-family="monospace" font-size="12">60.6k</text></g>
+<g class="chart-row" data-series="node"><text class="chart-label" x="0" y="122" fill="#73796b" font-family="sans-serif" font-size="12">Node</text><rect x="87" y="107" width="172" height="22" fill="#ebece3"/><rect class="bar" x="87" y="107" width="112.0457" height="22" fill="#73796b"/><text class="chart-value" x="357" y="122" text-anchor="end" fill="#73796b" font-family="monospace" font-size="12">45.6k</text></g>
+<g class="chart-row" data-series="deno"><text class="chart-label" x="0" y="167" fill="#73796b" font-family="sans-serif" font-size="12">Deno</text><rect x="87" y="152" width="172" height="22" fill="#ebece3"/><rect class="bar" x="87" y="152" width="107.8686" height="22" fill="#73796b"/><text class="chart-value" x="357" y="167" text-anchor="end" fill="#73796b" font-family="monospace" font-size="12">43.9k</text></g>
+<path d="M87 12V184H259" fill="none" stroke="#a9ad9f" stroke-width="1"/>
+<text x="87" y="204" fill="#6c7066" font-family="monospace" font-size="10">0</text>
+<text x="259" y="204" text-anchor="end" fill="#6c7066" font-family="monospace" font-size="10">70k</text>
+</svg>
