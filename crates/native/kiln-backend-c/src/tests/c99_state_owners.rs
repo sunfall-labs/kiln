@@ -37,6 +37,9 @@ pub(super) const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     // Counts the engine builtin modules whose synchronous initializer is running; no turn
     // boundary sees it.
     ("kiln_c99_private_hooks_active", C99StateOwner::Frame),
+    // Set when an unhandled rejection becomes the uncaught exception; the launcher takes and
+    // clears it in the same turn to print `(in promise)`.
+    ("kiln_c99_uncaught_in_promise", C99StateOwner::Frame),
     ("kiln_c99_fixture_method_stores", C99StateOwner::TestFixture),
     ("kiln_c99_gc_fallback", C99StateOwner::TestFixture),
     ("kiln_c99_keys_check_mode", C99StateOwner::TestFixture),
