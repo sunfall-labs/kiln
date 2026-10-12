@@ -940,6 +940,51 @@ static kiln_val kiln_c99_val_binary(uint16_t operation, kiln_host *host, kiln_va
     return KILN_VAL_UNDEFINED;
 }
 
+/* Compiler-private storage for a proven unobserved loop accumulator. The graph proof keeps
+ * prior values private and drops `owner` at every loop exit. No string ABI or public built-in
+ * changes: once frozen this is an ordinary flat Latin-1 / UTF-16 string. */
+static kiln_val kiln_c99_val_append_owned(kiln_host *host, kiln_val left, kiln_val right,
+                                         kiln_string **owner, size_t *capacity, int *status,
+                                         int depth, kiln_value *thrown) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (!KILN_VAL_IS_STRING(left) || !KILN_VAL_IS_STRING(right) ||
+        heap == NULL || heap->actor_candidate_id != 0) {
+        *owner = NULL;
+        return kiln_c99_val_binary(1, host, left, right, status, depth, thrown);
+    }
+    const kiln_string *l = (const kiln_string *)KILN_VAL_PTR(left);
+    const kiln_string *r = (const kiln_string *)KILN_VAL_PTR(right);
+    if (l == NULL || r == NULL || l->unit_len > UINT32_MAX - r->unit_len) {
+        *owner = NULL;
+        return kiln_c99_val_binary(1, host, left, right, status, depth, thrown);
+    }
+    size_t nl = l->unit_len, nr = r->unit_len, total = nl + nr;
+    uint32_t flags = kiln_string_is_utf16(l) || kiln_string_is_utf16(r)
+                         ? KILN_STRING_UTF16 : KILN_STRING_LATIN1;
+    kiln_string *joined = *owner;
+    int reuse = joined == l && joined->flags == flags && *capacity >= total;
+    if (!reuse) {
+        size_t reserved = 16;
+        while (reserved < total) {
+            if (reserved > UINT32_MAX / 2) { reserved = total; break; }
+            reserved *= 2;
+        }
+        joined = kiln_c99_gc_alloc_units(reserved, flags);
+        if (joined == NULL) { *owner = NULL; *status = KILN_C99_OUT_OF_MEMORY; return KILN_VAL_UNDEFINED; }
+        if (flags == KILN_STRING_LATIN1) memcpy((void *)joined->data, l->data, nl);
+        else if (kiln_string_is_utf16(l)) memcpy((void *)joined->data, l->data, nl * sizeof(uint16_t));
+        else for (size_t i = 0; i < nl; ++i) ((uint16_t *)(uintptr_t)joined->data)[i] = kiln_string_unit_at(l, i);
+        *capacity = reserved;
+    }
+    if (flags == KILN_STRING_LATIN1) memmove((uint8_t *)(uintptr_t)joined->data + nl, r->data, nr);
+    else if (kiln_string_is_utf16(r)) memmove((uint16_t *)(uintptr_t)joined->data + nl, r->data, nr * sizeof(uint16_t));
+    else for (size_t i = 0; i < nr; ++i) ((uint16_t *)(uintptr_t)joined->data)[nl+i] = kiln_string_unit_at(r, i);
+    joined->unit_len = (uint32_t)total;
+    *owner = joined;
+    *status = KILN_C99_OK;
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, joined);
+}
+
 static kiln_val kiln_c99_val_unary_fast(uint16_t operation, kiln_val value) {
     if (KILN_LIKELY(KILN_VAL_IS_NUMBER(value))) {
         double a;

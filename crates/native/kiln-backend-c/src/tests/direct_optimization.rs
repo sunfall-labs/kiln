@@ -1305,3 +1305,32 @@ fn diagnose_pinned_sharding_generic_optimization_selection() {
         "the profiled 916-instruction Sharding loop should enter the bounded tier"
     );
 }
+
+#[test]
+fn string_accumulator_storage_is_initialized_before_clone_dispatch() {
+    let source = include_str!("../../../../../conformance/native/string-accumulator-html.ts");
+    let hir = kiln_frontend_oxc::parse("fixture/string-accumulator-html.ts", source);
+    let program = kiln_ir::compile_module(&hir).unwrap().program;
+    let emitted = crate::emit(&program).unwrap();
+    let declaration = emitted
+        .source
+        .find("kiln_string *kiln_string_owner_")
+        .expect("HTML loop qualifies");
+    // Earlier functions may have their own versioned dispatch. Check the enclosing body.
+    let body_start = emitted.source[..declaration]
+        .rfind("\nstatic int ")
+        .expect("enclosing function");
+    let append = emitted.source[declaration..]
+        .find("kiln_c99_val_append_owned(host,")
+        .expect("private append emitted")
+        + declaration;
+    assert!(declaration < append);
+    let dispatch = emitted.source[body_start..]
+        .find("goto kiln_fast_block_")
+        .expect("fixture exercises versioned clones")
+        + body_start;
+    assert!(
+        declaration < dispatch,
+        "both clones share initialized ownership"
+    );
+}

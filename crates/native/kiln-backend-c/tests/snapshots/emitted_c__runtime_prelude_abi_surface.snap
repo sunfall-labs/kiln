@@ -4633,6 +4633,7 @@ static int kiln_c99_val_same_value_zero(kiln_val a, kiln_val b) {
 static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val right, int *result) {
 static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln_val right) {
 static kiln_val kiln_c99_val_binary(uint16_t operation, kiln_host *host, kiln_val left, kiln_val right, int *status, int depth, kiln_value *thrown) {
+static kiln_val kiln_c99_val_append_owned(kiln_host *host, kiln_val left, kiln_val right,
 static kiln_val kiln_c99_val_unary_fast(uint16_t operation, kiln_val value) {
 static inline int kiln_c99_site_member_matches_bytes(const kiln_c99_site *site,
 static int kiln_c99_read_property(kiln_host *host, kiln_value target,

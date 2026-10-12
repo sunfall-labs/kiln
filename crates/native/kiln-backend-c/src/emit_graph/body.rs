@@ -1244,6 +1244,7 @@ fn emit_block_sequence(
     this_sites: &std::collections::HashMap<ValueId, usize>,
     spec: &Speculation,
     argument_length_values: &HashSet<ValueId>,
+    string_accumulators: &[super::string_accumulator::Accumulator],
 ) {
     let prepared_method_properties: HashSet<ValueId> = graph
         .blocks
@@ -1537,6 +1538,17 @@ fn emit_block_sequence(
             }
         }
         writeln!(output, "{block_prefix}{}:;", block.id.0).unwrap();
+        for accumulator in string_accumulators {
+            if !accumulator.blocks.contains(&block.id) {
+                writeln!(
+                    output,
+                    "    kiln_string_owner_{} = NULL;",
+                    accumulator.phi.0
+                )
+                .unwrap();
+            }
+        }
+
         if graph.seam_block == Some(block.id) {
             output
                 .push_str("    if (frame->binding) { frame->sp = 0; return KILN_C99_YIELDED; }\n");
@@ -1629,6 +1641,23 @@ fn emit_block_sequence(
                 &prepared_method_properties,
                 &argument_length_values,
             );
+            if let Some(accumulator) = string_accumulators
+                .iter()
+                .find(|a| a.appends.contains(&vid))
+            {
+                if let GraphOp::Binary { left, right, .. } = op {
+                    let check = super::ops::status_check(
+                        diagnostic_site,
+                        graph.origins.get(&vid).map_or(0, |o| o.pc),
+                        "String accumulator",
+                        &unwind,
+                    );
+                    op_text = format!(
+                        "    {{ int status = KILN_C99_OK; v{} = kiln_c99_val_append_owned(host, v{}, v{}, &kiln_string_owner_{}, &kiln_string_capacity_{}, &status, depth, thrown); {check} }}\n",
+                        vid.0, left.0, right.0, accumulator.phi.0, accumulator.phi.0
+                    );
+                }
+            }
             if kind.restarts() {
                 op_text = bail_out(op, &op_text, RESTART);
             }
@@ -2956,6 +2985,20 @@ fn emit_blocks(
     trace_label: &str,
 ) -> (usize, usize) {
     let body_start = output.len();
+    let string_accumulators = if matches!(kind, EntryKind::Boxed) {
+        super::string_accumulator::analyze(graph, proto, program)
+    } else {
+        Vec::new()
+    };
+    for accumulator in &string_accumulators {
+        writeln!(
+            output,
+            "    kiln_string *kiln_string_owner_{} = NULL; size_t kiln_string_capacity_{} = 0;",
+            accumulator.phi.0, accumulator.phi.0
+        )
+        .unwrap();
+    }
+
     // The reads of `this`, each with its column in the function's receiver-shape cache: one
     // row per shape seen, one column per property name.
     let this_sites = if plan.generic_only {
@@ -3402,6 +3445,7 @@ fn emit_blocks(
                 exits: true,
             },
             &argument_length_values,
+            &string_accumulators,
         );
 
         writeln!(output, "    /* Clone B: generic fallback path */").unwrap();
@@ -3440,6 +3484,7 @@ fn emit_blocks(
                 exits: false,
             },
             &argument_length_values,
+            &string_accumulators,
         );
     } else {
         let boxed = if plan.generic_only && baseline_numbers.is_empty() {
@@ -3508,6 +3553,7 @@ fn emit_blocks(
             &this_sites,
             &Speculation::default(),
             &argument_length_values,
+            &string_accumulators,
         );
     }
 

@@ -473,6 +473,7 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
 #endif
 extern int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val right, int *result);
 extern kiln_val kiln_c99_val_binary(uint16_t operation, kiln_host *host, kiln_val left, kiln_val right, int *status, int depth, kiln_value *thrown);
+extern kiln_val kiln_c99_val_append_owned(kiln_host *host, kiln_val left, kiln_val right, kiln_string **owner, size_t *capacity, int *status, int depth, kiln_value *thrown);
 extern kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln_val right);
 extern kiln_val kiln_c99_val_unary_fast(uint16_t operation, kiln_val value);
 extern int kiln_c99_val_read_property(kiln_host *host, kiln_val target, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site, kiln_val *out);

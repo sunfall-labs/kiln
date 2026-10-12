@@ -10,6 +10,7 @@ mod body;
 mod clones;
 mod ops;
 pub(crate) mod sites;
+mod string_accumulator;
 
 pub(crate) use body::ArgumentsLengthFact;
 pub use body::{
