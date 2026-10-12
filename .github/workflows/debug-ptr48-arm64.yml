@@ -1,0 +1,56 @@
+name: debug ptr48 arm64
+on:
+  push:
+    branches: [debug/ptr48-arm64]
+jobs:
+  arm64:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --no-self-update
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          toolchain: nightly-2026-09-15
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq gdb nodejs
+      - run: mbx build --release -p kiln-cli
+      - name: programs
+        shell: bash {0}
+        run: |
+          K=$GITHUB_WORKSPACE/target/release/kiln
+          mkdir -p /tmp/p && cd /tmp/p
+          echo '1+1' > empty.js
+          echo 'const s: string = "hello"; console.log(s);' > hello.ts
+          cat > rare.mjs <<'JS'
+          const b = 10n ** 20n + 7n;
+          const t = Temporal.PlainDate.from("2026-10-12").add({ days: 3 });
+          const m = new Map([[1, { a: 1 }], ["k", [1, 2, 3]]]);
+          const s = new Set([b, t.toString()]);
+          console.log(String(b), t.toString(), m.get(1).a, m.get("k").length, s.size, typeof b);
+          JS
+          cat > http.mjs <<'JS'
+          import http from "node:http";
+          const server = http.createServer((q, r) => r.end("hi " + q.url));
+          server.listen(0, "127.0.0.1", async () => {
+            const res = await fetch(`http://127.0.0.1:${server.address().port}/x`);
+            console.log(res.status, await res.text());
+            server.close();
+          });
+          JS
+          for f in empty.js hello.ts rare.mjs http.mjs; do
+            for prof in native-dev native-release; do
+              out=./$(basename $f | tr . _)-$prof
+              $K --one-shot build $f --profile $prof --output $out > /dev/null 2>&1 || { echo "BUILD FAIL $f $prof"; continue; }
+              $out; echo "== $f $prof exit=$?"
+            done
+            echo "-- interpreter:"; $K --one-shot run $f
+          done
+          KILN_GC_STRESS=1 ./rare_mjs-native-dev; echo "== rare gc-stress exit=$?"
+          gdb -q -batch -ex run -ex bt ./hello_ts-native-dev 2>&1 | grep -E 'SIGSEGV|^#' | head -20
+      - name: native corpus sample
+        shell: bash {0}
+        run: |
+          ls conformance/native/*.{js,mjs,cjs,ts} | grep -iE 'bigint|temporal|shared|collection|map|set|actor|cell|closure|http|json|string|array|class|promise|error|parallel' | head -110 > /tmp/probes.txt
+          wc -l < /tmp/probes.txt
+          KILN_BIN=$GITHUB_WORKSPACE/target/release/kiln KILN_JOBS=4 ./scripts/native.sh $(cat /tmp/probes.txt) > /tmp/native.log 2>&1
+          grep -E '^native:|DIVERG|refused' -A3 /tmp/native.log | head -60
