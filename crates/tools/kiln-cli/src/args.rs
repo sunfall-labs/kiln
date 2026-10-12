@@ -60,6 +60,10 @@ pub enum Command {
     Check {
         path: PathBuf,
         node: bool,
+        /// `--explain`: print the daemon's counters (module hashes, what was recomputed and what
+        /// was reused) before the diagnostics. Without it a check prints only the diagnostics and
+        /// a one-line summary.
+        explain: bool,
         /// `--explain-parallel`: after the check, report every `parallelMap` site of the native
         /// build at this profile and what it decided, from the build's own emission (stopped
         /// before the C compiler). `None` without the flag.
@@ -459,8 +463,10 @@ where
             "--workers cannot be combined with `kiln build --shared`: a library has no launcher to record it in",
         ));
     }
-    if explain && name != "build" {
-        return Err(Error::usage("--explain only applies to `kiln build`"));
+    if explain && name != "build" && name != "check" {
+        return Err(Error::usage(
+            "--explain only applies to `kiln build` or `kiln check`",
+        ));
     }
     if !includes.is_empty() && (name != "build" || shared) {
         return Err(Error::usage(
@@ -497,6 +503,7 @@ where
         "check" => Command::Check {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             node,
+            explain,
             // The default is `kiln build`'s, so the two explain the same build unless told not to.
             explain_parallel: explain_parallel.then(|| profile.unwrap_or(BUILD_PROFILE)),
         },
@@ -1033,11 +1040,14 @@ kiln check - type-check a file
 usage:
     kiln check [options] <file>
 
-Reports diagnostics for <file> and what had to be recomputed to find them. Exits 1 when there
-are diagnostics.
+Reports diagnostics for <file>, then a one-line summary. Exits 1 when there are diagnostics.
+Node APIs (node:fs, process, Buffer, ...), kiln's own modules and its extensions are known
+without any package installed.
 
 options:
     --node                force the Node compatibility layer on
+    --explain             first print what the checker computed: the module's interface and
+                          implementation hashes, and what had to be recomputed or was reused
     --explain-parallel    after the check, report every parallelMap site of the native build
                           and what it decided (nothing is compiled)
     --profile <name>      with --explain-parallel: the build profile to explain
@@ -1250,6 +1260,7 @@ mod tests {
             Command::Check {
                 path: PathBuf::from("a.js"),
                 node: false,
+                explain: false,
                 explain_parallel: None,
             }
         );
@@ -1791,6 +1802,7 @@ mod tests {
             Command::Check {
                 path: PathBuf::from("--weird-name.js"),
                 node: false,
+                explain: false,
                 explain_parallel: None,
             }
         );

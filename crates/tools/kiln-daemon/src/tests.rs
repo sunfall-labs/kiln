@@ -4154,3 +4154,220 @@ fn a_zero_idle_period_disables_the_exit() {
         .expect("shutdown");
     fixture.stop();
 }
+
+/// `check_source_types` over one program in a directory with no configuration, plus any
+/// project files the program should see.
+fn check_program(
+    source: &str,
+    project: &[(&str, &str)],
+    auxiliary: &[(&str, &str)],
+) -> kiln_hir::source_types::CheckResult {
+    use std::sync::Arc;
+    let entry = "/project/main.ts";
+    let modules: Vec<_> = std::iter::once((entry, source))
+        .chain(project.iter().copied())
+        .map(|(path, text)| {
+            (
+                path.to_owned(),
+                Arc::new(kiln_frontend_oxc::parse(path, text)),
+            )
+        })
+        .collect();
+    let auxiliary: Vec<(String, Arc<[u8]>)> = auxiliary
+        .iter()
+        .map(|(path, text)| ((*path).to_owned(), Arc::from(text.as_bytes())))
+        .collect();
+    crate::server::check_source_types(entry, &modules, &auxiliary)
+}
+
+fn messages(result: &kiln_hir::source_types::CheckResult) -> Vec<String> {
+    result
+        .diagnostics
+        .iter()
+        .map(|d| format!("{:?}: {}", d.code, d.message))
+        .collect()
+}
+
+#[test]
+fn source_check_without_a_config_knows_the_globals_kiln_provides() {
+    let result = check_program(
+        r#"
+        const xs: number[] = [1, 2, 3];
+        setTimeout(() => console.log(xs.map((x) => x * 2)), 10);
+        const text: Promise<string> = fetch("http://example.com").then((r) => r.text());
+        const url = new URL("http://example.com");
+        console.log(process.argv.length, Buffer.from("x").length, structuredClone(url).href, text);
+        "#,
+        &[],
+        &[],
+    );
+    assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+}
+
+#[test]
+fn source_check_knows_node_modules_and_still_reports_real_errors() {
+    let result = check_program(
+        r#"
+        import { readFileSync } from "node:fs";
+        import path from "node:path";
+        const ok: string = readFileSync("x", "utf8");
+        const bad: number = readFileSync("x", "utf8");
+        console.log(path.join("a", "b"), ok, bad);
+        "#,
+        &[],
+        &[],
+    );
+    assert_eq!(
+        result.diagnostics.iter().map(|d| d.code).collect::<Vec<_>>(),
+        vec![Some(2322)],
+        "{:?}",
+        messages(&result)
+    );
+}
+
+#[test]
+fn source_check_knows_kiln_extensions_and_modules() {
+    let result = check_program(
+        r#"
+        import { run } from "kiln:process";
+        const doubled: number[] = [1, 2].parallelMap((x) => x * 2);
+        const total: number = new Float64Array(4).parallelReduce((a, v) => a + v, (a, b) => a + b, 0);
+        Kiln.serve({ fetch: () => new Response("hi"), port: 0 });
+        Bun.serve((request) => new Response(request.url));
+        run("echo", ["hi"]).then((r) => console.log(r.exitCode, doubled, total));
+        const wrong: string = [1].parallelMap((x) => x);
+        "#,
+        &[],
+        &[],
+    );
+    assert_eq!(
+        result.diagnostics.iter().map(|d| d.code).collect::<Vec<_>>(),
+        vec![Some(2322)],
+        "{:?}",
+        messages(&result)
+    );
+}
+
+#[test]
+fn source_check_prefers_the_projects_own_node_types() {
+    // The project's @types/node declares one name only. If the embedded copy were loaded too,
+    // `process` would resolve; it must not, and the project's own declaration must.
+    let project = [(
+        "/project/node_modules/@types/node/index.d.ts",
+        "declare const ONLY_IN_PROJECT_NODE_TYPES: 1;",
+    )];
+    let result = check_program(
+        "const a: 1 = ONLY_IN_PROJECT_NODE_TYPES; process.exit(0);",
+        &project,
+        &[],
+    );
+    let codes: Vec<_> = result.diagnostics.iter().map(|d| d.code).collect();
+    assert_eq!(codes, vec![Some(2591)], "{:?}", messages(&result));
+}
+
+#[test]
+fn source_check_respects_a_projects_config_but_keeps_the_builtin_declarations() {
+    // `strict` is off, so assigning null to a number is fine; the config says nothing of Node.
+    let result = check_program(
+        r#"
+        import { readFileSync } from "node:fs";
+        const n: number = null;
+        console.log(n, readFileSync("x", "utf8"), [1].parallelMap((x) => x));
+        "#,
+        &[],
+        &[(
+            "/project/tsconfig.json",
+            r#"{"compilerOptions":{"strict":false,"lib":["es2020"]}}"#,
+        )],
+    );
+    assert!(result.diagnostics.is_empty(), "{:?}", messages(&result));
+    let strict = check_program(
+        "const n: number = null; console.log(n);",
+        &[],
+        &[(
+            "/project/tsconfig.json",
+            r#"{"compilerOptions":{"strict":true}}"#,
+        )],
+    );
+    assert_eq!(
+        strict.diagnostics.iter().map(|d| d.code).collect::<Vec<_>>(),
+        vec![Some(2322)],
+        "{:?}",
+        messages(&strict)
+    );
+}
+
+/// Every member `KILN_EXTENSIONS` declares is declared in `@kiln/types`, and the declarations
+/// carry no extension the registry lacks -- so adding an extension without a declaration (or the
+/// reverse) fails here.
+#[test]
+fn kiln_types_declare_exactly_the_registered_extensions() {
+    use kiln_builtin_surface::KILN_EXTENSIONS;
+    let file = |name: &str| {
+        kiln_type_checker::KILN_LIBRARIES
+            .iter()
+            .find(|(path, _)| *path == format!("kiln/{name}"))
+            .unwrap_or_else(|| panic!("kiln/{name} is not embedded"))
+            .1
+    };
+    let parallel = file("parallel.d.ts");
+    let globals = file("globals.d.ts");
+    // `interface Name<..> { ... }` bodies, keyed by name.
+    let body = |name: &str| -> &str {
+        let at = parallel
+            .find(&format!("\ninterface {name}"))
+            .unwrap_or_else(|| panic!("parallel.d.ts has no interface {name}"));
+        let rest = &parallel[at + 1..];
+        &rest[..rest.find("\n}").expect("interface body ends")]
+    };
+    const TYPED: [&str; 11] = [
+        "Int8Array",
+        "Uint8Array",
+        "Uint8ClampedArray",
+        "Int16Array",
+        "Uint16Array",
+        "Int32Array",
+        "Uint32Array",
+        "Float32Array",
+        "Float64Array",
+        "BigInt64Array",
+        "BigUint64Array",
+    ];
+    let mut registered_parallel = std::collections::BTreeSet::new();
+    for extension in KILN_EXTENSIONS {
+        let key = extension.key.property_key();
+        let declared = |interface: &str| {
+            let text = body(interface);
+            text.contains(&format!("\n  {key}(")) || text.contains(&format!("\n  {key}<"))
+        };
+        match extension.owner {
+            "Array.prototype" => {
+                registered_parallel.insert(key);
+                assert!(declared("Array"), "Array.prototype.{key} is not declared");
+                if key != "parallelSort" {
+                    assert!(declared("ReadonlyArray"), "ReadonlyArray.{key} is not declared");
+                }
+            }
+            "%TypedArray%.prototype" => {
+                registered_parallel.insert(key);
+                for typed in TYPED {
+                    assert!(declared(typed), "{typed}.{key} is not declared");
+                }
+            }
+            "globalThis" => assert!(
+                globals.contains(&format!("declare var {key}:")),
+                "global {key} is not declared"
+            ),
+            other => panic!("extension owner {other} has no declaration rule; add one in kiln-types"),
+        }
+    }
+    let declared_parallel: std::collections::BTreeSet<_> = parallel
+        .lines()
+        .filter_map(|line| line.strip_prefix("  parallel"))
+        .filter_map(|rest| rest.split(['(', '<']).next())
+        .map(|name| format!("parallel{name}"))
+        .collect();
+    let registered_parallel: std::collections::BTreeSet<_> =
+        registered_parallel.iter().map(|k| (*k).to_owned()).collect();
+    assert_eq!(declared_parallel, registered_parallel);
+}

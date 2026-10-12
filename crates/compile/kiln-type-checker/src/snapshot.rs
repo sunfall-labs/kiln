@@ -47,10 +47,14 @@ struct Library {
 }
 
 impl Libraries {
-    /// [`crate::STANDARD_LIBRARIES`] under `/__kiln_typescript_lib`.
+    /// [`crate::STANDARD_LIBRARIES`] (TypeScript's own), [`crate::KILN_LIBRARIES`] and
+    /// [`crate::NODE_LIBRARIES`] under `/__kiln_typescript_lib`. Only the first are `lib` names;
+    /// the others are ambient declarations a caller adds as roots (see [`Libraries::path`]).
     pub fn standard(parse: fn(&str, &str) -> Module) -> Self {
         let entries = crate::STANDARD_LIBRARIES
             .iter()
+            .chain(crate::KILN_LIBRARIES)
+            .chain(crate::NODE_LIBRARIES)
             .map(|&(name, source)| {
                 let library = Library {
                     source,
@@ -60,6 +64,11 @@ impl Libraries {
             })
             .collect();
         Self { entries, parse }
+    }
+
+    /// The absolute path of a library file, `name` as in the tables above, for use as a check root.
+    pub fn path(name: &str) -> String {
+        format!("{LIBRARY_DIRECTORY}/{name}")
     }
 
     /// Parse `roots`, named as in a `lib` setting (`"esnext"`), and every library they reference,
@@ -933,9 +942,13 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
         files: complete_files,
         ..Default::default()
     };
+    // The embedded declarations (TypeScript's libraries, kiln's, @types/node) are pinned inputs a
+    // user cannot fix, so whatever the project's `skipLibCheck`, problems inside them are not
+    // reported as the project's own.
     result.diagnostics = report
         .diagnostics
         .into_iter()
+        .filter(|d| !d.path.starts_with(LIBRARY_DIRECTORY.as_bytes()))
         .map(|d| SourceDiagnostic {
             path: (!d.path.is_empty()).then(|| String::from_utf8_lossy(&d.path).into_owned()),
             span: (!d.has_undefined_range && !d.path.is_empty()).then(|| Span::new(d.start, d.end)),

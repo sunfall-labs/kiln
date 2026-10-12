@@ -84,7 +84,31 @@ impl Work {
     }
 }
 
-/// `kiln check` output: the module's identity, then what it cost to learn it.
+/// What a check that found nothing prints.
+pub const NO_ERRORS: &str = "no errors\n";
+
+/// The last line of a check that found errors: `2 errors in bad.ts`, or `3 errors in 2 files`.
+/// Starts with a newline so it stands apart from the last diagnostic, and contains one so that
+/// `report` prints it as it is rather than as a `kiln:` note.
+pub fn error_count(display: &str, canonical: &str, diagnostics: &[Diagnostic]) -> String {
+    let mut files: Vec<&str> = diagnostics
+        .iter()
+        .map(|d| match d.path.as_deref() {
+            Some(path) if path != display && path != canonical => path,
+            _ => display,
+        })
+        .collect();
+    files.sort_unstable();
+    files.dedup();
+    let errors = diagnostics.len();
+    let noun = if errors == 1 { "error" } else { "errors" };
+    match files.as_slice() {
+        [file] => format!("\n{errors} {noun} in {file}"),
+        files => format!("\n{errors} {noun} in {} files", files.len()),
+    }
+}
+
+/// `kiln check --explain` output: the module's identity, then what it cost to learn it.
 pub fn check(
     display_path: &str,
     summary: &ModuleSummary,

@@ -897,7 +897,7 @@ fn default_build_file_name(source: &Path, shared: bool) -> String {
 /// The everyday `kiln check`: [`check_explaining`] without the parallel report.
 #[cfg(test)]
 pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path, node: bool) -> Result<Output> {
-    check_explaining(backend, path, root, node, None)
+    check_explaining(backend, path, root, node, false, None)
 }
 
 /// Check one file: push its current contents, ask for its summary, report the cost. With
@@ -910,6 +910,7 @@ pub fn check_explaining(
     path: &Path,
     root: &Path,
     node: bool,
+    explain: bool,
     explain_parallel: Option<NativeProfile>,
 ) -> Result<Output> {
     let display = path.display().to_string();
@@ -964,7 +965,17 @@ pub fn check_explaining(
         };
         render::diagnostic(&display, diagnostic, src)
     }));
-    let mut text = render::check(&display, &summary, &work, after.revision, elapsed);
+    // The daemon's counters are for people debugging the cache, so they come with `--explain`.
+    let mut text = if explain {
+        render::check(&display, &summary, &work, after.revision, elapsed)
+    } else if summary.diagnostics.is_empty() {
+        render::NO_ERRORS.to_owned()
+    } else {
+        String::new()
+    };
+    if !summary.diagnostics.is_empty() {
+        notes.push(render::error_count(&display, &canonical, &summary.diagnostics));
+    }
     if let Some(profile) = explain_parallel
         && summary.diagnostics.is_empty()
     {

@@ -458,6 +458,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
         Command::Check {
             path,
             node,
+            explain,
             explain_parallel,
         } => {
             let node = auto_node(node, &path);
@@ -476,6 +477,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 &path,
                 &root,
                 node,
+                explain,
                 explain_parallel,
             )?);
             // The process exits as soon as this returns. A one-shot engine owns nothing but

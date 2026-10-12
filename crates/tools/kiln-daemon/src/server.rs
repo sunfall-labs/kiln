@@ -395,6 +395,7 @@ pub(crate) fn check_source_types(
                 .map(|name| parent.join(name).to_string_lossy().into_owned())
                 .find(|path| snapshot.auxiliary_files.contains_key(path))
         });
+    roots.extend(builtin_declaration_roots(modules, &snapshot, config_path.is_none(), entry));
     let current_directory = config_path
         .as_deref()
         .and_then(|path| std::path::Path::new(path).parent())
@@ -413,6 +414,57 @@ pub(crate) fn check_source_types(
         ..Default::default()
     };
     kiln_type_checker::check(&snapshot, &roots, &options)
+}
+
+/// kiln's built-in declarations, as extra roots of the check: `@kiln/types` (the `kiln:` modules,
+/// `Kiln`/`Bun`, the parallel methods) and `@types/node`. A kiln program has `process`, `Buffer`,
+/// `console`, timers and `fetch` as globals whether or not the Node adapter is on (only `require`
+/// and the `node:` modules need it), and `@types/node` declares exactly that surface, so it is
+/// always present; the browser's `dom` library, which declares `document`, would be wrong.
+/// Each is left out when the project brings its own copy under `node_modules`, which would
+/// otherwise declare everything twice. A project's tsconfig is still respected: these add declarations and change
+/// no option.
+fn builtin_declaration_roots(
+    modules: &[(String, std::sync::Arc<kiln_hir::Module>)],
+    snapshot: &kiln_type_checker::SourceSnapshot,
+    automatic_types: bool,
+    entry: &str,
+) -> Vec<String> {
+    let provided = |package: &str| {
+        let marker = format!("/node_modules/{package}/");
+        modules.iter().any(|(path, _)| path.contains(&marker))
+            || snapshot
+                .auxiliary_files
+                .keys()
+                .any(|path| path.contains(&marker))
+    };
+    let mut roots = Vec::new();
+    // `tsc` loads every `node_modules/@types/*` visible from the project when no configuration
+    // narrows `types`; without a configuration there is nothing to narrow it, so do the same.
+    if automatic_types {
+        const MARKER: &str = "/node_modules/@types/";
+        roots.extend(modules.iter().filter_map(|(path, _)| {
+            let at = path.find(MARKER)?;
+            let (project, package) = (&path[..at], &path[at + MARKER.len()..]);
+            let (name, file) = package.split_once('/')?;
+            (file == "index.d.ts"
+                && !name.is_empty()
+                && entry.starts_with(project)
+                && entry[project.len()..].starts_with('/'))
+            .then(|| path.clone())
+        }));
+    }
+    if !provided("@kiln/types") {
+        roots.push(kiln_type_checker::Libraries::path(
+            kiln_type_checker::KILN_DECLARATIONS_ROOT,
+        ));
+    }
+    if !provided("@types/node") {
+        roots.push(kiln_type_checker::Libraries::path(
+            kiln_type_checker::NODE_DECLARATIONS_ROOT,
+        ));
+    }
+    roots
 }
 
 fn uploaded_package_root(

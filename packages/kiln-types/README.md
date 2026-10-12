@@ -10,6 +10,7 @@ package only describes them, as `@types/node` describes `node:*`.
 | `kiln:actors` | classes that run in a realm of their own, called through a mailbox |
 | `kiln:shared` | frozen graphs every realm can read without a copy |
 | `kiln:process` | `run(command, args, options)` |
+| `Kiln`, `Bun` | the `serve` globals |
 | `Array` / typed arrays | `parallelMap`, `parallelFilter`, `parallelFlatMap`, `parallelSort`, `parallelReduce` |
 
 ```jsonc

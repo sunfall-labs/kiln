@@ -386,3 +386,43 @@ pub const STANDARD_LIBRARIES: &[(&str, &str)] = &[
         include_str!("../lib/lib.webworker.iterable.d.ts"),
     ),
 ];
+
+/// kiln's own declarations: the `@kiln/types` package (`packages/kiln-types`), embedded so
+/// `kiln check` knows the `kiln:` modules, the `Kiln` and `Bun` globals and the parallel methods
+/// without the package installed. Paths relative to the library directory.
+pub const KILN_LIBRARIES: &[(&str, &str)] = &[
+    (
+        "kiln/index.d.ts",
+        include_str!("../../../../packages/kiln-types/index.d.ts"),
+    ),
+    (
+        "kiln/gui.d.ts",
+        include_str!("../../../../packages/kiln-types/gui.d.ts"),
+    ),
+    (
+        "kiln/actors.d.ts",
+        include_str!("../../../../packages/kiln-types/actors.d.ts"),
+    ),
+    (
+        "kiln/shared.d.ts",
+        include_str!("../../../../packages/kiln-types/shared.d.ts"),
+    ),
+    (
+        "kiln/process.d.ts",
+        include_str!("../../../../packages/kiln-types/process.d.ts"),
+    ),
+    (
+        "kiln/parallel.d.ts",
+        include_str!("../../../../packages/kiln-types/parallel.d.ts"),
+    ),
+    (
+        "kiln/globals.d.ts",
+        include_str!("../../../../packages/kiln-types/globals.d.ts"),
+    ),
+];
+
+/// The library files an ambient-declaration set starts from, as paths inside the library
+/// directory ([`crate::Libraries::path`] makes them absolute).
+pub const KILN_DECLARATIONS_ROOT: &str = "kiln/index.d.ts";
+/// `@types/node`'s entry point, which references the rest.
+pub const NODE_DECLARATIONS_ROOT: &str = "node_modules/@types/node/index.d.ts";

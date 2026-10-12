@@ -8,6 +8,7 @@ pub mod conformance;
 pub mod driver;
 mod engine;
 mod libraries;
+mod libraries_node;
 mod lower;
 mod lower_jsdoc;
 mod lower_modules;
@@ -17,7 +18,10 @@ mod parser_errors;
 mod plan;
 mod snapshot;
 mod support;
-pub use libraries::STANDARD_LIBRARIES;
+pub use libraries::{
+    KILN_DECLARATIONS_ROOT, KILN_LIBRARIES, NODE_DECLARATIONS_ROOT, STANDARD_LIBRARIES,
+};
+pub use libraries_node::NODE_LIBRARIES;
 pub use snapshot::{
     CheckOptions, CheckResult, FactSelection, Libraries, SourceDiagnostic, SourceSnapshot,
     SourceType, TypeClass, TypeRole, check, project_roots,

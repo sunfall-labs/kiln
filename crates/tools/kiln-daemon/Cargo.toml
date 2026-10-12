@@ -30,3 +30,6 @@ kiln-test-selector = { workspace = true }
 kiln-test262 = { workspace = true }
 kiln-jobs = { workspace = true }
 rayon = { workspace = true }
+
+[dev-dependencies]
+kiln-builtin-surface = { workspace = true }
