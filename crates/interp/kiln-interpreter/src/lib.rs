@@ -2344,8 +2344,9 @@ pub use execution_api::{
     execute_node_module_in_session_with_loader, execute_node_with_clock_and_strictness,
     execute_node_with_strictness, execute_reclaiming,
     execute_reclaiming_in_runtime_with_strictness, execute_reclaiming_with_strictness,
-    execute_with_strictness, namespace_entries, namespace_object, ordinary_object,
-    own_data_property, parse_json_module, read_through_cell, worker_error_tokens,
+    execute_with_clock_and_strictness, execute_with_strictness, namespace_entries,
+    namespace_object, ordinary_object, own_data_property, parse_json_module, read_through_cell,
+    worker_error_tokens,
 };
 #[path = "vm/state.rs"]
 mod vm_state;
@@ -2779,9 +2780,10 @@ fn binary(
         BinaryOp::Multiply => Value::Number(left.as_number() * right.as_number()),
         BinaryOp::Divide => Value::Number(left.as_number() / right.as_number()),
         BinaryOp::Remainder => Value::Number(left.as_number() % right.as_number()),
-        BinaryOp::Exponentiate => {
-            Value::Number(kiln_ir::js_exponentiate(left.as_number(), right.as_number()))
-        }
+        BinaryOp::Exponentiate => Value::Number(kiln_ir::js_exponentiate(
+            left.as_number(),
+            right.as_number(),
+        )),
         BinaryOp::StrictEqual => Value::Boolean(strict_equal(&left, &right)),
         // `key in object` tests presence, which is not the same question as reading the key and
         // comparing to undefined: a property explicitly set to undefined is present.

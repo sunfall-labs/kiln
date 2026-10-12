@@ -58,6 +58,13 @@ pub trait ModuleGraphExecution {
         limits: ExecutionLimits,
         capabilities: ExecutionCapabilities,
     ) -> Result<ExecutionResult, ModuleEvaluationError>;
+    fn execute_with_clock<H: HostOps + ?Sized>(
+        &self,
+        host: &mut H,
+        limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
+        clock: ClockCapability,
+    ) -> Result<ExecutionResult, ModuleEvaluationError>;
     fn execute_node<H: HostOps + ?Sized>(
         &self,
         host: &mut H,
@@ -89,6 +96,15 @@ impl ModuleGraphExecution for ModuleGraph {
         capabilities: ExecutionCapabilities,
     ) -> Result<ExecutionResult, ModuleEvaluationError> {
         GraphExecutor(self).execute(host, limits, capabilities)
+    }
+    fn execute_with_clock<H: HostOps + ?Sized>(
+        &self,
+        host: &mut H,
+        limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
+        clock: ClockCapability,
+    ) -> Result<ExecutionResult, ModuleEvaluationError> {
+        GraphExecutor(self).execute_with_clock(host, limits, capabilities, clock)
     }
     fn execute_node<H: HostOps + ?Sized>(
         &self,
@@ -1569,6 +1585,17 @@ impl GraphExecutor<'_> {
         clock: ClockCapability,
     ) -> Result<ExecutionResult, ModuleEvaluationError> {
         self.execute_mode_with_clock(host, limits, capabilities, true, clock)
+    }
+
+    /// [`Self::execute`] under an explicit clock policy, still without the Node adapter.
+    pub fn execute_with_clock<H: HostOps + ?Sized>(
+        &self,
+        host: &mut H,
+        limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
+        clock: ClockCapability,
+    ) -> Result<ExecutionResult, ModuleEvaluationError> {
+        self.execute_mode_with_clock(host, limits, capabilities, false, clock)
     }
 
     fn execute_mode<H: HostOps + ?Sized>(

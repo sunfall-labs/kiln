@@ -378,6 +378,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                             path,
                             project_root,
                             profile,
+                            wall_clock,
                             static_link,
                             pgo_gen,
                             pgo_u,
@@ -1216,11 +1217,6 @@ pub(crate) fn execute_prepared_run(
     wall_clock: bool,
     steps: StepBudget,
 ) -> Response {
-    if wall_clock && !node {
-        return Response::Error {
-            message: "wall-clock scheduling requires the Node host adapter".to_owned(),
-        };
-    }
     #[cfg(test)]
     wait_for_run_gate(prepared.path());
 
@@ -1568,7 +1564,16 @@ fn execute_graph(
             let capabilities = capabilities.with_module_loader_service(std::sync::Arc::new(
                 kiln_module_eval::GraphModuleLoader::new(std::sync::Arc::clone(&graph)),
             ));
-            graph.execute(&mut host, limits, capabilities)
+            graph.execute_with_clock(
+                &mut host,
+                limits,
+                capabilities,
+                if wall_clock {
+                    kiln_runtime::ClockCapability::Host
+                } else {
+                    kiln_runtime::ClockCapability::Virtual
+                },
+            )
         }
         Err(error) => Err(error.into()),
     };
@@ -2377,6 +2382,16 @@ fn execute_program(
                 capabilities,
             )
         }
+    } else if wall_clock {
+        let strictness = std::rc::Rc::new(kiln_ir::Strictness::sloppy(&program));
+        kiln_interpreter::execute_with_clock_and_strictness(
+            std::rc::Rc::new(program),
+            strictness,
+            &mut host,
+            limits,
+            capabilities,
+            kiln_runtime::ClockCapability::Host,
+        )
     } else {
         kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, limits, capabilities)
     };
@@ -2941,6 +2956,7 @@ pub(crate) fn native_run_program(
     path: String,
     project_root: String,
     profile: NativeProfile,
+    wall_clock: bool,
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
@@ -2955,6 +2971,11 @@ pub(crate) fn native_run_program(
             Ok(output) => output,
             Err(message) => return Response::Error { message },
         };
+    let realm = if wall_clock {
+        kiln_native::NativeRealmPolicy::host_clock()
+    } else {
+        kiln_native::NativeRealmPolicy::default()
+    };
     let result = run_streaming_native(|sink, inherit| {
         if inherit {
             builder.run_inheriting_output(
@@ -2962,7 +2983,7 @@ pub(crate) fn native_run_program(
                 &kiln_native::NativeBuildOptions {
                     output,
                     profile: native_profile(profile),
-                    realm: kiln_native::NativeRealmPolicy::default(),
+                    realm: realm.clone(),
                     march_native: false,
                     static_link,
                     pgo_generate,
@@ -2976,7 +2997,7 @@ pub(crate) fn native_run_program(
                 &kiln_native::NativeBuildOptions {
                     output,
                     profile: native_profile(profile),
-                    realm: kiln_native::NativeRealmPolicy::default(),
+                    realm,
                     march_native: false,
                     static_link,
                     pgo_generate,
