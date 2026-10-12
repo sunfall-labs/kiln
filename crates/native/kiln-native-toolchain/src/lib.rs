@@ -1197,6 +1197,13 @@ impl Toolchain {
         // declarations are generated from the provider registry precisely so the compiler can name
         // the missing symbol, at the step where it went missing.
         args.push(OsString::from("-Werror=implicit-function-declaration"));
+        // The C is C11 because users' compilers are: a construct only C23 allows (a declaration
+        // right after a label) compiled here under a new Clang and failed every release runner's
+        // older one. Clang reports C23-only syntax under `-std=c11` as a warning; make it fail
+        // here, where it is written, rather than on a user's machine.
+        if matches!(self.identity.kind, CompilerKind::Clang | CompilerKind::Zig) {
+            args.push(OsString::from("-Werror=c23-extensions"));
+        }
         // Report the source as though it sat in `.`, whatever directory it really occupies.
         //
         // Emitted C is written to a workspace named for the process that made it --

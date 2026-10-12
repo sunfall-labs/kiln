@@ -2518,7 +2518,7 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
         }
     }
 
-    fallback:
+    fallback:;
 
     kiln_value bself = kiln_val_to_boundary(receiver);
     kiln_value bargs[argc > 0 ? argc : 1];
