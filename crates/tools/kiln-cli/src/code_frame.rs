@@ -109,7 +109,17 @@ fn render(source: &str, file: &str, line: usize, column: usize, header: &str) ->
             .path(file)
             .annotation(AnnotationKind::Primary.span(start..end).label(label)),
     )];
-    Some(Renderer::plain().render(&report).to_string())
+    // Coloured on a terminal by the same rule as `kiln check` (NO_COLOR, CLICOLOR_FORCE, TERM).
+    let styled = crate::render::use_color(
+        crate::args::ColorChoice::Auto,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    );
+    let renderer = if styled {
+        Renderer::styled()
+    } else {
+        Renderer::plain()
+    };
+    Some(renderer.render(&report).to_string())
 }
 
 #[cfg(test)]

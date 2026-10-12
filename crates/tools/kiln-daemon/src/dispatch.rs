@@ -2241,6 +2241,7 @@ fn module_evaluation_diagnostics(error: ModuleEvaluationError) -> Vec<Diagnostic
             message: error.to_string(),
             start: None,
             end: None,
+            related: Vec::new(),
         }];
     }
     let path = match &error {
