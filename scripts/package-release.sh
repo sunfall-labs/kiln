@@ -201,6 +201,19 @@ smoke_tmp=$work
 archive="$output/$name.tar.gz"
 tar -C "$work" -czf "$archive.partial" "$name"
 mv "$archive.partial" "$archive"
-(cd "$output" && shasum -a 256 "$name.tar.gz" >"$name.tar.gz.sha256")
+# sha256sum on Linux, shasum on macOS; both print "<digest>  <name>", the format SHA256SUMS and
+# install.sh expect. A missing tool must fail the release, not leave an empty checksum behind.
+if command -v sha256sum >/dev/null 2>&1; then
+	(cd "$output" && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
+elif command -v shasum >/dev/null 2>&1; then
+	(cd "$output" && shasum -a 256 "$name.tar.gz" >"$name.tar.gz.sha256")
+else
+	echo "package-release: needs sha256sum or shasum to checksum the archive" >&2
+	exit 1
+fi
+if [[ ! -s "$output/$name.tar.gz.sha256" ]]; then
+	echo "package-release: the checksum for $name.tar.gz is empty" >&2
+	exit 1
+fi
 size=$(du -h "$archive" | cut -f1)
 kiln_say "wrote $archive ($size, ${#selected[@]} provider variants)"
