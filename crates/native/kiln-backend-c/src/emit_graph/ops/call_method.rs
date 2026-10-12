@@ -2401,7 +2401,7 @@ pub(super) fn emit_call_method(
                     "if ((v{a0} & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX && KILN_LIKELY(kiln_c99_gc_kind_of_ptr(KILN_VAL_PTR(v{a0})) == KILN_GC_ARRAY)) {{ \
                          v{v} = KILN_VAL_TRUE; \
                          handled = 1; \
-                     }} else if (KILN_VAL_IS_NUMBER(v{a0}) || KILN_VAL_IS_BOOLEAN(v{a0}) || KILN_VAL_IS_NULLISH(v{a0}) || KILN_VAL_IS_STRING(v{a0}) || ((v{a0} & KILN_TAG_MASK) == KILN_TAG_BIGINT_PREFIX) || ((v{a0} & KILN_TAG_MASK) == KILN_TAG_SYMBOL_PREFIX) || KILN_VAL_IS_CLOSURE(v{a0})) {{ \
+                     }} else if (KILN_VAL_IS_NUMBER(v{a0}) || KILN_VAL_IS_BOOLEAN(v{a0}) || KILN_VAL_IS_NULLISH(v{a0}) || KILN_VAL_IS_STRING(v{a0}) || KILN_VAL_IS_BIGINT(v{a0}) || ((v{a0} & KILN_TAG_MASK) == KILN_TAG_SYMBOL_PREFIX) || KILN_VAL_IS_CLOSURE(v{a0})) {{ \
                          v{v} = KILN_VAL_FALSE; \
                          handled = 1; \
                      }}"

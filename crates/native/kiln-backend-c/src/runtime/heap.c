@@ -3575,8 +3575,8 @@ static void kiln_c99_gc_mark_word(kiln_gc_heap *heap, uintptr_t word) {
         if (block != NULL) kiln_c99_gc_mark_found(heap, block);
     }
     if ((word & KILN_TAG_MASK) >= KILN_TAG_STRING_PREFIX) {
-        /* The shared-facade tag uses bit 47; taking a 48-bit address here turns that tag bit
-         * into a false pointer and lets a live facade die during a generated expression. */
+        /* The payload mask also clears the rare kinds' low sub-tag, so a shared facade's word
+         * marks the facade it names rather than a byte past its start. */
         uintptr_t address = word & KILN_PAYLOAD_MASK;
         if (address < heap->lo || address >= heap->hi) return;
         block = kiln_c99_gc_lookup_interior(heap, address);

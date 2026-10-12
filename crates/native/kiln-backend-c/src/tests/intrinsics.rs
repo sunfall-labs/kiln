@@ -54,6 +54,30 @@ int main(void) {
     if (result.tag != KILN_VALUE_SHARED || result.bits != (uint64_t)(uintptr_t)p ||
         kiln_val_from_boundary(result) != boxed) return 9;
 #endif
+    /* Linux on arm64 places programs and mappings above 2^47: every kind keeps all 48 address
+     * bits, and the rare kinds sharing a prefix stay apart. Never dereferenced. */
+    {
+        const uint64_t high[] = { UINT64_C(0xAAAAAB505890), UINT64_C(0xFFFFF7FF09B0) };
+        const uint64_t prefixes[] = { KILN_TAG_STRING_PREFIX, KILN_TAG_OBJECT_PREFIX,
+            KILN_TAG_CLOSURE_PREFIX, KILN_TAG_BUFFER_PREFIX, KILN_TAG_SYMBOL_PREFIX,
+            KILN_TAG_CELL_PREFIX, KILN_TAG_BIGINT_PREFIX, KILN_TAG_TEMPORAL_PREFIX,
+            KILN_TAG_SHARED_PREFIX };
+        size_t h, k;
+        for (h = 0; h < 2; ++h) {
+            for (k = 0; k < sizeof prefixes / sizeof prefixes[0]; ++k) {
+                boxed = KILN_VAL_TAG_PTR(prefixes[k], (const void *)(uintptr_t)high[h]);
+                if ((uint64_t)(uintptr_t)KILN_VAL_PTR(boxed) != high[h]) return 11;
+                if (KILN_VAL_IS_NUMBER(boxed)) return 12;
+                if (KILN_VAL_IS_BIGINT(boxed) != (prefixes[k] == KILN_TAG_BIGINT_PREFIX) ||
+                    KILN_VAL_IS_TEMPORAL(boxed) != (prefixes[k] == KILN_TAG_TEMPORAL_PREFIX) ||
+                    KILN_VAL_IS_SHARED(boxed) != (prefixes[k] == KILN_TAG_SHARED_PREFIX) ||
+                    KILN_VAL_IS_OBJECT(boxed) != (prefixes[k] == KILN_TAG_OBJECT_PREFIX) ||
+                    KILN_VAL_IS_STRING(boxed) != (prefixes[k] == KILN_TAG_STRING_PREFIX) ||
+                    KILN_VAL_IS_CLOSURE(boxed) != (prefixes[k] == KILN_TAG_CLOSURE_PREFIX))
+                    return 13;
+            }
+        }
+    }
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
 }

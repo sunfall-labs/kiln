@@ -857,8 +857,9 @@ static inline int kiln_c99_key_has_prefix(const kiln_string *key, const char *pr
 static inline int kiln_c99_key_is_program_symbol(const kiln_string *key) {
 typedef uint64_t kiln_val;
 #define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
-#define KILN_TAG_MASK           UINT64_C(0xFFFF800000000000)
-#define KILN_PAYLOAD_MASK       UINT64_C(0x00007FFFFFFFFFFF)
+#define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
+#define KILN_PAYLOAD_MASK       UINT64_C(0x0000FFFFFFFFFFF8)
+#define KILN_RARE_TAG_MASK      (KILN_TAG_MASK | UINT64_C(7))
 #define KILN_VAL_UNDEFINED      UINT64_C(0xFFF8000000000001)
 #define KILN_VAL_NULL           UINT64_C(0xFFF8000000000002)
 #define KILN_VAL_FALSE          UINT64_C(0xFFF8000000000004)
@@ -879,10 +880,11 @@ typedef uint64_t kiln_val;
 #define KILN_TAG_CLOSURE_PREFIX  UINT64_C(0xFFFB000000000000)
 #define KILN_TAG_BUFFER_PREFIX   UINT64_C(0xFFFC000000000000)
 #define KILN_TAG_SYMBOL_PREFIX   UINT64_C(0xFFFD000000000000)
-#define KILN_TAG_BIGINT_PREFIX   UINT64_C(0xFFFE000000000000)
-#define KILN_TAG_TEMPORAL_PREFIX UINT64_C(0xFFFE800000000000)
 #define KILN_TAG_CELL_PREFIX     UINT64_C(0xFFFF000000000000)
-#define KILN_TAG_SHARED_PREFIX   UINT64_C(0xFFFF800000000000)
+#define KILN_TAG_RARE_PREFIX     UINT64_C(0xFFFE000000000000)
+#define KILN_TAG_BIGINT_PREFIX   (KILN_TAG_RARE_PREFIX | UINT64_C(0))
+#define KILN_TAG_TEMPORAL_PREFIX (KILN_TAG_RARE_PREFIX | UINT64_C(1))
+#define KILN_TAG_SHARED_PREFIX   (KILN_TAG_RARE_PREFIX | UINT64_C(2))
 #define KILN_VAL_TYPED_FAIL     UINT64_C(0xFFF8000000000008)
 static inline double kiln_c99_typed_fail_double(void) {
 static inline int kiln_c99_typed_failed(double d) {
@@ -895,11 +897,18 @@ static inline int kiln_c99_typed_failed(double d) {
 #define KILN_VAL_EQUALITY_IMMEDIATE(op, left, right) \
 #define KILN_VAL_IS_STRING(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX)
 #define KILN_VAL_IS_OBJECT(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_OBJECT_PREFIX)
-#define KILN_VAL_IS_SHARED(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_SHARED_PREFIX)
+#define KILN_VAL_IS_SHARED(v)    (((v) & KILN_RARE_TAG_MASK) == KILN_TAG_SHARED_PREFIX)
+#define KILN_VAL_IS_BIGINT(v)    (((v) & KILN_RARE_TAG_MASK) == KILN_TAG_BIGINT_PREFIX)
+#define KILN_VAL_IS_TEMPORAL(v)  (((v) & KILN_RARE_TAG_MASK) == KILN_TAG_TEMPORAL_PREFIX)
 #define KILN_VAL_IS_CLOSURE(v)   (((v) & KILN_TAG_MASK) == KILN_TAG_CLOSURE_PREFIX)
 #define KILN_VAL_IS_SYMBOL(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_SYMBOL_PREFIX)
 #define KILN_VAL_PTR(v)          ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
+#ifdef KILN_ASSERT_BOX_ALIGNMENT
+static inline kiln_val kiln_val_tag_ptr_checked(uint64_t prefix, const void *pointer) {
+#define KILN_VAL_TAG_PTR(pfx, p) kiln_val_tag_ptr_checked((pfx), (const void *)(p))
+#else
 #define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
+#endif
 #define KILN_VAL_IS_DOUBLE(v)    KILN_VAL_IS_NUMBER(v)
 static const uint8_t kiln_c99_empty_chars[] = { 0 };
 static const kiln_string kiln_c99_empty_string = { 0, KILN_STRING_LATIN1, kiln_c99_empty_chars };

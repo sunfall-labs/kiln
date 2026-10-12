@@ -554,8 +554,7 @@ static int kiln_c99_clone_plain_val_for_message(kiln_val value, kiln_gc_ptrset *
     size_t index;
     if (KILN_VAL_IS_NUMBER(value) || KILN_VAL_IS_IMMEDIATE(value) ||
         KILN_VAL_IS_STRING(value)) return 1;
-    if ((value & KILN_TAG_MASK) == KILN_TAG_BIGINT_PREFIX &&
-        (value & UINT64_C(0xFFFF800000000000)) == KILN_TAG_BIGINT_PREFIX) return 1;
+    if (KILN_VAL_IS_BIGINT(value)) return 1;
     if (depth > KILN_C99_CLONE_MAX_DEPTH ||
         (!KILN_VAL_IS_OBJECT(value) &&
          (value & KILN_TAG_MASK) != KILN_TAG_BUFFER_PREFIX)) return 0;
@@ -695,14 +694,10 @@ static int kiln_c99_clone_data_val(kiln_c99_clone_table *table, kiln_val value, 
     }
     if (KILN_VAL_IS_NUMBER(value) || value == KILN_VAL_UNDEFINED || value == KILN_VAL_NULL ||
         KILN_VAL_IS_BOOLEAN(value) || KILN_VAL_IS_STRING(value) ||
-        (value & KILN_TAG_MASK) == KILN_TAG_BIGINT_PREFIX) {
-        /* Primitives, and strings and BigInts are immutable: the copy is the value. The BigInt
-         * test is on the whole top half, so a Temporal value (a narrower prefix inside the same
-         * range) is not mistaken for one. */
-        if ((value & KILN_TAG_MASK) == KILN_TAG_BIGINT_PREFIX &&
-            (value & UINT64_C(0xFFFF800000000000)) != KILN_TAG_BIGINT_PREFIX) {
-            return KILN_C99_CLONE_BAIL;
-        }
+        (value & KILN_TAG_MASK) == KILN_TAG_RARE_PREFIX) {
+        /* Primitives, and strings and BigInts are immutable: the copy is the value. The other
+         * rare kinds (Temporal values, shared facades) share the BigInt prefix and bail. */
+        if (!KILN_VAL_IS_BIGINT(value)) return KILN_C99_CLONE_BAIL;
         *out = value;
         return KILN_C99_OK;
     }

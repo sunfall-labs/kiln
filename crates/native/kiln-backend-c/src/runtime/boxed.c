@@ -86,13 +86,13 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
             if (tag == KILN_TAG_CELL_PREFIX) {
                 return kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)ptr, NULL, 0);
             }
-            if (tag == KILN_TAG_SHARED_PREFIX) {
+            if (KILN_VAL_IS_SHARED(v)) {
                 return kiln_c99_value(KILN_VALUE_SHARED, (uint64_t)(uintptr_t)ptr, NULL, 0);
             }
-            if ((v & UINT64_C(0xFFFF800000000000)) == KILN_TAG_TEMPORAL_PREFIX) {
+            if (KILN_VAL_IS_TEMPORAL(v)) {
                 return kiln_c99_value(KILN_VALUE_TEMPORAL, (uint64_t)(uintptr_t)ptr, NULL, 0);
             }
-            if ((v & UINT64_C(0xFFFF800000000000)) == KILN_TAG_BIGINT_PREFIX) {
+            if (KILN_VAL_IS_BIGINT(v)) {
                 return kiln_c99_value(KILN_VALUE_BIGINT, (uint64_t)(uintptr_t)ptr, NULL, 0);
             }
             uint32_t val_tag = (tag == KILN_TAG_BUFFER_PREFIX) ? KILN_VALUE_ARRAY : KILN_VALUE_OBJECT;
@@ -3073,7 +3073,7 @@ static void kiln_c99_par_array_seal(kiln_array *array) {
 }
 
 static int kiln_c99_par_is_bigint(kiln_val value) {
-    return (value & UINT64_C(0xFFFF800000000000)) == KILN_TAG_BIGINT_PREFIX;
+    return KILN_VAL_IS_BIGINT(value);
 }
 
 /* --- callable globals ------------------------------------------------------------------ */
