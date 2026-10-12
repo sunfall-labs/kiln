@@ -1567,6 +1567,10 @@ static int kiln_c99_shared_prototype(kiln_value value, kiln_value *out) {
     if (facade == NULL || facade->lease == 0 ||
         kiln_shared_graph_info(facade->lease, &info) != 0) return KILN_C99_INVALID_ARGUMENT;
     *out = info.array ? kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE)
+          : info.collection == KILN_SHARED_COLLECTION_MAP
+              ? kiln_c99_builtin(KILN_C99_BUILTIN_MAP_PROTOTYPE)
+          : info.collection == KILN_SHARED_COLLECTION_SET
+              ? kiln_c99_builtin(KILN_C99_BUILTIN_SET_PROTOTYPE)
           : info.null_prototype ? kiln_c99_null()
           : kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
     return KILN_C99_OK;
@@ -1577,10 +1581,12 @@ static int kiln_c99_shared_prototype(kiln_value value, kiln_value *out) {
  * pointer layout. No callback allocates in the C heap or calls JavaScript. */
 #define KILN_C99_SHARED_SOURCE_RECORD UINT64_C(1)
 #define KILN_C99_SHARED_SOURCE_ARRAY UINT64_C(2)
+#define KILN_C99_SHARED_SOURCE_COLLECTION UINT64_C(3)
 
 static uint64_t kiln_c99_shared_source_id(kiln_value value) {
     uint64_t kind = value.tag == KILN_VALUE_ARRAY ? KILN_C99_SHARED_SOURCE_ARRAY
-                                                 : KILN_C99_SHARED_SOURCE_RECORD;
+                    : value.tag == KILN_VALUE_COLLECTION ? KILN_C99_SHARED_SOURCE_COLLECTION
+                                                         : KILN_C99_SHARED_SOURCE_RECORD;
     return value.bits | kind;
 }
 
@@ -1634,6 +1640,7 @@ static int kiln_c99_shared_source_value(kiln_value value, kiln_shared_source_fie
     }
     case KILN_VALUE_OBJECT:
     case KILN_VALUE_ARRAY:
+    case KILN_VALUE_COLLECTION:
         field->value_kind = 7;
         field->value_bits = kiln_c99_shared_source_id(value);
         break;
@@ -1654,11 +1661,57 @@ static int kiln_c99_shared_source_value(kiln_value value, kiln_shared_source_fie
     return 0;
 }
 
+/* A Map or Set is published when it is an ordinary instance of its own constructor with no own
+ * properties: a subclass is refused as a custom prototype, an own property as code 6, and a weak
+ * collection as internal state. Each entry slot ever used is reported -- a deleted one as a hole
+ * -- so field `index` is found without a walk: a Map's slot `index / 2`, key then value. */
+static int kiln_c99_shared_source_collection(kiln_collection *collection, uint64_t index,
+                                              kiln_shared_source_node *node,
+                                              kiln_shared_source_field *field) {
+    size_t per_entry = collection->is_map ? 2 : 1;
+    const kiln_entry *entry;
+    if (index == UINT64_MAX) {
+        if (node == NULL) return -1;
+        if (collection->is_weak) return KILN_C99_SHARED_REFUSED(4);
+        if (collection->properties.tag == KILN_VALUE_OBJECT) {
+            const kiln_object *store = kiln_c99_object_of(collection->properties);
+            kiln_value prototype = store->prototype;
+            size_t named = store->shape != NULL ? store->shape->property_count : store->count;
+            if (prototype.tag != KILN_VALUE_UNDEFINED &&
+                !(prototype.tag == KILN_VALUE_BUILTIN &&
+                  prototype.bits == (collection->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE
+                                                        : KILN_C99_BUILTIN_SET_PROTOTYPE)))
+                return KILN_C99_SHARED_REFUSED(3);
+            if (named != 0 || store->element_count != 0) return KILN_C99_SHARED_REFUSED(6);
+        } else if (collection->properties.tag != KILN_VALUE_UNDEFINED) {
+            return -1;
+        }
+        if (collection->count > UINT64_MAX / per_entry) return -1;
+        node->kind = collection->is_map ? 3 : 4;
+        node->null_prototype = 0;
+        node->length = 0;
+        node->field_count = (uint64_t)collection->count * per_entry;
+        return 0;
+    }
+    if (field == NULL || index / per_entry >= collection->count) return -1;
+    memset(field, 0, sizeof *field);
+    entry = &collection->entries[index / per_entry];
+    if (entry->dead) { field->key_kind = 3; return 0; }
+    field->key_kind = 4;
+    return kiln_c99_shared_source_value(index % per_entry == 0 ? entry->key : entry->value, field);
+}
+
 static int kiln_c99_shared_source_inspect(void *context, uint64_t id, uint64_t index,
                                            kiln_shared_source_node *node,
                                            kiln_shared_source_field *field) {
     kiln_array *array;
-    kiln_object *store = kiln_c99_shared_source_store(id, &array);
+    kiln_object *store;
+    if ((id & 7) == KILN_C99_SHARED_SOURCE_COLLECTION) {
+        (void)context;
+        return kiln_c99_shared_source_collection(
+            (kiln_collection *)(uintptr_t)(id & ~UINT64_C(7)), index, node, field);
+    }
+    store = kiln_c99_shared_source_store(id, &array);
     size_t elements = array != NULL ? array->count : store != NULL ? store->element_count : 0;
     size_t named = store == NULL ? 0 : store->shape != NULL
                                               ? store->shape->property_count : store->count;
@@ -1752,7 +1805,8 @@ static int kiln_c99_share_value(kiln_value input, kiln_value *out) {
         *out = input;
         return KILN_C99_OK;
     }
-    if (input.tag != KILN_VALUE_OBJECT && input.tag != KILN_VALUE_ARRAY)
+    if (input.tag != KILN_VALUE_OBJECT && input.tag != KILN_VALUE_ARRAY &&
+        input.tag != KILN_VALUE_COLLECTION)
         return KILN_C99_INVALID_ARGUMENT;
     status = kiln_shared_graph_build(kiln_c99_shared_source_id(input),
                                      kiln_c99_shared_source_inspect, kiln_c99_shared_source_unit,

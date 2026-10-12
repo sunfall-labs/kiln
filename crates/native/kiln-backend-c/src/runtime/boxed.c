@@ -986,7 +986,10 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
                  kiln_c99_cached_builtin_member_ok(
                      site->cached_builtin, site->cached_member, site->cached_member_len));
             if (builtin_key_matches &&
-                (target.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED)) {
+                (target.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED) &&
+                (target.tag != KILN_VALUE_SHARED ||
+                 kiln_c99_shared_cached_method_allowed(
+                     (const kiln_shared_facade *)(uintptr_t)target.bits, site->cached_method))) {
                 *out = kiln_c99_method(site->cached_method);
                 return KILN_C99_OK;
             }
@@ -1020,6 +1023,9 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
             (target.tag == KILN_VALUE_ARRAY && kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED) ||
             target.tag == KILN_VALUE_TYPED_ARRAY ||
             target.tag == KILN_VALUE_COLLECTION ||
+            (target.tag == KILN_VALUE_SHARED &&
+             kiln_c99_shared_cached_method_allowed(
+                 (const kiln_shared_facade *)(uintptr_t)target.bits, out->bits)) ||
             target.tag == KILN_VALUE_BUILTIN) {
             kiln_c99_site_cache_method(site, (uint8_t)target.tag, out->bits,
                                        target.tag == KILN_VALUE_BUILTIN ? (uint32_t)target.bits : 0,
@@ -1132,6 +1138,9 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
         const char *method = kiln_c99_method_name(site->cached_method);
         return kiln_c99_collection_cached_method_allowed(collection, key, site->cached_method,
                                                          method);
+    } else if (ctag == KILN_VALUE_SHARED && KILN_VAL_IS_SHARED(target)) {
+        return kiln_c99_shared_cached_method_allowed(
+            (const kiln_shared_facade *)KILN_VAL_PTR(target), site->cached_method);
     } else if (ctag == KILN_VALUE_STRING && KILN_VAL_IS_STRING(target)) {
         return 1;
     } else if (ctag == KILN_VALUE_NUMBER && KILN_VAL_IS_NUMBER(target)) {
@@ -2378,6 +2387,21 @@ static int kiln_c99_val_invoke_cached_method(kiln_host *host, uint64_t method_co
                     return KILN_C99_OK;
                 }
             }
+        }
+    } else if ((method_code == KILN_C99_METHOD_COLLECTION_GET ||
+                method_code == KILN_C99_METHOD_COLLECTION_HAS) &&
+               argc > 0 && KILN_VAL_IS_SHARED(receiver)) {
+        /* A sealed Map or Set (ADR 0073): probe its arena index directly. */
+        kiln_value sealed = kiln_val_to_boundary(receiver);
+        int kind = kiln_c99_shared_collection_kind(sealed);
+        if (kind == 1 || (kind == 0 && method_code == KILN_C99_METHOD_COLLECTION_HAS)) {
+            kiln_value answer;
+            int st = kiln_c99_shared_collection_lookup(
+                (kiln_shared_facade *)(uintptr_t)sealed.bits, kiln_val_to_boundary(args[0]),
+                method_code == KILN_C99_METHOD_COLLECTION_GET, &answer);
+            if (KILN_UNLIKELY(st != KILN_C99_OK)) return st;
+            *out = kiln_val_from_boundary(answer);
+            return KILN_C99_OK;
         }
     } else if (method_code == KILN_C99_METHOD_COLLECTION_GET) {
         if (argc > 0 && (KILN_VAL_IS_OBJECT(receiver) || ((receiver & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX))) {

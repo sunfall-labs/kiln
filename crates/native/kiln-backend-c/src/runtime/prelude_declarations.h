@@ -436,6 +436,9 @@ static inline int kiln_c99_cached_method_matches(const kiln_c99_site *site, kiln
         const char *method = kiln_c99_method_name(site->cached_method);
         return kiln_c99_collection_cached_method_allowed(collection, key, site->cached_method,
                                                          method);
+    } else if (ctag == KILN_VALUE_SHARED && KILN_VAL_IS_SHARED(target)) {
+        return kiln_c99_shared_cached_method_allowed(
+            (const kiln_shared_facade *)KILN_VAL_PTR(target), site->cached_method);
     } else if (ctag == KILN_VALUE_STRING && KILN_VAL_IS_STRING(target)) {
         return 1;
     } else if (ctag == KILN_VALUE_NUMBER && KILN_VAL_IS_NUMBER(target)) {

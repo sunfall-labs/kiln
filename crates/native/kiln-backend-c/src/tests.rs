@@ -765,6 +765,10 @@ int kiln_shared_graph_refusal(uint32_t kind, const char **text) {
     *text = "cannot share a function";
     return 0;
 }
+int kiln_shared_graph_collection_write_message(uint32_t is_map, const char **text) {
+    *text = is_map ? "Cannot modify a shared Map" : "Cannot modify a shared Set";
+    return 0;
+}
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
     (void)hooks;

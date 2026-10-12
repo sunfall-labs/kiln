@@ -3,13 +3,20 @@
 
 declare module "kiln:shared" {
   const sharedValueBrand: unique symbol;
-  export type Shared<T> = T extends object ? {
+  /** A sealed `Map` or `Set` keeps every read method and loses every write: it is the readonly
+   *  interface of shared keys and values. Records and arrays are deeply readonly. */
+  export type Shared<T> = T extends Map<infer K, infer V> ? ReadonlyMap<Shared<K>, Shared<V>> & {
+      readonly [sharedValueBrand]: true;
+  } : T extends Set<infer V> ? ReadonlySet<Shared<V>> & {
+      readonly [sharedValueBrand]: true;
+  } : T extends object ? {
       readonly [K in keyof T]: Shared<T[K]>;
   } & {
       readonly [sharedValueBrand]: true;
   } : T;
-  /** A frozen copy of a plain data graph that every realm -- workers, actors -- reads without a
-   *  copy. Sharing a shared value answers it; functions, accessors and class instances refuse. */
+  /** A frozen copy of a data graph -- records, arrays, Maps and Sets -- that every realm (workers,
+   *  actors) reads without a copy. Sharing a shared value answers it; functions, accessors and
+   *  class instances refuse. */
   export function share<T>(value: T): Shared<T>;
   /** Whether `value` is a graph `share` made. */
   export function isShared(value: unknown): boolean;

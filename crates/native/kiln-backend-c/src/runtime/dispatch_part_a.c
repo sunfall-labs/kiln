@@ -1163,6 +1163,129 @@ static int kiln_c99_collection_iterator_prototype(int is_map, kiln_value *out) {
     return status;
 }
 
+/* One `{ value, done }` iteration result. */
+static int kiln_c99_iterator_step(kiln_host *host, kiln_value produced, int finished,
+                                  kiln_value *result, int depth, kiln_value *thrown) {
+    kiln_value step;
+    int status;
+    kiln_c99_gc_keep_alive(&produced);
+    status = kiln_c99_new_object(&step);
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(host, step, "value", 5, produced, depth, thrown);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(host, step, "done", 4, kiln_c99_boolean(finished), depth, thrown);
+    }
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *result = step;
+    return KILN_C99_OK;
+}
+
+/* The iterator `keys()`, `values()`, `entries()` and `@@iterator` answer with, over a live or a
+ * sealed collection. A *live* iterator holds the collection rather than a copy of it: a delete
+ * during the walk has to be seen, and a snapshot is exactly what cannot see one. What each step
+ * hands back is decided here, where the collection's kind is known, so the iterator itself needs
+ * no reference back to it. */
+static int kiln_c99_collection_iterator(kiln_host *host, kiln_value receiver, int is_map,
+                                        uint64_t code, kiln_value *result, int depth,
+                                        kiln_value *thrown) {
+    int pairs = code == KILN_C99_METHOD_COLLECTION_ENTRIES ||
+                (code == KILN_C99_METHOD_COLLECTION_SELF && is_map);
+    int wants_keys = code == KILN_C99_METHOD_COLLECTION_KEYS;
+    kiln_value iterator;
+    kiln_value prototype;
+    int status = kiln_c99_new_object(&iterator);
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_collection_iterator_prototype(is_map, &prototype);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_set_prototype(iterator, prototype);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(host, iterator, "@@iterated", 10, receiver, depth, thrown);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(host, iterator, "@@index", 7, kiln_c99_number(0.0), depth, thrown);
+    }
+    if (status == KILN_C99_OK) {
+        /* 0 the value, 1 the key, 2 a `[key, value]` pair. */
+        status = kiln_c99_put(host, iterator, "@@part", 6,
+                              kiln_c99_number(pairs ? 2.0 : (wants_keys ? 1.0 : 0.0)), depth,
+                              thrown);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_put(host, iterator, "@@iterator", 10,
+                              kiln_c99_method(KILN_C99_METHOD_ITERATOR_SELF), depth, thrown);
+    }
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    *result = iterator;
+    return KILN_C99_OK;
+}
+
+/* A Map or Set method called on a sealed collection (ADR 0073). Reads probe the sealed index or
+ * walk the entry table; every write throws, in the words the interpreter uses. A method of the
+ * other collection -- `Set.prototype.add` on a sealed Map -- fails the brand check as it does on
+ * a live one. */
+static int kiln_c99_shared_collection_method(kiln_host *host, uint64_t code, kiln_value receiver,
+                                             const kiln_value *args, size_t argc,
+                                             kiln_value *result, int depth,
+                                             kiln_value *thrown) {
+    kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)receiver.bits;
+    kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
+    int is_map = kiln_c99_shared_collection_kind(receiver) == 1;
+    uint64_t index;
+    int status;
+    if ((code == KILN_C99_METHOD_COLLECTION_GET || code == KILN_C99_METHOD_COLLECTION_SET) && !is_map) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Method called on an incompatible receiver");
+    }
+    if (code == KILN_C99_METHOD_COLLECTION_ADD && is_map) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Method called on an incompatible receiver");
+    }
+    switch (code) {
+    case KILN_C99_METHOD_COLLECTION_GET:
+    case KILN_C99_METHOD_COLLECTION_HAS:
+        return kiln_c99_shared_collection_lookup(facade, first,
+                                                 code == KILN_C99_METHOD_COLLECTION_GET, result);
+    case KILN_C99_METHOD_COLLECTION_SET:
+    case KILN_C99_METHOD_COLLECTION_ADD:
+    case KILN_C99_METHOD_COLLECTION_DELETE:
+    case KILN_C99_METHOD_COLLECTION_CLEAR: {
+        const char *refusal = NULL;
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    kiln_shared_graph_collection_write_message(is_map, &refusal) == 0
+                                        ? refusal
+                                        : "Cannot modify a shared collection");
+    }
+    case KILN_C99_METHOD_COLLECTION_FOR_EACH: {
+        size_t size = kiln_c99_shared_collection_size(receiver);
+        if (!kiln_c99_is_callable(first)) {
+            return kiln_c99_throw_not_a(thrown, first, "function");
+        }
+        for (index = 0; index < size; ++index) {
+            kiln_value visit[3];
+            kiln_value ignored;
+            status = kiln_c99_shared_collection_entry(facade, index, &visit[1], &visit[0]);
+            if (status != KILN_C99_OK) return status;
+            visit[2] = receiver;
+            status = kiln_c99_call(host, &ignored, first, argc > 1 ? args[1] : kiln_c99_undefined(),
+                                   visit, 3, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        kiln_c99_gc_keep_alive(facade);
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    default:
+        return kiln_c99_collection_iterator(host, receiver, is_map, code, result, depth, thrown);
+    }
+}
+
 /* Array, String, RegExp String and TypedArray iterators also have distinct prototype identities.
  * Their common Iterator.prototype remains the parent, where lazy helpers live. */
 static int kiln_c99_builtin_iterator_prototype(int kind, kiln_value *out) {
@@ -2146,6 +2269,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         "AsyncGeneratorFunction construction is not implemented");
     }
     if (code == KILN_C99_METHOD_COLLECTION_SIZE_RAW) {
+        if (argc >= 2 && args[1].tag == KILN_VALUE_BOOLEAN &&
+            kiln_c99_shared_collection_kind(args[0]) == (args[1].bits != 0)) {
+            *result = kiln_c99_number((double)kiln_c99_shared_collection_size(args[0]));
+            return KILN_C99_OK;
+        }
         if (argc == 0 || args[0].tag != KILN_VALUE_COLLECTION ||
             kiln_c99_collection_of(args[0])->is_weak || argc < 2 ||
             args[1].tag != KILN_VALUE_BOOLEAN ||
@@ -2241,7 +2369,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         const char *refusal = NULL;
         /* The provider words the refusal (`kiln-shared-graph`), so both engines say the same: the
          * build's own reason for a graph, the value's kind for a root never built. */
-        uint32_t kind = input.tag == KILN_VALUE_OBJECT || input.tag == KILN_VALUE_ARRAY
+        uint32_t kind = input.tag == KILN_VALUE_OBJECT || input.tag == KILN_VALUE_ARRAY ||
+                                input.tag == KILN_VALUE_COLLECTION
                             ? 0 : kiln_c99_shared_refusal_kind(input);
         if (status == KILN_C99_INVALID_ARGUMENT)
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,

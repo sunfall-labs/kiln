@@ -7338,6 +7338,9 @@ macro_rules! assert_provider_export {
         (realm, kiln_shared_graph_refusal, shared_graph_build) => {
             const _: unsafe extern "C" fn(u32, *mut *const u8) -> i32 = shared_graph::kiln_shared_graph_refusal;
         };
+        (realm, kiln_shared_graph_collection_write_message, shared_graph_build) => {
+            const _: unsafe extern "C" fn(u32, *mut *const u8) -> i32 = shared_graph::kiln_shared_graph_collection_write_message;
+        };
         (realm, kiln_realm_run_pinned, realm_run_pinned) => {
             const _: unsafe extern "C" fn(u64, Option<PinnedRun>, *mut c_void, *mut i32) -> i32 = kiln_realm_run_pinned;
         };

@@ -391,6 +391,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             set_weak_map_value(receiver, &key_slot, value.clone())?;
             return Ok(value);
         }
+        // A sealed Map answers a present key and refuses the insertion an absent one asks for,
+        // after the callback has run, as the write that follows it would.
+        if let Value::Shared(facade) = receiver
+            && facade.collection() == Some(true)
+        {
+            let key = canonical_key(arguments.first().cloned().unwrap_or(Value::Undefined));
+            let supplied = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+            if computed && !is_callable(&supplied) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "getOrInsertComputed: callbackfn must be a function".to_owned(),
+                });
+            }
+            if let Some((_, value)) = facade.find_entry(&key) {
+                return Ok(value);
+            }
+            if computed {
+                self.call_value(&supplied, Value::Undefined, vec![key], instruction)?;
+            }
+            return Err(ExecutionError::TypeErrorMessage {
+                message: kiln_shared_graph::sealed_collection_write_message(true).to_owned(),
+            });
+        }
         let (entries, is_map) = require_collection(receiver, native)?;
         let key = canonical_key(arguments.first().cloned().unwrap_or(Value::Undefined));
         if weak && !self.can_be_held_weakly(&key) {

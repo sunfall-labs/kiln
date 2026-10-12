@@ -667,6 +667,24 @@ pub(super) fn require_collection(
         | Native::CollectionEntries(is_map) => Some((is_map, false)),
         _ => None,
     };
+    // A sealed collection answers every read and refuses every write. (`getOrInsert` reads
+    // first and refuses only the insertion: `Vm::collection_get_or_insert`.)
+    if let Value::Shared(facade) = receiver
+        && let Some(is_map) = facade.collection()
+        && matches!(
+            native,
+            Native::SetAdd
+                | Native::SetDelete
+                | Native::MapSet
+                | Native::MapDelete
+                | Native::CollectionClear(_)
+        )
+        && wanted.is_some_and(|brand| brand == (is_map, false))
+    {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: kiln_shared_graph::sealed_collection_write_message(is_map).to_owned(),
+        });
+    }
     let weak = is_weak_collection(receiver);
     collection_state(receiver)
         .filter(|(_, is_map)| match wanted {
@@ -736,8 +754,13 @@ pub(super) fn iterator_state(receiver: &Value) -> Result<Value, ExecutionError> 
 
 /// The backing entries of a Set or Map, and whether it is a Map.
 pub(super) fn collection_state(receiver: &Value) -> Option<(Rc<ArrayData>, bool)> {
-    let Value::Object(object) = receiver else {
-        return None;
+    let object = match receiver {
+        Value::Object(object) => object,
+        Value::Shared(facade) => {
+            let is_map = facade.collection()?;
+            return Some((facade.collection_entries(), is_map));
+        }
+        _ => return None,
     };
     let object = object.borrow();
     let Some(Value::Array(entries)) = object.get_own("@@entries").cloned() else {

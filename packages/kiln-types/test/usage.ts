@@ -39,7 +39,17 @@ function shared(): void {
   const flag: boolean = isShared(frozen);
   // @ts-expect-error -- a shared graph is read-only
   frozen.nested.a = "y";
-  void flag;
+  const rates = share(new Map([["acme", { rate: 2 }]]));
+  const rate: number | undefined = rates.get("acme")?.rate;
+  const tags = share(new Set(["a"]));
+  const tagged: boolean = tags.has("a");
+  // @ts-expect-error -- a shared Map has no `set`
+  rates.set("globex", { rate: 3 });
+  // @ts-expect-error -- a shared Set has no `add`
+  tags.add("b");
+  // @ts-expect-error -- a shared Map's values are read-only
+  rates.get("acme")!.rate = 4;
+  void flag; void rate; void tagged;
 }
 
 async function processes(): Promise<void> {

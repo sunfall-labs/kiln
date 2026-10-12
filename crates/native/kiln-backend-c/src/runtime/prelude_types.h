@@ -740,12 +740,19 @@ extern int kiln_realm_graph_capsule_take(uint64_t reservation, uint64_t sender,
 extern uint64_t kiln_realm_retire_tag(void);
 extern int kiln_realm_retired_safe(uint64_t tag);
 extern int kiln_realm_retire(void *record);
+/* `collection` is 0 for a record or array, KILN_SHARED_COLLECTION_MAP or _SET otherwise; a
+ * sealed collection has no own fields and reports its entry count as `length`. */
 typedef struct kiln_shared_info {
     uint32_t array;
     uint32_t null_prototype;
     uint32_t length;
+    uint32_t collection;
     uint64_t field_count;
 } kiln_shared_info;
+_Static_assert(sizeof(kiln_shared_info) == 24, "sealed info ABI");
+_Static_assert(offsetof(kiln_shared_info, collection) == 12, "sealed info offset");
+#define KILN_SHARED_COLLECTION_MAP 1u
+#define KILN_SHARED_COLLECTION_SET 2u
 typedef struct kiln_shared_field_info {
     uint32_t kind;
     uint32_t enumerable;
@@ -774,6 +781,18 @@ typedef struct kiln_shared_field_record {
     uint64_t payload;
     uint64_t value_length;
 } kiln_shared_field_record;
+/* One sealed Map/Set entry: each half in the field encoding, and a SHARED half's length and
+ * aux word holding the external graph ID and node. */
+typedef struct kiln_shared_entry_record {
+    uint32_t key_kind;
+    uint32_t value_kind;
+    uint64_t key_payload;
+    uint64_t key_length;
+    uint64_t key_aux;
+    uint64_t value_payload;
+    uint64_t value_length;
+    uint64_t value_aux;
+} kiln_shared_entry_record;
 typedef struct kiln_shared_arena_view {
     const uint8_t *base;
     uint64_t length;
@@ -786,9 +805,13 @@ _Static_assert(sizeof(kiln_shared_field_record) == 40, "sealed field layout");
 _Static_assert(offsetof(kiln_shared_field_record, value_length) == 32, "sealed field offset");
 _Static_assert(sizeof(kiln_shared_arena_view) == 24, "sealed view ABI");
 _Static_assert(offsetof(kiln_shared_arena_view, layout_version) == 20, "sealed view offset");
-#define KILN_SHARED_ARENA_LAYOUT_VERSION 1u
+_Static_assert(sizeof(kiln_shared_entry_record) == 56, "sealed entry layout");
+_Static_assert(offsetof(kiln_shared_entry_record, value_aux) == 48, "sealed entry offset");
+#define KILN_SHARED_ARENA_LAYOUT_VERSION 2u
 #define KILN_SHARED_ARENA_RECORD 1u
 #define KILN_SHARED_ARENA_ARRAY 2u
+#define KILN_SHARED_ARENA_MAP 3u
+#define KILN_SHARED_ARENA_SET 4u
 #define KILN_SHARED_ARENA_EXTERNAL 7u
 #define KILN_SHARED_FIELD_UNDEFINED 0u
 #define KILN_SHARED_FIELD_NULL 1u
@@ -839,6 +862,7 @@ extern int kiln_shared_graph_build(uint64_t root, kiln_shared_source_inspect_fn 
                                    kiln_shared_source_unit_fn unit, void *context,
                                    kiln_shared_build_result *out);
 extern int kiln_shared_graph_refusal(uint32_t kind, const char **text);
+extern int kiln_shared_graph_collection_write_message(uint32_t is_map, const char **text);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -3277,6 +3301,50 @@ static inline int kiln_c99_collection_cached_method_allowed(const kiln_collectio
         /* Object.prototype methods are cacheable only while the collection has no own or
          * subclass overlay. Their prototype mutations are covered by the tag-pristine guard. */
         return 1;
+    }
+}
+
+/* A sealed Map (1) or Set (0), told from its arena header alone, or -1 for any other facade
+ * (ADR 0073). Header-only, so a call site's method cache checks a sealed receiver's brand on
+ * every hit without leaving the emitted code. */
+static inline int kiln_c99_shared_facade_collection(const kiln_shared_facade *facade) {
+    uint64_t offset;
+    uint32_t kind;
+    if (facade == NULL || facade->lease == 0 || facade->arena.base == NULL ||
+        facade->arena.layout_version != KILN_SHARED_ARENA_LAYOUT_VERSION ||
+        facade->node >= facade->arena.node_count ||
+        facade->arena.length < sizeof(kiln_shared_node_record))
+        return -1;
+    offset = (uint64_t)facade->node * sizeof(kiln_shared_node_record);
+    if (offset > facade->arena.length - sizeof(kiln_shared_node_record)) return -1;
+    memcpy(&kind, facade->arena.base + offset, sizeof kind);
+    return kind == KILN_SHARED_ARENA_MAP ? 1 : kind == KILN_SHARED_ARENA_SET ? 0 : -1;
+}
+
+/* Whether a call site that remembered `method_code` may answer it for this sealed receiver: a
+ * collection method, on the collection that has it. A sealed record never has one cached, so a
+ * record's own field named `get` is always read. Program writes to `Map.prototype` are the
+ * tag-pristine guard's, as for a live collection. */
+static inline int kiln_c99_shared_cached_method_allowed(const kiln_shared_facade *facade,
+                                                        uint64_t method_code) {
+    int kind = kiln_c99_shared_facade_collection(facade);
+    switch (method_code) {
+    case KILN_C99_METHOD_COLLECTION_GET:
+    case KILN_C99_METHOD_COLLECTION_SET:
+        return kind == 1;
+    case KILN_C99_METHOD_COLLECTION_ADD:
+        return kind == 0;
+    case KILN_C99_METHOD_COLLECTION_HAS:
+    case KILN_C99_METHOD_COLLECTION_DELETE:
+    case KILN_C99_METHOD_COLLECTION_CLEAR:
+    case KILN_C99_METHOD_COLLECTION_FOR_EACH:
+    case KILN_C99_METHOD_COLLECTION_KEYS:
+    case KILN_C99_METHOD_COLLECTION_VALUES:
+    case KILN_C99_METHOD_COLLECTION_ENTRIES:
+    case KILN_C99_METHOD_COLLECTION_SELF:
+        return kind >= 0;
+    default:
+        return 0;
     }
 }
 

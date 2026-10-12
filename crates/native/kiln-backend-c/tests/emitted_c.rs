@@ -1230,7 +1230,10 @@ fn runtime_prelude_size() {
     // Reviewed 2026-10-10: the per-realm value-slot cache, the per-site global hint, the
     // all-string join, the shaped literal constructor and the inline call/builtin-member helpers
     // bring it to 86,103 lines; each is a private helper of an existing kernel, appearing once.
-    const CEILING_LINES: usize = 87_500;
+    // Reviewed 2026-10-11: sealed Map and Set (ADR 0073 amendment) add the arena entry reader,
+    // its SameValueZero probe, the sealed method kernel and the shared iterator constructor,
+    // 87,534 lines in all; each appears once and extends the existing collection kernels.
+    const CEILING_LINES: usize = 88_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

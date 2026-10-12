@@ -348,8 +348,8 @@ impl Value {
             Self::String(_) => "string",
             Self::Function(_) => "function",
             Self::Object(_) => "object",
-            Self::Shared(facade) => match facade.handle.graph().node(facade.handle.index()) {
-                Some(kiln_shared_graph::Node::Array { .. }) => "array",
+            Self::Shared(facade) => match facade.handle.graph().node_kind(facade.handle.index()) {
+                Some(kiln_shared_graph::NodeKind::Array { .. }) => "array",
                 _ => "object",
             },
             Self::Native(Native::PrototypeOf(PrototypeTable::Function), _) => "function",

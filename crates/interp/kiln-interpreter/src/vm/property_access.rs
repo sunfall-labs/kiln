@@ -383,6 +383,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `length` is not an ordinary property of an array: it is derived, and writing it
             // truncates. Reading it is all the corpus needs so far.
             Value::Array(items) if name == "length" => Value::Number(items.length() as f64),
+            // A sealed collection has no own properties; its `size` is answered from the entry
+            // count, exactly as a live collection's is from its stored count above.
+            Value::Shared(facade) if name == "size" && facade.collection().is_some() => {
+                Value::Number(facade.collection_size().unwrap_or(0) as f64)
+            }
             Value::Shared(facade) => facade
                 .own_property(PropertyKeyRef::Utf8(name))
                 .and_then(|(property, _)| match property {
