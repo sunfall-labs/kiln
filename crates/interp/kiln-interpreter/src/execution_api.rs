@@ -104,6 +104,36 @@ pub fn execute_with_strictness<H: HostOps + ?Sized>(
     )
 }
 
+/// [`execute_with_strictness`] under an explicit clock policy, without the Node adapter.
+///
+/// `ClockCapability::Host` makes `Date`, `performance.now` and timer scheduling follow real time
+/// while the program keeps the plain (adapter-free) global surface.
+pub fn execute_with_clock_and_strictness<H: HostOps + ?Sized>(
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    host: &mut H,
+    limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
+    clock: ClockCapability,
+) -> Result<ExecutionResult, ExecutionError> {
+    let mut runtime = RealmRuntime::with_capabilities(RealmCapabilities {
+        clock,
+        ..RealmCapabilities::default()
+    })
+    .map_err(|error| ExecutionError::Host {
+        instruction: 0,
+        message: error.to_string(),
+    })?;
+    execute_in_runtime_with_strictness(
+        program,
+        strictness,
+        host,
+        limits,
+        &mut runtime,
+        capabilities,
+    )
+}
+
 /// Execute one script under a caller-owned realm runtime.
 ///
 /// This is ADR 0031's policy injection seam: the ordinary [`execute`] API keeps the deterministic

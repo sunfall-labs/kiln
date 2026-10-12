@@ -65,7 +65,7 @@ def argv_for(runtime, path, native_binary):
         return ["bun", "run", path]
     if runtime == "kiln":
         flags = ["--node"] if node_surface(path) else []
-        return [kiln, "--one-shot", *flags, "run", path]
+        return [kiln, "--one-shot", "--clock", "virtual", *flags, "run", path]
     return [native_binary]
 
 def run(argv):
@@ -123,7 +123,7 @@ for runtime in RUNTIMES:
     binary = empty_binary if runtime == "kiln-native" else None
     times = [run(argv_for(runtime, empty, binary))[0] for _ in range(PASSES)]
     floor[runtime] = statistics.median(times)
-adapter_argv = [kiln, "--one-shot", "--node", "run", empty]
+adapter_argv = [kiln, "--one-shot", "--clock", "virtual", "--node", "run", empty]
 floor["kiln+node"] = statistics.median([run(adapter_argv)[0] for _ in range(PASSES)])
 
 rows, divergences = [], []

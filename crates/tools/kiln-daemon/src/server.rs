@@ -1456,6 +1456,7 @@ fn handle<E: QueryEngine>(
                         path,
                         project_root,
                         profile,
+                        wall_clock,
                         static_link,
                         pgo_gen,
                         pgo_u,

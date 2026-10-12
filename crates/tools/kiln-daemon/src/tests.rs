@@ -2567,6 +2567,76 @@ fn production_wall_clock_reads_system_time_across_immediate_turns() {
     within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
 }
 
+#[test]
+fn wall_clock_runs_without_the_node_adapter() {
+    let fixture = Fixture::empty();
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+    let epoch_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current epoch")
+            .as_secs_f64()
+            * 1000.0
+    };
+    // A module (graph path) and a script (single-program path), both without `node`.
+    for (path, text) in [
+        (
+            "plain-clock.mjs",
+            "export {};\nconsole.log(Date.now());\nsetTimeout(() => console.log(Date.now()), 40);\n",
+        ),
+        (
+            "plain-clock.js",
+            "console.log(Date.now());\nsetTimeout(function () { console.log(Date.now()); }, 40);\n",
+        ),
+    ] {
+        std::fs::write(fixture.dir.join(path), text).expect("write clock source");
+        client
+            .request(&Request::SetSource {
+                source_view: client.source_view(),
+                path: path.to_owned(),
+                text: text.to_owned(),
+            })
+            .expect("set clock source");
+        let before = epoch_ms().floor();
+        let response = client
+            .request(&Request::Run {
+                stream_output: false,
+                steps: StepBudget::Unmetered,
+                source_view: client.source_view(),
+                path: path.to_owned(),
+                project_root: fixture.dir.to_string_lossy().into_owned(),
+                node: false,
+                wall_clock: true,
+                args: Vec::new(),
+            })
+            .expect("run clock source");
+        let after = epoch_ms().ceil();
+        let Response::Ran(summary) = response else {
+            panic!("expected run response, got {response:?}");
+        };
+        assert!(summary.succeeded, "{path}: {:?}", summary.diagnostics);
+        let readings: Vec<f64> = summary
+            .stdout
+            .lines()
+            .map(|line| line.parse().expect("numeric epoch time"))
+            .collect();
+        assert_eq!(readings.len(), 2, "{path}: {}", summary.stdout);
+        for reading in &readings {
+            assert!(
+                *reading >= before && *reading <= after,
+                "{path}: epoch {reading} outside {before}..={after}"
+            );
+        }
+        assert!(readings[1] - readings[0] >= 30.0, "{path}: {readings:?}");
+    }
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
 #[cfg(unix)]
 #[test]
 fn node_launch_evaluates_preloads_and_runtime_created_esm_in_one_module_realm() {

@@ -49,7 +49,7 @@ KILN_CI_NATIVE_OUTPUT="target/kiln-ci-native"
 kiln_cargo run -p kiln-cli --locked -- --one-shot build examples/hello.ts \
 	--output "$KILN_CI_NATIVE_OUTPUT" >/dev/null
 KILN_CI_WARM_BUILD="$(kiln_cargo run -p kiln-cli --locked -- --one-shot build examples/hello.ts \
-	--output "$KILN_CI_NATIVE_OUTPUT")"
+	--explain --output "$KILN_CI_NATIVE_OUTPUT")"
 KILN_CI_HIT_COUNT="$(printf '%s\n' "$KILN_CI_WARM_BUILD" | grep -c '(hit)')"
 if [[ $KILN_CI_HIT_COUNT -ne 5 ]]; then
 	echo "expected five native cache hits on the warm build" >&2
@@ -71,7 +71,7 @@ KILN_CI_MODULE_OUTPUT="target/kiln-ci-native-modules"
 kiln_cargo run -p kiln-cli --locked -- --one-shot build examples/modules/main.ts \
 	--output "$KILN_CI_MODULE_OUTPUT" >/dev/null
 KILN_CI_MODULE_WARM_BUILD="$(kiln_cargo run -p kiln-cli --locked -- --one-shot build \
-	examples/modules/main.ts --output "$KILN_CI_MODULE_OUTPUT")"
+	examples/modules/main.ts --explain --output "$KILN_CI_MODULE_OUTPUT")"
 KILN_CI_MODULE_HIT_COUNT="$(printf '%s\n' "$KILN_CI_MODULE_WARM_BUILD" | grep -c '(hit)')"
 if [[ $KILN_CI_MODULE_HIT_COUNT -ne 5 ]]; then
 	echo "expected five native graph cache hits on the warm build" >&2

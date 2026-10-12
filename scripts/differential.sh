@@ -95,7 +95,7 @@ run_probe() {
 
 	local actual
 	local kiln_status=0
-	actual="$("$KILN" --one-shot run "$probe" 2>&1)" || kiln_status=$?
+	actual="$("$KILN" --one-shot --clock virtual run "$probe" 2>&1)" || kiln_status=$?
 
 	if [[ $actual == "$expected" ]]; then
 		touch "$WORK_DIR/$name.matched"

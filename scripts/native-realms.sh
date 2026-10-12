@@ -10,7 +10,7 @@
 # rewritten under another thread's reader, a key interned into the wrong realm: each shows up as a
 # realm printing something the program alone does not.
 #
-# HOW. Each probe is built once by `kiln run --native`, which keeps the realm's virtual clock.
+# HOW. Each probe is built once by `kiln run --native --clock virtual`, which keeps the realm's virtual clock.
 # The binary runs alone, then with `KILN_REALMS=N`, which launches N realms at once. By default
 # realms share turn-scheduler lanes, and eligible turns migrate between lanes. Set
 # `KILN_REALM_MIGRATE=0` to retain fixed scheduler lanes, or `KILN_REALM_SCHEDULER=0` to use
@@ -156,7 +156,7 @@ run_probe() {
 	local kept built program=""
 	printf '%s\n' build > "$dir/phase"
 	KILN_NATIVE_KEEP_WORK=1 env ${probe_env[@]+"${probe_env[@]}"} "$KILN" --one-shot \
-		${adapter:+"$adapter"} run --native ${profile:+--profile "$profile"} "$probe" > "$dir/build.log" 2>&1 || true
+		--clock virtual ${adapter:+"$adapter"} run --native ${profile:+--profile "$profile"} "$probe" > "$dir/build.log" 2>&1 || true
 	while read -r kept; do
 		for built in "$kept/run-graph" "$kept/program"; do
 			[[ -z $program && -x $built ]] && cp "$built" "$dir/program" && program=1

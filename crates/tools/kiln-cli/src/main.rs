@@ -16,6 +16,7 @@ mod env;
 mod error;
 mod exec;
 mod lifecycle;
+mod node_detect;
 mod oneshot;
 mod render;
 mod sources;
@@ -80,6 +81,10 @@ fn run() -> Result<i32> {
             emit(args::HELP)?;
             Ok(0)
         }
+        Parsed::CommandHelp(command) => {
+            emit(&args::command_help(command))?;
+            Ok(0)
+        }
         Parsed::Version => {
             emit(&version())?;
             Ok(0)
@@ -124,11 +129,7 @@ fn version() -> String {
         (Some(commit), None) => format!(" ({commit})"),
         _ => String::new(),
     };
-    format!(
-        "kiln {}{build}\nprotocol {}\n",
-        env!("CARGO_PKG_VERSION"),
-        kiln_proto::PROTOCOL_VERSION
-    )
+    format!("kiln {}{build}\n", env!("CARGO_PKG_VERSION"))
 }
 
 fn target_for_command(command: &Command) -> Option<&Path> {
@@ -247,12 +248,15 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
         client::socket_path(invocation.socket, &root)?
     };
 
-    let auto_node = |explicit: bool| -> bool {
+    // The Node adapter is on when asked for, when the project looks like a Node project, or when
+    // the program's own module graph imports a Node built-in (`node:http`, `fs`, `require("fs")`).
+    let auto_node = |explicit: bool, entry: &Path| -> bool {
         explicit
             || root.join("package.json").is_file()
             || root.join("tsconfig.json").is_file()
             || root.join("jsconfig.json").is_file()
             || root.join("node_modules").is_dir()
+            || node_detect::graph_imports_node_builtin(entry)
     };
 
     match invocation.command {
@@ -284,7 +288,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             workers,
             ..
         } => {
-            let node = auto_node(node);
+            let node = auto_node(node, &path);
             if workers > 1 {
                 let mut handles = Vec::with_capacity(workers);
                 for _ in 0..workers {
@@ -349,7 +353,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             pgo_generate,
             pgo_use,
         } => {
-            let node = auto_node(node);
+            let node = auto_node(node, &path);
             if workers > 1 {
                 let mut handles = Vec::with_capacity(workers);
                 for _ in 0..workers {
@@ -423,7 +427,12 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             pgo_generate,
             pgo_use,
         } => {
-            let node = if shared { false } else { auto_node(node) };
+            // `--include` links Node-resolved lazy modules, so it implies the adapter.
+            let node = if shared {
+                false
+            } else {
+                auto_node(node || !includes.is_empty(), &path)
+            };
             let mut backend = open(one_shot, &socket)?;
             let mut built = commands::build(
                 backend.as_mut(),
@@ -451,7 +460,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             node,
             explain_parallel,
         } => {
-            let node = auto_node(node);
+            let node = auto_node(node, &path);
             // An in-process engine starts with no declaration libraries parsed; parse them while
             // the project is read. A daemon keeps its own from the first check.
             if one_shot && sources::is_typescript(&path) {
@@ -521,7 +530,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             interval,
             node,
         } => {
-            let node = auto_node(node);
+            let node = auto_node(node, &path);
             let mut backend = open(one_shot, &socket)?;
             let mut out = std::io::stdout().lock();
             let mut notes = std::io::stderr().lock();
@@ -649,8 +658,12 @@ mod tests {
 
     use super::*;
 
+    const TOPICS: [&str; 10] = [
+        "run", "build", "check", "watch", "x", "test", "project", "cache", "daemon", "stats",
+    ];
+
     #[test]
-    fn help_documents_every_command_and_option() {
+    fn help_documents_every_command_and_global_option() {
         for expected in [
             "run",
             "build",
@@ -664,13 +677,10 @@ mod tests {
             "x",
             "--one-shot",
             "--socket",
-            "--interval",
-            "--out",
-            "--dry-run",
-            "--march=native",
             "--help",
             "--version",
             "exit status",
+            "kiln <command> --help",
         ] {
             assert!(
                 args::HELP.contains(expected),
@@ -680,31 +690,109 @@ mod tests {
     }
 
     #[test]
+    fn every_flag_the_parser_accepts_is_documented_on_some_command_page() {
+        let pages: String = TOPICS.iter().map(|t| args::command_help(t)).collect();
+        for flag in [
+            "--one-shot",
+            "--socket",
+            "--interval",
+            "--list",
+            "--cases",
+            "--changed",
+            "--parse-only",
+            "--node",
+            "--clock",
+            "--native",
+            "--shared",
+            "--dry-run",
+            "--output",
+            "--include",
+            "--out",
+            "--profile",
+            "--march=native",
+            "--max-steps",
+            "--workers",
+            "--explain",
+            "--no-kiln-extensions",
+            "--explain-parallel",
+            "--static",
+            "--pgo-generate",
+            "--pgo-use",
+        ] {
+            assert!(pages.contains(flag), "no command page documents {flag}");
+        }
+    }
+
+    #[test]
+    fn a_command_page_lists_only_its_own_flags() {
+        let build = args::command_help("build");
+        assert!(build.contains("--shared") && build.contains("--output"));
+        assert!(!build.contains("--interval") && !build.contains("--max-steps"));
+        let watch = args::command_help("watch");
+        assert!(watch.contains("--interval") && !watch.contains("--output"));
+        for topic in TOPICS {
+            let page = args::command_help(topic);
+            assert!(
+                page.contains(&format!("kiln {topic}")),
+                "{topic} page has no usage line"
+            );
+            assert!(
+                page.contains("--help"),
+                "{topic} page does not mention --help"
+            );
+        }
+    }
+
+    #[test]
+    fn no_internal_jargon_in_user_facing_help() {
+        let all: String = std::iter::once(args::HELP.to_owned())
+            .chain(TOPICS.iter().map(|t| args::command_help(t)))
+            .collect();
+        for jargon in ["Tokio", "schema-1", "deliberately growing", "Adapter"] {
+            assert!(!all.contains(jargon), "help still says {jargon:?}");
+        }
+    }
+
+    #[test]
     fn help_lists_the_current_command_surface() {
         let commands: Vec<&str> = args::HELP
             .lines()
-            .skip_while(|line| !line.starts_with("commands:"))
-            .skip(1)
-            .take_while(|line| line.starts_with("    "))
+            .skip_while(|line| !line.starts_with("everyday commands:"))
+            .take_while(|line| !line.starts_with("global options"))
+            .filter(|line| line.starts_with("    "))
             .filter_map(|line| line.split_whitespace().next())
             .collect();
         assert_eq!(
             commands,
             [
-                "run", "build", "check", "test", "project", "stats", "watch", "daemon", "cache",
-                "x"
+                "run", "build", "check", "watch", "x", "test", "project", "cache", "daemon",
+                "stats"
             ]
         );
     }
 
     #[test]
-    fn version_names_the_protocol_it_speaks() {
+    fn help_rows_are_aligned() {
+        // Every `    <name> ... description` row of a section starts its description in one column.
+        for line in args::HELP
+            .lines()
+            .take_while(|l| !l.starts_with("exit status"))
+            .filter(|l| l.starts_with("    ") && !l.starts_with("     "))
+        {
+            let Some(at) = line.trim_start().find("  ") else {
+                continue;
+            };
+            let column = 4 + at + line[4 + at..].len() - line[4 + at..].trim_start().len();
+            assert_eq!(column, 23, "misaligned help row: {line:?}");
+        }
+    }
+
+    #[test]
+    fn version_is_one_plain_line() {
         let text = version();
         assert!(text.starts_with("kiln "), "{text}");
-        assert!(
-            text.contains(&format!("protocol {}", kiln_proto::PROTOCOL_VERSION)),
-            "{text}"
-        );
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(!text.contains("protocol"), "{text}");
     }
 
     #[test]

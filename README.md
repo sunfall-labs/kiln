@@ -132,6 +132,18 @@ kernels, and any kernel or seccomp profile that refuses a ring, use epoll. `KILN
 epoll anywhere and `KILN_IO=uring` asks for the ring below the floor. See
 `crates/host/kiln-runtime/src/uring.rs` for the design and the measurements behind that default.
 
+## Quick start
+
+```sh
+curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install.sh | sh
+kiln run hello.ts                      # run it now, with the built-in interpreter
+kiln build hello.ts && ./hello         # compile it to a native executable
+```
+
+`kiln run` needs nothing else; `kiln build` needs a C compiler (Clang, GCC, cc or Zig) on `PATH`.
+`kiln --help` lists the commands and `kiln <command> --help` the options of each. A program that
+imports `node:http`, `node:fs` and the like gets the Node compatibility layer automatically.
+
 ## Installing
 
 Each release is a binary for macOS on Apple silicon and Linux (glibc) on x86_64 and arm64:
@@ -167,11 +179,13 @@ Day-to-day development goes through `mbx` and `mise` (see `AGENTS.md`); bare `ca
 cargo build
 cargo run -p kiln-cli -- --one-shot run examples/hello.ts                    # interpret
 cargo run -p kiln-cli -- --one-shot run examples/hello.ts --native           # compile and run
-cargo run -p kiln-cli -- --one-shot build server.mjs --node --profile native-release --output server
+cargo run -p kiln-cli -- --one-shot build server.mjs --output server      # native-release by default
 ./server
 ```
 
-`--node` selects Node's module resolution and installs the Tokio-owned adapter for `node:*`.
+`--node` selects Node's module resolution and installs the Node compatibility layer (`node:*`,
+`process`, `require`). kiln turns it on by itself when the program imports a Node built-in or the
+project has a `package.json`, `tsconfig.json` or `node_modules`; the flag forces it.
 When a worker or another loader receives a module path at run time, declare that module in the
 project's `package.json` so the native build can compile it:
 
@@ -240,9 +254,10 @@ follows from it.
 - **The native heap is collected at the turn boundary.** A precise mark-sweep collector runs
   between callbacks; every allocation a value can point at is a tagged block, and marking never
   trusts a pointer it cannot look up.
-- **A shipped realm keeps wall time; a measured one keeps virtual time.** `kiln build` gives the
-  program the host's clock, so timers fire on schedule under load; `kiln run --native` and the
-  conformance harness keep the deterministic clock that makes two engines comparable.
+- **A shipped realm keeps wall time; a measured one keeps virtual time.** `kiln build` and
+  `kiln run` give the program the host's clock, so `Date` shows the real date and timers fire on
+  schedule under load; `kiln run --clock virtual`, `kiln test` and the conformance harnesses keep
+  the deterministic clock that makes two engines comparable.
 
 Every decision of that kind is an ADR under `docs/adr/`, numbered and never edited in place;
 `docs/design.md` is the founding document, kept as written.
