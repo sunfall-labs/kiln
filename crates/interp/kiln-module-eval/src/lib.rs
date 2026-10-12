@@ -1668,10 +1668,7 @@ impl GraphExecutor<'_> {
             .collect();
         let mut total_steps = 0_u64;
         let mut entry_result = None;
-        let realm_capabilities = RealmCapabilities {
-            clock,
-            ..RealmCapabilities::default()
-        };
+        let realm_capabilities = RealmCapabilities::for_clock(clock);
         let mut runtime = RealmRuntime::with_capabilities(realm_capabilities).map_err(|error| {
             ModuleEvaluationError::Execution {
                 module: self.entry().to_path_buf(),

@@ -1220,11 +1220,9 @@ static int kiln_cli_entropy_u64(kiln_value *result) {
         return KILN_C99_HOST_ERROR;
     }
 #else
-    FILE *random = fopen("/dev/urandom", "rb");
-    if (random == NULL) return KILN_C99_HOST_ERROR;
-    if (fread(&word, 1, sizeof(word), random) != sizeof(word) || fclose(random) != 0) {
-        return KILN_C99_HOST_ERROR;
-    }
+    /* The kernel CSPRNG without a file descriptor (glibc 2.25+, macOS 10.12+). */
+    extern int getentropy(void *buffer, size_t length);
+    if (getentropy(&word, sizeof(word)) != 0) return KILN_C99_HOST_ERROR;
 #endif
     *result = kiln_cli_undefined();
     result->tag = KILN_VALUE_NUMBER;

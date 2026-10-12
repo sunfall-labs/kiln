@@ -573,19 +573,32 @@ export function getHashes(): string[] {
   return ['md5', 'sha1', 'sha256', 'sha512'];
 }
 
+// Every random byte this module hands out comes from the operating system's CSPRNG, through the
+// WebCrypto primitive the bootstrap publishes. There is deliberately no fallback: a predictable
+// `randomBytes` or `randomUUID` is a security hole, not a degraded answer.
+const secureRandomBytes: ((length: number) => Uint8Array) | undefined =
+  (globalThis as any).__kilnPrivate?.secureRandomBytes;
+
+function fillSecure(view: Uint8Array): void {
+  if (typeof secureRandomBytes !== 'function') {
+    throw new Error('crypto: no secure random source is available in this runtime');
+  }
+  for (let at = 0; at < view.length; at += 65536) {
+    const length = Math.min(65536, view.length - at);
+    view.set(secureRandomBytes(length), at);
+  }
+}
+
 export function randomUUID(): string {
+  const bytes = new Uint8Array(16);
+  fillSecure(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const s = '0123456789abcdef';
   let uuid = '';
-  for (let i = 0; i < 36; i++) {
-    if (i === 8 || i === 13 || i === 18 || i === 23) {
-      uuid += '-';
-    } else if (i === 14) {
-      uuid += '4';
-    } else if (i === 19) {
-      uuid += s[(Math.floor(Math.random() * 16) & 0x3) | 0x8];
-    } else {
-      uuid += s[Math.floor(Math.random() * 16)];
-    }
+  for (let i = 0; i < 16; i++) {
+    if (i === 4 || i === 6 || i === 8 || i === 10) uuid += '-';
+    uuid += s[bytes[i] >> 4] + s[bytes[i] & 15];
   }
   return uuid;
 }
@@ -601,10 +614,7 @@ export function getRandomValues(typedArray: any): any {
   if (typedArray.byteLength > 65536) {
     throw new RangeError('The requested length exceeds 65,536 bytes');
   }
-  const view = new Uint8Array(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength);
-  for (let i = 0; i < view.length; i++) {
-    view[i] = Math.floor(Math.random() * 256);
-  }
+  fillSecure(new Uint8Array(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength));
   return typedArray;
 }
 
@@ -614,9 +624,7 @@ export function randomBytes(size: number, callback?: (err: Error | null, buf?: a
     throw new RangeError('The value of "size" is out of range');
   }
   const bytes = new Uint8Array(s);
-  for (let i = 0; i < s; i++) {
-    bytes[i] = Math.floor(Math.random() * 256);
-  }
+  fillSecure(bytes);
   const result = typeof Buffer !== 'undefined' ? Buffer.from(bytes) : bytes;
   if (typeof callback === 'function') {
     callback(null, result);
@@ -639,9 +647,7 @@ export function randomFillSync(buffer: any, offset: number = 0, size?: number): 
     throw new RangeError('The value of "size" is out of range');
   }
   const view = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer.buffer || buffer, buffer.byteOffset || 0, totalLen);
-  for (let i = 0; i < sz; i++) {
-    view[off + i] = Math.floor(Math.random() * 256);
-  }
+  fillSecure(view.subarray(off, off + sz));
   return buffer;
 }
 

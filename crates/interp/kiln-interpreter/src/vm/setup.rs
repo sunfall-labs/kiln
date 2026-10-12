@@ -119,6 +119,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 EntropyCapability::Seeded(seed) => seed,
             },
             entropy,
+            math_random_seeded: false,
             closures: Vec::new(),
             closures_prune_at: 0,
             module_map: SharedModuleMap::default(),
@@ -185,8 +186,20 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         }
     }
 
+    /// `Math.random`: not a cryptographic source, as in node. A host-entropy realm seeds its
+    /// SplitMix64 stream from the host once, so a run is unpredictable without a system call per
+    /// draw; `crypto` keeps drawing host entropy for every byte (`random_bytes`).
     pub(super) fn random_double(&mut self, instruction: usize) -> Result<f64, ExecutionError> {
-        Ok((self.entropy_word(instruction)? >> 11) as f64 / 9_007_199_254_740_992.0)
+        let word = if self.entropy == EntropyCapability::Host {
+            if !self.math_random_seeded {
+                self.random_state = self.entropy_word(instruction)?;
+                self.math_random_seeded = true;
+            }
+            split_mix_64(&mut self.random_state)
+        } else {
+            self.entropy_word(instruction)?
+        };
+        Ok((word >> 11) as f64 / 9_007_199_254_740_992.0)
     }
 
     pub(super) fn random_bytes(

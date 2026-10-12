@@ -16,8 +16,25 @@ static int kiln_c99_entropy_word(kiln_host *host, uint64_t *out) {
 
 static int kiln_c99_random(kiln_host *host, double *out) {
     uint64_t word;
+#if KILN_REALM_HOST_ENTROPY
+    /* `Math.random` is not a cryptographic source, as in node: the realm seeds a SplitMix64
+     * stream from the host once and draws from it, rather than asking the host every call. */
+    kiln_c99_realm_state *realm = kiln_c99_realm();
+    if (!realm->math_random_seeded) {
+        int seeded = kiln_c99_entropy_word(host, &realm->math_random_state);
+        if (seeded != KILN_C99_OK) return seeded;
+        realm->math_random_seeded = 1;
+    }
+    realm->math_random_state += UINT64_C(0x9E3779B97F4A7C15);
+    word = realm->math_random_state;
+    word = (word ^ (word >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
+    word = (word ^ (word >> 27)) * UINT64_C(0x94D049BB133111EB);
+    word ^= word >> 31;
+    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
+#else
     int status = kiln_c99_entropy_word(host, &word);
     if (status != KILN_C99_OK || out == NULL) return status;
+#endif
     /* 53 random bits, which is every bit the mantissa has. */
     *out = (double)(word >> 11) / 9007199254740992.0;
     return KILN_C99_OK;

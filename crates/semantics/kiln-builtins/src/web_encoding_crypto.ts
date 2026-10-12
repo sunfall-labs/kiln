@@ -19,6 +19,10 @@
   function provider(op: number, key?: Uint8Array, data?: Uint8Array, iv?: Uint8Array, aad?: Uint8Array, length = 0): Uint8Array {
     try { return primitive(op, key, data, iv, aad, length); } catch (error) { throw new DOMException(String(error), 'OperationError'); }
   }
+  // The operating system's CSPRNG, at most 65,536 bytes a call, for `node:crypto`'s random
+  // functions: they must never fall back to `Math.random`, which is not a cryptographic source.
+  kilnPrivate.secureRandomBytes = (length: number): Uint8Array =>
+    primitive(OP.RANDOM_BYTES, undefined, undefined, undefined, undefined, length);
   function exactBuffer(bytes: Uint8Array): ArrayBuffer { return bytes.slice().buffer as ArrayBuffer; }
   function algorithmName(value: any): string {
     const name = typeof value === 'string' ? value : value && value.name;

@@ -384,6 +384,8 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// machine -- the same trade the virtual clock makes.
     pub(super) entropy: EntropyCapability,
     pub(super) random_state: u64,
+    /// Whether a host-entropy realm has seeded `random_state` for `Math.random` yet.
+    pub(super) math_random_seeded: bool,
     pub(super) steps: u64,
     /// The step count at which the dispatch loop stops to think.
     ///

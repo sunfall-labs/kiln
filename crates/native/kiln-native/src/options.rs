@@ -181,10 +181,12 @@ pub enum NativeStringPolicy {
 }
 
 impl NativeRealmPolicy {
+    /// A binary that runs on real time: the host's clock, and the host's entropy with it, so
+    /// `Math.random` differs between runs as it does in node.
     pub const fn host_clock() -> Self {
         Self {
             host_clock: true,
-            entropy: NativeEntropyPolicy::Deterministic,
+            entropy: NativeEntropyPolicy::Host,
             timezone: NativeStringPolicy::Deterministic,
             locale: NativeStringPolicy::Deterministic,
             type_profile_path: None,

@@ -1163,6 +1163,9 @@ typedef struct kiln_c99_realm_state {
     struct kiln_c99_region_own **region_own;
     size_t region_own_buckets;
     size_t region_own_count;
+    /* `Math.random`'s stream in a host-entropy realm, seeded from the host on first use. */
+    uint64_t math_random_state;
+    int math_random_seeded;
 } kiln_c99_realm_state;
 
 /* A region closure's prototype and property store in one realm. */

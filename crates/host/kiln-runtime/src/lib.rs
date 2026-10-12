@@ -359,6 +359,10 @@ pub enum ClockCapability {
 }
 
 /// How one realm obtains entropy.
+///
+/// The default is deterministic for the reproducible realms tests and harnesses build, but a
+/// realm that runs on real time must also draw real entropy: `RealmCapabilities::for_clock`
+/// pairs the two, so `crypto.randomUUID()` in an ordinary `kiln run` is never predictable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EntropyCapability {
     /// SplitMix64 with ADR 0026's fixed seed.
@@ -408,6 +412,19 @@ pub struct RealmCapabilities {
 }
 
 impl RealmCapabilities {
+    /// The environment of a realm on `clock`: a host-clock realm runs against the real world and
+    /// also draws host entropy; a virtual-clock realm keeps every input deterministic.
+    pub fn for_clock(clock: ClockCapability) -> Self {
+        Self {
+            clock,
+            entropy: match clock {
+                ClockCapability::Host => EntropyCapability::Host,
+                ClockCapability::Virtual => EntropyCapability::Deterministic,
+            },
+            ..Self::default()
+        }
+    }
+
     /// Typed policy identity for artifact keys. Host *values* are deliberately absent.
     pub fn artifact_identity(&self) -> RealmCapabilityIdentity {
         RealmCapabilityIdentity {
@@ -6000,7 +6017,12 @@ impl HostOps for CaptureHost {
                 let ptr = arguments.first().cloned().unwrap_or(HostValue::Undefined);
                 Ok(ptr)
             }
-            HostOp::EntropyU64 | HostOp::TimeZone | HostOp::Locale => Err(HostError::new(format!(
+            // Asked only by a realm whose policy is `EntropyCapability::Host`: the operating
+            // system's CSPRNG, one word at a time.
+            HostOp::EntropyU64 => getrandom::u64()
+                .map(HostValue::Number)
+                .map_err(|error| HostError::new(format!("host entropy unavailable: {error}"))),
+            HostOp::TimeZone | HostOp::Locale => Err(HostError::new(format!(
                 "deterministic host does not provide {operation:?}"
             ))),
         }
