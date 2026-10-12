@@ -3988,3 +3988,99 @@ fn interpreted_argv_names_the_interpreter_then_the_entry() {
     assert_eq!(argv_with_args[2], "--flag");
     assert_eq!(argv_with_args[3], "arg");
 }
+
+fn serve_with_idle(fixture: &Fixture, idle: Option<Duration>) -> JoinHandle<()> {
+    let daemon = Daemon::bind_with(&fixture.socket, StubEngine::default())
+        .expect("bind")
+        .with_idle_timeout(idle);
+    std::thread::spawn(move || daemon.serve())
+}
+
+fn wait_until_finished(serving: &JoinHandle<()>, limit: Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        if serving.is_finished() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    serving.is_finished()
+}
+
+#[test]
+fn an_idle_daemon_exits_and_unlinks_its_socket() {
+    let fixture = Fixture::empty();
+    let serving = serve_with_idle(&fixture, Some(Duration::from_millis(300)));
+    // Served a request first: idleness is measured from the last client, not from startup.
+    fixture.client().handshake().expect("handshake");
+    assert!(
+        wait_until_finished(&serving, Duration::from_secs(10)),
+        "an idle daemon must exit"
+    );
+    serving.join().expect("clean exit");
+    assert!(!fixture.socket.exists(), "the socket must be unlinked");
+    assert!(
+        Client::connect(&fixture.socket).is_err(),
+        "nothing may answer after the exit"
+    );
+}
+
+#[test]
+fn a_daemon_that_never_had_a_client_still_goes_idle() {
+    let fixture = Fixture::empty();
+    let serving = serve_with_idle(&fixture, Some(Duration::from_millis(200)));
+    assert!(wait_until_finished(&serving, Duration::from_secs(10)));
+    assert!(!fixture.socket.exists());
+}
+
+#[test]
+fn an_open_connection_keeps_the_daemon_alive() {
+    // A `watch` session holds one connection open between saves and sends nothing for as long as
+    // the files do not change.
+    let fixture = Fixture::empty();
+    let idle = Duration::from_millis(300);
+    let serving = serve_with_idle(&fixture, Some(idle));
+    let mut client = fixture.client();
+    client.handshake().expect("handshake");
+
+    std::thread::sleep(idle * 4);
+    assert!(!serving.is_finished(), "exited under an open connection");
+    client.handshake().expect("the daemon still answers");
+
+    // The clock starts when the last client leaves, not before.
+    drop(client);
+    assert!(
+        wait_until_finished(&serving, Duration::from_secs(10)),
+        "the daemon must go idle once the last client is gone"
+    );
+    assert!(!fixture.socket.exists());
+}
+
+#[test]
+fn a_new_request_restarts_the_idle_clock() {
+    let fixture = Fixture::empty();
+    let idle = Duration::from_millis(600);
+    let serving = serve_with_idle(&fixture, Some(idle));
+    for _ in 0..4 {
+        std::thread::sleep(idle / 3);
+        fixture.client().handshake().expect("still serving");
+    }
+    assert!(!serving.is_finished());
+    assert!(wait_until_finished(&serving, Duration::from_secs(10)));
+}
+
+#[test]
+fn a_zero_idle_period_disables_the_exit() {
+    let mut fixture = Fixture::empty();
+    fixture.serving = Some(serve_with_idle(&fixture, Some(Duration::ZERO)));
+    fixture.stop = None;
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(!fixture.serving.as_ref().unwrap().is_finished());
+    fixture.client().handshake().expect("still serving");
+    // `Fixture::stop` needs a handle; ask for the shutdown the way a client would.
+    fixture
+        .client()
+        .raw_request(&Request::Shutdown)
+        .expect("shutdown");
+    fixture.stop();
+}

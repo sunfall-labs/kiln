@@ -417,6 +417,14 @@ gates failing on vanished binaries. Lower it with `mbx settings set gc.min_free_
 tight disk; `mbx doctor` shows the budget. If a build directory disappears under you, check `df`
 and `mbx stats` before suspecting a colleague.
 
+## The autostarted daemon exits when idle
+
+`kiln run`/`check`/`test`/`watch` autostart one resident `kiln daemon serve` per project, and it
+exits by itself (unlinking its socket) after 15 minutes with no client connected; an open
+connection, including a `watch` session, keeps it alive. `KILN_DAEMON_IDLE_SECS=<n>` changes the
+period and `0` disables it; the next command starts a fresh daemon. Set it small when a test needs
+to watch the exit, and large (or `0`) when attaching a profiler to a daemon.
+
 ## Profiling a native binary
 
 `scripts/profile-native.sh <binary> [top-n]` (macOS) records an Instruments CPU profile of a built

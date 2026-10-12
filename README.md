@@ -187,6 +187,10 @@ for the closed-world policy.
 `kiln watch` re-runs an entry in the interpreter on every save. `kiln test <dir>` runs a
 conformance corpus; the corpora and the runner each one needs are listed in `AGENTS.md`.
 
+The resident daemon exits on its own after 15 minutes with no client connected (an open
+connection, such as a `kiln watch` session, keeps it alive); `KILN_DAEMON_IDLE_SECS` sets the
+period in seconds and `0` disables the exit, and the next command starts a fresh daemon.
+
 Without `--one-shot`, `kiln run` interprets the program inside the resident daemon, and the
 program is a process of its own there (realms issue 26; `kiln_runtime::signals`). Its
 `process.pid` is a virtual pid, one per run and above any pid Linux or macOS hands out: logging

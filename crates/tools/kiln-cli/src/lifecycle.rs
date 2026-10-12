@@ -89,12 +89,33 @@ pub fn status(socket: &Path) -> Result<(Output, i32)> {
     }
 }
 
+/// How long a daemon with no client lives before it exits.
+const DEFAULT_IDLE_SECS: u64 = 15 * 60;
+
+/// `KILN_DAEMON_IDLE_SECS`: seconds without any connected client before the daemon exits.
+/// Unset means 15 minutes, `0` means never. An unparsable value is reported and ignored rather
+/// than silently turning the exit off.
+fn idle_timeout(value: Option<&str>) -> Option<std::time::Duration> {
+    let secs = match value.map(str::trim) {
+        None | Some("") => DEFAULT_IDLE_SECS,
+        Some(text) => text.parse().unwrap_or_else(|_| {
+            eprintln!(
+                "kiln daemon: ignoring KILN_DAEMON_IDLE_SECS={text:?} (want whole seconds; 0 disables)"
+            );
+            DEFAULT_IDLE_SECS
+        }),
+    };
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
 /// Run the accept loop in the foreground. This is what `start` and autostart spawn, and what
 /// a developer runs by hand when they want to watch the daemon's own output.
 pub fn serve(socket: &Path) -> Result<()> {
+    let idle = idle_timeout(std::env::var("KILN_DAEMON_IDLE_SECS").ok().as_deref());
     let daemon = Daemon::bind(socket)
         .map_err(|source| Error::Daemon(source.to_string()))?
-        .isolate_hosted_programs();
+        .isolate_hosted_programs()
+        .with_idle_timeout(idle);
     // The spawned copy has this redirected into the log beside the socket, which is where
     // `wait_for_daemon` looks when a daemon dies before it can listen.
     eprintln!(
@@ -112,6 +133,15 @@ pub fn serve(socket: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_timeout_defaults_parses_and_disables() {
+        use std::time::Duration;
+        assert_eq!(idle_timeout(None), Some(Duration::from_secs(900)));
+        assert_eq!(idle_timeout(Some("5")), Some(Duration::from_secs(5)));
+        assert_eq!(idle_timeout(Some("0")), None);
+        assert_eq!(idle_timeout(Some("soon")), Some(Duration::from_secs(900)));
+    }
 
     struct Fixture {
         dir: std::path::PathBuf,
