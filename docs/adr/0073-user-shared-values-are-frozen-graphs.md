@@ -6,6 +6,9 @@ Accepted, 2026-09-27, under the project owner's delegation to adjust or approve 
 contracts and implement them. The `kiln:shared` implementation subsequently landed in both
 engines; the final program-wide gate remains due.
 
+Amended, 2026-10-11, at the project owner's request: ordinary `Map` and `Set` instances are
+accepted graph kinds and are read as sealed collections (see "Sealed Map and Set" below).
+
 Specifies user data in ADR 0070's shared immutable region (realms issues 08 and 11). Follows ADR
 0068 for kiln extensions, ADR 0060 for one semantic owner, ADR 0059 for realm intrinsics, and ADR
 0071 for shared shapes and caches. ADR 0072's actor messages use the same shared-value rule.
@@ -71,9 +74,9 @@ Every reachable property must be an own **data** property with a string key. Enu
 non-enumerable properties are accepted and keep their enumerable flag; all resulting data
 properties become non-writable and non-configurable. Arrays also receive a non-writable length.
 Own symbol keys and accessor descriptors cause `TypeError`, including non-enumerable ones.
-Functions, proxies, class instances, dates, regexps, errors, maps, sets, promises, weak
-collections, typed arrays, `ArrayBuffer`, `SharedArrayBuffer`, host objects and objects with
-private or other internal slots cause `TypeError`. A null-prototype record is accepted, but an
+Functions, proxies, class instances, dates, regexps, errors, promises, weak collections, typed
+arrays, `ArrayBuffer`, `SharedArrayBuffer`, host objects and objects with private or other
+internal slots cause `TypeError`. A `Map` or `Set` is accepted under the 2026-10-11 amendment. A null-prototype record is accepted, but an
 object with any other custom prototype is not. These restrictions avoid silently losing behavior
 or leaving hidden mutable state in the sealed graph. Future graph kinds require an explicit ADR
 amendment and both-engine parity.
@@ -112,6 +115,58 @@ the shared graph alive; finalization becomes eligible only after the graph is un
 all realms and message queues. No timing of a finalizer is promised beyond the usual JavaScript
 rules. Implementations must not release a graph while a weak-key operation or finalizer check
 still reads it.
+
+### Sealed Map and Set (amendment, 2026-10-11)
+
+A shared graph's data is rarely only records and arrays: a lookup table is a `Map`, a membership
+test a `Set`. Without them a program converts to records to share and back to collections to
+use, and pays the copy on every realm's side that this ADR exists to remove.
+
+**Accepted.** A `Map` or `Set` is published when it is an ordinary instance of the source realm's
+own constructor: its prototype is that realm's `%Map.prototype%` or `%Set.prototype%` and it has
+no own properties. A subclass instance is refused as a class instance; a collection carrying own
+properties is refused with its own reason ("a Map or Set with its own properties"), because its
+entries must be its whole observable state. `WeakMap` and `WeakSet` stay refused. Keys and values
+are validated exactly as property values are, and may be any accepted value, including records,
+arrays, other collections and earlier shared graphs. Entries keep insertion order; a key is
+stored as `Map.prototype.set` stores it (`-0` as `+0`). Deleted entries are not published.
+
+**Read.** A sealed collection presents an ordinary collection whose every write fails. Its
+logical prototype is the **reading realm's** `%Map.prototype%` or `%Set.prototype%`, so
+`instanceof Map`, `Object.prototype.toString`, a program's own additions to the prototype, and
+the Set algebra methods work in every receiver. `get`, `has`, `size`, `forEach`, `keys`,
+`values`, `entries` and `@@iterator` answer as on a live collection; an iterator walks the
+sealed entries, which never change under it. `set`, `add`, `delete`, `clear` and `getOrInsert`
+throw `TypeError` ("Cannot modify a shared Map" or "... Set"; `kiln-shared-graph` words it once
+for both engines). A method of the other collection fails the usual brand check. The collection
+has no own properties: `Object.keys` is empty, `JSON.stringify` gives `{}` as for any `Map`, and
+`Object.isFrozen` is true. A key found by iteration is the same shared identity a later `get`
+accepts; an object of the reading realm is in no sealed collection. Because `share` snapshots,
+the source collection's key objects are not keys of the result: their shared copies are.
+
+**Storage.** A collection node has no own fields, so every own-property reader sees an empty
+record without a special case. Its record counts entries and points at a table of fixed-layout
+entry records in the same sealed arena: each half uses the field value encoding, and an edge to
+another graph records that graph's opaque ID and node so that native readers compare keys and
+build facades without asking the provider. From eight entries a collection carries an immutable
+open-addressed SameValueZero index over its keys, whose slots hold the key hash's high half
+beside the entry ordinal; a probe that meets another key's slot moves on without reading that
+entry. The hash is `kiln-shared-graph`'s and the C reader repeats it bit for bit. The arena
+layout version is 2 and the provider ABI version 83.
+
+**Cost.** A lookup takes no lock and makes no provider call; it allocates only the facades and
+strings a returned value becomes. A call site's method cache may remember a collection method for
+a sealed receiver -- by value kind and method, never a graph pointer -- and checks the receiver's
+brand from its arena header on every hit. Measured on 2026-10-11 on a shared, heavily loaded
+machine, a sealed `get` on a 100,000-entry table cost about twice a local live `Map`'s (~650 ns
+against ~330 ns with a string key and a record value), and sending that table to four workers
+that each performed 100,000 lookups took ~390 ms shared against ~5,300 ms cloned. Sealing is
+proportional to the table and paid once.
+
+**Not taken.** Class instances remain refused: a reader cannot be given the sender's prototype,
+and resolving the class in the reader by module and export (as ADR 0072 addresses actors) is a
+separate decision. Implicitly sharing an `Object.freeze`d message stays rejected below: Node's
+receiver gets a writable clone.
 
 ### Messages and ownership
 

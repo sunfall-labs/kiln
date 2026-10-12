@@ -27,6 +27,10 @@
             /* `Map.prototype.get.call({})`. A collection method reached through a receiver that
              * has no backing collection is a brand check the language fails with a TypeError, not
              * a method this backend is missing -- it has the method, and the receiver is wrong. */
+            if (receiver.tag == KILN_VALUE_SHARED && kiln_c99_shared_collection_kind(receiver) >= 0) {
+                return kiln_c99_shared_collection_method(host, code, receiver, args, argc, result,
+                                                         depth, thrown);
+            }
             if (receiver.tag != KILN_VALUE_COLLECTION) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Method called on an incompatible receiver");
@@ -118,49 +122,9 @@
                 *result = kiln_c99_undefined();
                 return KILN_C99_OK;
             }
-            default: {
-                /* A *live* iterator, holding the collection rather than a copy of it: a delete
-                 * during the walk has to be seen, and a snapshot is exactly what cannot see one.
-                 * What each step hands back is decided here, where the collection's kind is
-                 * known, so the iterator itself needs no reference back to it. */
-                int pairs = code == KILN_C99_METHOD_COLLECTION_ENTRIES ||
-                            (code == KILN_C99_METHOD_COLLECTION_SELF && collection->is_map);
-                int wants_keys = code == KILN_C99_METHOD_COLLECTION_KEYS;
-                kiln_value iterator;
-                kiln_value prototype;
-                status = kiln_c99_new_object(&iterator);
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_collection_iterator_prototype(collection->is_map,
-                                                                    &prototype);
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_set_prototype(iterator, prototype);
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, iterator, "@@iterated", 10, receiver, depth,
-                                          thrown);
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, iterator, "@@index", 7, kiln_c99_number(0.0),
-                                          depth, thrown);
-                }
-                if (status == KILN_C99_OK) {
-                    /* 0 the value, 1 the key, 2 a `[key, value]` pair. */
-                    status = kiln_c99_put(host, iterator, "@@part", 6,
-                                          kiln_c99_number(pairs ? 2.0 : (wants_keys ? 1.0 : 0.0)),
-                                          depth, thrown);
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, iterator, "@@iterator", 10,
-                                          kiln_c99_method(KILN_C99_METHOD_ITERATOR_SELF), depth,
-                                          thrown);
-                }
-                if (status != KILN_C99_OK) {
-                    return status;
-                }
-                *result = iterator;
-                return KILN_C99_OK;
-            }
+            default:
+                return kiln_c99_collection_iterator(host, receiver, collection->is_map, code,
+                                                    result, depth, thrown);
             }
         }
         case KILN_C99_METHOD_THEN:
@@ -603,7 +567,6 @@
             kiln_value source;
             kiln_value at;
             kiln_value part;
-            kiln_value step;
             kiln_value produced = kiln_c99_undefined();
             kiln_collection *collection;
             size_t position;
@@ -620,6 +583,34 @@
             }
             if (status != KILN_C99_OK) {
                 return status;
+            }
+            if (source.tag == KILN_VALUE_SHARED && kiln_c99_shared_collection_kind(source) >= 0) {
+                /* A sealed collection never changes under its iterator: no holes, no growth. */
+                kiln_value key;
+                kiln_value value;
+                double which = kiln_c99_as_number(part);
+                position = (size_t)kiln_c99_as_number(at);
+                finished = position >= kiln_c99_shared_collection_size(source);
+                if (!finished) {
+                    status = kiln_c99_shared_collection_entry(
+                        (kiln_shared_facade *)(uintptr_t)source.bits, position, &key, &value);
+                    if (status == KILN_C99_OK && which == 2.0) {
+                        kiln_c99_gc_keep_alive(&key);
+                        kiln_c99_gc_keep_alive(&value);
+                        status = kiln_c99_new_array(&produced);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(produced, key);
+                        if (status == KILN_C99_OK) status = kiln_c99_array_push(produced, value);
+                    } else if (status == KILN_C99_OK) {
+                        produced = which == 1.0 ? key : value;
+                    }
+                    if (status == KILN_C99_OK) {
+                        status = kiln_c99_put(host, receiver, "@@index", 7,
+                                              kiln_c99_number((double)(position + 1)), depth,
+                                              thrown);
+                    }
+                    if (status != KILN_C99_OK) return status;
+                }
+                return kiln_c99_iterator_step(host, produced, finished, result, depth, thrown);
             }
             if (source.tag != KILN_VALUE_COLLECTION) {
                 KILN_C99_REFUSE("a collection iterator whose source is not a collection");
@@ -656,19 +647,7 @@
                     return status;
                 }
             }
-            status = kiln_c99_new_object(&step);
-            if (status == KILN_C99_OK) {
-                status = kiln_c99_put(host, step, "value", 5, produced, depth, thrown);
-            }
-            if (status == KILN_C99_OK) {
-                status = kiln_c99_put(host, step, "done", 4, kiln_c99_boolean(finished), depth,
-                                      thrown);
-            }
-            if (status != KILN_C99_OK) {
-                return status;
-            }
-            *result = step;
-            return KILN_C99_OK;
+            return kiln_c99_iterator_step(host, produced, finished, result, depth, thrown);
         }
         case KILN_C99_METHOD_ITERATOR_NEXT: {
             kiln_value items;

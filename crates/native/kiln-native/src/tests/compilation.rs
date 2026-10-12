@@ -126,18 +126,28 @@ fn object_single_flight_key(builder: &NativeBuilder, source: &[u8]) -> ArtifactK
 
 #[test]
 fn release_prelude_compile_only_disables_vectorizers() {
-    let mut options = CompileOptions::default();
-    configure_release_prelude_compile(&mut options);
-    let arguments = options
-        .extra_args
-        .iter()
-        .map(|argument| argument.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
+    let arguments = |kind| {
+        let mut options = CompileOptions::default();
+        configure_release_prelude_compile(&mut options, kind);
+        options
+            .extra_args
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    for kind in [CompilerKind::Clang, CompilerKind::Zig] {
+        assert_eq!(
+            arguments(kind),
+            ["-fno-vectorize", "-fno-slp-vectorize"],
+            "scalar inlining is runtime-significant and must stay enabled"
+        );
+    }
     assert_eq!(
-        arguments,
-        ["-fno-vectorize", "-fno-slp-vectorize"],
-        "scalar inlining is runtime-significant and must stay enabled"
+        arguments(CompilerKind::Gcc),
+        ["-fno-tree-vectorize"],
+        "GCC rejects Clang's spelling, which failed every GCC release build"
     );
+    assert!(arguments(CompilerKind::Cc).is_empty());
 }
 
 #[test]

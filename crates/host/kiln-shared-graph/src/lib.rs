@@ -1,7 +1,8 @@
 //! Realm-neutral, immutable graph snapshots (ADR 0073).
 //!
-//! An engine adapter supplies own descriptors without invoking JavaScript. The builder rejects
-//! accessors, symbols, proxies and internal-slot objects before allocating a published arena.
+//! An engine adapter supplies own descriptors and collection entries without invoking
+//! JavaScript. The builder rejects accessors, symbols, proxies and other internal-slot objects
+//! before allocating a published arena.
 //! It preserves aliases and cycles by assigning a node index before inspecting that node's
 //! children. The resulting arena owns every string unit and graph edge; it has no realm pointer.
 //! This crate intentionally exposes no JavaScript API. Both engines must wire reads, mutation,
@@ -13,6 +14,16 @@ use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 pub mod arena;
+
+/// The `TypeError` message for a write to a sealed `Map` or `Set`: the one text both engines
+/// throw from `set`, `add`, `delete`, `clear` and `getOrInsert`.
+pub fn sealed_collection_write_message(is_map: bool) -> &'static str {
+    if is_map {
+        "Cannot modify a shared Map"
+    } else {
+        "Cannot modify a shared Set"
+    }
+}
 
 /// A source object's identity, meaningful only for one snapshot walk.
 pub type SourceId = u64;
@@ -50,8 +61,12 @@ pub struct Property {
     pub enumerable: bool,
 }
 
-/// Only the first two variants can be published. The other variants make rejection explicit at
-/// the semantic owner, even when an adapter recognizes an object kind before reading its keys.
+/// Every variant but `Unsupported` can be published. That one makes rejection explicit at the
+/// semantic owner, even when an adapter recognizes an object kind before reading its keys.
+///
+/// A `Map` or `Set` is published only when it is an ordinary instance of the reading realm's
+/// constructor with no own properties: its entries are its whole observable state. A Set's
+/// entries carry no value.
 #[derive(Clone, Debug)]
 pub enum SourceNode {
     Record {
@@ -61,6 +76,12 @@ pub enum SourceNode {
     Array {
         length: u32,
         properties: Vec<Property>,
+    },
+    Map {
+        entries: Vec<(InputValue, InputValue)>,
+    },
+    Set {
+        values: Vec<InputValue>,
     },
     Unsupported(UnsupportedKind),
 }
@@ -72,6 +93,7 @@ pub enum UnsupportedKind {
     CustomPrototype,
     InternalSlots,
     Symbol,
+    CollectionProperties,
 }
 
 impl UnsupportedKind {
@@ -83,6 +105,7 @@ impl UnsupportedKind {
             Self::CustomPrototype => 3,
             Self::InternalSlots => 4,
             Self::Symbol => 5,
+            Self::CollectionProperties => 6,
         }
     }
 
@@ -93,6 +116,7 @@ impl UnsupportedKind {
             3 => Self::CustomPrototype,
             4 => Self::InternalSlots,
             5 => Self::Symbol,
+            6 => Self::CollectionProperties,
             _ => return None,
         })
     }
@@ -107,9 +131,10 @@ impl UnsupportedKind {
                 "an object whose prototype is not Object.prototype or null (a class instance)"
             }
             Self::InternalSlots => {
-                "a built-in object with internal state (a Date, Map, Set, RegExp, buffer or the like)"
+                "a built-in object with internal state (a Date, WeakMap, RegExp, buffer or the like)"
             }
             Self::Symbol => "a symbol",
+            Self::CollectionProperties => "a Map or Set with its own properties",
         }
     }
 }
@@ -176,6 +201,44 @@ pub enum Node {
         length: u32,
         fields: Vec<Field>,
     },
+    /// Entries in insertion order. Keys are unique under SameValueZero, and `-0` is stored as
+    /// `+0`, as `Map.prototype.set` stores it.
+    Map {
+        entries: Vec<(Value, Value)>,
+    },
+    Set {
+        values: Vec<Value>,
+    },
+}
+
+/// What one node is, without copying its fields or entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeKind {
+    Record { null_prototype: bool },
+    Array { length: u32 },
+    Map,
+    Set,
+}
+
+impl NodeKind {
+    pub fn is_collection(self) -> bool {
+        matches!(self, Self::Map | Self::Set)
+    }
+}
+
+/// A key a reader looks up in a sealed `Map` or `Set`, borrowed from that reader's own value.
+/// An object key can only match when it is a shared node: `Object` names one by its opaque
+/// identity. Any other object is absent from every sealed collection, and a reader answers
+/// that without building a probe.
+#[derive(Clone, Copy, Debug)]
+pub enum EntryProbe<'a> {
+    Undefined,
+    Null,
+    Boolean(bool),
+    Number(f64),
+    BigInt(&'a str),
+    String(&'a [u16]),
+    Object(OpaqueHandle),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -237,6 +300,11 @@ pub struct Graph {
 impl Graph {
     pub fn id(&self) -> u64 {
         (u64::from(self.generation) << 32) | u64::from(self.slot)
+    }
+
+    /// Whether `token` names a node of this graph rather than of another one.
+    pub fn owns(&self, token: OpaqueHandle) -> bool {
+        token.graph == self.slot && token.generation == self.generation
     }
 
     pub fn len(&self) -> usize {
@@ -346,12 +414,62 @@ pub fn share<I: Inspector>(
     while let Some(id) = pending.pop() {
         let at = indices[&id] as usize;
         let source = inspector.inspect(id).map_err(SnapshotError::Source)?;
+        let mut edge = |value: InputValue| -> Result<Value, SnapshotError<I::Error>> {
+            Ok(match value {
+                InputValue::Object(child) => match indices.get(&child) {
+                    Some(index) => Value::Node(*index),
+                    None => {
+                        let index =
+                            u32::try_from(nodes.len()).map_err(|_| SnapshotError::TooLarge)?;
+                        indices.insert(child, index);
+                        pending.push(child);
+                        nodes.push(None);
+                        Value::Node(index)
+                    }
+                },
+                InputValue::Shared(handle) => Value::Shared(handle),
+                InputValue::BigInt(text) => {
+                    let digits = text.strip_prefix('-').unwrap_or(&text);
+                    if digits.is_empty() || !digits.bytes().all(|digit| digit.is_ascii_digit()) {
+                        return Err(SnapshotError::InvalidBigInt);
+                    }
+                    Value::BigInt(text)
+                }
+                scalar => scalar_value(scalar),
+            })
+        };
         let (array_length, null_prototype, properties) = match source {
             SourceNode::Record {
                 null_prototype,
                 properties,
             } => (None, null_prototype, properties),
             SourceNode::Array { length, properties } => (Some(length), false, properties),
+            SourceNode::Map { entries } => {
+                let mut keys = HashSet::with_capacity(entries.len());
+                let mut sealed = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    let key = edge(key)?;
+                    if !keys.insert(EntryKey::of(&key)) {
+                        return Err(SnapshotError::DuplicateKey);
+                    }
+                    sealed.push((key.canonical_key(), edge(value)?));
+                }
+                nodes[at] = Some(Node::Map { entries: sealed });
+                continue;
+            }
+            SourceNode::Set { values } => {
+                let mut keys = HashSet::with_capacity(values.len());
+                let mut sealed = Vec::with_capacity(values.len());
+                for value in values {
+                    let value = edge(value)?;
+                    if !keys.insert(EntryKey::of(&value)) {
+                        return Err(SnapshotError::DuplicateKey);
+                    }
+                    sealed.push(value.canonical_key());
+                }
+                nodes[at] = Some(Node::Set { values: sealed });
+                continue;
+            }
             SourceNode::Unsupported(kind) => return Err(SnapshotError::Unsupported(kind)),
         };
         let mut fields = Vec::with_capacity(properties.len());
@@ -366,31 +484,7 @@ pub fn share<I: Inspector>(
             let Descriptor::Data(value) = property.descriptor else {
                 return Err(SnapshotError::Accessor);
             };
-            let value = match value {
-                InputValue::Object(child) => {
-                    let index = match indices.get(&child) {
-                        Some(index) => *index,
-                        None => {
-                            let index =
-                                u32::try_from(nodes.len()).map_err(|_| SnapshotError::TooLarge)?;
-                            indices.insert(child, index);
-                            pending.push(child);
-                            nodes.push(None);
-                            index
-                        }
-                    };
-                    Value::Node(index)
-                }
-                InputValue::Shared(handle) => Value::Shared(handle),
-                InputValue::BigInt(text) => {
-                    let digits = text.strip_prefix('-').unwrap_or(&text);
-                    if digits.is_empty() || !digits.bytes().all(|digit| digit.is_ascii_digit()) {
-                        return Err(SnapshotError::InvalidBigInt);
-                    }
-                    Value::BigInt(text)
-                }
-                scalar => scalar_value(scalar),
-            };
+            let value = edge(value)?;
             fields.push(Field {
                 key,
                 value,
@@ -426,6 +520,45 @@ pub fn share<I: Inspector>(
         }
     });
     Ok(Snapshot::Shared(Handle { graph, index: 0 }))
+}
+
+/// A sealed collection key's SameValueZero identity, for rejecting a duplicate before publication.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum EntryKey {
+    Undefined,
+    Null,
+    Boolean(bool),
+    Number(u64),
+    BigInt(String),
+    String(StringUnits),
+    Node(u32),
+    Shared(u64, u32),
+}
+
+impl EntryKey {
+    fn of(value: &Value) -> Self {
+        match value {
+            Value::Undefined => Self::Undefined,
+            Value::Null => Self::Null,
+            Value::Boolean(flag) => Self::Boolean(*flag),
+            Value::Number(number) => Self::Number(arena::same_value_zero_bits(*number)),
+            Value::BigInt(text) => Self::BigInt(text.clone()),
+            Value::String(text) => Self::String(text.clone()),
+            Value::Node(index) => Self::Node(*index),
+            Value::Shared(handle) => Self::Shared(handle.graph().id(), handle.index()),
+        }
+    }
+}
+
+impl Value {
+    /// `-0` becomes `+0`, as `Map.prototype.set` and `Set.prototype.add` store it.
+    fn canonical_key(self) -> Self {
+        match self {
+            // A float pattern compares with `==`, so this arm takes `-0` as well as `+0`.
+            Self::Number(0.0) => Self::Number(0.0),
+            other => other,
+        }
+    }
 }
 
 fn scalar_value(value: InputValue) -> Value {
@@ -634,6 +767,134 @@ mod tests {
         assert!(matches!(
             share(InputValue::Object(1), &mut source),
             Err(SnapshotError::InvalidBigInt)
+        ));
+    }
+
+    fn probe_units(text: &str) -> Vec<u16> {
+        text.encode_utf16().collect()
+    }
+
+    /// Every key kind, in a collection small enough to scan and in one large enough to index.
+    #[test]
+    fn collections_find_every_key_kind_under_same_value_zero() {
+        let mut older = Table(HashMap::from([(
+            9,
+            SourceNode::Record {
+                null_prototype: false,
+                properties: Vec::new(),
+            },
+        )]));
+        let Snapshot::Shared(external) = share(InputValue::Object(9), &mut older).unwrap() else {
+            panic!("expected graph")
+        };
+        for padding in [0usize, 40] {
+            let mut entries = vec![
+                (InputValue::Undefined, InputValue::Number(1.0)),
+                (InputValue::Null, InputValue::Number(2.0)),
+                (InputValue::Boolean(true), InputValue::Number(3.0)),
+                (InputValue::Number(-0.0), InputValue::Number(4.0)),
+                (InputValue::Number(f64::NAN), InputValue::Number(5.0)),
+                (InputValue::String("acme".into()), InputValue::Object(2)),
+                (InputValue::BigInt("-12".into()), InputValue::Number(7.0)),
+                (InputValue::Object(2), InputValue::String("node".into())),
+                (
+                    InputValue::Shared(external.clone()),
+                    InputValue::Shared(external.clone()),
+                ),
+            ];
+            for extra in 0..padding {
+                entries.push((
+                    InputValue::String(format!("k{extra}").as_str().into()),
+                    InputValue::Number(extra as f64),
+                ));
+            }
+            let mut source = Table(HashMap::from([
+                (1, SourceNode::Map { entries }),
+                (
+                    2,
+                    SourceNode::Record {
+                        null_prototype: true,
+                        properties: Vec::new(),
+                    },
+                ),
+            ]));
+            let Snapshot::Shared(map) = share(InputValue::Object(1), &mut source).unwrap() else {
+                panic!("expected graph")
+            };
+            let graph = map.graph();
+            assert_eq!(graph.node_kind(0), Some(NodeKind::Map));
+            assert_eq!(
+                graph.node_info(0),
+                Some((false, false, 0, 0)),
+                "no own fields"
+            );
+            assert_eq!(graph.collection_len(0), Some(9 + padding));
+            let node = map.child(1).unwrap().opaque();
+            let acme = probe_units("acme");
+            let probes = [
+                (EntryProbe::Undefined, 0),
+                (EntryProbe::Null, 1),
+                (EntryProbe::Boolean(true), 2),
+                (EntryProbe::Number(0.0), 3),
+                (EntryProbe::Number(f64::NAN), 4),
+                (EntryProbe::String(&acme), 5),
+                (EntryProbe::BigInt("-12"), 6),
+                (EntryProbe::Object(node), 7),
+                (EntryProbe::Object(external.opaque()), 8),
+            ];
+            for (probe, expected) in probes {
+                assert_eq!(graph.find_entry(0, probe), Some(expected), "{probe:?}");
+            }
+            for (probe, label) in [
+                (EntryProbe::Boolean(false), "false"),
+                (EntryProbe::Number(1.0), "one"),
+                (EntryProbe::BigInt("12"), "positive bigint"),
+                (EntryProbe::Object(map.opaque()), "the map itself"),
+            ] {
+                assert_eq!(graph.find_entry(0, probe), None, "{label}");
+            }
+            if padding != 0 {
+                let last = probe_units("k39");
+                assert_eq!(graph.find_entry(0, EntryProbe::String(&last)), Some(48));
+            }
+            let (key, value) = graph.entry(0, 3).unwrap();
+            assert!(
+                matches!(key, Value::Number(zero) if zero == 0.0 && zero.is_sign_positive()),
+                "-0 is stored as +0"
+            );
+            assert!(matches!(value, Value::Number(four) if four == 4.0));
+            assert!(
+                matches!(graph.entry(0, 8).unwrap().0, Value::Shared(ref key) if key.same_object(&external))
+            );
+        }
+    }
+
+    #[test]
+    fn sets_report_each_value_twice_and_refuse_same_value_zero_duplicates() {
+        let mut source = Table(HashMap::from([(
+            1,
+            SourceNode::Set {
+                values: vec![InputValue::String("a".into()), InputValue::Number(1.0)],
+            },
+        )]));
+        let Snapshot::Shared(set) = share(InputValue::Object(1), &mut source).unwrap() else {
+            panic!("expected graph")
+        };
+        assert_eq!(set.graph().node_kind(0), Some(NodeKind::Set));
+        let (key, value) = set.graph().entry(0, 1).unwrap();
+        assert!(
+            matches!((key, value), (Value::Number(a), Value::Number(b)) if a == 1.0 && b == 1.0)
+        );
+        assert_eq!(set.graph().find_entry(0, EntryProbe::Number(1.0)), Some(1));
+        source.0.insert(
+            1,
+            SourceNode::Set {
+                values: vec![InputValue::Number(0.0), InputValue::Number(-0.0)],
+            },
+        );
+        assert!(matches!(
+            share(InputValue::Object(1), &mut source),
+            Err(SnapshotError::DuplicateKey)
         ));
     }
 

@@ -842,14 +842,17 @@ pub(crate) fn call_native(
                     message: "get size: receiver does not have the required internal slot".to_owned(),
                 });
             }
-            let Value::Object(object) = receiver else {
-                unreachable!("collection state is stored on an object");
-            };
-            object
-                .borrow()
-                .get_own(COLLECTION_SIZE)
-                .cloned()
-                .unwrap_or(Value::Number(0.0))
+            match receiver {
+                Value::Shared(facade) => {
+                    Value::Number(facade.collection_size().unwrap_or(0) as f64)
+                }
+                Value::Object(object) => object
+                    .borrow()
+                    .get_own(COLLECTION_SIZE)
+                    .cloned()
+                    .unwrap_or(Value::Number(0.0)),
+                _ => unreachable!("collection state is stored on an object"),
+            }
         }
         // `__kilnTypedArrayCopy(target, targetIndex, source, sourceIndex, count)` and
         // `__kilnTypedArraySort(view)` (ADR 0065, representation): the shared TypeScript has
@@ -2625,6 +2628,21 @@ pub(crate) fn call_native(
                 }
             }
             receiver.clone()
+        }
+        Native::SetHas | Native::MapHas | Native::MapGet
+            if matches!(receiver, Value::Shared(facade)
+                if facade.collection() == Some(native != Native::SetHas)) =>
+        {
+            let Value::Shared(facade) = receiver else {
+                unreachable!("the guard matched a sealed collection");
+            };
+            let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let found = facade.find_entry(&key);
+            if native == Native::MapGet {
+                found.map_or(Value::Undefined, |(_, value)| value)
+            } else {
+                Value::Boolean(found.is_some())
+            }
         }
         Native::SetHas | Native::MapHas => {
             let (entries, is_map) = require_collection(receiver, native)?;

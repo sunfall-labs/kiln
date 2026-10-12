@@ -9,14 +9,22 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+/// `collection` is 0 for a record or array, 1 for a sealed `Map` and 2 for a sealed `Set`; a
+/// collection reports no own fields and its entry count as `length`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SharedInfo {
     pub array: u32,
     pub null_prototype: u32,
     pub length: u32,
+    pub collection: u32,
     pub field_count: u64,
 }
+
+const _: () = {
+    assert!(std::mem::size_of::<SharedInfo>() == 24);
+    assert!(std::mem::offset_of!(SharedInfo, collection) == 12);
+};
 
 /// A copied descriptor for one sealed own field. `bits` is a boolean, IEEE-754 number, or the
 /// opaque child graph slot; `generation` and `node` complete a child handle. Text length is in
@@ -70,7 +78,9 @@ pub struct SharedBuildResult {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SharedSourceNode {
-    pub kind: u32, // 1 ordinary record, 2 ordinary array
+    /// 1 ordinary record, 2 ordinary array, 3 Map, 4 Set. A Map reports two fields per entry
+    /// slot (key, then value) and a Set one; each has key kind 4, or 3 for a deleted slot.
+    pub kind: u32,
     pub null_prototype: u32,
     pub length: u32,
     pub field_count: u64,
@@ -79,7 +89,7 @@ pub struct SharedSourceNode {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SharedSourceField {
-    pub key_kind: u32, // 0 string, 1 symbol, 2 decimal array index
+    pub key_kind: u32, // 0 string, 1 symbol, 2 decimal array index, 3 hole, 4 collection element
     pub key_id: u64,
     pub key_length: u64,
     pub value_kind: u32, // 0..6 scalars; 7 ordinary node, 8 earlier graph
@@ -160,7 +170,7 @@ impl kiln_shared_graph::Inspector for NativeInspector {
     type Error = NativeInspectError;
 
     fn inspect(&mut self, object: u64) -> Result<kiln_shared_graph::SourceNode, Self::Error> {
-        use kiln_shared_graph::{Descriptor, InputValue, Key, Property, SourceNode};
+        use kiln_shared_graph::{Descriptor, Key, Property, SourceNode};
         let mut node = SharedSourceNode::default();
         // `u64::MAX` asks for the kind and field count; a callback never invokes JS traps.
         let status = unsafe {
@@ -178,9 +188,11 @@ impl kiln_shared_graph::Inspector for NativeInspector {
                 None => Err(NativeInspectError::Unsupported),
             };
         }
-        if node.kind != 1 && node.kind != 2 {
+        if !(1..=4).contains(&node.kind) {
             return Err(NativeInspectError::Unsupported);
         }
+        let collection = node.kind >= 3;
+        let mut elements = Vec::new();
         let count = usize::try_from(node.field_count).map_err(|_| NativeInspectError::TooLarge)?;
         let mut properties = Vec::new();
         properties
@@ -204,54 +216,17 @@ impl kiln_shared_graph::Inspector for NativeInspector {
                 0 => Key::String(self.units(field.key_id, field.key_length)?),
                 1 => Key::Symbol,
                 2 => Key::String(field.key_id.to_string().into()),
-                3 => continue, // a hole in a dense element vector
+                3 => continue, // a hole in a dense element vector, or a deleted entry slot
+                4 if collection => {
+                    elements.push(self.value(&field)?);
+                    continue;
+                }
                 _ => return Err(NativeInspectError::InvalidSource),
             };
             let descriptor = if field.accessor != 0 {
                 Descriptor::Accessor
             } else {
-                let value = match field.value_kind {
-                    0 => InputValue::Undefined,
-                    1 => InputValue::Null,
-                    2 => InputValue::Boolean(field.value_bits != 0),
-                    3 => InputValue::Number(f64::from_bits(field.value_bits)),
-                    4 => {
-                        #[cfg(feature = "bigint")]
-                        {
-                            let bigint = field.value_bits as *const num_bigint::BigInt;
-                            if bigint.is_null() {
-                                return Err(NativeInspectError::InvalidSource);
-                            }
-                            // SAFETY: C passes the provider's live immutable BigInt handle.
-                            InputValue::BigInt(unsafe { &*bigint }.to_string())
-                        }
-                        #[cfg(not(feature = "bigint"))]
-                        {
-                            return Err(NativeInspectError::Unsupported);
-                        }
-                    }
-                    5 => InputValue::String(self.units(field.value_bits, field.value_length)?),
-                    7 => InputValue::Object(field.value_bits),
-                    8 => {
-                        let token = OpaqueHandle {
-                            graph: u32::try_from(field.value_bits)
-                                .map_err(|_| NativeInspectError::InvalidSource)?,
-                            generation: field.value_generation,
-                            node: field.value_node,
-                        };
-                        InputValue::Shared(
-                            Handle::resolve(token).ok_or(NativeInspectError::InvalidSource)?,
-                        )
-                    }
-                    9 => {
-                        return Err(u32::try_from(field.value_bits)
-                            .ok()
-                            .and_then(kiln_shared_graph::UnsupportedKind::from_code)
-                            .map_or(NativeInspectError::Unsupported, NativeInspectError::Refused));
-                    }
-                    _ => return Err(NativeInspectError::Unsupported),
-                };
-                Descriptor::Data(value)
+                Descriptor::Data(self.value(&field)?)
             };
             properties.push(Property {
                 key,
@@ -259,16 +234,75 @@ impl kiln_shared_graph::Inspector for NativeInspector {
                 enumerable: field.enumerable != 0,
             });
         }
-        Ok(if node.kind == 2 {
-            SourceNode::Array {
-                length: node.length,
-                properties,
-            }
-        } else {
-            SourceNode::Record {
+        Ok(match node.kind {
+            1 => SourceNode::Record {
                 null_prototype: node.null_prototype != 0,
                 properties,
+            },
+            2 => SourceNode::Array {
+                length: node.length,
+                properties,
+            },
+            3 => {
+                if elements.len() % 2 != 0 {
+                    return Err(NativeInspectError::InvalidSource);
+                }
+                let mut pairs = elements.into_iter();
+                let mut entries = Vec::new();
+                while let (Some(key), Some(value)) = (pairs.next(), pairs.next()) {
+                    entries.push((key, value));
+                }
+                SourceNode::Map { entries }
             }
+            _ => SourceNode::Set { values: elements },
+        })
+    }
+}
+
+impl NativeInspector {
+    fn value(
+        &self,
+        field: &SharedSourceField,
+    ) -> Result<kiln_shared_graph::InputValue, NativeInspectError> {
+        use kiln_shared_graph::InputValue;
+        Ok(match field.value_kind {
+            0 => InputValue::Undefined,
+            1 => InputValue::Null,
+            2 => InputValue::Boolean(field.value_bits != 0),
+            3 => InputValue::Number(f64::from_bits(field.value_bits)),
+            4 => {
+                #[cfg(feature = "bigint")]
+                {
+                    let bigint = field.value_bits as *const num_bigint::BigInt;
+                    if bigint.is_null() {
+                        return Err(NativeInspectError::InvalidSource);
+                    }
+                    // SAFETY: C passes the provider's live immutable BigInt handle.
+                    InputValue::BigInt(unsafe { &*bigint }.to_string())
+                }
+                #[cfg(not(feature = "bigint"))]
+                {
+                    return Err(NativeInspectError::Unsupported);
+                }
+            }
+            5 => InputValue::String(self.units(field.value_bits, field.value_length)?),
+            7 => InputValue::Object(field.value_bits),
+            8 => {
+                let token = OpaqueHandle {
+                    graph: u32::try_from(field.value_bits)
+                        .map_err(|_| NativeInspectError::InvalidSource)?,
+                    generation: field.value_generation,
+                    node: field.value_node,
+                };
+                InputValue::Shared(Handle::resolve(token).ok_or(NativeInspectError::InvalidSource)?)
+            }
+            9 => {
+                return Err(u32::try_from(field.value_bits)
+                    .ok()
+                    .and_then(kiln_shared_graph::UnsupportedKind::from_code)
+                    .map_or(NativeInspectError::Unsupported, NativeInspectError::Refused));
+            }
+            _ => return Err(NativeInspectError::Unsupported),
         })
     }
 }
@@ -383,11 +417,26 @@ pub unsafe extern "C" fn kiln_shared_graph_info(lease: u64, out: *mut SharedInfo
     let Some(handle) = handle else {
         return -1;
     };
-    let Some((array, null_prototype, length, field_count)) =
+    let Some((array, null_prototype, mut length, field_count)) =
         handle.graph().node_info(handle.index())
     else {
         return -1;
     };
+    let collection = match handle.graph().node_kind(handle.index()) {
+        Some(kiln_shared_graph::NodeKind::Map) => 1,
+        Some(kiln_shared_graph::NodeKind::Set) => 2,
+        _ => 0,
+    };
+    if collection != 0 {
+        let Some(size) = handle
+            .graph()
+            .collection_len(handle.index())
+            .and_then(|size| u32::try_from(size).ok())
+        else {
+            return -1;
+        };
+        length = size;
+    }
     let Ok(field_count) = u64::try_from(field_count) else {
         return -1;
     };
@@ -397,6 +446,7 @@ pub unsafe extern "C" fn kiln_shared_graph_info(lease: u64, out: *mut SharedInfo
             array: u32::from(array),
             null_prototype: u32::from(null_prototype),
             length,
+            collection,
             field_count,
         };
     }
@@ -566,6 +616,32 @@ pub unsafe extern "C" fn kiln_shared_graph_field(
 thread_local! {
     /// Why this thread's last [`kiln_shared_graph_build`] refused, NUL-terminated.
     static LAST_REFUSAL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The `TypeError` text for a write to a sealed `Map` (`is_map` nonzero) or `Set`, NUL-terminated
+/// and static: `kiln-shared-graph` words it once for both engines.
+///
+/// # Safety
+/// `text` must be null or point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kiln_shared_graph_collection_write_message(
+    is_map: u32,
+    text: *mut *const u8,
+) -> i32 {
+    static MAP: OnceLock<String> = OnceLock::new();
+    static SET: OnceLock<String> = OnceLock::new();
+    if text.is_null() {
+        return -1;
+    }
+    let words = if is_map != 0 { &MAP } else { &SET }.get_or_init(|| {
+        format!(
+            "{}\0",
+            kiln_shared_graph::sealed_collection_write_message(is_map != 0)
+        )
+    });
+    // SAFETY: the caller supplied writable storage for one pointer; the text is static.
+    unsafe { *text = words.as_ptr() };
+    0
 }
 
 /// The words for a refusal, so a native `share` throws exactly the interpreter's text

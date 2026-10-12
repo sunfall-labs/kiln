@@ -225,6 +225,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_shared_graph_field, shared_graph_field);
             (realm, kiln_shared_graph_build, shared_graph_build);
             (realm, kiln_shared_graph_refusal, shared_graph_build);
+            (realm, kiln_shared_graph_collection_write_message, shared_graph_build);
             (realm, kiln_shared_release, shared_release);
             (realm, kiln_shared_grow, shared_grow);
             (realm, kiln_atomics_wait, atomics_wait);
@@ -304,7 +305,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 82;
+pub const PROVIDER_ABI_VERSION: u32 = 83;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -323,6 +324,10 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
+        // 83 and 199 exports: sealed `Map` and `Set` joined ADR 0073's shared graphs. The arena
+        // layout gained collection nodes and entry records (version 2), `SharedInfo` its
+        // `collection` word, and `kiln_shared_graph_collection_write_message` joined so a write
+        // to a sealed collection throws exactly the interpreter's text. Before that,
         // 80 and 195 exports: per-realm string-code-generation policy joined; this lets a launcher
         // disable eval/Function source strings without disabling linked source modules. Before that,
         // 79 and 193 exports: stateful compression stream primitives joined; the TypeScript
@@ -387,8 +392,8 @@ mod tests {
         // one realm the other's cache. A shipped archive built before any of these does not export
         // the newer symbol, and the version is how a resolver knows to rebuild rather than to fail
         // at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 82);
-        assert_eq!(PROVIDER_EXPORTS.len(), 198);
+        assert_eq!(PROVIDER_ABI_VERSION, 83);
+        assert_eq!(PROVIDER_EXPORTS.len(), 199);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_ffi_last_error"));
     }

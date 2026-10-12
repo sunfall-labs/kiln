@@ -3402,10 +3402,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Ok(builtin_accessor_slot(accessor, &symbol));
         }
         if matches!(accessor, BuiltinAccessor::CollectionSize(_)) {
-            let Value::Object(object) = receiver else {
-                unreachable!("the brand check passed, so this is a collection object");
+            let size = match receiver {
+                Value::Shared(facade) => facade
+                    .collection_size()
+                    .map(|size| Value::Number(size as f64)),
+                Value::Object(object) => object.borrow().get_own(COLLECTION_SIZE).cloned(),
+                _ => unreachable!("the brand check passed, so this is a collection object"),
             };
-            let size = object.borrow().get_own(COLLECTION_SIZE).cloned();
             return Ok(size.unwrap_or(Value::Number(0.0)));
         }
         // DataView's two measurements reject a view stranded by resize or detach. Keep that

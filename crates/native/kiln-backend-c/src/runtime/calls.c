@@ -1166,14 +1166,16 @@ static int kiln_c99_ordinary_has_instance(kiln_host *host, kiln_value value, kil
             *answer = value.tag == KILN_VALUE_PROMISE;
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_MAP:
-            *answer = value.tag == KILN_VALUE_COLLECTION &&
-                      kiln_c99_collection_of(value)->is_map &&
-                      !kiln_c99_collection_of(value)->is_weak;
+            *answer = (value.tag == KILN_VALUE_COLLECTION &&
+                       kiln_c99_collection_of(value)->is_map &&
+                       !kiln_c99_collection_of(value)->is_weak) ||
+                      kiln_c99_shared_collection_kind(value) == 1;
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_SET:
-            *answer = value.tag == KILN_VALUE_COLLECTION &&
-                      !kiln_c99_collection_of(value)->is_map &&
-                      !kiln_c99_collection_of(value)->is_weak;
+            *answer = (value.tag == KILN_VALUE_COLLECTION &&
+                       !kiln_c99_collection_of(value)->is_map &&
+                       !kiln_c99_collection_of(value)->is_weak) ||
+                      kiln_c99_shared_collection_kind(value) == 0;
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_WEAK_MAP:
             *answer = value.tag == KILN_VALUE_COLLECTION &&

@@ -3,8 +3,9 @@
 
 use super::*;
 use kiln_shared_graph::{
-    Descriptor, Handle, InputValue, Inspector, Key, OpaqueHandle, Property as GraphProperty,
-    Snapshot, SourceId, SourceNode, UnsupportedKind, Value as GraphValue,
+    Descriptor, EntryProbe, Handle, InputValue, Inspector, Key, NodeKind, OpaqueHandle,
+    Property as GraphProperty, Snapshot, SourceId, SourceNode, UnsupportedKind,
+    Value as GraphValue,
 };
 use std::collections::HashMap;
 
@@ -18,6 +19,9 @@ pub struct SharedFacade {
     pub(super) handle: Handle,
     pub(super) realm: RealmId,
     cache: Rc<RefCell<SharedCache>>,
+    /// A sealed Map or Set's entries in the shape a live collection keeps them, built the first
+    /// time this realm iterates it. Lookups never need it: they probe the sealed index.
+    entries: RefCell<Option<Rc<ArrayData>>>,
 }
 
 impl SharedFacade {
@@ -40,6 +44,7 @@ impl SharedFacade {
             handle,
             realm,
             cache: Rc::clone(cache),
+            entries: RefCell::new(None),
         });
         cache
             .borrow_mut()
@@ -150,13 +155,86 @@ impl SharedFacade {
     }
 
     pub(super) fn prototype(&self) -> Value {
-        match self.handle.graph().node_info(self.handle.index()) {
-            Some((_, true, _, _)) => Value::Null,
-            Some((true, _, _, _)) => {
-                Value::Native(Native::PrototypeOf(PrototypeTable::Array), self.realm)
-            }
-            _ => Value::Native(Native::PrototypeOf(PrototypeTable::Object), self.realm),
+        let table = match self.kind() {
+            Some(NodeKind::Record {
+                null_prototype: true,
+            }) => return Value::Null,
+            Some(NodeKind::Array { .. }) => PrototypeTable::Array,
+            Some(NodeKind::Map) => PrototypeTable::Map,
+            Some(NodeKind::Set) => PrototypeTable::Set,
+            _ => PrototypeTable::Object,
+        };
+        Value::Native(Native::PrototypeOf(table), self.realm)
+    }
+
+    fn kind(&self) -> Option<NodeKind> {
+        self.handle.graph().node_kind(self.handle.index())
+    }
+
+    /// `Some(is_map)` for a sealed Map or Set.
+    pub(super) fn collection(&self) -> Option<bool> {
+        match self.kind()? {
+            NodeKind::Map => Some(true),
+            NodeKind::Set => Some(false),
+            _ => None,
         }
+    }
+
+    pub(super) fn collection_size(&self) -> Option<usize> {
+        self.handle.graph().collection_len(self.handle.index())
+    }
+
+    /// The entries as a live collection stores them -- a `[key, value]` pair per Map entry, the
+    /// value itself per Set entry -- so iteration, `forEach` and the Set algebra share every
+    /// line with ordinary collections. Nothing writes to it: the methods that would refuse a
+    /// sealed receiver before reaching its entries.
+    pub(super) fn collection_entries(&self) -> Rc<ArrayData> {
+        if let Some(entries) = self.entries.borrow().as_ref() {
+            return Rc::clone(entries);
+        }
+        let is_map = self.collection() == Some(true);
+        let graph = self.handle.graph();
+        let node = self.handle.index();
+        let entries = (0..self.collection_size().unwrap_or(0))
+            .filter_map(|index| graph.entry(node, index))
+            .map(|(key, value)| {
+                if is_map {
+                    Value::Array(ArrayData::new(vec![self.value(key), self.value(value)]))
+                } else {
+                    self.value(key)
+                }
+            })
+            .collect();
+        let entries = ArrayData::new(entries);
+        *self.entries.borrow_mut() = Some(Rc::clone(&entries));
+        entries
+    }
+
+    /// The entry whose key is SameValueZero-equal to `key`, as `(key, value)`, found through the
+    /// sealed index. A key that is an object of this realm is in no sealed collection.
+    pub(super) fn find_entry(&self, key: &Value) -> Option<(Value, Value)> {
+        let units;
+        let digits;
+        let probe = match key {
+            Value::Undefined => EntryProbe::Undefined,
+            Value::Null => EntryProbe::Null,
+            Value::Boolean(flag) => EntryProbe::Boolean(*flag),
+            Value::Number(number) => EntryProbe::Number(*number),
+            Value::String(text) => {
+                units = text.to_units();
+                EntryProbe::String(&units)
+            }
+            Value::BigInt(number) => {
+                digits = number.to_string();
+                EntryProbe::BigInt(&digits)
+            }
+            Value::Shared(facade) => EntryProbe::Object(facade.handle.opaque()),
+            _ => return None,
+        };
+        let graph = self.handle.graph();
+        let index = graph.find_entry(self.handle.index(), probe)?;
+        let (key, value) = graph.entry(self.handle.index(), index)?;
+        Some((self.value(key), self.value(value)))
     }
 }
 
@@ -229,6 +307,59 @@ impl InterpreterInspector {
             .collect()
     }
 
+    /// A Map or Set this realm made, with no own properties and its own constructor's prototype,
+    /// as its entries. `None` for anything that is not a strong collection.
+    fn collection(&mut self, object: &ObjectData) -> Option<Result<SourceNode, UnsupportedKind>> {
+        let Some(Value::Array(entries)) = object.get_own("@@entries").cloned() else {
+            return None;
+        };
+        let is_map = matches!(object.get_own("@@map"), Some(&Value::Boolean(true)));
+        if matches!(object.get_own("@@weak"), Some(&Value::Boolean(true))) {
+            return Some(Err(UnsupportedKind::InternalSlots));
+        }
+        let table = if is_map {
+            PrototypeTable::Map
+        } else {
+            PrototypeTable::Set
+        };
+        if !matches!(&object.prototype,
+            Some(Value::Native(Native::PrototypeOf(found), realm))
+                if *found == table && *realm == self.realm)
+        {
+            return Some(Err(UnsupportedKind::CustomPrototype));
+        }
+        if object.properties.iter().any(|slot| !slot.internal) {
+            return Some(Err(UnsupportedKind::CollectionProperties));
+        }
+        let live = entries
+            .borrow()
+            .iter()
+            .filter(|entry| !matches!(entry, Value::Native(Native::Tombstone, _)))
+            .cloned()
+            .collect::<Vec<_>>();
+        Some(Ok(if is_map {
+            SourceNode::Map {
+                entries: live
+                    .into_iter()
+                    .map(|pair| {
+                        let Value::Array(pair) = pair else {
+                            unreachable!("a Map entry is a [key, value] pair");
+                        };
+                        let pair = pair.borrow();
+                        let key = pair.first().cloned().unwrap_or(Value::Undefined);
+                        let value = pair.get(1).cloned().unwrap_or(Value::Undefined);
+                        drop(pair);
+                        (self.input(key), self.input(value))
+                    })
+                    .collect(),
+            }
+        } else {
+            SourceNode::Set {
+                values: live.into_iter().map(|value| self.input(value)).collect(),
+            }
+        }))
+    }
+
     fn plain_store(&self, object: &ObjectData, array: bool) -> Result<bool, UnsupportedKind> {
         if object.error_brand
             || object.arguments_brand
@@ -241,10 +372,12 @@ impl InterpreterInspector {
             || object.shadow_realm.is_some()
             || object.weak_shared_target.is_some()
             || !object.finalization_cells.is_empty()
-            // A Map, Set or weak collection keeps its entries in this internal slot (a class
-            // instance has internal slots too, and is refused for its prototype instead).
+            // A Map, Set or weak collection keeps its entries in this internal slot. The strong
+            // two are published by `collection` before this check is reached.
             || object.properties.iter().any(|slot| {
-                slot.internal && slot.key == kiln_string::StringUnits::from("@@entries")
+                slot.internal
+                    && (slot.key == kiln_string::StringUnits::from("@@entries")
+                        || slot.key == kiln_string::StringUnits::from("@@weak"))
             })
         {
             return Err(UnsupportedKind::InternalSlots);
@@ -280,6 +413,9 @@ impl Inspector for InterpreterInspector {
         Ok(match value {
             Value::Object(object) => {
                 let object = object.borrow();
+                if let Some(collection) = self.collection(&object) {
+                    return Ok(collection.unwrap_or_else(SourceNode::Unsupported));
+                }
                 match self.plain_store(&object, false) {
                     Ok(null_prototype) => SourceNode::Record {
                         null_prototype,

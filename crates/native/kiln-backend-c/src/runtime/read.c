@@ -309,6 +309,10 @@ static int kiln_c99_shared_arena_node(const kiln_shared_facade *facade,
         kiln_c99_shared_arena_bytes(&facade->arena, offset, sizeof *out, &bytes) != KILN_C99_OK)
         return KILN_C99_INVALID_ARGUMENT;
     memcpy(out, bytes, sizeof *out);
+    /* A sealed Map or Set has no own fields; its `index` describes its entries instead. */
+    if (out->kind == KILN_SHARED_ARENA_MAP || out->kind == KILN_SHARED_ARENA_SET)
+        return out->field_count == 0 && out->length <= UINT32_MAX ? KILN_C99_OK
+                                                                  : KILN_C99_INVALID_ARGUMENT;
     return (out->kind == KILN_SHARED_ARENA_RECORD || out->kind == KILN_SHARED_ARENA_ARRAY) &&
                    out->length <= UINT32_MAX && out->field_count <= SIZE_MAX
                ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
@@ -328,6 +332,35 @@ static int kiln_c99_shared_arena_field(const kiln_shared_facade *facade,
     return KILN_C99_OK;
 }
 
+/* The writer's UTF-16 FNV-1a over a realm string's units, read in its own representation. */
+static uint64_t kiln_c99_shared_units_hash(const kiln_string *text) {
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    size_t length = text->unit_len;
+    if (!kiln_string_is_utf16(text)) {
+        const uint8_t *bytes = (const uint8_t *)text->data;
+        for (size_t at = 0; at < length; ++at)
+            hash = (hash ^ (uint64_t)bytes[at]) * UINT64_C(0x100000001b3);
+    } else {
+        const uint16_t *units = (const uint16_t *)text->data;
+        for (size_t at = 0; at < length; ++at)
+            hash = (hash ^ (uint64_t)units[at]) * UINT64_C(0x100000001b3);
+    }
+    return hash;
+}
+
+/* Whether `text.unit_len` sealed UTF-16 units at `bytes` spell `text`. */
+static int kiln_c99_shared_units_equal(const uint8_t *bytes, const kiln_string *text) {
+    size_t length = text->unit_len;
+    if (kiln_string_is_utf16(text))
+        return length == 0 || memcmp(bytes, text->data, length * sizeof(uint16_t)) == 0;
+    for (size_t at = 0; at < length; ++at) {
+        uint16_t unit;
+        memcpy(&unit, bytes + at * sizeof unit, sizeof unit);
+        if (unit != ((const uint8_t *)text->data)[at]) return 0;
+    }
+    return 1;
+}
+
 static int kiln_c99_shared_arena_key_equal(const kiln_shared_facade *facade,
                                             const kiln_shared_field_record *field,
                                             const kiln_string *key, int *equal) {
@@ -338,12 +371,7 @@ static int kiln_c99_shared_arena_key_equal(const kiln_shared_facade *facade,
         kiln_c99_shared_arena_bytes(&facade->arena, field->key_offset,
                                     field->key_length * sizeof(uint16_t), &bytes) != KILN_C99_OK)
         return KILN_C99_INVALID_ARGUMENT;
-    for (size_t at = 0; at < key->unit_len; ++at) {
-        uint16_t unit;
-        memcpy(&unit, bytes + at * sizeof unit, sizeof unit);
-        if (unit != kiln_string_unit_at(key, at)) return KILN_C99_OK;
-    }
-    *equal = 1;
+    *equal = kiln_c99_shared_units_equal(bytes, key);
     return KILN_C99_OK;
 }
 
@@ -353,11 +381,11 @@ static int kiln_c99_shared_arena_find(const kiln_shared_facade *facade,
                                       const kiln_shared_node_record *node,
                                       const kiln_string *key, uint64_t *out_index,
                                       kiln_shared_field_record *out_field) {
-    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    uint64_t hash;
     uint64_t capacity = node->index_capacity;
     const uint8_t *slots = NULL;
-    for (size_t at = 0; at < key->unit_len; ++at)
-        hash = (hash ^ (uint64_t)kiln_string_unit_at(key, at)) * UINT64_C(0x100000001b3);
+    if (node->field_count == 0) return 1;
+    hash = kiln_c99_shared_units_hash(key);
     if (capacity != 0) {
         if ((capacity & (capacity - 1)) != 0 || node->field_count > capacity / 2 ||
             capacity > UINT64_MAX / sizeof(uint64_t) ||
@@ -431,6 +459,320 @@ static int kiln_c99_shared_arena_value(kiln_shared_facade *facade, uint64_t inde
     return KILN_C99_INVALID_ARGUMENT;
 }
 
+/* ---- Sealed Map and Set (ADR 0073, 2026-10-11 amendment) --------------------------------
+ *
+ * A sealed collection's entries live in the same protected arena as its graph: a table of
+ * `kiln_shared_entry_record`s in insertion order and, from eight entries up, an open-addressed
+ * SameValueZero index over their keys. The hash below is `kiln-shared-graph`'s `entry_hash`,
+ * bit for bit; the Rust writer built the index with it. Nothing here writes to the arena and
+ * nothing is cached in the reading realm except the facades the entries' objects become. */
+#define KILN_C99_SHARED_HASH_NUMBER UINT64_C(0x6e756d626572)
+#define KILN_C99_SHARED_HASH_BIGINT UINT64_C(0x626967696e74)
+#define KILN_C99_SHARED_HASH_NODE UINT64_C(0x6e6f6465)
+#define KILN_C99_SHARED_HASH_EXTERNAL UINT64_C(0x65787465726e)
+
+static uint64_t kiln_c99_shared_mix(uint64_t x) {
+    x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return x ^ (x >> 31);
+}
+
+static uint64_t kiln_c99_shared_same_value_zero_bits(double number) {
+    uint64_t bits;
+    if (number == 0.0) return 0;
+    if (number != number) return UINT64_C(0x7ff8000000000000);
+    memcpy(&bits, &number, sizeof bits);
+    return bits;
+}
+
+static uint64_t kiln_c99_shared_external_hash(uint64_t graph, uint64_t node) {
+    return kiln_c99_shared_mix(kiln_c99_shared_mix(graph) ^ node ^
+                               (KILN_C99_SHARED_HASH_EXTERNAL << 16));
+}
+
+/* The facade's sealed collection node, or an error for anything else. */
+static int kiln_c99_shared_collection_node(const kiln_shared_facade *facade,
+                                           kiln_shared_node_record *out) {
+    if (facade == NULL || facade->lease == 0 || facade->arena.base == NULL ||
+        facade->arena.layout_version != KILN_SHARED_ARENA_LAYOUT_VERSION ||
+        kiln_c99_shared_arena_node(facade, out) != KILN_C99_OK ||
+        (out->kind != KILN_SHARED_ARENA_MAP && out->kind != KILN_SHARED_ARENA_SET))
+        return KILN_C99_INVALID_ARGUMENT;
+    return KILN_C99_OK;
+}
+
+/* 1 for a sealed Map, 0 for a sealed Set, -1 for any other value. */
+static int kiln_c99_shared_collection_kind(kiln_value value) {
+    return value.tag == KILN_VALUE_SHARED
+               ? kiln_c99_shared_facade_collection(
+                     (const kiln_shared_facade *)(uintptr_t)value.bits)
+               : -1;
+}
+
+static int kiln_c99_shared_arena_entry(const kiln_shared_facade *facade,
+                                       const kiln_shared_node_record *node, uint64_t index,
+                                       kiln_shared_entry_record *out) {
+    const uint8_t *bytes;
+    if (index >= node->length || index > (UINT64_MAX - node->fields) / sizeof *out ||
+        kiln_c99_shared_arena_bytes(&facade->arena, node->fields + index * sizeof *out,
+                                    sizeof *out, &bytes) != KILN_C99_OK)
+        return KILN_C99_INVALID_ARGUMENT;
+    memcpy(out, bytes, sizeof *out);
+    return KILN_C99_OK;
+}
+
+/* One half of an entry as a value of this realm. A string or BigInt is copied out of the arena;
+ * an object becomes this realm's facade for its node, here or in the external graph. */
+static int kiln_c99_shared_entry_half(kiln_shared_facade *facade, uint32_t kind,
+                                      uint64_t payload, uint64_t length, uint64_t aux,
+                                      kiln_value *out) {
+    const uint8_t *bytes;
+    void *bigint = NULL;
+    int status = KILN_C99_OK;
+    switch (kind) {
+    case KILN_SHARED_FIELD_UNDEFINED: *out = kiln_c99_undefined(); break;
+    case KILN_SHARED_FIELD_NULL: *out = kiln_c99_null(); break;
+    case KILN_SHARED_FIELD_BOOLEAN: *out = kiln_c99_boolean(payload != 0); break;
+    case KILN_SHARED_FIELD_NUMBER: *out = kiln_c99_value(KILN_VALUE_NUMBER, payload, NULL, 0); break;
+    case KILN_SHARED_FIELD_STRING:
+        if ((payload & (sizeof(uint16_t) - 1)) != 0 || length > SIZE_MAX / sizeof(uint16_t) ||
+            kiln_c99_shared_arena_bytes(&facade->arena, payload, length * sizeof(uint16_t),
+                                        &bytes) != KILN_C99_OK)
+            return KILN_C99_INVALID_ARGUMENT;
+        *out = kiln_c99_from_units((const uint16_t *)bytes, (size_t)length);
+        status = out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+        break;
+    case KILN_SHARED_FIELD_BIGINT:
+        if (kiln_c99_shared_arena_bytes(&facade->arena, payload, length, &bytes) != KILN_C99_OK ||
+            kiln_bigint_parse(bytes, (size_t)length, 10, &bigint) != 0)
+            return KILN_C99_INVALID_ARGUMENT;
+        *out = kiln_c99_bigint_value(bigint);
+        break;
+    case KILN_SHARED_FIELD_NODE:
+        if (payload >= facade->arena.node_count) return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_c99_new_shared_facade(facade->graph, facade->generation, (uint32_t)payload,
+                                            out);
+        break;
+    case KILN_SHARED_ARENA_EXTERNAL:
+        if (aux > UINT32_MAX) return KILN_C99_INVALID_ARGUMENT;
+        status = kiln_c99_new_shared_facade((uint32_t)length, (uint32_t)(length >> 32),
+                                            (uint32_t)aux, out);
+        break;
+    default:
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    return status;
+}
+
+/* Entry `index` of a sealed collection: its key and, for a Map, its value. A Set's value is its
+ * key, as Set iteration reports it. */
+static int kiln_c99_shared_collection_entry(kiln_shared_facade *facade, uint64_t index,
+                                            kiln_value *key, kiln_value *value) {
+    kiln_shared_node_record node;
+    kiln_shared_entry_record entry;
+    int status;
+    if (kiln_c99_shared_collection_node(facade, &node) != KILN_C99_OK ||
+        kiln_c99_shared_arena_entry(facade, &node, index, &entry) != KILN_C99_OK)
+        return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_c99_shared_entry_half(facade, entry.key_kind, entry.key_payload,
+                                        entry.key_length, entry.key_aux, key);
+    if (status != KILN_C99_OK || value == NULL) return status;
+    if (node.kind == KILN_SHARED_ARENA_SET) {
+        *value = *key;
+        return KILN_C99_OK;
+    }
+    kiln_c99_gc_keep_alive(key);
+    return kiln_c99_shared_entry_half(facade, entry.value_kind, entry.value_payload,
+                                      entry.value_length, entry.value_aux, value);
+}
+
+/* Whether the stored key in `entry` is SameValueZero-equal to `key`, whose hash class the
+ * caller already matched to `kind`. */
+static int kiln_c99_shared_entry_key_equal(const kiln_shared_facade *facade,
+                                           const kiln_shared_entry_record *entry, uint32_t kind,
+                                           kiln_value key, const unsigned char *digits,
+                                           size_t digits_len) {
+    const uint8_t *bytes;
+    if (entry->key_kind != kind) return 0;
+    switch (kind) {
+    case KILN_SHARED_FIELD_UNDEFINED:
+    case KILN_SHARED_FIELD_NULL: return 1;
+    case KILN_SHARED_FIELD_BOOLEAN: return (entry->key_payload != 0) == (key.bits != 0);
+    case KILN_SHARED_FIELD_NUMBER: {
+        double stored;
+        memcpy(&stored, &entry->key_payload, sizeof stored);
+        return kiln_c99_shared_same_value_zero_bits(stored) ==
+               kiln_c99_shared_same_value_zero_bits(kiln_c99_as_number(key));
+    }
+    case KILN_SHARED_FIELD_STRING: {
+        const kiln_string *text = (const kiln_string *)key.ptr;
+        return text != NULL && entry->key_length == text->unit_len &&
+               entry->key_length <= UINT64_MAX / sizeof(uint16_t) &&
+               kiln_c99_shared_arena_bytes(&facade->arena, entry->key_payload,
+                                           entry->key_length * sizeof(uint16_t),
+                                           &bytes) == KILN_C99_OK &&
+               kiln_c99_shared_units_equal(bytes, text);
+    }
+    case KILN_SHARED_FIELD_BIGINT:
+        return entry->key_length == digits_len &&
+               kiln_c99_shared_arena_bytes(&facade->arena, entry->key_payload, digits_len,
+                                           &bytes) == KILN_C99_OK &&
+               memcmp(bytes, digits, digits_len) == 0;
+    case KILN_SHARED_FIELD_NODE: {
+        const kiln_shared_facade *other = (const kiln_shared_facade *)(uintptr_t)key.bits;
+        return entry->key_payload == other->node;
+    }
+    case KILN_SHARED_ARENA_EXTERNAL: {
+        const kiln_shared_facade *other = (const kiln_shared_facade *)(uintptr_t)key.bits;
+        return entry->key_length == (((uint64_t)other->generation << 32) | other->graph) &&
+               entry->key_aux == other->node;
+    }
+    default: return 0;
+    }
+}
+
+/* The sealed entry whose key is SameValueZero-equal to `key`: 0 with `*out_index`, 1 when there
+ * is none, or a native error status. An object of this realm is in no sealed collection, so it
+ * is absent without a probe. */
+static int kiln_c99_shared_collection_find(kiln_shared_facade *facade, kiln_value key,
+                                           uint64_t *out_index) {
+    kiln_shared_node_record node;
+    kiln_shared_entry_record entry;
+    unsigned char small[64];
+    unsigned char *digits = small;
+    size_t digits_len = 0;
+    uint32_t kind;
+    uint64_t hash;
+    const uint8_t *slots;
+    int status = 1;
+    if (kiln_c99_shared_collection_node(facade, &node) != KILN_C99_OK)
+        return KILN_C99_INVALID_ARGUMENT;
+    switch (key.tag) {
+    case KILN_VALUE_UNDEFINED: kind = KILN_SHARED_FIELD_UNDEFINED; hash = kiln_c99_shared_mix(1); break;
+    case KILN_VALUE_NULL: kind = KILN_SHARED_FIELD_NULL; hash = kiln_c99_shared_mix(2); break;
+    case KILN_VALUE_BOOLEAN:
+        kind = KILN_SHARED_FIELD_BOOLEAN;
+        hash = kiln_c99_shared_mix(key.bits != 0 ? 4 : 3);
+        break;
+    case KILN_VALUE_NUMBER:
+        kind = KILN_SHARED_FIELD_NUMBER;
+        hash = kiln_c99_shared_mix(
+            kiln_c99_shared_same_value_zero_bits(kiln_c99_as_number(key)) ^
+            KILN_C99_SHARED_HASH_NUMBER);
+        break;
+    case KILN_VALUE_STRING: {
+        const kiln_string *text = (const kiln_string *)key.ptr;
+        if (text == NULL) return 1;
+        kind = KILN_SHARED_FIELD_STRING;
+        hash = kiln_c99_shared_units_hash(text);
+        break;
+    }
+    case KILN_VALUE_BIGINT: {
+        int32_t written = kiln_bigint_to_string((const void *)(uintptr_t)key.bits, 10, small,
+                                                sizeof small);
+        if (written < 0) {
+            size_t needed = (size_t)(-(int64_t)written);
+            digits = (unsigned char *)malloc(needed == 0 ? 1 : needed);
+            if (digits == NULL) return KILN_C99_OUT_OF_MEMORY;
+            written = kiln_bigint_to_string((const void *)(uintptr_t)key.bits, 10, digits, needed);
+            if (written < 0) { free(digits); return KILN_C99_INVALID_ARGUMENT; }
+        }
+        digits_len = (size_t)written;
+        kind = KILN_SHARED_FIELD_BIGINT;
+        hash = UINT64_C(0xcbf29ce484222325);
+        for (size_t at = 0; at < digits_len; ++at)
+            hash = (hash ^ (uint64_t)digits[at]) * UINT64_C(0x100000001b3);
+        hash = kiln_c99_shared_mix(hash ^ KILN_C99_SHARED_HASH_BIGINT);
+        break;
+    }
+    case KILN_VALUE_SHARED: {
+        const kiln_shared_facade *other = (const kiln_shared_facade *)(uintptr_t)key.bits;
+        if (other == NULL) return 1;
+        if (other->graph == facade->graph && other->generation == facade->generation) {
+            kind = KILN_SHARED_FIELD_NODE;
+            hash = kiln_c99_shared_mix((uint64_t)other->node ^ (KILN_C99_SHARED_HASH_NODE << 32));
+        } else {
+            kind = KILN_SHARED_ARENA_EXTERNAL;
+            hash = kiln_c99_shared_external_hash(
+                ((uint64_t)other->generation << 32) | other->graph, other->node);
+        }
+        break;
+    }
+    default:
+        return 1;
+    }
+    if (node.index_capacity == 0) {
+        for (uint64_t index = 0; index < node.length; ++index) {
+            if (kiln_c99_shared_arena_entry(facade, &node, index, &entry) != KILN_C99_OK) {
+                status = KILN_C99_INVALID_ARGUMENT;
+                break;
+            }
+            if (kiln_c99_shared_entry_key_equal(facade, &entry, kind, key, digits, digits_len)) {
+                *out_index = index;
+                status = 0;
+                break;
+            }
+        }
+    } else if ((node.index_capacity & (node.index_capacity - 1)) != 0 ||
+               node.length > node.index_capacity / 2 ||
+               node.index_capacity > UINT64_MAX / sizeof(uint64_t) ||
+               kiln_c99_shared_arena_bytes(&facade->arena, node.index,
+                                           node.index_capacity * sizeof(uint64_t),
+                                           &slots) != KILN_C99_OK) {
+        status = KILN_C99_INVALID_ARGUMENT;
+    } else {
+        for (uint64_t step = 0, slot = hash & (node.index_capacity - 1);
+             step < node.index_capacity; ++step, slot = (slot + 1) & (node.index_capacity - 1)) {
+            uint64_t stored;
+            uint64_t ordinal;
+            memcpy(&stored, slots + (size_t)slot * sizeof stored, sizeof stored);
+            ordinal = stored & UINT64_C(0xffffffff);
+            if (ordinal == 0) break;
+            /* The slot's high half is its key's hash's: another key's slot is passed over
+             * without reading that entry. */
+            if ((stored ^ hash) >> 32 != 0) continue;
+            if (kiln_c99_shared_arena_entry(facade, &node, ordinal - 1, &entry) != KILN_C99_OK) {
+                status = KILN_C99_INVALID_ARGUMENT;
+                break;
+            }
+            if (kiln_c99_shared_entry_key_equal(facade, &entry, kind, key, digits, digits_len)) {
+                *out_index = ordinal - 1;
+                status = 0;
+                break;
+            }
+        }
+    }
+    if (digits != small) free(digits);
+    return status;
+}
+
+/* `get` (`want_value`) or `has` on a sealed collection: the entry's value or `undefined`, or a
+ * boolean. The caller has checked that `facade` is a sealed Map for `get`. */
+static int kiln_c99_shared_collection_lookup(kiln_shared_facade *facade, kiln_value key,
+                                             int want_value, kiln_value *out) {
+    kiln_value stored_key;
+    uint64_t index;
+    int status = kiln_c99_shared_collection_find(facade, key, &index);
+    if (status != 0 && status != 1) return KILN_C99_INVALID_ARGUMENT;
+    if (!want_value || status == 1) {
+        *out = want_value ? kiln_c99_undefined() : kiln_c99_boolean(status == 0);
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_shared_collection_entry(facade, index, &stored_key, out);
+    kiln_c99_gc_keep_alive(facade);
+    return status;
+}
+
+/* The entry count of a sealed collection, or 0 for any other value. */
+static size_t kiln_c99_shared_collection_size(kiln_value value) {
+    kiln_shared_node_record node;
+    if (value.tag != KILN_VALUE_SHARED ||
+        kiln_c99_shared_collection_node((const kiln_shared_facade *)(uintptr_t)value.bits,
+                                        &node) != KILN_C99_OK)
+        return 0;
+    return (size_t)node.length;
+}
+
 static int kiln_c99_shared_own_read(kiln_value target, const kiln_string *key,
                                     kiln_value *out, int *found, int *enumerable) {
     kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)target.bits;
@@ -502,7 +844,42 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const kiln_
     case KILN_VALUE_SHARED: {
         kiln_shared_facade *facade = (kiln_shared_facade *)(uintptr_t)target.bits;
         kiln_shared_info node;
+        kiln_shared_node_record sealed;
         int found;
+        /* A sealed Map or Set, told from its arena record without asking the provider. It has
+         * no own properties, so every name is its prototype's, read in a live collection's
+         * order: what the program wrote on `Map.prototype`, the collection methods (run on the
+         * sealed entries through this receiver), the rest of the built-in prototype, then
+         * `Object.prototype`. `size` is answered from the entry count, as for a live one. */
+        if (kiln_c99_shared_collection_node(facade, &sealed) == KILN_C99_OK) {
+            int is_map = sealed.kind == KILN_SHARED_ARENA_MAP;
+            uint64_t prototype = is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE
+                                        : KILN_C99_BUILTIN_SET_PROTOTYPE;
+            uint64_t method;
+            int status;
+            if (kiln_c99_same_name_key(key, "size")) {
+                *out = kiln_c99_number((double)sealed.length);
+                return KILN_C99_OK;
+            }
+            KILN_C99_WRITTEN_MEMBER_FIRST(prototype, receiver);
+            (void)kiln_c99_intrinsic_ascii_view(key, intrinsic_buffer, &intrinsic_key,
+                                                &intrinsic_len);
+            method = kiln_c99_lookup_method(intrinsic_key, intrinsic_len,
+                                            KILN_C99_METHOD_COLLECTION_GET,
+                                            KILN_C99_METHOD_COLLECTION_SELF);
+            if (method != 0 && !(is_map && method == KILN_C99_METHOD_COLLECTION_ADD) &&
+                !(!is_map && (method == KILN_C99_METHOD_COLLECTION_GET ||
+                              method == KILN_C99_METHOD_COLLECTION_SET))) {
+                *out = kiln_c99_method(method);
+                return KILN_C99_OK;
+            }
+            status = kiln_c99_get_own_kind(host, kiln_c99_builtin(prototype), key, receiver,
+                                           ikey, out, depth, thrown);
+            if (status != KILN_C99_OK || out->tag != KILN_VALUE_UNDEFINED) return status;
+            return kiln_c99_primitive_object_prototype_read(host, receiver, key, ikey,
+                                                            intrinsic_key, intrinsic_len, out,
+                                                            depth, thrown, &found);
+        }
         int status = kiln_c99_shared_own_read(target, key, out, &found, NULL);
         uint64_t code;
         if (status != KILN_C99_OK || found) return status;
