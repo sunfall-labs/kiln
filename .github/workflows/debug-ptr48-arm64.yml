@@ -7,15 +7,15 @@ jobs:
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - run: rustup toolchain install --no-self-update
-      - uses: jdx/mr-boxington-action@v1
+      - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240
         with:
           toolchain: nightly-2026-09-15
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq gdb nodejs
       - run: mbx build --release -p kiln-cli
       - name: programs
-        shell: bash {0}
+        shell: bash --noprofile --norc -eo pipefail {0}
         run: |
           K=$GITHUB_WORKSPACE/target/release/kiln
           mkdir -p /tmp/p && cd /tmp/p
@@ -40,17 +40,38 @@ jobs:
           for f in empty.js hello.ts rare.mjs http.mjs; do
             for prof in native-dev native-release; do
               out=./$(basename $f | tr . _)-$prof
-              $K --one-shot build $f --profile $prof --output $out > /dev/null 2>&1 || { echo "BUILD FAIL $f $prof"; continue; }
-              $out; echo "== $f $prof exit=$?"
+              timeout 300 $K --one-shot build $f --profile $prof --output $out
+              timeout 60 $out; echo "== $f $prof exit=$?"
             done
-            echo "-- interpreter:"; $K --one-shot run $f
+            echo "-- interpreter:"; timeout 60 $K --one-shot run $f
           done
           KILN_GC_STRESS=1 ./rare_mjs-native-dev; echo "== rare gc-stress exit=$?"
-          gdb -q -batch -ex run -ex bt ./hello_ts-native-dev 2>&1 | grep -E 'SIGSEGV|^#' | head -20
+          gdb -q -batch -ex run -ex bt ./hello_ts-native-dev > /tmp/gdb.log 2>&1 || true
+          cat /tmp/gdb.log
+          ! grep -q SIGSEGV /tmp/gdb.log
       - name: native corpus sample
-        shell: bash {0}
+        shell: bash --noprofile --norc -eo pipefail {0}
         run: |
-          ls conformance/native/*.{js,mjs,cjs,ts} | grep -iE 'bigint|temporal|shared|collection|map|set|actor|cell|closure|http|json|string|array|class|promise|error|parallel' | head -110 > /tmp/probes.txt
+          python3 - <<'PYTHON' > /tmp/probes.txt
+          from pathlib import Path
+          import re
+          paths = sorted(p for p in Path("conformance/native").iterdir() if p.suffix in (".js", ".mjs", ".cjs", ".ts"))
+          selected = [p for p in paths if re.search("bigint|temporal|shared|collection|map|set|actor|cell|closure|http|json|string|array|class|promise|error|parallel", p.name, re.I)]
+          print("\n".join(map(str, selected[:110])))
+          PYTHON
+          # Previous shell inventory could hide SIGPIPE or an empty corpus.
+          test "$(wc -l < /tmp/probes.txt)" -eq 110
+          # 'bigint|temporal|shared|collection|map|set|actor|cell|closure|http|json|string|array|class|promise|error|parallel' | head -110 > /tmp/probes.txt
           wc -l < /tmp/probes.txt
-          KILN_BIN=$GITHUB_WORKSPACE/target/release/kiln KILN_JOBS=4 ./scripts/native.sh $(cat /tmp/probes.txt) > /tmp/native.log 2>&1
-          grep -E '^native:|DIVERG|refused' -A3 /tmp/native.log | head -60
+          KILN_NATIVE_TIMEOUT_SECONDS=180 KILN_BIN=$GITHUB_WORKSPACE/target/release/kiln KILN_JOBS=4 ./scripts/native.sh $(cat /tmp/probes.txt) > /tmp/native.log 2>&1
+          cat /tmp/native.log
+      - name: retain evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ptr48-arm64-evidence
+          path: |
+            /tmp/native.log
+            /tmp/gdb.log
+            /tmp/probes.txt
+          if-no-files-found: warn
