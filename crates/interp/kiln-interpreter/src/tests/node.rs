@@ -453,7 +453,7 @@ fn named_timezone_and_locale_never_call_the_host() {
 }
 
 #[test]
-fn host_entropy_is_one_explicit_word_per_draw() {
+fn host_entropy_seeds_math_random_once_and_feeds_crypto_every_draw() {
     let program = Program {
         source: "".into(),
         template_sites: Vec::new(),
@@ -493,12 +493,19 @@ fn host_entropy_is_one_explicit_word_per_draw() {
     )
     .expect("realm capabilities resolve");
 
+    // `Math.random` is not a cryptographic source: the first draw takes one host word as the
+    // seed of the realm's SplitMix64 stream, and later draws take none.
+    for instruction in [1, 2] {
+        let Ok(Value::Number(drawn)) =
+            vm.dispatch_native(Native::MathRandom, &Value::Undefined, &[], instruction)
+        else {
+            panic!("Math.random returns a number");
+        };
+        assert!((0.0..1.0).contains(&drawn), "{drawn}");
+    }
+    // `crypto` takes host entropy for every byte it hands out.
     assert_eq!(
-        vm.dispatch_native(Native::MathRandom, &Value::Undefined, &[], 1),
-        Ok(Value::Number(0.5))
-    );
-    assert_eq!(
-        vm.dispatch_native(Native::NodeCryptoRandomUuid, &Value::Undefined, &[], 2),
+        vm.dispatch_native(Native::NodeCryptoRandomUuid, &Value::Undefined, &[], 3),
         Ok(Value::String(
             "00112233-4455-4677-8899-aabbccddeeff".to_owned().into()
         ))

@@ -3101,6 +3101,9 @@ static int kiln_c99_entropy_word(kiln_host *host, uint64_t *out) {
 #else
 #endif
 static int kiln_c99_random(kiln_host *host, double *out) {
+#if KILN_REALM_HOST_ENTROPY
+#else
+#endif
 static int kiln_c99_hex_digit(char character) {
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width) {
 static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
