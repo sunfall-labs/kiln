@@ -13,6 +13,7 @@ license = "MIT"
 repository = "https://github.com/sunfall-labs/kiln"
 
 [workspace.dependencies]
+kiln-value-abi = { path = "crates/foundation/kiln-value-abi" }
 kiln-type-checker = { path = "crates/compile/kiln-type-checker" }
 kiln-graph = { path = "crates/compile/kiln-graph" }
 kiln-module-eval = { path = "crates/interp/kiln-module-eval" }

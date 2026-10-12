@@ -155,8 +155,18 @@ fn write_prelude_literal_keys() {
 fn main() {
     write_prelude_literal_keys();
     let mut bytes = Vec::new();
+    fingerprint(
+        Path::new("../../foundation/kiln-value-abi/src"),
+        &mut bytes,
+        None,
+    );
     fingerprint(Path::new("src"), &mut bytes, None);
     let mut module_emitter_bytes = Vec::new();
+    fingerprint(
+        Path::new("../../foundation/kiln-value-abi/src"),
+        &mut module_emitter_bytes,
+        None,
+    );
     // Runtime C implements helpers declared by the prelude header. It is compiled and linked
     // separately from graph module C and cannot affect the bytes emitted for a ModuleProgram.
     // Keep it in the complete backend identity while excluding it from the module-source cache

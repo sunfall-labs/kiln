@@ -480,7 +480,7 @@ static uint64_t kiln_c99_shared_mix(uint64_t x) {
 static uint64_t kiln_c99_shared_same_value_zero_bits(double number) {
     uint64_t bits;
     if (number == 0.0) return 0;
-    if (number != number) return UINT64_C(0x7ff8000000000000);
+    if (number != number) return KILN_QNAN_BASE;
     memcpy(&bits, &number, sizeof bits);
     return bits;
 }

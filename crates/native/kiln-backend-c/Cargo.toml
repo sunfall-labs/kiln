@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+kiln-value-abi = { workspace = true }
 kiln-native-provider-contract = { workspace = true }
 bitflags = { workspace = true }
 kiln-builtin-surface = { workspace = true }

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended 2026-10-12 (48-bit pointers; see the end).
 
 ## Context
 
@@ -84,3 +84,44 @@ These conversions occur only at the external module boundary (`kiln_module_*` en
 1. **Phase 1 (Immediate)**: Float specialization in instruction fusion (`can_fuse_load_const_binary`, `can_fuse_load_const_compare_jump`) emitting unboxed arithmetic and bitwise modulo for power-of-two constants.
 2. **Phase 2**: Introduce `kiln_val` definitions and bit masks into `prelude_types.h` and helper conversions in `prelude_core.c`.
 3. **Phase 3**: Migrate local registers and stack arrays in `kiln-backend-c` to 64-bit `kiln_val`.
+
+## Amendment (2026-10-12): 48-bit pointers, and one prefix for the rare kinds
+
+The table above gives every pointer kind a 48-bit payload, but the implementation drifted to 47
+bits: BigInt (`0xFFFE`), Temporal (`0xFFFE8`), cells (`0xFFFF`) and shared facades (`0xFFFF8`)
+were told apart by bit 47. That holds wherever user space sits below 2^47 -- Linux x86_64, macOS
+on Apple silicon -- and fails on Linux arm64, which loads programs at `0xaaaa_aaaa_0000` and maps
+memory near `0xffff_...`: the first pointer into a program's data lost its top bit when unboxed,
+and every native program crashed at startup.
+
+The layout is now what this ADR said. Each pointer kind is a 16-bit prefix over a full 48-bit
+address (`KILN_TAG_MASK = 0xFFFF_0000_0000_0000`):
+
+| Kind | Prefix |
+|---|---|
+| String | `0xFFF9` |
+| Object | `0xFFFA` |
+| Closure | `0xFFFB` |
+| Array / buffer | `0xFFFC` |
+| Symbol | `0xFFFD` |
+| BigInt / Temporal / shared facade | `0xFFFE`, low bits `0` / `1` / `2` |
+| Cell | `0xFFFF` |
+
+The quiet-NaN space has seven 48-bit prefixes above `0xFFF8` (which keeps the immediates, built-in
+and method references and the typed-failure value), and kiln has nine pointer kinds. The three
+rare ones -- no generated fast path tests for them -- share `0xFFFE` and are told apart by the low
+three bits of the payload, which are free because every boxed payload is 8-byte aligned.
+`KILN_PAYLOAD_MASK = 0x0000_FFFF_FFFF_FFF8` clears them on every unbox, so a sub-tag never reaches
+a dereference; `KILN_VAL_IS_BIGINT`, `KILN_VAL_IS_TEMPORAL` and `KILN_VAL_IS_SHARED` compare with
+`KILN_RARE_TAG_MASK`. Every other kind keeps one mask-and-compare.
+
+The alignment premise is checked: builds without `NDEBUG`, or with
+`KILN_ASSERT_BOX_ALIGNMENT` explicitly defined, abort at any box whose pointer is unaligned or
+wider than 48 bits. Tests exercise high addresses, distinguish every pointer kind, and require
+unaligned and out-of-range boxes to fail before dereferencing them.
+
+`kiln-value-abi` owns the layout registry. It generates Rust constants and the C declarations
+included in both emitted units and the separately compiled runtime header. A source guard scans
+C headers, runtime C and Rust (including emitter strings) for copied tag and pointer-mask literals.
+The registry also participates in the emitter fingerprint, so a layout change cannot reuse
+modules from the previous representation.

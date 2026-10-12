@@ -8118,13 +8118,13 @@ static inline kiln_val kiln_c99_transfer_val_destructive(kiln_val *slot, kiln_gc
     if (tag == KILN_TAG_OBJECT_PREFIX ||
         tag == KILN_TAG_STRING_PREFIX ||
         tag == KILN_TAG_BUFFER_PREFIX) {
-        void *ptr = (void *)(uintptr_t)(val & KILN_PAYLOAD_MASK);
+        void *ptr = KILN_VAL_PTR(val);
         if (target_heap != NULL) {
             void *transferred = kiln_c99_gc_splice_sublist(kiln_c99_gc_heap(), target_heap, ptr);
-            return tag | ((uint64_t)(uintptr_t)transferred & KILN_PAYLOAD_MASK);
+            return KILN_VAL_TAG_PTR(tag, transferred);
         } else {
             void *unlinked = __kiln_transfer_region(ptr);
-            return tag | ((uint64_t)(uintptr_t)unlinked & KILN_PAYLOAD_MASK);
+            return KILN_VAL_TAG_PTR(tag, unlinked);
         }
     }
     return val;

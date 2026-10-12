@@ -6,7 +6,7 @@ fn boxed_tag_round_trips_keep_pointer_kinds_and_nan_distinct() {
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
 int main(void) {
-    static int payload;
+    static uint64_t payload;
     const void *p = &payload;
     kiln_value object, array, text, result;
     kiln_val boxed;
@@ -89,6 +89,26 @@ int main(void) {
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
+}
+
+#[test]
+fn pointer_boxing_checks_reject_unaligned_and_out_of_range_addresses() {
+    let generated = emit(&program(vec![], vec![Instruction::Return], 0)).unwrap();
+    for address in [1u64, 1u64 << 48] {
+        let wrapper = format!(
+            "int main(void) {{ KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, (void *)(uintptr_t){address}ULL); return 0; }}"
+        );
+        let run = run_with_main(
+            &generated,
+            &wrapper,
+            &format!("boxed-pointer-invalid-{address}"),
+        );
+        assert!(
+            !run.status.success(),
+            "invalid pointer was accepted: {address}"
+        );
+        assert!(String::from_utf8_lossy(&run.stderr).contains("is not an aligned 48-bit address"));
+    }
 }
 
 #[test]

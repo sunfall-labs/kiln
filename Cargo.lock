@@ -2311,6 +2311,7 @@ dependencies = [
  "kiln-native-provider-contract",
  "kiln-native-runtime",
  "kiln-native-toolchain",
+ "kiln-value-abi",
  "memchr",
  "proptest",
  "regress",
@@ -2901,6 +2902,10 @@ version = "0.1.0"
 dependencies = [
  "url",
 ]
+
+[[package]]
+name = "kiln-value-abi"
+version = "0.1.0"
 
 [[package]]
 name = "kiln-webcrypto"

@@ -1,4 +1,5 @@
 use super::*;
+use kiln_value_abi::value_layout_c_declaration;
 
 #[derive(Clone, Copy)]
 pub(crate) struct MethodId {
@@ -3970,7 +3971,7 @@ static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
 }
 /* KILN_RUNTIME_ONLY_METHOD_GROUPS_END */
 "#,
-            concat!(kiln_native_runtime::kiln_value_abi_declaration!(), include_str!("runtime/prelude_types.h")),
+            concat!(kiln_native_runtime::kiln_value_abi_declaration!(), kiln_value_abi::value_layout_registry!(value_layout_c_declaration), include_str!("runtime/prelude_types.h")),
             kiln_native_provider_contract::provider_abi_registry!(provider_c_declaration),
         )
     };

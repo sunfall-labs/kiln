@@ -139,7 +139,7 @@ static uint64_t kiln_c99_value_hash(kiln_value v) {
         double d;
         memcpy(&d, &bits, sizeof bits);
         if (isnan(d)) {
-            return UINT64_C(0x7ff8000000000000);
+            return KILN_QNAN_BASE;
         }
         if (d == 0.0) {
             bits = 0;
@@ -193,7 +193,7 @@ static int kiln_c99_collection_rehash(kiln_collection *collection, size_t new_ca
                 double d;
                 memcpy(&d, &bits, sizeof(d));
                 if (KILN_UNLIKELY(isnan(d))) {
-                    hash = UINT64_C(0x7ff8000000000000);
+                    hash = KILN_QNAN_BASE;
                 } else {
                     if (d == 0.0) bits = 0;
                     bits ^= bits >> 32;

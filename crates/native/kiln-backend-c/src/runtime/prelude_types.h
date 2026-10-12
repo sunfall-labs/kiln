@@ -65,54 +65,31 @@ static inline int kiln_c99_key_is_program_symbol(const kiln_string *key) {
  * ADR 0053: 64-Bit Quiet-NaN Boxed Internal Value Representation
  * ========================================================================= */
 typedef uint64_t kiln_val;
+/* Constants are generated from kiln-value-abi before this header. */
 
-#define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
 /* A boxed pointer is a 16-bit prefix above a 48-bit address (ADR 0053 amendment, 2026-10-12): Linux
  * on arm64 loads programs at 0xaaaa_aaaa_0000 and maps memory near 0xffff_..., so the address needs
  * all 48 bits. Every boxed payload is 8-byte aligned, so its low three bits are free: the payload
  * mask clears them, and the three rare kinds that share the 0xFFFE prefix (BigInt, Temporal,
  * shared facades) are told apart there. */
-#define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
-#define KILN_PAYLOAD_MASK       UINT64_C(0x0000FFFFFFFFFFF8)
-#define KILN_RARE_TAG_MASK      (KILN_TAG_MASK | UINT64_C(7))
 
-#define KILN_VAL_UNDEFINED      UINT64_C(0xFFF8000000000001)
-#define KILN_VAL_NULL           UINT64_C(0xFFF8000000000002)
-#define KILN_VAL_FALSE          UINT64_C(0xFFF8000000000004)
-#define KILN_VAL_TRUE           UINT64_C(0xFFF8000000000005)
-#define KILN_VAL_HOLE           UINT64_C(0xFFF8000000000006)
-#define KILN_VAL_UNINITIALIZED  UINT64_C(0xFFF8000000000007)
-#define KILN_VAL_RETURN_SIGNAL  UINT64_C(0xFFF8000000000009)
 
-#define KILN_VAL_BUILTIN_PREFIX UINT64_C(0xFFF8000100000000)
-#define KILN_VAL_BUILTIN(id)    (KILN_VAL_BUILTIN_PREFIX | ((uint64_t)(id) & UINT64_C(0xFFFFFFFF)))
-#define KILN_VAL_IS_BUILTIN(v)  (((uint64_t)(v) & UINT64_C(0xFFFFFFFF00000000)) == KILN_VAL_BUILTIN_PREFIX)
-#define KILN_VAL_BUILTIN_ID(v)  ((uint32_t)((uint64_t)(v) & UINT64_C(0xFFFFFFFF)))
+#define KILN_VAL_BUILTIN(id)    (KILN_VAL_BUILTIN_PREFIX | ((uint64_t)(id) & KILN_REF_ID_MASK))
+#define KILN_VAL_IS_BUILTIN(v)  (((uint64_t)(v) & KILN_REF_TAG_MASK) == KILN_VAL_BUILTIN_PREFIX)
+#define KILN_VAL_BUILTIN_ID(v)  ((uint32_t)((uint64_t)(v) & KILN_REF_ID_MASK))
 
-#define KILN_VAL_METHOD_PREFIX  UINT64_C(0xFFF8000200000000)
-#define KILN_VAL_METHOD(id)     (KILN_VAL_METHOD_PREFIX | ((uint64_t)(id) & UINT64_C(0xFFFFFFFF)))
-#define KILN_VAL_IS_METHOD(v)   (((uint64_t)(v) & UINT64_C(0xFFFFFFFF00000000)) == KILN_VAL_METHOD_PREFIX)
-#define KILN_VAL_METHOD_ID(v)   ((uint32_t)((uint64_t)(v) & UINT64_C(0xFFFFFFFF)))
+#define KILN_VAL_METHOD(id)     (KILN_VAL_METHOD_PREFIX | ((uint64_t)(id) & KILN_REF_ID_MASK))
+#define KILN_VAL_IS_METHOD(v)   (((uint64_t)(v) & KILN_REF_TAG_MASK) == KILN_VAL_METHOD_PREFIX)
+#define KILN_VAL_METHOD_ID(v)   ((uint32_t)((uint64_t)(v) & KILN_REF_ID_MASK))
 
-#define KILN_TAG_STRING_PREFIX   UINT64_C(0xFFF9000000000000)
-#define KILN_TAG_OBJECT_PREFIX   UINT64_C(0xFFFA000000000000)
-#define KILN_TAG_CLOSURE_PREFIX  UINT64_C(0xFFFB000000000000)
-#define KILN_TAG_BUFFER_PREFIX   UINT64_C(0xFFFC000000000000)
-#define KILN_TAG_SYMBOL_PREFIX   UINT64_C(0xFFFD000000000000)
-#define KILN_TAG_CELL_PREFIX     UINT64_C(0xFFFF000000000000)
 /* The rare kinds share one prefix and a low-bit sub-tag; a test against one of them masks with
  * KILN_RARE_TAG_MASK. Shared facades stay distinct from cells and from object/array prefixes, so
  * every generated fast path misses them without inspecting a payload. */
-#define KILN_TAG_RARE_PREFIX     UINT64_C(0xFFFE000000000000)
-#define KILN_TAG_BIGINT_PREFIX   (KILN_TAG_RARE_PREFIX | UINT64_C(0))
-#define KILN_TAG_TEMPORAL_PREFIX (KILN_TAG_RARE_PREFIX | UINT64_C(1))
-#define KILN_TAG_SHARED_PREFIX   (KILN_TAG_RARE_PREFIX | UINT64_C(2))
 
 /* What a typed entry returns instead of its number when it failed -- a throw, a refusal, or the
  * call-depth limit. No arithmetic produces this NaN payload and no value carries it, so the
  * caller tells failure from any result by one comparison; the status and the thrown value wait
  * in `kiln_c99_typed_status` and `kiln_c99_typed_thrown`. */
-#define KILN_VAL_TYPED_FAIL     UINT64_C(0xFFF8000000000008)
 static inline double kiln_c99_typed_fail_double(void) {
     union { uint64_t u; double d; } bits = { .u = KILN_VAL_TYPED_FAIL };
     return bits.d;
@@ -127,8 +104,8 @@ static inline int kiln_c99_typed_failed(double d) {
     return bits.u == KILN_VAL_TYPED_FAIL;
 }
 
-#define KILN_VAL_IS_NUMBER(v)    ((uint64_t)(v) < UINT64_C(0xFFF8000000000000))
-#define KILN_VAL_IS_BOOLEAN(v)   (((uint64_t)(v) & UINT64_C(0xFFFFFFFFFFFFFFFE)) == KILN_VAL_FALSE)
+#define KILN_VAL_IS_NUMBER(v)    ((uint64_t)(v) < KILN_IMMEDIATE_PREFIX)
+#define KILN_VAL_IS_BOOLEAN(v)   (((uint64_t)(v) & KILN_BOOLEAN_MASK) == KILN_VAL_FALSE)
 #define KILN_VAL_IS_NULL(v)      ((v) == KILN_VAL_NULL)
 #define KILN_VAL_IS_UNDEFINED(v) ((v) == KILN_VAL_UNDEFINED)
 #define KILN_VAL_IS_NULLISH(v)   ((v) == KILN_VAL_UNDEFINED || (v) == KILN_VAL_NULL)
@@ -154,7 +131,7 @@ static inline int kiln_c99_typed_failed(double d) {
 #define KILN_VAL_IS_CLOSURE(v)   (((v) & KILN_TAG_MASK) == KILN_TAG_CLOSURE_PREFIX)
 #define KILN_VAL_IS_SYMBOL(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_SYMBOL_PREFIX)
 #define KILN_VAL_PTR(v)          ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
-#ifdef KILN_ASSERT_BOX_ALIGNMENT
+#if defined(KILN_ASSERT_BOX_ALIGNMENT) || !defined(NDEBUG)
 /* Builds that define this check the layout's premise at every box: an unaligned payload would lose
  * its low bits to the mask. */
 static inline kiln_val kiln_val_tag_ptr_checked(uint64_t prefix, const void *pointer) {
@@ -337,7 +314,7 @@ static kiln_value kiln_val_binding_to_boundary(kiln_val v);
 static inline kiln_val kiln_val_from_boundary(kiln_value v) {
     if (v.tag == KILN_VALUE_NUMBER) {
         /* Canonicalize any quiet-NaN to prevent collision with tagged pointer prefixes */
-        if (KILN_UNLIKELY((v.bits & UINT64_C(0x7FF8000000000000)) == UINT64_C(0x7FF8000000000000))) {
+        if (KILN_UNLIKELY((v.bits & KILN_QNAN_BASE) == KILN_QNAN_BASE)) {
             return KILN_QNAN_BASE;
         }
         return (kiln_val)v.bits;

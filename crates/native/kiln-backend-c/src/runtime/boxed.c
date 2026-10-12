@@ -43,12 +43,12 @@ static kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_
 }
 
 static kiln_value kiln_val_to_boundary(kiln_val v) {
-    if (KILN_VAL_IS_NUMBER(v) || v == UINT64_C(0xFFF8000000000000)) {
+    if (KILN_VAL_IS_NUMBER(v) || v == KILN_IMMEDIATE_PREFIX) {
         kiln_value out;
         out.tag = KILN_VALUE_NUMBER;
         out.flags = 0;
         out.len = 0;
-        out.bits = (v == UINT64_C(0xFFF8000000000000)) ? KILN_QNAN_BASE : (uint64_t)v;
+        out.bits = (v == KILN_IMMEDIATE_PREFIX) ? KILN_QNAN_BASE : (uint64_t)v;
         return out;
     }
     if (KILN_VAL_IS_BUILTIN(v)) {
@@ -400,7 +400,7 @@ static inline uint64_t kiln_c99_val_collection_hash(kiln_val key) {
         uint64_t bits = (uint64_t)key;
         double d;
         memcpy(&d, &bits, sizeof(d));
-        if (KILN_UNLIKELY(isnan(d))) return UINT64_C(0x7ff8000000000000);
+        if (KILN_UNLIKELY(isnan(d))) return KILN_QNAN_BASE;
         if (d == 0.0) bits = 0;
         bits ^= bits >> 32;
         bits *= UINT64_C(0xff51afd7ed558ccd);
