@@ -23,7 +23,7 @@ mod sources;
 mod watch;
 
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use args::{CacheAction, Command, DaemonAction, Invocation, Parsed};
@@ -458,6 +458,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
         Command::Check {
             path,
             node,
+            color,
             explain,
             explain_parallel,
         } => {
@@ -477,6 +478,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 &path,
                 &root,
                 node,
+                render::use_color(color, std::io::stderr().is_terminal()),
                 explain,
                 explain_parallel,
             )?);

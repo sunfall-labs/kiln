@@ -436,6 +436,7 @@ fn run_discovered(
                     .diagnostics
                     .iter()
                     .map(|diagnostic| Diagnostic {
+                        related: Vec::new(),
                         path: Some(id.clone()),
                         message: format!("{}: {}", diagnostic.phase.tag(), diagnostic.message),
                         start: diagnostic.span.map(|span| span.start),

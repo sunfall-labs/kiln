@@ -2332,6 +2332,7 @@ mod tests {
                     })
                     .collect(),
                 diagnostics: vec![SourceDiagnostic {
+                    related: Vec::new(),
                     path: Some(entry.into()),
                     span: None,
                     code: None,

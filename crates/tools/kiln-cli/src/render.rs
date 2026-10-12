@@ -505,33 +505,165 @@ pub fn cache_gc(summary: &CacheGcSummary) -> String {
     out
 }
 
-/// Format a single compiler or resolution diagnostic.
-///
-/// When the underlying source text and character span are available, this renders an
-/// `annotate-snippets` codeframe displaying the file, line number, source snippet, and caret
-/// underline pointing at the offending span. If source text or offsets are not available (e.g.
-/// module graph resolution errors), it falls back to a clean single-line report.
-pub fn diagnostic(display_path: &str, diag: &Diagnostic, source: Option<&str>) -> String {
+/// Render a diagnostic with a codeframe: see [`report`]. `source_of` reads a diagnostic's file
+/// (by the path it names); `styled` draws with ANSI colour.
+pub fn diagnostic(
+    display_path: &str,
+    diag: &Diagnostic,
+    source_of: &dyn Fn(&str) -> Option<String>,
+    styled: bool,
+) -> String {
     let path = diag.path.as_deref().unwrap_or(display_path);
-    if let (Some(src), Some(start), Some(end)) = (source, diag.start, diag.end) {
-        let start = start as usize;
-        let end = end as usize;
-        if start <= end && end <= src.len() {
-            let report = [Level::ERROR.primary_title(&diag.message).element(
-                Snippet::source(src).line_start(1).path(path).annotation(
-                    AnnotationKind::Primary
-                        .span(start..end)
-                        .label(&diag.message),
-                ),
-            )];
-            let renderer = Renderer::plain();
-            return renderer.render(&report).to_string();
+    let primary_source = source_of(path);
+    let secondary_sources: Vec<Option<String>> = diag
+        .related
+        .iter()
+        .map(|related| related.path.as_deref().and_then(source_of))
+        .collect();
+    let primary = Frame {
+        path: &shown_path(path, display_path),
+        source: primary_source.as_deref(),
+        span: diag
+            .start
+            .zip(diag.end)
+            .map(|(s, e)| (s as usize, e as usize)),
+        label: &diag.message,
+    };
+    let secondary: Vec<Frame<'_>> = diag
+        .related
+        .iter()
+        .zip(&secondary_sources)
+        .map(|(related, source)| Frame {
+            path: related.path.as_deref().map_or(primary.path, |p| p),
+            source: source.as_deref(),
+            span: related
+                .start
+                .zip(related.end)
+                .map(|(s, e)| (s as usize, e as usize)),
+            label: &related.message,
+        })
+        .collect();
+    // The related frames' paths are shown the way the primary's is.
+    let shown: Vec<String> = secondary
+        .iter()
+        .map(|f| shown_path(f.path, display_path))
+        .collect();
+    let secondary: Vec<Frame<'_>> = secondary
+        .into_iter()
+        .zip(&shown)
+        .map(|(frame, path)| Frame { path, ..frame })
+        .collect();
+    report(styled, &primary, &secondary)
+}
+
+/// One place in one file: where a message points. The rendering primitive both type errors and
+/// runtime errors can use; `source` is the file's text and `span` a byte range in it.
+pub struct Frame<'a> {
+    pub path: &'a str,
+    pub source: Option<&'a str>,
+    pub span: Option<(usize, usize)>,
+    pub label: &'a str,
+}
+
+impl Frame<'_> {
+    /// The span, when it lies inside the source and so can be drawn.
+    fn drawable(&self) -> Option<(&str, usize, usize)> {
+        let (start, end) = self.span?;
+        let source = self.source?;
+        (start <= end
+            && end <= source.len()
+            && source.is_char_boundary(start)
+            && source.is_char_boundary(end))
+        .then_some((source, start, end))
+    }
+}
+
+/// An error report: `primary` underlined with its message as the title, and each of `secondary`
+/// (related information: `'age' is declared here.`) as a labelled annotation, in the same snippet
+/// when it is in the same file and in a snippet of its own otherwise. A frame that cannot be
+/// drawn (no source, or a span outside it) falls back to a `path:start..end: message` line, so a
+/// report always says where it is.
+pub fn report(styled: bool, primary: &Frame<'_>, secondary: &[Frame<'_>]) -> String {
+    let renderer = if styled {
+        Renderer::styled()
+    } else {
+        Renderer::plain()
+    };
+    let Some((source, start, end)) = primary.drawable() else {
+        let mut out = match primary.span {
+            Some((start, end)) => format!("{}:{start}..{end}: {}", primary.path, primary.label),
+            None => format!("{}: {}", primary.path, primary.label),
+        };
+        for frame in secondary {
+            out.push_str(&format!("\n  note: {}", frame.label));
+        }
+        return out;
+    };
+    let title = Level::ERROR.primary_title(primary.label);
+    let mut main = Snippet::source(source)
+        .line_start(1)
+        .path(primary.path)
+        .annotation(
+            AnnotationKind::Primary
+                .span(start..end)
+                .label(primary.label),
+        );
+    let mut others = Vec::new();
+    for frame in secondary {
+        match frame.drawable() {
+            Some((_, s, e)) if frame.path == primary.path => {
+                main = main.annotation(AnnotationKind::Context.span(s..e).label(frame.label));
+            }
+            Some((src, s, e)) => others.push(
+                Snippet::source(src)
+                    .line_start(1)
+                    .path(frame.path)
+                    .annotation(AnnotationKind::Context.span(s..e).label(frame.label)),
+            ),
+            None => {}
         }
     }
-    match (diag.start, diag.end) {
-        (Some(start), Some(end)) => format!("{path}:{start}..{end}: {}", diag.message),
-        _ => format!("{path}: {}", diag.message),
+    let mut group = title.element(main);
+    for snippet in others {
+        group = group.element(snippet);
     }
+    renderer.render(&[group]).to_string()
+}
+
+/// Whether to draw with ANSI styling: `--color` wins, then `NO_COLOR` (set and not empty means
+/// no), then `CLICOLOR_FORCE` (set and not `0` means yes), then whether the stream is a terminal
+/// that is not `TERM=dumb`.
+pub fn use_color(choice: crate::args::ColorChoice, is_terminal: bool) -> bool {
+    use crate::args::ColorChoice;
+    let env = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    match choice {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => {
+            if env("NO_COLOR").is_some() {
+                false
+            } else if env("CLICOLOR_FORCE").is_some_and(|value| value != "0") {
+                true
+            } else {
+                is_terminal && env("TERM").is_none_or(|term| term != "dumb")
+            }
+        }
+    }
+}
+
+/// `path` as the user would type it: the entry file as it was named, anything else relative to
+/// the current directory when it lies inside it, and absolute otherwise.
+fn shown_path(path: &str, entry_display: &str) -> String {
+    if path == entry_display {
+        return path.to_owned();
+    }
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(relative) = Path::new(path).strip_prefix(&cwd)
+        && !relative.as_os_str().is_empty()
+    {
+        return relative.display().to_string();
+    }
+    path.to_owned()
 }
 
 /// Binary units, because a cache budget is a disk allocation and `du` reports the same way.
@@ -919,9 +1051,10 @@ mod tests {
             message: "expected an identifier".to_owned(),
             start: Some(13),
             end: Some(14),
+            related: Vec::new(),
         };
         let source = "export const = 1;";
-        let rendered = diagnostic("broken.ts", &diag, Some(source));
+        let rendered = diagnostic("broken.ts", &diag, &|_| Some(source.to_owned()), false);
         assert!(
             rendered.contains("error: expected an identifier"),
             "{rendered}"
@@ -937,8 +1070,9 @@ mod tests {
             message: "expected an identifier".to_owned(),
             start: Some(7),
             end: Some(8),
+            related: Vec::new(),
         };
-        let rendered = diagnostic("broken.ts", &diag, None);
+        let rendered = diagnostic("broken.ts", &diag, &|_| None, false);
         assert_eq!(rendered, "broken.ts:7..8: expected an identifier");
     }
 
@@ -949,8 +1083,68 @@ mod tests {
             message: "could not resolve ./missing.js".to_owned(),
             start: None,
             end: None,
+            related: Vec::new(),
         };
-        let rendered = diagnostic("main.js", &diag, None);
+        let rendered = diagnostic("main.js", &diag, &|_| None, false);
         assert_eq!(rendered, "dep.js: could not resolve ./missing.js");
+    }
+
+    fn with_related() -> (Diagnostic, &'static str) {
+        let source = "interface P { age: number }\nconst p: P = { age: \"x\" };\n";
+        let declared = source.find("age").unwrap() as u32;
+        let used = source.rfind("age").unwrap() as u32;
+        (
+            Diagnostic {
+                path: Some("a.ts".to_owned()),
+                message: "TS2322: Type 'string' is not assignable to type 'number'.".to_owned(),
+                start: Some(used),
+                end: Some(used + 3),
+                related: vec![Diagnostic {
+                    path: Some("a.ts".to_owned()),
+                    message: "The expected type comes from property 'age'".to_owned(),
+                    start: Some(declared),
+                    end: Some(declared + 3),
+                    related: Vec::new(),
+                }],
+            },
+            source,
+        )
+    }
+
+    #[test]
+    fn related_information_is_drawn_in_the_same_report() {
+        let (diag, source) = with_related();
+        let rendered = diagnostic("a.ts", &diag, &|_| Some(source.to_owned()), false);
+        assert!(
+            rendered.contains("The expected type comes from property 'age'"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("interface P { age: number }"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "plain output has no escapes: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn styled_output_carries_ansi_escapes_and_plain_does_not() {
+        let (diag, source) = with_related();
+        let styled = diagnostic("a.ts", &diag, &|_| Some(source.to_owned()), true);
+        assert!(styled.contains('\u{1b}'), "{styled:?}");
+    }
+
+    #[test]
+    fn color_choice_honours_flags_and_environment() {
+        use crate::args::ColorChoice::{Always, Auto, Never};
+        // Environment-dependent cases are exercised only through the explicit choices, which do
+        // not read it; `auto` on a pipe with a clean environment is plain.
+        assert!(use_color(Always, false));
+        assert!(!use_color(Never, true));
+        if std::env::var_os("NO_COLOR").is_none() && std::env::var_os("CLICOLOR_FORCE").is_none() {
+            assert!(!use_color(Auto, false));
+        }
     }
 }

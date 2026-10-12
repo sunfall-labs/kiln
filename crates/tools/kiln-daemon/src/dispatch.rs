@@ -506,6 +506,7 @@ pub(crate) fn check_with_cache<E: QueryEngine>(
         .clone()
         .into_iter()
         .map(|diagnostic| Diagnostic {
+            related: Vec::new(),
             path: None,
             message: diagnostic.message,
             start: diagnostic.span.map(|span| span.start),
@@ -534,14 +535,27 @@ pub(crate) fn check_with_cache<E: QueryEngine>(
         )
     {
         let checked = engine.source_check(file);
-        diagnostics.extend(checked.diagnostics.into_iter().map(|d| Diagnostic {
-            path: d.path,
-            message: match d.code {
-                Some(code) => format!("TS{code}: {}", d.message),
-                None => d.message,
-            },
-            start: d.span.map(|s| s.start),
-            end: d.span.map(|s| s.end),
+        diagnostics.extend(checked.diagnostics.into_iter().map(|d| {
+            Diagnostic {
+                related: d
+                    .related
+                    .into_iter()
+                    .map(|r| Diagnostic {
+                        related: Vec::new(),
+                        path: r.path,
+                        message: r.message,
+                        start: r.span.map(|s| s.start),
+                        end: r.span.map(|s| s.end),
+                    })
+                    .collect(),
+                path: d.path,
+                message: match d.code {
+                    Some(code) => format!("TS{code}: {}", d.message),
+                    None => d.message,
+                },
+                start: d.span.map(|s| s.start),
+                end: d.span.map(|s| s.end),
+            }
         }));
     }
     Response::Checked(ModuleSummary {
@@ -2221,6 +2235,7 @@ fn module_evaluation_diagnostics(error: ModuleEvaluationError) -> Vec<Diagnostic
         _ => None,
     };
     vec![Diagnostic {
+        related: Vec::new(),
         path,
         message: error.to_string(),
         start: None,
@@ -2235,6 +2250,7 @@ fn module_graph_diagnostics(error: kiln_module_graph::ModuleGraphError) -> Vec<D
             diagnostics
                 .into_iter()
                 .map(|diagnostic| Diagnostic {
+                    related: Vec::new(),
                     path: Some(path.clone()),
                     message: diagnostic.message,
                     start: diagnostic.span.map(|span| span.start),
@@ -2262,6 +2278,7 @@ fn module_graph_diagnostics(error: kiln_module_graph::ModuleGraphError) -> Vec<D
             }
             .map(|path| path.to_string_lossy().into_owned());
             vec![Diagnostic {
+                related: Vec::new(),
                 path,
                 message: error.to_string(),
                 start: None,
@@ -2340,6 +2357,7 @@ fn execute_program(
                 diagnostics: diagnostics
                     .into_iter()
                     .map(|diagnostic| Diagnostic {
+                        related: Vec::new(),
                         path: None,
                         message: diagnostic.message,
                         start: diagnostic.span.map(|span| span.start),
@@ -2441,6 +2459,7 @@ fn execute_program(
             scalar_value: None,
             instructions: 0,
             diagnostics: vec![Diagnostic {
+                related: Vec::new(),
                 path: None,
                 message: error.to_string(),
                 start: None,

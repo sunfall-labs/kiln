@@ -395,7 +395,12 @@ pub(crate) fn check_source_types(
                 .map(|name| parent.join(name).to_string_lossy().into_owned())
                 .find(|path| snapshot.auxiliary_files.contains_key(path))
         });
-    roots.extend(builtin_declaration_roots(modules, &snapshot, config_path.is_none(), entry));
+    roots.extend(builtin_declaration_roots(
+        modules,
+        &snapshot,
+        config_path.is_none(),
+        entry,
+    ));
     let current_directory = config_path
         .as_deref()
         .and_then(|path| std::path::Path::new(path).parent())

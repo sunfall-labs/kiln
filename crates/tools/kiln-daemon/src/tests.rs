@@ -4218,7 +4218,11 @@ fn source_check_knows_node_modules_and_still_reports_real_errors() {
         &[],
     );
     assert_eq!(
-        result.diagnostics.iter().map(|d| d.code).collect::<Vec<_>>(),
+        result
+            .diagnostics
+            .iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>(),
         vec![Some(2322)],
         "{:?}",
         messages(&result)
@@ -4241,7 +4245,11 @@ fn source_check_knows_kiln_extensions_and_modules() {
         &[],
     );
     assert_eq!(
-        result.diagnostics.iter().map(|d| d.code).collect::<Vec<_>>(),
+        result
+            .diagnostics
+            .iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>(),
         vec![Some(2322)],
         "{:?}",
         messages(&result)
@@ -4290,7 +4298,11 @@ fn source_check_respects_a_projects_config_but_keeps_the_builtin_declarations() 
         )],
     );
     assert_eq!(
-        strict.diagnostics.iter().map(|d| d.code).collect::<Vec<_>>(),
+        strict
+            .diagnostics
+            .iter()
+            .map(|d| d.code)
+            .collect::<Vec<_>>(),
         vec![Some(2322)],
         "{:?}",
         messages(&strict)
@@ -4345,7 +4357,10 @@ fn kiln_types_declare_exactly_the_registered_extensions() {
                 registered_parallel.insert(key);
                 assert!(declared("Array"), "Array.prototype.{key} is not declared");
                 if key != "parallelSort" {
-                    assert!(declared("ReadonlyArray"), "ReadonlyArray.{key} is not declared");
+                    assert!(
+                        declared("ReadonlyArray"),
+                        "ReadonlyArray.{key} is not declared"
+                    );
                 }
             }
             "%TypedArray%.prototype" => {
@@ -4358,7 +4373,9 @@ fn kiln_types_declare_exactly_the_registered_extensions() {
                 globals.contains(&format!("declare var {key}:")),
                 "global {key} is not declared"
             ),
-            other => panic!("extension owner {other} has no declaration rule; add one in kiln-types"),
+            other => {
+                panic!("extension owner {other} has no declaration rule; add one in kiln-types")
+            }
         }
     }
     let declared_parallel: std::collections::BTreeSet<_> = parallel
@@ -4367,7 +4384,9 @@ fn kiln_types_declare_exactly_the_registered_extensions() {
         .filter_map(|rest| rest.split(['(', '<']).next())
         .map(|name| format!("parallel{name}"))
         .collect();
-    let registered_parallel: std::collections::BTreeSet<_> =
-        registered_parallel.iter().map(|k| (*k).to_owned()).collect();
+    let registered_parallel: std::collections::BTreeSet<_> = registered_parallel
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect();
     assert_eq!(declared_parallel, registered_parallel);
 }

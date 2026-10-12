@@ -527,16 +527,12 @@ fn finish_run_summary(
         .diagnostics
         .iter()
         .map(|diagnostic| {
-            let src = if diagnostic
-                .path
-                .as_deref()
-                .is_none_or(|p| p == display || p == summary.path)
-            {
-                source
-            } else {
-                None
-            };
-            render::diagnostic(&display, diagnostic, src)
+            render::diagnostic(
+                &display,
+                diagnostic,
+                &|p| diagnostic_source(p, &display, &summary.path, source),
+                false,
+            )
         })
         .chain(project_notes)
         .collect();
@@ -894,10 +890,24 @@ fn default_build_file_name(source: &Path, shared: bool) -> String {
     }
 }
 
-/// The everyday `kiln check`: [`check_explaining`] without the parallel report.
+/// The text of the file a diagnostic names: the entry's from memory (`entry_text`, which may be
+/// an unsaved view), anything else from disk.
+fn diagnostic_source(
+    path: &str,
+    display: &str,
+    canonical: &str,
+    entry_text: Option<&str>,
+) -> Option<String> {
+    if path == display || path == canonical {
+        return entry_text.map(str::to_owned);
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+/// `kiln check --explain` without the parallel report: the counters tests assert on.
 #[cfg(test)]
 pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path, node: bool) -> Result<Output> {
-    check_explaining(backend, path, root, node, false, None)
+    check_explaining(backend, path, root, node, false, true, None)
 }
 
 /// Check one file: push its current contents, ask for its summary, report the cost. With
@@ -910,6 +920,7 @@ pub fn check_explaining(
     path: &Path,
     root: &Path,
     node: bool,
+    styled: bool,
     explain: bool,
     explain_parallel: Option<NativeProfile>,
 ) -> Result<Output> {
@@ -954,16 +965,12 @@ pub fn check_explaining(
 
     let work = Work::between(&before, &after);
     notes.extend(summary.diagnostics.iter().map(|diagnostic| {
-        let src = if diagnostic
-            .path
-            .as_deref()
-            .is_none_or(|p| p == display || p == canonical)
-        {
-            Some(text.as_str())
-        } else {
-            None
-        };
-        render::diagnostic(&display, diagnostic, src)
+        render::diagnostic(
+            &display,
+            diagnostic,
+            &|p| diagnostic_source(p, &display, &canonical, Some(text.as_str())),
+            styled,
+        )
     }));
     // The daemon's counters are for people debugging the cache, so they come with `--explain`.
     let mut text = if explain {
@@ -974,7 +981,11 @@ pub fn check_explaining(
         String::new()
     };
     if !summary.diagnostics.is_empty() {
-        notes.push(render::error_count(&display, &canonical, &summary.diagnostics));
+        notes.push(render::error_count(
+            &display,
+            &canonical,
+            &summary.diagnostics,
+        ));
     }
     if let Some(profile) = explain_parallel
         && summary.diagnostics.is_empty()
@@ -1037,16 +1048,12 @@ pub fn check_source(
         .diagnostics
         .iter()
         .map(|diagnostic| {
-            let src = if diagnostic
-                .path
-                .as_deref()
-                .is_none_or(|p| p == display || p == canonical)
-            {
-                Some(text.as_str())
-            } else {
-                None
-            };
-            render::diagnostic(display, diagnostic, src)
+            render::diagnostic(
+                display,
+                diagnostic,
+                &|p| diagnostic_source(p, display, &canonical, Some(text.as_str())),
+                false,
+            )
         })
         .collect();
     Ok(Output {
@@ -2804,6 +2811,7 @@ mod tests {
     fn parser_diagnostics_become_user_visible_notes() {
         let mut fake = Fake::new();
         fake.diagnostics.push(Diagnostic {
+            related: Vec::new(),
             path: None,
             message: "expected an identifier".to_string(),
             start: Some(7),
@@ -2839,6 +2847,7 @@ mod tests {
     fn graph_diagnostics_make_check_unsuccessful() {
         let mut fake = Fake::new();
         fake.diagnostics.push(Diagnostic {
+            related: Vec::new(),
             path: Some("/tmp/dep.js".to_owned()),
             message: "could not resolve ./missing.js".to_owned(),
             start: None,
@@ -2878,6 +2887,7 @@ mod tests {
                 scalar_value: None,
                 instructions: 0,
                 diagnostics: vec![Diagnostic {
+                    related: Vec::new(),
                     path: Some("/tmp/dep.js".to_owned()),
                     message: "expected an identifier".to_owned(),
                     start: Some(7),

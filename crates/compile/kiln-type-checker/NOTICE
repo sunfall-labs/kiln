@@ -7,3 +7,6 @@ Local integration and owned syntax adaptation: Kiln contributors.
 
 Standard declaration libraries (ECMAScript, DOM, worker and host): TypeScript 7.0.2, Copyright Microsoft Corporation, Apache License 2.0.
 Source: @typescript/native-preview-linux-x64 7.0.2 npm package, lib/lib*.d.ts.
+
+Node declarations embedded for `kiln check`: @types/node 26.6.5 (lib/vendor/types-node) and undici-types 8.9.0 (lib/vendor/undici-types), Copyright Microsoft Corporation and contributors, MIT License; each directory keeps its LICENSE. Vendored by tools/vendor_node_types.sh.
+kiln's own declarations (`@kiln/types`, packages/kiln-types) are embedded from that package.

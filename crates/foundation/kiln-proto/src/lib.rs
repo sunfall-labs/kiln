@@ -1192,6 +1192,10 @@ pub struct Diagnostic {
     pub message: String,
     pub start: Option<u32>,
     pub end: Option<u32>,
+    /// Other locations the diagnostic points at (`'age' is declared here.`); each has its own
+    /// `path`, span and message and no related entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<Diagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2058,6 +2062,7 @@ mod tests {
         assert_eq!(decoded.path, None);
 
         let diagnostic = Diagnostic {
+            related: Vec::new(),
             path: Some("/src/dep.js".to_owned()),
             message: "unresolved binding".to_owned(),
             start: Some(1),

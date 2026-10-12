@@ -1323,6 +1323,7 @@ mod tests {
                         instructions: 1,
                         diagnostics: if failed {
                             vec![Diagnostic {
+                                related: Vec::new(),
                                 path: None,
                                 message: "program failed".to_string(),
                                 start: None,

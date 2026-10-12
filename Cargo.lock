@@ -2412,6 +2412,7 @@ version = "0.1.0"
 dependencies = [
  "kiln-artifact-cache",
  "kiln-backend-c",
+ "kiln-builtin-surface",
  "kiln-conformance",
  "kiln-data-formats",
  "kiln-db",

@@ -372,6 +372,7 @@ impl Host for SnapshotHost<'_> {
             file
         } else {
             self.unsupported.lock().unwrap().push(SourceDiagnostic {
+                related: Vec::new(),
                 path: Some(name),
                 span: None,
                 code: None,
@@ -445,6 +446,7 @@ pub fn check(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions
             checker_identity: crate::CHECKER_VERSION.into(),
             complete: false,
             diagnostics: vec![SourceDiagnostic {
+                related: Vec::new(),
                 path: Some(path.clone()),
                 span: None,
                 code: None,
@@ -498,6 +500,7 @@ pub fn check(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions
                     checker_identity: crate::CHECKER_VERSION.into(),
                     complete: false,
                     diagnostics: vec![SourceDiagnostic {
+                        related: Vec::new(),
                         path: Some(path.clone()),
                         span: None,
                         code: None,
@@ -520,6 +523,7 @@ pub fn check(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptions
                     checker_identity: crate::CHECKER_VERSION.into(),
                     complete: false,
                     diagnostics: vec![SourceDiagnostic {
+                        related: Vec::new(),
                         path: Some(path.clone()),
                         span: None,
                         code: None,
@@ -705,6 +709,7 @@ fn push_config_errors(
                     )
                 });
         result.diagnostics.push(SourceDiagnostic {
+            related: Vec::new(),
             path,
             span,
             code: Some(error.code),
@@ -743,6 +748,7 @@ pub(crate) fn lower_module<'s>(
     if source_module.panicked || !source_module.diagnostics.is_empty() {
         for diagnostic in &source_module.diagnostics {
             let reported = SourceDiagnostic {
+                related: Vec::new(),
                 path: Some(name.to_owned()),
                 span: diagnostic.span,
                 code: None,
@@ -755,6 +761,7 @@ pub(crate) fn lower_module<'s>(
         }
         if source_module.panicked && source_module.diagnostics.is_empty() {
             errors.push(SourceDiagnostic {
+                related: Vec::new(),
                 path: Some(name.to_owned()),
                 span: None,
                 code: None,
@@ -778,6 +785,7 @@ pub(crate) fn lower_module<'s>(
         unsupported
             .into_iter()
             .map(|(span, message)| SourceDiagnostic {
+                related: Vec::new(),
                 path: Some(name.to_owned()),
                 span: Some(span),
                 code: None,
@@ -949,11 +957,22 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
         .diagnostics
         .into_iter()
         .filter(|d| !d.path.starts_with(LIBRARY_DIRECTORY.as_bytes()))
-        .map(|d| SourceDiagnostic {
-            path: (!d.path.is_empty()).then(|| String::from_utf8_lossy(&d.path).into_owned()),
-            span: (!d.has_undefined_range && !d.path.is_empty()).then(|| Span::new(d.start, d.end)),
-            code: Some(d.code),
-            message: String::from_utf8_lossy(&d.text).into_owned(),
+        .map(|d| {
+            let of = |d: &crate::driver::Diagnostic, related| SourceDiagnostic {
+                path: (!d.path.is_empty()).then(|| String::from_utf8_lossy(&d.path).into_owned()),
+                span: (!d.has_undefined_range && !d.path.is_empty())
+                    .then(|| Span::new(d.start, d.end)),
+                code: Some(d.code),
+                message: String::from_utf8_lossy(&d.text).into_owned(),
+                related,
+            };
+            let related = d
+                .related
+                .iter()
+                .filter(|r| !r.path.starts_with(LIBRARY_DIRECTORY.as_bytes()))
+                .map(|r| of(r, Vec::new()))
+                .collect();
+            of(&d, related)
         })
         .collect();
     let unsupported = host.unsupported.into_inner().unwrap();
@@ -980,6 +999,7 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
     result.diagnostics.extend(unsupported);
     if ran_out {
         result.diagnostics.push(SourceDiagnostic {
+            related: Vec::new(),
             path: None,
             span: None,
             code: None,

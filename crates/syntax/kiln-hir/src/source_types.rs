@@ -42,6 +42,9 @@ pub struct SourceDiagnostic {
     pub span: Option<Span>,
     pub code: Option<u32>,
     pub message: String,
+    /// Other locations the checker points at (`'age' is declared here.`), each with its own path,
+    /// span and message and no related entries of its own.
+    pub related: Vec<SourceDiagnostic>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CheckResult {

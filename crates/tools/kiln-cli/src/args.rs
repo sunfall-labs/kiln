@@ -55,11 +55,24 @@ pub struct Invocation {
     pub socket: Option<PathBuf>,
 }
 
+/// `--color`: whether diagnostics are drawn with ANSI styling.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorChoice {
+    /// Styled when the stream is a terminal, `NO_COLOR` is unset, and `TERM` is not `dumb`;
+    /// `CLICOLOR_FORCE` turns it on for a pipe.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Check {
         path: PathBuf,
         node: bool,
+        /// `--color=auto|always|never`.
+        color: ColorChoice,
         /// `--explain`: print the daemon's counters (module hashes, what was recomputed and what
         /// was reused) before the diagnostics. Without it a check prints only the diagnostics and
         /// a one-line summary.
@@ -190,6 +203,8 @@ where
     let mut shared = false;
     let mut march_native = false;
     let mut explain = false;
+    let mut color = ColorChoice::Auto;
+    let mut color_given = false;
     let mut no_kiln_extensions = false;
     let mut explain_parallel = false;
     let mut static_link = false;
@@ -318,6 +333,19 @@ where
             }
             "--explain" => {
                 explain = true;
+            }
+            "--color" => {
+                color = match value_for(&flag, inline, &mut args)?.as_str() {
+                    "auto" => ColorChoice::Auto,
+                    "always" => ColorChoice::Always,
+                    "never" => ColorChoice::Never,
+                    other => {
+                        return Err(Error::usage(format!(
+                            "--color takes auto, always or never, not `{other}`"
+                        )));
+                    }
+                };
+                color_given = true;
             }
             "--no-kiln-extensions" => {
                 reject_inline_value(&flag, &inline)?;
@@ -463,6 +491,9 @@ where
             "--workers cannot be combined with `kiln build --shared`: a library has no launcher to record it in",
         ));
     }
+    if color_given && name != "check" {
+        return Err(Error::usage("--color only applies to `kiln check`"));
+    }
     if explain && name != "build" && name != "check" {
         return Err(Error::usage(
             "--explain only applies to `kiln build` or `kiln check`",
@@ -503,6 +534,7 @@ where
         "check" => Command::Check {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             node,
+            color,
             explain,
             // The default is `kiln build`'s, so the two explain the same build unless told not to.
             explain_parallel: explain_parallel.then(|| profile.unwrap_or(BUILD_PROFILE)),
@@ -803,6 +835,7 @@ const FLAGS: &[&str] = &[
     "--max-steps",
     "--workers",
     "--explain",
+    "--color",
     "--no-kiln-extensions",
     "--explain-parallel",
     "--static",
@@ -1046,6 +1079,9 @@ without any package installed.
 
 options:
     --node                force the Node compatibility layer on
+    --color <when>        auto (the default), always or never: style diagnostics with ANSI
+                          colour. auto means a terminal, with NO_COLOR unset; CLICOLOR_FORCE=1
+                          forces it on for a pipe
     --explain             first print what the checker computed: the module's interface and
                           implementation hashes, and what had to be recomputed or was reused
     --explain-parallel    after the check, report every parallelMap site of the native build
@@ -1260,6 +1296,7 @@ mod tests {
             Command::Check {
                 path: PathBuf::from("a.js"),
                 node: false,
+                color: ColorChoice::Auto,
                 explain: false,
                 explain_parallel: None,
             }
@@ -1802,6 +1839,7 @@ mod tests {
             Command::Check {
                 path: PathBuf::from("--weird-name.js"),
                 node: false,
+                color: ColorChoice::Auto,
                 explain: false,
                 explain_parallel: None,
             }
