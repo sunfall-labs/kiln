@@ -2177,6 +2177,38 @@ fn emitted_static_object_literal_uses_cached_shape_and_inline_slots() {
 }
 
 #[test]
+fn emitted_static_literals_cache_gc_owned_tail_shapes() {
+    for count in [9, 11, 32] {
+        let mut constants = Vec::new();
+        let mut code = Vec::new();
+        for index in 0..count {
+            constants.push(Constant::String(format!("field{index}").into()));
+            constants.push(Constant::Number((index as f64).to_bits()));
+            code.extend([
+                Instruction::Const(index * 2),
+                Instruction::Const(index * 2 + 1),
+            ]);
+        }
+        code.extend([Instruction::NewObject { count }, Instruction::Return]);
+        let program = program(constants, code, 0);
+        let normal = emit(&program).unwrap().source;
+        assert!(normal.contains("kiln_c99_slot_publish(&lit_shape, obj->shape)"));
+        assert!(normal.contains(&format!("&obj->slots[{}]", count - 1)));
+        let compact = emit_with_policy(
+            &program,
+            EmissionPolicy {
+                compact: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .source;
+        assert!(compact.contains("int status = ku_new_object_literal_fast("));
+        assert!(compact.contains("count <= KILN_SHAPE_MAX_FAST_PROPERTIES"));
+    }
+}
+
+#[test]
 fn compact_module_pools_inline_cache_sites_and_interned_keys_into_dense_tables() {
     let function = |local_count, code| FunctionProto {
         inferred_name: None,

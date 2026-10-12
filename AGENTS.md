@@ -298,6 +298,24 @@ moves it never ends.
 compared, and one that did different work is excluded from the table and named. A fast wrong
 answer reads exactly like a win.
 
+For HTTP transport, stream hot paths, or the compiler facts they consume, also run a quiet
+paired HTTP comparison after correctness compilation has stopped. Build the before/after
+`bench/server/serve.mjs` and `bench/server/app.mjs` binaries in owned worktrees, then run:
+
+```sh
+RUNTIMES=kiln PASSES=5 DURATION_MS=5000 \
+WORKLOADS="hello mixed json-echo-1k json-echo-64k chunked-stream large-upload" \
+bench/server/compare.sh <after-hello> <after-app> --baseline <before-hello> <before-app>
+```
+
+Read `paired-summary.json`: it alternates order and pairs each pass on the same machine.
+Check every workload and retain the full evidence; one body size cannot stand for the others.
+On Linux the harness also records server CPU microseconds/request and peak RSS from `/proc`.
+CPU excludes client processes, but includes startup after the readiness sample and client-launch
+and drain time; RSS is the fresh server process's lifetime peak. These counters are omitted on
+other platforms. The routine gate does not run this load test, and an old machine's absolute
+throughput baseline is not a paired comparison.
+
 ## Changing Node HTTP close behavior
 
 Run `bash scripts/check-http-close-contract.sh`. HTTP close authority spans the runtime transport,

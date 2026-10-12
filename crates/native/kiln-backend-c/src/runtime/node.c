@@ -215,7 +215,9 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
                                     "EventEmitter method called on an incompatible receiver");
     }
     {
-        kiln_property *state = kiln_c99_own_private(receiver, "@@node:events", 13);
+        kiln_property snapshot;
+        kiln_property *state = kiln_c99_read_private(receiver, "@@node:events", 13, &snapshot)
+            ? &snapshot : NULL;
         /* No listener has ever been registered on this receiver -- the common case for `finish`
          * and `close` on a response nothing is listening for. `on`/`once` are the only codes
          * that need somewhere to put a listener; every other code has a fixed answer for "no
@@ -251,6 +253,8 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
         if (table.tag != KILN_VALUE_ARRAY) {
             status = kiln_c99_new_array(&table);
             if (status != KILN_C99_OK) return status;
+            /* The snapshot is read-only; acquire storage only when changing the table. */
+            state = kiln_c99_own_private(receiver, "@@node:events", 13);
             kiln_c99_heap_store_value(kiln_c99_object_of(receiver), &state->value, table);
         }
     }

@@ -1457,19 +1457,21 @@ static int kiln_c99_new_object_sized(kiln_value *out, size_t tail_slots) {
 }
 
 /* An object literal whose site already knows its shape: one nursery bump, one pass over the
- * fixed header, then the `count` values stored straight into the inline slots. `shape` must be
- * a portable shape of exactly `count` inline-slot properties whose double-slot mask matches
+ * fixed header, then the `count` values stored straight into its slots. `shape` must be
+ * a portable shape of exactly `count` properties whose double-slot mask matches
  * the values (the site checks that before calling), and the object has no prototype link,
  * exactly as `kiln_c99_val_new_object_literal` leaves it. */
 static int kiln_c99_new_object_literal_shaped(kiln_val *out, const kiln_shape *shape,
                                               const kiln_val *pairs, size_t count) {
-    kiln_object *object = (kiln_object *)kiln_c99_gc_alloc_hot(KILN_GC_OBJECT, sizeof *object, 0);
+    size_t tail_slots = count > KILN_C99_INLINE_SLOTS ? count : 0;
+    kiln_object *object = (kiln_object *)kiln_c99_gc_alloc_hot(
+        KILN_GC_OBJECT, sizeof *object + tail_slots * sizeof(kiln_val), 0);
     size_t index;
     if (KILN_UNLIKELY(object == NULL)) return KILN_C99_OUT_OF_MEMORY;
-    kiln_c99_object_init_from(object, 0, count);
+    kiln_c99_object_init_from(object, tail_slots, tail_slots == 0 ? count : 0);
     object->shape = (kiln_shape *)shape;
     for (index = 0; index < count; ++index)
-        kiln_c99_heap_store_val(object, &object->inline_slots[index], pairs[index * 2 + 1]);
+        kiln_c99_heap_store_val(object, &object->slots[index], pairs[index * 2 + 1]);
     *out = KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, object);
     return KILN_C99_OK;
 }

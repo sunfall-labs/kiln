@@ -969,6 +969,83 @@ fn source_contracts_annotate_bytecode_without_changing_executable_code() {
 }
 
 #[test]
+fn transformed_method_contracts_match_their_own_signature() {
+    let path = "/project/methods.ts";
+    let source = r#"
+type Count = number;
+export class Counter {
+  step(value: Count): Count { return value + 1; }
+  get size(): Count { return 1; }
+  ["label"](value: string): string { return value; }
+}
+export const object = { step(value: string): string { return value; } };
+"#;
+    let checked = check_sources(&[(path, source)]);
+    assert_complete(&checked);
+    assert_clean(&checked);
+    let module = kiln_frontend_oxc::parse(path, source);
+    let mut compiled = kiln_ir::compile_module(&module).unwrap();
+    let executable = compiled.program.clone();
+    kiln_ir::apply_source_types(
+        path,
+        &module,
+        &checked,
+        crate::CHECKER_VERSION,
+        &mut compiled.program,
+    );
+    for (prefix, parameter, returned) in [
+        (
+            "step(value) {",
+            Some(kiln_hir::TypeAnnotation::Number),
+            kiln_hir::TypeAnnotation::Number,
+        ),
+        ("get size() {", None, kiln_hir::TypeAnnotation::Number),
+        (
+            "[\"label\"](value) {",
+            Some(kiln_hir::TypeAnnotation::String),
+            kiln_hir::TypeAnnotation::String,
+        ),
+    ] {
+        let function = compiled
+            .program
+            .functions
+            .iter()
+            .find(|function| {
+                compiled.program.source[function.span.start as usize..function.span.end as usize]
+                    .starts_with(prefix)
+            })
+            .expect(prefix);
+        assert_eq!(function.parameter_type(0), parameter);
+        assert_eq!(function.return_type(), Some(returned));
+    }
+    let string_step = compiled
+        .program
+        .functions
+        .iter()
+        .filter(|function| {
+            compiled.program.source[function.span.start as usize..function.span.end as usize]
+                .starts_with("step(value) {")
+        })
+        .last()
+        .unwrap();
+    assert_eq!(
+        string_step.parameter_type(0),
+        Some(kiln_hir::TypeAnnotation::String)
+    );
+    for (before, after) in executable.functions.iter().zip(&compiled.program.functions) {
+        assert_eq!(before.code, after.code);
+        if after.is_class {
+            assert!(
+                after
+                    .type_annotations
+                    .as_ref()
+                    .is_none_or(|annotations| annotations.source_types.is_none())
+            );
+        }
+    }
+}
+
+#[test]
 fn function_contract_fact_selection_preserves_checking_and_bytecode_metadata() {
     let path = "/project/contracts.ts";
     let source = "type Scalar = number; function add(value: Scalar): Scalar { return value + 1; } const answer = add(41);";

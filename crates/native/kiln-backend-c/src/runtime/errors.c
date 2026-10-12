@@ -274,9 +274,9 @@ static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
  * here for the same reason -- inheriting a private name would be inheriting somebody else's
  * identity. A static private member lives on the constructor, whose properties are in its own
  * store rather than in an object. */
-static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len) {
+/* Resolve the private-element store once for pointer and read-only queries. */
+static kiln_object *kiln_c99_private_store_of(kiln_value target) {
     kiln_object *object;
-    size_t index;
     if (target.tag == KILN_VALUE_PROXY) {
         kiln_value store;
         if (kiln_c99_proxy_private_store(target, 0, &store) != KILN_C99_OK ||
@@ -296,48 +296,40 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
         if (store == NULL || store->tag != KILN_VALUE_OBJECT) return NULL;
         object = kiln_c99_object_of(*store);
     }
-    if (object->shape != NULL) {
-        kiln_c99_ensure_dictionary(object);
-    }
-    {
-        kiln_gc_heap *heap = kiln_c99_gc_heap();
-        index = kiln_c99_own_index(object, kiln_c99_interned_in(heap, key, key_len), key,
-                                   key_len);
-    }
+    return object;
+}
+
+/* A descriptor copy keeps shaped objects shaped, including an absent private key. */
+static int kiln_c99_read_private(kiln_value target, const char *key, size_t key_len,
+                                  kiln_property *out) {
+    kiln_object *object = kiln_c99_private_store_of(target);
+    kiln_string view;
+    if (object == NULL || key_len > UINT32_MAX) return 0;
+    view.unit_len = (uint32_t)key_len;
+    view.flags = kiln_c99_fixed_key_flags(key, key_len);
+    view.data = key;
+    return kiln_c99_property_read_own(object, &view,
+        kiln_c99_interned_in(kiln_c99_gc_heap(), key, key_len), out);
+}
+
+static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len) {
+    kiln_object *object = kiln_c99_private_store_of(target);
+    size_t index;
+    if (object == NULL) return NULL;
+    if (object->shape != NULL) kiln_c99_ensure_dictionary(object);
+    index = kiln_c99_own_index(object,
+        kiln_c99_interned_in(kiln_c99_gc_heap(), key, key_len), key, key_len);
     return index == object->count ? NULL : &object->properties[index];
 }
 
-/* The headed form: private keys are unit-identified, so the lookup interns the header
- * rather than reading its words as key bytes. */
+/* The headed form preserves the private key's unit identity. */
 static kiln_property *kiln_c99_own_private_key(kiln_value target, const kiln_string *key) {
-    kiln_object *object;
+    kiln_object *object = kiln_c99_private_store_of(target);
     size_t index;
-    if (target.tag == KILN_VALUE_PROXY) {
-        kiln_value store;
-        if (kiln_c99_proxy_private_store(target, 0, &store) != KILN_C99_OK ||
-            store.tag != KILN_VALUE_OBJECT) return NULL;
-        target = store;
-    }
-    if (target.tag == KILN_VALUE_FUNCTION) {
-        kiln_value store = kiln_c99_closure_store(kiln_c99_closure_of(target));
-        if (store.tag != KILN_VALUE_OBJECT) {
-            return NULL;
-        }
-        object = kiln_c99_object_of(store);
-    } else if (target.tag == KILN_VALUE_OBJECT) {
-        object = kiln_c99_object_of(target);
-    } else {
-        kiln_value *store = kiln_c99_exotic_store(target);
-        if (store == NULL || store->tag != KILN_VALUE_OBJECT) return NULL;
-        object = kiln_c99_object_of(*store);
-    }
-    if (object->shape != NULL) {
-        kiln_c99_ensure_dictionary(object);
-    }
-    {
-        kiln_gc_heap *heap = kiln_c99_gc_heap();
-        index = kiln_c99_own_index_key(object, kiln_c99_interned_key_in(heap, key), key);
-    }
+    if (object == NULL) return NULL;
+    if (object->shape != NULL) kiln_c99_ensure_dictionary(object);
+    index = kiln_c99_own_index_key(object,
+        kiln_c99_interned_key_in(kiln_c99_gc_heap(), key), key);
     return index == object->count ? NULL : &object->properties[index];
 }
 

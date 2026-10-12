@@ -380,13 +380,16 @@ class ReadableImplementation extends Stream {
     if (chunk === "" || (chunk && typeof chunk.length === "number" && chunk.length === 0)) {
       if (!state.ended && this.listeners("readable").length > 0) {
         state.reading = true;
+        // Capture a separate binding only when a deferred read is actually scheduled. The
+        // ordinary state binding stays a direct local on the data, buffered and EOF paths.
+        const capturedState = state;
         if (typeof process !== "undefined" && typeof process.nextTick === "function") {
           process.nextTick(() => {
-            if (!this.destroyed && !state.ended) this._read(state.highWaterMark);
+            if (!this.destroyed && !capturedState.ended) this._read(capturedState.highWaterMark);
           });
         } else {
           setTimeout(() => {
-            if (!this.destroyed && !state.ended) this._read(state.highWaterMark);
+            if (!this.destroyed && !capturedState.ended) this._read(capturedState.highWaterMark);
           }, 0);
         }
       }
@@ -400,11 +403,12 @@ class ReadableImplementation extends Stream {
       this.emit("data", chunk);
       if (!state.ended && state.flowing && !state.reading) {
         state.reading = true;
+        const capturedState = state;
         const again = () => {
-          state.reading = false;
-          if (this.destroyed || state.ended || !state.flowing) return;
-          state.reading = true;
-          this._read(state.highWaterMark);
+          capturedState.reading = false;
+          if (this.destroyed || capturedState.ended || !capturedState.flowing) return;
+          capturedState.reading = true;
+          this._read(capturedState.highWaterMark);
         };
         if (typeof process !== "undefined" && typeof process.nextTick === "function") process.nextTick(again);
         else setTimeout(again, 0);

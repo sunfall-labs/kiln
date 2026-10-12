@@ -59,10 +59,14 @@ fn builtin_program(
     builtin: NodeBuiltin,
     identity: Option<&str>,
 ) -> Result<ModuleProgram, Vec<kiln_ir::CompileDiagnostic>> {
-    type Programs = HashMap<(NodeBuiltin, Option<String>), Arc<ModuleProgram>>;
+    type Programs = HashMap<(NodeBuiltin, Option<String>, bool), Arc<ModuleProgram>>;
     static PROGRAMS: std::sync::OnceLock<std::sync::Mutex<Programs>> = std::sync::OnceLock::new();
     let programs = PROGRAMS.get_or_init(Default::default);
-    let key = (builtin, identity.map(str::to_owned));
+    let key = (
+        builtin,
+        identity.map(str::to_owned),
+        kiln_ir::source_types_enabled(),
+    );
     let held = programs
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -76,12 +80,114 @@ fn builtin_program(
     if let Some(identity) = identity {
         hir.module_id = Arc::from(identity);
     }
-    let program = compile_module(&hir)?;
+    let mut program = compile_module(&hir)?;
+    if key.2 {
+        let (path, checked) = builtin_source_types(builtin, &hir);
+        kiln_ir::apply_source_types(
+            &path,
+            &hir,
+            &checked,
+            kiln_type_checker::CHECKER_VERSION,
+            &mut program.program,
+        );
+    }
     programs
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(key, Arc::new(program.clone()));
     Ok(program)
+}
+
+/// Check the authored builtin once, independently of its project-specific compiler identity.
+/// Static TypeScript lowering erases annotations from executable HIR; source facts must cross
+/// that boundary through the same provenance mapping used for user modules.
+fn builtin_source_types(
+    builtin: NodeBuiltin,
+    hir: &Module,
+) -> (String, Arc<kiln_type_checker::CheckResult>) {
+    type Facts = HashMap<NodeBuiltin, Arc<kiln_type_checker::CheckResult>>;
+    static FACTS: std::sync::OnceLock<std::sync::Mutex<Facts>> = std::sync::OnceLock::new();
+    static LIBRARIES: std::sync::OnceLock<Arc<kiln_type_checker::Libraries>> =
+        std::sync::OnceLock::new();
+    let path = format!(
+        "/__kiln_builtins/{}",
+        kiln_builtins::builtin_logical_path(builtin)
+    );
+    let facts = FACTS.get_or_init(Default::default);
+    if let Some(checked) = facts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&builtin)
+        .cloned()
+    {
+        return (path, checked);
+    }
+    let libraries = LIBRARIES.get_or_init(|| {
+        Arc::new(kiln_type_checker::Libraries::standard(
+            kiln_frontend_oxc::parse_authored,
+        ))
+    });
+    let snapshot = kiln_type_checker::SourceSnapshot {
+        modules: BTreeMap::from([(path.clone(), Arc::new(hir.clone()))]),
+        libraries: Some(libraries.clone()),
+        ..Default::default()
+    };
+    let roots = vec![
+        path.clone(),
+        kiln_type_checker::Libraries::path(kiln_type_checker::KILN_DECLARATIONS_ROOT),
+        kiln_type_checker::Libraries::path(kiln_type_checker::NODE_DECLARATIONS_ROOT),
+    ];
+    let checked = Arc::new(kiln_type_checker::check(
+        &snapshot,
+        &roots,
+        &kiln_type_checker::CheckOptions {
+            libraries: vec!["esnext".into()],
+            facts: kiln_type_checker::FactSelection::FunctionContracts,
+            ..Default::default()
+        },
+    ));
+    facts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(builtin, checked.clone());
+    (path, checked)
+}
+
+#[cfg(test)]
+mod builtin_type_tests {
+    use super::*;
+
+    #[test]
+    fn builtin_contracts_survive_static_typescript_and_project_identity() {
+        for identity in [None, Some("node_modules/.kiln/node/stream.ts")] {
+            let program = builtin_program(NodeBuiltin::Stream, identity).unwrap();
+            let setter = program
+                .program
+                .functions
+                .iter()
+                .find(|function| {
+                    let source = &program.program.source
+                        [function.span.start as usize..function.span.end as usize];
+                    source.starts_with("setMaxListeners(")
+                })
+                .expect("stream EventEmitter setter");
+            assert_eq!(
+                setter.parameter_type(0),
+                Some(kiln_hir::TypeAnnotation::Number)
+            );
+            assert_eq!(
+                setter
+                    .type_annotations
+                    .as_ref()
+                    .unwrap()
+                    .source_types
+                    .as_ref()
+                    .unwrap()
+                    .checker_identity,
+                kiln_type_checker::CHECKER_VERSION
+            );
+        }
+    }
 }
 
 /// A cache-stable identity for private names in one project graph. Files retain their absolute

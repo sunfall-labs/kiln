@@ -54,6 +54,17 @@ def wait_ready(port: int, process: subprocess.Popen[bytes], timeout: float = 5.0
         except Exception: time.sleep(0.1)
     raise RuntimeError(f"server did not answer on port {port} within {timeout:g}s")
 
+def server_resources(pid: int) -> dict | None:
+    """Linux process CPU includes its threads, excludes load clients; RSS is lifetime peak."""
+    if sys.platform != "linux": return None
+    root = Path("/proc") / str(pid)
+    # comm can contain spaces and parentheses; the fields after its closing ')' start at state.
+    fields = (root / "stat").read_text().rsplit(")", 1)[1].split()
+    cpu_seconds = (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    status = (root / "status").read_text().splitlines()
+    peak_kib = next(int(line.split()[1]) for line in status if line.startswith("VmHWM:"))
+    return {"cpu_seconds": cpu_seconds, "peak_rss_bytes": peak_kib * 1024}
+
 def runtime_command(runtime: str, variant: dict[str, Path], workload: str, sources: Path) -> list[str]:
     simple_server = workload in ("hello", "pipeline")
     script = sources / ("serve.mjs" if simple_server else "app.mjs")
@@ -212,6 +223,7 @@ def main() -> int:
                                                    stdout=stdout_file, stderr=stderr_file, start_new_session=True)
                         try:
                             wait_ready(port, process)
+                            resources_before = server_resources(process.pid)
                             reports = run_clients(driver, duration, connections, port, workload, processes,
                                                   max(10.0, duration / 1000 + 5.0), node_bin=node_client,
                                                   output_dir=run_dir)
@@ -226,6 +238,17 @@ def main() -> int:
                                         raise RuntimeError(f"pipeline client did not complete whole 8-request batches: {report}")
                             aggregate = {"pass": pass_number, "label": label, "runtime": runtime, "workload": workload,
                                          "reports": [row[0] for row in reports], "rps": sum(row[0]["rps"] for row in reports)}
+                            resources_after = server_resources(process.pid)
+                            if resources_before is not None and resources_after is not None:
+                                cpu = resources_after["cpu_seconds"] - resources_before["cpu_seconds"]
+                                if cpu < 0: raise RuntimeError("server CPU counter moved backwards")
+                                requests = sum(row[0]["requests"] for row in reports)
+                                if requests <= 0: raise RuntimeError("load clients completed no requests")
+                                aggregate["server_resources"] = {
+                                    "source": "linux-proc", "cpu_seconds": cpu,
+                                    "cpu_us_per_request": cpu * 1_000_000 / requests,
+                                    "peak_rss_bytes": resources_after["peak_rss_bytes"],
+                                }
                             (run_dir / "aggregate.json").write_text(json.dumps(aggregate, indent=2) + "\n")
                             if runtime == "kiln" and len(variants) == 2:
                                 key = (pass_number, workload, label)
@@ -285,6 +308,13 @@ def main() -> int:
                     "baseline_median_client_p99_ms": statistics.median(baseline_p99),
                     "candidate_median_client_p99_ms": statistics.median(candidate_p99),
                 }
+                for label in ["baseline", "candidate"]:
+                    resources = [paired_kiln_results[(number, workload, label)].get("server_resources")
+                                 for number in range(1, passes + 1)]
+                    if all(row is not None for row in resources):
+                        for metric in ["cpu_us_per_request", "peak_rss_bytes"]:
+                            summary[workload][f"{label}_median_server_{metric}"] = statistics.median(
+                                row[metric] for row in resources)
             paired_summary = {"runtime": "kiln", "workloads": summary}
             (result_root / "paired-summary.json").write_text(json.dumps(paired_summary, indent=2) + "\n")
             print(json.dumps({"paired_summary": paired_summary}, separators=(",", ":")))

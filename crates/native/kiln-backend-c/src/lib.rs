@@ -5086,16 +5086,16 @@ fn render_compact_macros(output: &mut String, program: &Program, closure_fn: &st
 }\n\
 static __attribute__((unused)) inline int ku_new_object_literal_fast(kiln_val *out, const kiln_shape **lit_shape, const kiln_val *pairs, size_t count) {\n\
     const kiln_shape *shape = __atomic_load_n(lit_shape, __ATOMIC_ACQUIRE);\n\
-    if (KILN_LIKELY(shape != NULL && count <= KILN_C99_INLINE_SLOTS)) {\n\
+    if (KILN_LIKELY(shape != NULL && count <= KILN_SHAPE_MAX_FAST_PROPERTIES)) {\n\
         uint32_t mask = ku_compute_literal_mask(pairs, count);\n\
         if (KILN_LIKELY(shape->double_slots_mask == mask)) {\n\
             return kiln_c99_new_object_literal_shaped(out, shape, pairs, count);\n\
         }\n\
     }\n\
     int status = kiln_c99_val_new_object_literal(out, pairs, count);\n\
-    if (KILN_LIKELY(status == KILN_C99_OK && count <= KILN_C99_INLINE_SLOTS && KILN_VAL_IS_OBJECT(*out))) {\n\
+    if (KILN_LIKELY(status == KILN_C99_OK && count <= KILN_SHAPE_MAX_FAST_PROPERTIES && KILN_VAL_IS_OBJECT(*out))) {\n\
         kiln_object *obj = (kiln_object *)KILN_VAL_PTR(*out);\n\
-        if (obj->shape != NULL && KILN_C99_SHAPE_IS_PORTABLE(obj->shape) && obj->shape->property_count == count && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {\n\
+        if (obj->shape != NULL && KILN_C99_SHAPE_IS_PORTABLE(obj->shape) && obj->shape->property_count == count && obj->slot_capacity >= count && !kiln_c99_object_slots_owned(obj) && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {\n\
             __atomic_store_n(lit_shape, (const kiln_shape *)obj->shape, __ATOMIC_RELEASE);\n\
         }\n\
     }\n\

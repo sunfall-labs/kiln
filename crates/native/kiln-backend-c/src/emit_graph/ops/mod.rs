@@ -1475,7 +1475,7 @@ pub(super) fn emit_graph_op(
                     .join(", ");
                 if let Some(keys) = static_keys
                     && literal_keys_take_one_slot_each(&keys)
-                    && count <= 8
+                    && count <= u32::BITS as usize
                 {
                     writeln!(output, "    {{ static const kiln_shape *lit_shape = NULL; kiln_val pairs[{pair_count}] = {{ {values} }}; int status = ku_new_object_literal_fast(&v{v}, &lit_shape, pairs, {count}); {check} }}", pair_count = count * 2).unwrap();
                 } else {
@@ -1483,7 +1483,7 @@ pub(super) fn emit_graph_op(
                 }
                 return;
             }
-            if count > 0 && count <= 8 {
+            if count > 0 && count <= u32::BITS as usize {
                 let static_keys: Option<Vec<String>> = pairs
                     .iter()
                     .map(|(k, _)| resolve_const_string(*k, defs, program))
@@ -1510,10 +1510,16 @@ pub(super) fn emit_graph_op(
                     } else {
                         " && lit->double_slots_mask == mask".to_string()
                     };
+                    let slot_array = if count <= 8 { "inline_slots" } else { "slots" };
+                    let alloc = if count <= 8 {
+                        "kiln_c99_new_object(&built)".to_owned()
+                    } else {
+                        format!("kiln_c99_new_object_with_capacity(&built, {count})")
+                    };
                     let mut direct_stores = String::new();
                     for (i, (_, val)) in pairs.iter().enumerate() {
                         direct_stores.push_str(&format!(
-                            " kiln_c99_heap_store_val(obj, &obj->inline_slots[{i}], v{});",
+                            " kiln_c99_heap_store_val(obj, &obj->{slot_array}[{i}], v{});",
                             val.0
                         ));
                     }
@@ -1526,7 +1532,7 @@ pub(super) fn emit_graph_op(
                     }
                     writeln!(
                         output,
-                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = kiln_c99_new_object(&built); if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); const kiln_shape *lit = kiln_c99_slot_key(&lit_shape); {mask_expr}if (KILN_LIKELY(lit != NULL{mask_guard})) {{{direct_stores} obj->shape = (kiln_shape *)lit; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL && KILN_C99_SHAPE_IS_PORTABLE(obj->shape) && obj->shape->property_count == {count} && obj->slots == obj->inline_slots && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {{ kiln_c99_slot_publish(&lit_shape, obj->shape); }} }} v{v} = kiln_val_from_boundary(built); }}"
+                        "    {{ static const kiln_shape *lit_shape = NULL; kiln_value built; int status = {alloc}; if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; kiln_object *obj = kiln_c99_object_of(built); const kiln_shape *lit = kiln_c99_slot_key(&lit_shape); {mask_expr}if (KILN_LIKELY(lit != NULL{mask_guard})) {{{direct_stores} obj->shape = (kiln_shape *)lit; }} else {{{defines} if (status == KILN_C99_OK && obj->shape != NULL && KILN_C99_SHAPE_IS_PORTABLE(obj->shape) && obj->shape->property_count == {count} && obj->slot_capacity >= {count} && !kiln_c99_object_slots_owned(obj) && obj->properties == NULL && obj->elements == NULL && obj->prototype.tag == KILN_VALUE_UNDEFINED) {{ kiln_c99_slot_publish(&lit_shape, obj->shape); }} }} v{v} = kiln_val_from_boundary(built); }}"
                     ).unwrap();
                     return;
                 }

@@ -12,6 +12,7 @@ kiln-module-resolver = { path = "../../semantics/kiln-module-resolver" }
 kiln-data-formats = { workspace = true }
 kiln-builtins = { workspace = true }
 kiln-frontend-oxc = { workspace = true }
+kiln-type-checker = { workspace = true }
 serde = { workspace = true }
 url = { workspace = true }
 

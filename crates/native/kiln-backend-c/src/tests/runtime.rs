@@ -1349,6 +1349,36 @@ int main(void) {{
     if (kiln_c99_callable_prototype(child, &child_prototype) != KILN_C99_OK ||
         kiln_c99_callable_prototype(exports[0], &parent_prototype) != KILN_C99_OK ||
         kiln_c99_object_of(child_prototype)->prototype.bits != parent_prototype.bits) return 38;
+    /* An empty listener query must preserve the HTTP object's fast layout. */
+    {{ kiln_value shaped;
+       if (kiln_c99_new_object(&shaped) != KILN_C99_OK ||
+           kiln_c99_put(NULL, shaped, "method", 6, kiln_c99_number(1.0), 0, &thrown) != KILN_C99_OK ||
+           kiln_c99_put(NULL, shaped, "url", 3, kiln_c99_number(2.0), 0, &thrown) != KILN_C99_OK)
+           return 40;
+       if (kiln_c99_object_of(shaped)->shape == NULL) return 41;
+       args[0] = kiln_c99_copy_text("absent", 6);
+       if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_EMIT,
+                                  shaped, args, 1, 0, &thrown) != KILN_C99_OK ||
+           kiln_c99_truthy(result) || kiln_c99_object_of(shaped)->shape == NULL) return 42;
+       kiln_value table;
+       if (kiln_c99_new_array(&table) != KILN_C99_OK ||
+           kiln_c99_put(NULL, shaped, "@@node:events", 13, table, 0, &thrown) != KILN_C99_OK)
+           return 43;
+       if (kiln_c99_object_of(shaped)->shape == NULL) return 44;
+       args[0] = kiln_c99_copy_text("tick", 4); args[1] = callback;
+       if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_ON,
+                                  shaped, args, 2, 0, &thrown) != KILN_C99_OK ||
+           kiln_c99_object_of(shaped)->shape == NULL) return 45;
+       args[1] = kiln_c99_number(6.0);
+       if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_EMIT,
+                                  shaped, args, 2, 0, &thrown) != KILN_C99_OK ||
+           !kiln_c99_truthy(result) || calls != 6 ||
+           kiln_c99_object_of(shaped)->shape == NULL) return 46;
+       kiln_value visible;
+       if (kiln_c99_own_keys(NULL, shaped, &visible, 0, &thrown) != KILN_C99_OK ||
+           kiln_c99_array_of(visible)->count != 2) return 47;
+       calls = 0;
+    }}
     args[0] = kiln_c99_copy_text("tick", 4); args[1] = callback;
     if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_ON, emitter, args, 2,
                                0, &thrown) != KILN_C99_OK) return 4;

@@ -56,6 +56,16 @@ pub fn apply_source_types(
         .values()
         .map(|signature| (signature.owner_span.start, *signature))
         .collect();
+    let signature_ends: BTreeMap<_, _> = signatures
+        .values()
+        .filter_map(|signature| {
+            signature
+                .owner_span
+                .end
+                .checked_sub(1)
+                .map(|end| (end, *signature))
+        })
+        .collect();
     let mut parameter_types = BTreeMap::new();
     let mut return_types = BTreeMap::new();
     for fact in checked.types.iter().filter(|fact| fact.path == path) {
@@ -74,14 +84,35 @@ pub fn apply_source_types(
         }
     }
     for proto in &mut program.functions {
+        let authored_start = match &module.static_source_provenance {
+            Some(provenance) => provenance.original_offset(proto.span.start),
+            None => Some(proto.span.start),
+        };
         // Static TS execution uses generated JavaScript coordinates. Checker signatures use
         // authored coordinates, so cross this boundary through the frontend's source map.
         let signature = if let Some(provenance) = &module.static_source_provenance {
             provenance
                 .original_offset(proto.span.start)
                 .and_then(|start| signature_starts.get(&start).copied())
+                // A method's executable span includes its key, whereas Oxc's signature span
+                // begins at `(`. The source map preserves its closing brace exactly. Match
+                // that endpoint rather than guessing which nearby declaration owns the key.
+                .or_else(|| {
+                    proto
+                        .is_method
+                        .then(|| proto.span.end.checked_sub(1))
+                        .flatten()
+                        .and_then(|end| provenance.original_offset(end))
+                        .and_then(|end| signature_ends.get(&end).copied())
+                })
         } else {
-            signatures.get(&proto.span).copied()
+            signatures.get(&proto.span).copied().or_else(|| {
+                proto
+                    .is_method
+                    .then(|| proto.span.end.checked_sub(1))
+                    .flatten()
+                    .and_then(|end| signature_ends.get(&end).copied())
+            })
         };
         let Some(signature) = signature else {
             continue;
@@ -94,6 +125,7 @@ pub fn apply_source_types(
             .collect::<Vec<_>>();
         let return_type = return_types
             .get(&signature.owner_span.start)
+            .or_else(|| authored_start.and_then(|start| return_types.get(&start)))
             .copied()
             .flatten();
         if parameters.iter().any(Option::is_some) || return_type.is_some() {

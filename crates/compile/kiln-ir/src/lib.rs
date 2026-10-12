@@ -13,7 +13,9 @@ pub use kiln_string::StringUnits;
 /// Version of the bytecode contract produced by this crate.
 pub const BYTECODE_VERSION: u16 = 18;
 mod source_types;
-pub use source_types::{SOURCE_TYPE_METADATA_VERSION, SourceTypeAnnotations, apply_source_types};
+pub use source_types::{
+    SOURCE_TYPE_METADATA_VERSION, SourceTypeAnnotations, apply_source_types, source_types_enabled,
+};
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

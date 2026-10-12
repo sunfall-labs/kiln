@@ -2693,6 +2693,7 @@ dependencies = [
  "kiln-module-eval",
  "kiln-module-resolver",
  "kiln-runtime",
+ "kiln-type-checker",
  "serde",
  "url",
 ]

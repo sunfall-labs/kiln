@@ -14,6 +14,24 @@ spec.loader.exec_module(compare)
 
 
 class CompareHarnessTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux", "resource counters use Linux procfs")
+    def test_server_resources_exclude_client_cpu_and_report_rss_in_bytes(self):
+        process = subprocess.Popen([
+            sys.executable, "-c",
+            "import time; data=bytearray(16*1024*1024); print('ready', flush=True); time.sleep(30)",
+        ], stdout=subprocess.PIPE, start_new_session=True)
+        try:
+            self.assertEqual(process.stdout.readline(), b"ready\n")
+            before = compare.server_resources(process.pid)
+            deadline = time.process_time() + .2
+            while time.process_time() < deadline: pass
+            after = compare.server_resources(process.pid)
+            self.assertLessEqual(after["cpu_seconds"] - before["cpu_seconds"], 2 / os.sysconf("SC_CLK_TCK"))
+            self.assertGreaterEqual(after["peak_rss_bytes"], 16 * 1024 * 1024)
+        finally:
+            compare.stop_process(process)
+            process.stdout.close()
+
     def test_paired_variants_alternate_order_each_pass(self):
         baseline = ("baseline", {"hello": Path("baseline")})
         candidate = ("candidate", {"hello": Path("candidate")})
