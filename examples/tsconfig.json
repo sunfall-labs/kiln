@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ESNext",
+    "module": "Preserve",
+    "jsx": "react-jsx",
+    "jsxImportSource": "kiln:gui"
+  }
+}

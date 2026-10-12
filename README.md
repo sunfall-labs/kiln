@@ -46,3 +46,11 @@ The renderer refreshes chart SVGs, homepage counts, accessible tables and refere
 idempotent. Reference page prose is maintained in the renderer, while downloadable programs live
 under `examples/`; changed TypeScript samples must pass `kiln check` and both execution modes.
 TS7 means pinned TypeScript 7.0.2 libraries and reference comparisons, not full drop-in compatibility.
+
+`data/npm-compat.json` records all 361 package names, exact versions and smoke outcomes from the
+same source revision. The importer verifies this inventory against the pinned npm manifest.
+The npm reference page offers a progressive search; without JavaScript the full table remains
+available. Keep its native-dev profile, Node reference version and production-profile caveat visible.
+`reference/builtins.html` lists public modules and global extensions, with process, server and JSX
+samples. Linux release archives have no GUI provider; type checking the GUI sample is portable,
+but interactive execution must be checked with the Apple Silicon macOS release.

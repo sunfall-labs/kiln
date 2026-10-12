@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Snapshot conformance baselines from an immutable source-repository revision."""
 import argparse
+import csv
+import io
 import json
 import subprocess
 from pathlib import Path
@@ -27,3 +29,18 @@ for name, counts in baseline['chunks'].items():
 record = dict(release=args.ref, source_commit=commit, test262=baseline, typescript=ts, differential=diff, groups=groups)
 (root / 'data/conformance.json').write_text(json.dumps(record, indent=2) + '\n')
 print(f'Imported pinned baselines from {commit}')
+
+result_path = 'conformance/npm-compat/results/2026-10-11.tsv'
+raw = subprocess.check_output(['git', 'show', f'{commit}:{result_path}'], cwd=args.repo, text=True)
+packages = list(csv.DictReader(io.StringIO(raw), delimiter='\t'))
+manifest = load('conformance/npm-compat/package.json')['dependencies']
+if len(packages) != len(manifest) or len({p['package'] for p in packages}) != len(packages):
+    raise SystemExit('npm results do not match the complete pinned inventory')
+if {p['package']: p['version'] for p in packages} != manifest:
+    raise SystemExit('npm result versions differ from the pinned package manifest')
+record = dict(release=args.ref, source_commit=commit, date='2026-10-11',
+              reference_runtime='Node v26.8.1', profile='native-dev', host_mode='--node',
+              result_path=result_path, methodology_path='conformance/npm-compat/README.md',
+              packages=packages)
+(root / 'data/npm-compat.json').write_text(json.dumps(record, indent=2) + '\n')
+print(f'Imported {len(packages)} pinned npm package results')

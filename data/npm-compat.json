@@ -1,0 +1,1817 @@
+{
+  "release": "v0.1.0",
+  "source_commit": "5814f421d547dce3ff4e3f9e1ab05373558b889f",
+  "date": "2026-10-11",
+  "reference_runtime": "Node v26.8.1",
+  "profile": "native-dev",
+  "host_mode": "--node",
+  "result_path": "conformance/npm-compat/results/2026-10-11.tsv",
+  "methodology_path": "conformance/npm-compat/README.md",
+  "packages": [
+    {
+      "package": "accepts",
+      "version": "1.3.8",
+      "status": "pass"
+    },
+    {
+      "package": "acorn",
+      "version": "8.18.0",
+      "status": "pass"
+    },
+    {
+      "package": "acorn-walk",
+      "version": "8.3.5",
+      "status": "pass"
+    },
+    {
+      "package": "ajv",
+      "version": "8.20.0",
+      "status": "pass"
+    },
+    {
+      "package": "ajv-formats",
+      "version": "3.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "ansi-colors",
+      "version": "4.1.3",
+      "status": "pass"
+    },
+    {
+      "package": "ansi-regex",
+      "version": "6.4.0",
+      "status": "pass"
+    },
+    {
+      "package": "ansi-styles",
+      "version": "7.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "arg",
+      "version": "5.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "arktype",
+      "version": "2.2.5",
+      "status": "pass"
+    },
+    {
+      "package": "array-union",
+      "version": "3.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "arrify",
+      "version": "3.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "assert",
+      "version": "2.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "astring",
+      "version": "1.9.0",
+      "status": "pass"
+    },
+    {
+      "package": "async",
+      "version": "3.2.6",
+      "status": "pass"
+    },
+    {
+      "package": "axios",
+      "version": "1.20.0",
+      "status": "pass"
+    },
+    {
+      "package": "@babel/core",
+      "version": "8.0.6",
+      "status": "pass"
+    },
+    {
+      "package": "@babel/generator",
+      "version": "8.0.6",
+      "status": "pass"
+    },
+    {
+      "package": "@babel/parser",
+      "version": "7.29.9",
+      "status": "pass"
+    },
+    {
+      "package": "@babel/runtime",
+      "version": "8.0.5",
+      "status": "pass"
+    },
+    {
+      "package": "@babel/traverse",
+      "version": "8.0.6",
+      "status": "pass"
+    },
+    {
+      "package": "base64-js",
+      "version": "1.5.1",
+      "status": "pass"
+    },
+    {
+      "package": "bcryptjs",
+      "version": "3.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "big.js",
+      "version": "7.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "bignumber.js",
+      "version": "11.1.5",
+      "status": "pass"
+    },
+    {
+      "package": "bluebird",
+      "version": "3.7.2",
+      "status": "pass"
+    },
+    {
+      "package": "blueimp-md5",
+      "version": "2.19.0",
+      "status": "pass"
+    },
+    {
+      "package": "bn.js",
+      "version": "5.2.5",
+      "status": "pass"
+    },
+    {
+      "package": "boxen",
+      "version": "9.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "braces",
+      "version": "3.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "buffer",
+      "version": "6.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "bytes",
+      "version": "3.1.2",
+      "status": "pass"
+    },
+    {
+      "package": "cac",
+      "version": "7.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "camelcase",
+      "version": "9.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "chalk",
+      "version": "6.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "change-case",
+      "version": "5.4.4",
+      "status": "pass"
+    },
+    {
+      "package": "chroma-js",
+      "version": "3.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "classnames",
+      "version": "2.5.1",
+      "status": "pass"
+    },
+    {
+      "package": "class-variance-authority",
+      "version": "0.7.1",
+      "status": "pass"
+    },
+    {
+      "package": "cli-table3",
+      "version": "0.6.5",
+      "status": "pass"
+    },
+    {
+      "package": "cli-truncate",
+      "version": "6.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "clone",
+      "version": "2.1.2",
+      "status": "pass"
+    },
+    {
+      "package": "clsx",
+      "version": "2.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "color",
+      "version": "5.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "color-convert",
+      "version": "3.1.3",
+      "status": "pass"
+    },
+    {
+      "package": "colord",
+      "version": "2.10.0",
+      "status": "pass"
+    },
+    {
+      "package": "colorette",
+      "version": "2.0.20",
+      "status": "pass"
+    },
+    {
+      "package": "color-name",
+      "version": "2.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "commander",
+      "version": "15.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "common-tags",
+      "version": "1.8.2",
+      "status": "pass"
+    },
+    {
+      "package": "compare-versions",
+      "version": "6.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "complex.js",
+      "version": "2.4.3",
+      "status": "pass"
+    },
+    {
+      "package": "consola",
+      "version": "3.4.2",
+      "status": "pass"
+    },
+    {
+      "package": "content-type",
+      "version": "3.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "convert-units",
+      "version": "2.3.4",
+      "status": "pass"
+    },
+    {
+      "package": "cookie",
+      "version": "2.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "cookie-signature",
+      "version": "1.2.2",
+      "status": "pass"
+    },
+    {
+      "package": "core-js",
+      "version": "3.50.0",
+      "status": "pass"
+    },
+    {
+      "package": "cron-parser",
+      "version": "5.10.1",
+      "status": "pass"
+    },
+    {
+      "package": "crypto-js",
+      "version": "4.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "cssesc",
+      "version": "3.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "cssom",
+      "version": "0.5.0",
+      "status": "pass"
+    },
+    {
+      "package": "css-tree",
+      "version": "3.2.1",
+      "status": "pass"
+    },
+    {
+      "package": "css-what",
+      "version": "8.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "csv-parse",
+      "version": "7.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "csv-stringify",
+      "version": "6.9.0",
+      "status": "pass"
+    },
+    {
+      "package": "culori",
+      "version": "4.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "currency.js",
+      "version": "2.0.4",
+      "status": "pass"
+    },
+    {
+      "package": "d3-array",
+      "version": "3.2.4",
+      "status": "pass"
+    },
+    {
+      "package": "d3-color",
+      "version": "3.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "d3-format",
+      "version": "3.1.2",
+      "status": "pass"
+    },
+    {
+      "package": "d3-interpolate",
+      "version": "3.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "d3-scale",
+      "version": "4.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "d3-shape",
+      "version": "3.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "d3-time-format",
+      "version": "4.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "date-fns",
+      "version": "4.4.0",
+      "status": "pass"
+    },
+    {
+      "package": "date-fns-tz",
+      "version": "3.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "@date-fns/utc",
+      "version": "2.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "dayjs",
+      "version": "1.11.23",
+      "status": "pass"
+    },
+    {
+      "package": "debug",
+      "version": "4.4.3",
+      "status": "pass"
+    },
+    {
+      "package": "decamelize",
+      "version": "6.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "decimal.js",
+      "version": "10.6.0",
+      "status": "pass"
+    },
+    {
+      "package": "dedent",
+      "version": "1.7.2",
+      "status": "pass"
+    },
+    {
+      "package": "deep-equal",
+      "version": "2.2.3",
+      "status": "pass"
+    },
+    {
+      "package": "deepmerge",
+      "version": "4.3.1",
+      "status": "pass"
+    },
+    {
+      "package": "defu",
+      "version": "6.1.7",
+      "status": "pass"
+    },
+    {
+      "package": "dequal",
+      "version": "2.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "diff",
+      "version": "9.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "dinero.js",
+      "version": "2.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "dotenv",
+      "version": "18.0.4",
+      "status": "pass"
+    },
+    {
+      "package": "dot-prop",
+      "version": "10.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "effect",
+      "version": "3.22.2",
+      "status": "pass"
+    },
+    {
+      "package": "ejs",
+      "version": "6.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "emittery",
+      "version": "2.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "emoji-regex",
+      "version": "11.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "entities",
+      "version": "8.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "escape-goat",
+      "version": "4.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "escape-html",
+      "version": "1.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "escape-string-regexp",
+      "version": "5.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "escodegen",
+      "version": "2.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "@eslint-community/regexpp",
+      "version": "4.12.2",
+      "status": "pass"
+    },
+    {
+      "package": "espree",
+      "version": "11.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "esprima",
+      "version": "4.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "esquery",
+      "version": "1.7.0",
+      "status": "pass"
+    },
+    {
+      "package": "es-toolkit",
+      "version": "1.52.0",
+      "status": "pass"
+    },
+    {
+      "package": "estraverse",
+      "version": "5.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "eta",
+      "version": "4.6.0",
+      "status": "pass"
+    },
+    {
+      "package": "etag",
+      "version": "1.8.1",
+      "status": "pass"
+    },
+    {
+      "package": "eventemitter3",
+      "version": "5.0.4",
+      "status": "pass"
+    },
+    {
+      "package": "events",
+      "version": "3.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "eventsource-parser",
+      "version": "4.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "express",
+      "version": "5.2.1",
+      "status": "pass"
+    },
+    {
+      "package": "fast-deep-equal",
+      "version": "3.1.3",
+      "status": "pass"
+    },
+    {
+      "package": "fast-diff",
+      "version": "1.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "fastest-levenshtein",
+      "version": "1.0.16",
+      "status": "pass"
+    },
+    {
+      "package": "fastify",
+      "version": "5.12.5",
+      "status": "pass"
+    },
+    {
+      "package": "fast-json-patch",
+      "version": "3.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "fast-json-stable-stringify",
+      "version": "2.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "fast-querystring",
+      "version": "1.1.2",
+      "status": "pass"
+    },
+    {
+      "package": "fast-safe-stringify",
+      "version": "2.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "fast-xml-parser",
+      "version": "5.11.2",
+      "status": "pass"
+    },
+    {
+      "package": "fflate",
+      "version": "0.8.3",
+      "status": "pass"
+    },
+    {
+      "package": "figures",
+      "version": "6.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "filesize",
+      "version": "11.0.25",
+      "status": "pass"
+    },
+    {
+      "package": "filter-obj",
+      "version": "6.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "flat",
+      "version": "6.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "form-data",
+      "version": "4.0.6",
+      "status": "pass"
+    },
+    {
+      "package": "fp-ts",
+      "version": "2.16.11",
+      "status": "pass"
+    },
+    {
+      "package": "fraction.js",
+      "version": "5.3.4",
+      "status": "pass"
+    },
+    {
+      "package": "fresh",
+      "version": "0.5.2",
+      "status": "pass"
+    },
+    {
+      "package": "gl-matrix",
+      "version": "3.4.4",
+      "status": "pass"
+    },
+    {
+      "package": "glob",
+      "version": "13.0.6",
+      "status": "pass"
+    },
+    {
+      "package": "glob-parent",
+      "version": "6.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "h3",
+      "version": "2.0.1-rc.32",
+      "status": "pass"
+    },
+    {
+      "package": "handlebars",
+      "version": "4.7.9",
+      "status": "pass"
+    },
+    {
+      "package": "hashids",
+      "version": "2.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "hash-sum",
+      "version": "2.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "he",
+      "version": "1.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "hono",
+      "version": "4.13.11",
+      "status": "pass"
+    },
+    {
+      "package": "hookable",
+      "version": "6.1.2",
+      "status": "pass"
+    },
+    {
+      "package": "htm",
+      "version": "3.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "html-entities",
+      "version": "2.6.0",
+      "status": "pass"
+    },
+    {
+      "package": "htmlparser2",
+      "version": "12.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "http-errors",
+      "version": "2.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "humanize-duration",
+      "version": "3.35.0",
+      "status": "pass"
+    },
+    {
+      "package": "@iarna/toml",
+      "version": "2.2.5",
+      "status": "pass"
+    },
+    {
+      "package": "iconv-lite",
+      "version": "0.7.3",
+      "status": "pass"
+    },
+    {
+      "package": "ieee754",
+      "version": "1.2.1",
+      "status": "pass"
+    },
+    {
+      "package": "immer",
+      "version": "11.1.18",
+      "status": "pass"
+    },
+    {
+      "package": "immutable",
+      "version": "5.1.9",
+      "status": "pass"
+    },
+    {
+      "package": "indent-string",
+      "version": "5.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "inferno",
+      "version": "9.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "inherits",
+      "version": "2.0.4",
+      "status": "pass"
+    },
+    {
+      "package": "ini",
+      "version": "7.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "invariant",
+      "version": "2.2.4",
+      "status": "pass"
+    },
+    {
+      "package": "is-glob",
+      "version": "4.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "is-number",
+      "version": "7.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "is-plain-object",
+      "version": "5.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "is-what",
+      "version": "5.5.6",
+      "status": "pass"
+    },
+    {
+      "package": "itty-router",
+      "version": "5.0.24",
+      "status": "pass"
+    },
+    {
+      "package": "joi",
+      "version": "18.2.9",
+      "status": "pass"
+    },
+    {
+      "package": "jose",
+      "version": "6.2.12",
+      "status": "pass"
+    },
+    {
+      "package": "jotai",
+      "version": "3.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "@jridgewell/sourcemap-codec",
+      "version": "1.6.0",
+      "status": "pass"
+    },
+    {
+      "package": "js-base64",
+      "version": "3.9.4",
+      "status": "pass"
+    },
+    {
+      "package": "jsbi",
+      "version": "4.3.2",
+      "status": "pass"
+    },
+    {
+      "package": "json5",
+      "version": "2.2.3",
+      "status": "pass"
+    },
+    {
+      "package": "jsonc-parser",
+      "version": "3.3.1",
+      "status": "pass"
+    },
+    {
+      "package": "jsonpointer",
+      "version": "5.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "json-schema-traverse",
+      "version": "1.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "json-stable-stringify",
+      "version": "1.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "jsonwebtoken",
+      "version": "9.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "js-sha256",
+      "version": "1.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "js-sha3",
+      "version": "0.13.0",
+      "status": "pass"
+    },
+    {
+      "package": "js-tokens",
+      "version": "10.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "js-yaml",
+      "version": "5.4.2",
+      "status": "pass"
+    },
+    {
+      "package": "just-diff",
+      "version": "6.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "keyv",
+      "version": "5.6.0",
+      "status": "pass"
+    },
+    {
+      "package": "kind-of",
+      "version": "6.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "kleur",
+      "version": "4.1.5",
+      "status": "pass"
+    },
+    {
+      "package": "klona",
+      "version": "2.0.6",
+      "status": "pass"
+    },
+    {
+      "package": "koa",
+      "version": "3.2.1",
+      "status": "pass"
+    },
+    {
+      "package": "kolorist",
+      "version": "1.8.0",
+      "status": "pass"
+    },
+    {
+      "package": "ky",
+      "version": "2.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "leven",
+      "version": "4.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "linkifyjs",
+      "version": "4.3.3",
+      "status": "pass"
+    },
+    {
+      "package": "liquidjs",
+      "version": "10.29.0",
+      "status": "pass"
+    },
+    {
+      "package": "lodash",
+      "version": "4.18.1",
+      "status": "pass"
+    },
+    {
+      "package": "lodash.clonedeep",
+      "version": "4.5.0",
+      "status": "pass"
+    },
+    {
+      "package": "lodash-es",
+      "version": "4.18.1",
+      "status": "pass"
+    },
+    {
+      "package": "lodash.get",
+      "version": "4.4.2",
+      "status": "pass"
+    },
+    {
+      "package": "lodash.isequal",
+      "version": "4.5.0",
+      "status": "pass"
+    },
+    {
+      "package": "lodash.merge",
+      "version": "4.6.2",
+      "status": "pass"
+    },
+    {
+      "package": "loglevel",
+      "version": "1.9.2",
+      "status": "pass"
+    },
+    {
+      "package": "long",
+      "version": "5.3.2",
+      "status": "pass"
+    },
+    {
+      "package": "lru-cache",
+      "version": "11.5.3",
+      "status": "pass"
+    },
+    {
+      "package": "luxon",
+      "version": "3.7.2",
+      "status": "pass"
+    },
+    {
+      "package": "lz-string",
+      "version": "1.5.0",
+      "status": "pass"
+    },
+    {
+      "package": "magic-string",
+      "version": "1.4.2",
+      "status": "pass"
+    },
+    {
+      "package": "map-obj",
+      "version": "6.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "markdown-it",
+      "version": "15.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "marked",
+      "version": "18.0.14",
+      "status": "pass"
+    },
+    {
+      "package": "mathjs",
+      "version": "15.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "md5",
+      "version": "2.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "merge-anything",
+      "version": "6.0.8",
+      "status": "pass"
+    },
+    {
+      "package": "meriyah",
+      "version": "7.3.3",
+      "status": "pass"
+    },
+    {
+      "package": "micromark",
+      "version": "4.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "micromatch",
+      "version": "4.0.8",
+      "status": "pass"
+    },
+    {
+      "package": "mime",
+      "version": "4.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "mime-db",
+      "version": "1.54.0",
+      "status": "pass"
+    },
+    {
+      "package": "mime-types",
+      "version": "3.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "minimatch",
+      "version": "10.2.6",
+      "status": "pass"
+    },
+    {
+      "package": "minimist",
+      "version": "1.2.8",
+      "status": "pass"
+    },
+    {
+      "package": "mitt",
+      "version": "3.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "ml-matrix",
+      "version": "6.15.0",
+      "status": "pass"
+    },
+    {
+      "package": "mobx",
+      "version": "7.0.5",
+      "status": "pass"
+    },
+    {
+      "package": "moment",
+      "version": "2.31.0",
+      "status": "pass"
+    },
+    {
+      "package": "mri",
+      "version": "1.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "ms",
+      "version": "2.1.3",
+      "status": "pass"
+    },
+    {
+      "package": "mustache",
+      "version": "4.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "nanoevents",
+      "version": "10.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "nanoid",
+      "version": "6.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "nanostores",
+      "version": "1.5.4",
+      "status": "pass"
+    },
+    {
+      "package": "negotiator",
+      "version": "1.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "neverthrow",
+      "version": "8.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "@noble/curves",
+      "version": "2.4.0",
+      "status": "pass"
+    },
+    {
+      "package": "@noble/hashes",
+      "version": "2.4.0",
+      "status": "pass"
+    },
+    {
+      "package": "node-cache",
+      "version": "5.1.2",
+      "status": "pass"
+    },
+    {
+      "package": "normalize-path",
+      "version": "3.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "numeral",
+      "version": "2.0.6",
+      "status": "pass"
+    },
+    {
+      "package": "nunjucks",
+      "version": "3.2.4",
+      "status": "pass"
+    },
+    {
+      "package": "object-hash",
+      "version": "3.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "object-path",
+      "version": "0.11.8",
+      "status": "pass"
+    },
+    {
+      "package": "ofetch",
+      "version": "1.5.1",
+      "status": "pass"
+    },
+    {
+      "package": "pako",
+      "version": "3.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "papaparse",
+      "version": "5.7.0",
+      "status": "pass"
+    },
+    {
+      "package": "@paralleldrive/cuid2",
+      "version": "3.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "parse5",
+      "version": "8.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "path-browserify",
+      "version": "1.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "path-is-absolute",
+      "version": "1.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "path-to-regexp",
+      "version": "8.4.2",
+      "status": "pass"
+    },
+    {
+      "package": "picocolors",
+      "version": "1.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "picomatch",
+      "version": "4.0.7",
+      "status": "pass"
+    },
+    {
+      "package": "pino",
+      "version": "10.3.1",
+      "status": "pass"
+    },
+    {
+      "package": "p-limit",
+      "version": "7.3.3",
+      "status": "pass"
+    },
+    {
+      "package": "pluralize",
+      "version": "8.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "p-map",
+      "version": "7.0.8",
+      "status": "pass"
+    },
+    {
+      "package": "postcss",
+      "version": "8.5.28",
+      "status": "pass"
+    },
+    {
+      "package": "p-queue",
+      "version": "9.3.3",
+      "status": "pass"
+    },
+    {
+      "package": "preact",
+      "version": "10.29.8",
+      "status": "pass"
+    },
+    {
+      "package": "preact-render-to-string",
+      "version": "6.7.0",
+      "status": "pass"
+    },
+    {
+      "package": "@preact/signals-core",
+      "version": "1.14.4",
+      "status": "pass"
+    },
+    {
+      "package": "p-retry",
+      "version": "8.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "prettier",
+      "version": "3.9.9",
+      "status": "pass"
+    },
+    {
+      "package": "pretty-bytes",
+      "version": "7.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "pretty-ms",
+      "version": "9.3.1",
+      "status": "pass"
+    },
+    {
+      "package": "process",
+      "version": "0.11.10",
+      "status": "pass"
+    },
+    {
+      "package": "prop-types",
+      "version": "15.8.1",
+      "status": "pass"
+    },
+    {
+      "package": "pubsub-js",
+      "version": "1.9.5",
+      "status": "pass"
+    },
+    {
+      "package": "punycode",
+      "version": "2.3.1",
+      "status": "pass"
+    },
+    {
+      "package": "qs",
+      "version": "6.16.0",
+      "status": "pass"
+    },
+    {
+      "package": "query-string",
+      "version": "9.5.1",
+      "status": "pass"
+    },
+    {
+      "package": "querystring-es3",
+      "version": "0.2.1",
+      "status": "pass"
+    },
+    {
+      "package": "querystringify",
+      "version": "2.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "quick-lru",
+      "version": "7.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "radash",
+      "version": "12.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "rambda",
+      "version": "11.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "ramda",
+      "version": "0.32.0",
+      "status": "pass"
+    },
+    {
+      "package": "random-seed",
+      "version": "0.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "range-parser",
+      "version": "1.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "react",
+      "version": "19.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "react-dom",
+      "version": "19.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "readable-stream",
+      "version": "4.7.0",
+      "status": "pass"
+    },
+    {
+      "package": "recast",
+      "version": "0.24.0",
+      "status": "pass"
+    },
+    {
+      "package": "redux",
+      "version": "5.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "@reduxjs/toolkit",
+      "version": "2.13.0",
+      "status": "pass"
+    },
+    {
+      "package": "regenerator-runtime",
+      "version": "0.14.1",
+      "status": "pass"
+    },
+    {
+      "package": "remeda",
+      "version": "2.50.0",
+      "status": "pass"
+    },
+    {
+      "package": "reselect",
+      "version": "5.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "rfdc",
+      "version": "1.4.1",
+      "status": "pass"
+    },
+    {
+      "package": "rrule",
+      "version": "2.8.1",
+      "status": "pass"
+    },
+    {
+      "package": "rxjs",
+      "version": "7.8.2",
+      "status": "pass"
+    },
+    {
+      "package": "safe-buffer",
+      "version": "5.2.1",
+      "status": "pass"
+    },
+    {
+      "package": "safe-stable-stringify",
+      "version": "2.5.0",
+      "status": "pass"
+    },
+    {
+      "package": "sanitize-html",
+      "version": "2.17.7",
+      "status": "pass"
+    },
+    {
+      "package": "sax",
+      "version": "1.6.1",
+      "status": "pass"
+    },
+    {
+      "package": "seedrandom",
+      "version": "3.0.5",
+      "status": "pass"
+    },
+    {
+      "package": "semver",
+      "version": "7.8.5",
+      "status": "pass"
+    },
+    {
+      "package": "set-cookie-parser",
+      "version": "3.1.2",
+      "status": "pass"
+    },
+    {
+      "package": "showdown",
+      "version": "2.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "simplex-noise",
+      "version": "4.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "@sindresorhus/slugify",
+      "version": "3.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "slice-ansi",
+      "version": "9.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "slugify",
+      "version": "1.6.9",
+      "status": "pass"
+    },
+    {
+      "package": "smol-toml",
+      "version": "1.9.0",
+      "status": "pass"
+    },
+    {
+      "package": "solid-js",
+      "version": "1.9.15",
+      "status": "pass"
+    },
+    {
+      "package": "sort-keys",
+      "version": "6.0.1",
+      "status": "pass"
+    },
+    {
+      "package": "source-map",
+      "version": "0.8.0",
+      "status": "pass"
+    },
+    {
+      "package": "source-map-js",
+      "version": "1.2.1",
+      "status": "pass"
+    },
+    {
+      "package": "spark-md5",
+      "version": "3.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "spdx-expression-parse",
+      "version": "5.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "spdx-license-ids",
+      "version": "3.0.24",
+      "status": "pass"
+    },
+    {
+      "package": "sprintf-js",
+      "version": "1.1.3",
+      "status": "pass"
+    },
+    {
+      "package": "statuses",
+      "version": "2.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "stream-browserify",
+      "version": "3.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "string_decoder",
+      "version": "1.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "string-similarity",
+      "version": "4.0.4",
+      "status": "pass"
+    },
+    {
+      "package": "string-width",
+      "version": "8.3.0",
+      "status": "pass"
+    },
+    {
+      "package": "strip-ansi",
+      "version": "7.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "strip-indent",
+      "version": "4.1.1",
+      "status": "pass"
+    },
+    {
+      "package": "striptags",
+      "version": "3.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "sucrase",
+      "version": "3.35.1",
+      "status": "pass"
+    },
+    {
+      "package": "superstruct",
+      "version": "2.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "svelte",
+      "version": "5.57.1",
+      "status": "pass"
+    },
+    {
+      "package": "tailwind-merge",
+      "version": "3.7.0",
+      "status": "pass"
+    },
+    {
+      "package": "@tanstack/query-core",
+      "version": "5.104.0",
+      "status": "pass"
+    },
+    {
+      "package": "tapable",
+      "version": "2.3.3",
+      "status": "pass"
+    },
+    {
+      "package": "terser",
+      "version": "5.51.2",
+      "status": "pass"
+    },
+    {
+      "package": "text-table",
+      "version": "0.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "through2",
+      "version": "5.0.11",
+      "status": "pass"
+    },
+    {
+      "package": "timeago.js",
+      "version": "4.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "tinycolor2",
+      "version": "1.6.0",
+      "status": "pass"
+    },
+    {
+      "package": "tiny-emitter",
+      "version": "2.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "tiny-invariant",
+      "version": "1.3.3",
+      "status": "pass"
+    },
+    {
+      "package": "title-case",
+      "version": "4.3.2",
+      "status": "pass"
+    },
+    {
+      "package": "toml",
+      "version": "5.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "trim-newlines",
+      "version": "5.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "tslib",
+      "version": "2.8.1",
+      "status": "pass"
+    },
+    {
+      "package": "ts-pattern",
+      "version": "5.9.0",
+      "status": "pass"
+    },
+    {
+      "package": "turndown",
+      "version": "7.2.4",
+      "status": "pass"
+    },
+    {
+      "package": "tweetnacl",
+      "version": "1.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "type-detect",
+      "version": "4.1.0",
+      "status": "pass"
+    },
+    {
+      "package": "typescript",
+      "version": "6.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "uglify-js",
+      "version": "3.19.3",
+      "status": "pass"
+    },
+    {
+      "package": "ulid",
+      "version": "3.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "underscore",
+      "version": "1.13.8",
+      "status": "pass"
+    },
+    {
+      "package": "upm",
+      "version": "1.3.1",
+      "status": "pass"
+    },
+    {
+      "package": "url",
+      "version": "0.11.4",
+      "status": "pass"
+    },
+    {
+      "package": "url-parse",
+      "version": "1.5.10",
+      "status": "pass"
+    },
+    {
+      "package": "util",
+      "version": "0.12.5",
+      "status": "pass"
+    },
+    {
+      "package": "util-deprecate",
+      "version": "1.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "uuid",
+      "version": "14.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "valibot",
+      "version": "1.5.0",
+      "status": "pass"
+    },
+    {
+      "package": "validate-npm-package-name",
+      "version": "8.0.0",
+      "status": "pass"
+    },
+    {
+      "package": "validator",
+      "version": "13.15.35",
+      "status": "pass"
+    },
+    {
+      "package": "valtio",
+      "version": "2.3.2",
+      "status": "pass"
+    },
+    {
+      "package": "vary",
+      "version": "1.1.2",
+      "status": "pass"
+    },
+    {
+      "package": "vue",
+      "version": "3.5.43",
+      "status": "pass"
+    },
+    {
+      "package": "@vue/reactivity",
+      "version": "3.5.43",
+      "status": "pass"
+    },
+    {
+      "package": "warning",
+      "version": "4.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "winston",
+      "version": "3.19.0",
+      "status": "pass"
+    },
+    {
+      "package": "word-wrap",
+      "version": "1.2.5",
+      "status": "pass"
+    },
+    {
+      "package": "wrap-ansi",
+      "version": "10.0.2",
+      "status": "pass"
+    },
+    {
+      "package": "ws",
+      "version": "8.22.0",
+      "status": "pass"
+    },
+    {
+      "package": "xmlbuilder2",
+      "version": "4.0.3",
+      "status": "pass"
+    },
+    {
+      "package": "xstate",
+      "version": "5.33.2",
+      "status": "pass"
+    },
+    {
+      "package": "yaml",
+      "version": "2.9.1",
+      "status": "pass"
+    },
+    {
+      "package": "yargs",
+      "version": "18.2.0",
+      "status": "pass"
+    },
+    {
+      "package": "yup",
+      "version": "1.7.1",
+      "status": "pass"
+    },
+    {
+      "package": "zod",
+      "version": "4.6.5",
+      "status": "pass"
+    },
+    {
+      "package": "zustand",
+      "version": "5.0.15",
+      "status": "pass"
+    }
+  ]
+}

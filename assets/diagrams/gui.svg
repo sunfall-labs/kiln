@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 290" role="img" aria-labelledby="title desc">
+<title id="title">Native GUI from TypeScript and JSX</title><desc id="desc">Signals and handlers update kiln widgets. A host dispatches widget operations to macOS AppKit or an in-memory headless test tree. The Linux release omits the GUI provider.</desc>
+<g fill="#faf8f3" stroke="#c5ceba"><rect x="15" y="85" width="210" height="100"/><rect x="295" y="85" width="210" height="100"/><rect x="575" y="20" width="210" height="100"/><rect x="575" y="170" width="210" height="100"/></g>
+<g fill="#292d24" font-family="sans-serif" font-size="18" text-anchor="middle"><text x="120" y="125">TypeScript + JSX</text><text x="400" y="125">Reactive widgets</text><text x="680" y="60">AppKit</text><text x="680" y="210">Headless host</text></g>
+<g fill="#73796b" font-family="sans-serif" font-size="13" text-anchor="middle"><text x="120" y="153">Signals · handlers · types</text><text x="400" y="153">State → widget operations</text><text x="680" y="88">Apple Silicon macOS</text><text x="680" y="238">In-memory test tree</text></g>
+<g stroke="#b6462b" stroke-width="2" fill="none"><path d="M225 135H280m-7-5 7 5-7 5M505 135H540V70H560m-7-5 7 5-7 5M540 135V220H560m-7-5 7 5-7 5"/></g></svg>
