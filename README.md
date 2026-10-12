@@ -148,7 +148,9 @@ epoll anywhere and `KILN_IO=uring` asks for the ring below the floor. See
 
 ## Installing
 
-Each release is a binary for macOS on Apple silicon and Linux (glibc) on x86_64 and arm64:
+Each release is a binary for macOS on Apple silicon and Linux (glibc) on x86_64. Linux on arm64
+is next: its native programs crash at startup today (the value layout keeps 47-bit pointers, and
+arm64 Linux places programs above that), so it has no release yet.
 
 ```sh
 curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install.sh | sh

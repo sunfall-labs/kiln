@@ -11,9 +11,11 @@ name: Release
 # Actions are pinned to commit SHAs (the tag is in the comment beside each): a release must not
 # change because someone moved a tag. Bump a pin deliberately, in its own commit.
 #
-# Targets are the ones the project measures: macOS on Apple silicon and Linux (glibc) on x86_64
-# and arm64. Intel macOS and Windows are not built: no one measures them, and ADR 0018's target
-# matrix was never adopted. Linux archives carry no GUI provider (the bridge is AppKit today).
+# Targets are the ones the project measures: macOS on Apple silicon and Linux (glibc) on x86_64.
+# Linux arm64 is not built yet: its native programs crash at startup, because the value layout
+# keeps 47-bit pointers and arm64 Linux maps the program above 2^47
+# (docs/issues/arm64-linux-48-bit-pointers.md). Intel macOS and Windows are not built: no one
+# measures them, and ADR 0018's target matrix was never adopted. Linux archives carry no GUI provider (the bridge is AppKit today).
 
 on:
   push:
@@ -74,8 +76,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             # The oldest supported image, so the binary's glibc floor is as low as it can be.
             runner: ubuntu-22.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

@@ -28,7 +28,9 @@ die() {
 case "$(uname -s)-$(uname -m)" in
 Darwin-arm64) target=aarch64-apple-darwin ;;
 Linux-x86_64) target=x86_64-unknown-linux-gnu ;;
-Linux-aarch64 | Linux-arm64) target=aarch64-unknown-linux-gnu ;;
+Linux-aarch64 | Linux-arm64)
+	die "Linux on arm64 is not supported yet (native programs need 48-bit pointer boxing); it is the next platform -- build from source to use the interpreter"
+	;;
 *) die "no release is built for $(uname -s) $(uname -m); build from source (see README.md)" ;;
 esac
 
