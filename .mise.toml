@@ -141,3 +141,7 @@ run = "./scripts/ts_conformance.py"
 [tasks.ts-conformance-update]
 description = "Regenerate the TypeScript conformance baseline (deliberate: the diff is the record)"
 run = "./scripts/ts_conformance.py --update"
+
+[tasks.fuzz-security]
+description = "Bounded JSON, HTTP framing and shared-graph boundary fuzz campaigns"
+run = "./scripts/fuzz-security.sh"

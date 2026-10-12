@@ -36,8 +36,9 @@ compiler developer's `cargo check --workspace` loop.
 
 ## Commands
 
-Sanitizers are not used and are not wanted here — the bugs being
-looked for are wrong answers, not memory errors, and every engine is safe Rust.
+The differential targets below primarily look for wrong answers. The native runtime and
+shared-graph arena also contain unsafe code; boundary campaigns in [`security/`](security/README.md)
+support sanitizer instrumentation and exercise malformed inputs.
 
 ```sh
 cd fuzz
@@ -73,7 +74,7 @@ Observed: 201,160 runs in 21 s for the memo oracle (coverage 1061, corpus 420), 
 the plain RNG engine and buys a corpus that keeps whatever reached new code.
 
 `--sanitizer NONE` is used throughout: cargo-bolero's default `--sanitizer address` needs
-`-Zsanitizer` and an extra instrumented build, and ASan finds nothing in safe Rust. The repository
+`-Zsanitizer` and an extra instrumented build, and is optional for the semantic campaigns below. Use ASan for the boundary campaigns. The repository
 pins a nightly toolchain (`rust-toolchain.toml`), which `fuzz/` inherits, but the flag keeps the
 run independent of sanitizer support.
 

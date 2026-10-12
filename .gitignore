@@ -61,3 +61,6 @@ conformance/npm-compat/expected/
 
 # Release archives written by scripts/package-release.sh.
 /dist/
+
+# Standalone security boundary campaigns have their own build and minimization output.
+/fuzz/security/target/

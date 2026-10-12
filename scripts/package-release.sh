@@ -94,7 +94,18 @@ mkdir -p "$stage/bin" "$stage/lib/kiln" "$output"
 kiln_say "kiln $version ($commit) for $target"
 
 kiln_say "building the CLI"
-KILN_BUILD_COMMIT=$commit KILN_BUILD_TARGET=$target \
+# Remap only the CLI build. The provider packager owns its exact Rust flags and compatibility
+# identity, and deliberately clears this override. Encode arguments so checkout paths with
+# spaces still form one rustc argument. Preserve caller flags (encoded flags take precedence).
+cli_rustflags=$(python3 - "$root" "${CARGO_HOME:-$HOME/.cargo}" <<'PYFLAGS'
+import os, shlex, sys
+flags = (os.environ["CARGO_ENCODED_RUSTFLAGS"].split("\x1f")
+         if os.environ.get("CARGO_ENCODED_RUSTFLAGS") else shlex.split(os.environ.get("RUSTFLAGS", "")))
+flags += [f"--remap-path-prefix={sys.argv[1]}=/kiln", f"--remap-path-prefix={sys.argv[2]}=/cargo"]
+print("\x1f".join(flags))
+PYFLAGS
+)
+KILN_BUILD_COMMIT=$commit KILN_BUILD_TARGET=$target CARGO_ENCODED_RUSTFLAGS=$cli_rustflags \
 	kiln_cargo build --release --locked -p kiln-cli --bin kiln
 cp target/release/kiln "$stage/bin/kiln"
 # The release profile keeps line tables (`debug = 1`) for local profiling; shipped, they are
@@ -136,7 +147,7 @@ for variant in "${selected[@]}"; do
 	}
 done
 
-cp LICENSE README.md "$stage/"
+cp LICENSE README.md SECURITY.md "$stage/"
 kiln_say "collecting third-party licenses"
 python3 scripts/third-party-licenses.py "$stage/THIRD-PARTY-LICENSES.md"
 

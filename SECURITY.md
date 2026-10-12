@@ -49,12 +49,21 @@ The language-level boundaries kiln does keep:
   every action pinned to a commit SHA, and only after `cargo deny` has checked the dependency
   tree against `deny.toml`: no known advisory without a recorded reason, no licence outside the
   allow list, and no source other than crates.io. Each archive is published with a SHA-256
-  checksum.
+  checksum. Public releases also carry a signed Sigstore build provenance attestation,
+  verified before publication against the release workflow and source commit. Verify a downloaded
+  archive with `gh attestation verify <archive.tar.gz> --repo sunfall-labs/kiln` (see
+  [GitHub’s verification documentation](https://cli.github.com/manual/gh_attestation_verify)).
+- **Build paths.** The shipped CLI remaps Rust checkout and Cargo dependency paths to `/kiln` and
+  `/cargo`. Provider archives retain the flags required by their compatibility identity. Debug
+  sections are stripped from the CLI while function symbols remain available for backtraces.
 
 ## Known limitations
 
 - kiln's native runtime includes a large hand-written C runtime and Rust code with `unsafe`
   blocks at the boundary between them. They are tested by the conformance corpora, by collector
   stress runs and by a differential fuzzer (`fuzz/`), but they have not had an external audit.
-- Release archives are not yet signed and carry no provenance attestation; verify them against
-  the published checksums.
+- Provenance identifies the workflow and source that produced an archive; it does not certify
+  that the source is free of vulnerabilities. Private packaging trials have no public attestation
+  and cannot pass the public release preflight.
+- JSON parsing, HTTP framing and shared-graph reads have dedicated bounded fuzz targets in
+  `fuzz/security/`. These complement conformance checks; they are not an external security audit.

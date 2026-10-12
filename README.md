@@ -163,6 +163,9 @@ archive (`lib/kiln/`), so `kiln build` needs only a C compiler -- Clang, GCC, cc
 Rust toolchain; `kiln run` needs neither. Each archive is checked against the release's
 `SHA256SUMS` before it is unpacked. To unpack one by hand, keep its `bin/` and `lib/` together:
 the binary finds its providers at `bin/../lib/kiln`, through a symlink if you make one.
+Public release archives also have signed build provenance. Before unpacking a downloaded archive,
+verify it with `gh attestation verify <archive.tar.gz> --repo sunfall-labs/kiln`; this binds its
+contents to the source and release workflow, beyond checking the download checksum.
 
 Not built: Intel macOS and Windows. Linux releases carry no `kiln:gui` provider (the bridge is
 AppKit today, ADR 0074), so a Linux program that imports it is refused by name. In

@@ -1,0 +1,28 @@
+# Isolated boundary targets: do not compile the whole compiler for a parser campaign.
+[package]
+name = "kiln-security-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+kiln-json = { path = "../../crates/semantics/kiln-json" }
+kiln-string = { path = "../../crates/foundation/kiln-string" }
+kiln-shared-graph = { path = "../../crates/host/kiln-shared-graph" }
+kiln-runtime = { path = "../../crates/host/kiln-runtime", default-features = false }
+bolero = { version = "0.13", features = ["arbitrary"] }
+serde_json = "1"
+
+[profile.dev]
+opt-level = 1
+debug = 1
+
+[profile.fuzz]
+inherits = "release"
+debug = 1
+debug-assertions = true
+overflow-checks = true
+incremental = false

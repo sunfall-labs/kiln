@@ -603,30 +603,30 @@ fn decode_chunked(bytes: &[u8]) -> Result<Option<(Vec<u8>, usize)>, HttpParseErr
                 .map_err(|_| HttpParseError::InvalidChunk)?;
         cursor = line_end + 2;
         if size == 0 {
-            let Some(trailers_end) = find_bytes(&bytes[cursor..], b"\r\n\r\n").or_else(|| {
-                bytes
-                    .get(cursor..cursor + 2)
-                    .filter(|ending| *ending == b"\r\n")
-                    .map(|_| 0)
-            }) else {
-                return Ok(None);
-            };
-            let consumed = if trailers_end == 0 {
+            // An immediate CRLF ends an empty trailer section. Searching for a later
+            // CRLFCRLF first would swallow a pipelined request as trailers in a single read,
+            // while the same bytes split across reads would produce two requests.
+            let consumed = if bytes.get(cursor..cursor + 2) == Some(b"\r\n") {
                 cursor + 2
-            } else {
+            } else if let Some(trailers_end) = find_bytes(&bytes[cursor..], b"\r\n\r\n") {
                 cursor + trailers_end + 4
+            } else {
+                return Ok(None);
             };
             return Ok(Some((body, consumed)));
         }
-        let end = cursor.saturating_add(size);
-        if bytes.len() < end + 2 {
+        let end = cursor
+            .checked_add(size)
+            .ok_or(HttpParseError::InvalidChunk)?;
+        let frame_end = end.checked_add(2).ok_or(HttpParseError::InvalidChunk)?;
+        if bytes.len() < frame_end {
             return Ok(None);
         }
-        if &bytes[end..end + 2] != b"\r\n" {
+        if &bytes[end..frame_end] != b"\r\n" {
             return Err(HttpParseError::InvalidChunk);
         }
         body.extend_from_slice(&bytes[cursor..end]);
-        cursor = end + 2;
+        cursor = frame_end;
     }
 }
 
@@ -1018,6 +1018,39 @@ mod tests {
             .pop()
             .unwrap();
         assert_eq!(request.body, b"Wikipedia");
+    }
+
+    #[test]
+    fn empty_chunk_trailers_do_not_consume_a_pipelined_request() {
+        let bytes = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /next HTTP/1.1\r\n\r\n";
+        let mut buffered = Http1Decoder::default();
+        let requests = buffered.push(bytes).unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].target, "/next");
+        let mut streaming = Http1Decoder::default();
+        assert_eq!(streaming.push_events(bytes).unwrap().len(), 4);
+        let mut split = Http1Decoder::default();
+        let mut split_requests = Vec::new();
+        for byte in bytes {
+            split_requests.extend(split.push(std::slice::from_ref(byte)).unwrap());
+        }
+        assert_eq!(requests, split_requests);
+    }
+
+    #[test]
+    fn overflowing_chunk_length_is_rejected() {
+        let bytes = format!(
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            usize::MAX
+        );
+        assert_eq!(
+            Http1Decoder::default().push(bytes.as_bytes()),
+            Err(HttpParseError::InvalidChunk)
+        );
+        assert_eq!(
+            Http1Decoder::default().push_events(bytes.as_bytes()),
+            Err(HttpParseError::InvalidChunk)
+        );
     }
 
     #[test]
