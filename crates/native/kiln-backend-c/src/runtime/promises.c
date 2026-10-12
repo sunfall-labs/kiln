@@ -209,6 +209,15 @@ static kiln_value kiln_c99_rejection_take(uint32_t slot_key) {
 /* Node's `processPromiseRejections`, run by the promise lane once both queues are empty: the
  * rejections still unhandled, marked reported, and the late handles, to the tracking. What it
  * throws -- the default `throw` mode's report -- ends the checkpoint as an uncaught exception. */
+/* Set when the promise checkpoint itself ended in an uncaught exception, so the launcher's report
+ * can say `(in promise)`, as the interpreter's does. Read and cleared by the launcher. */
+static _Thread_local int kiln_c99_uncaught_in_promise = 0;
+int kiln_c99_uncaught_in_promise_take(void) {
+    int taken = kiln_c99_uncaught_in_promise;
+    kiln_c99_uncaught_in_promise = 0;
+    return taken;
+}
+
 static int kiln_c99_process_rejections(kiln_gc_heap *heap, kiln_host *host, kiln_value *thrown) {
     kiln_value rejected = kiln_c99_rejection_take(KILN_C99_REALM_SLOT_REJECTED);
     kiln_value handled = kiln_c99_rejection_take(KILN_C99_REALM_SLOT_HANDLED_LATE);
@@ -246,12 +255,15 @@ static int kiln_c99_process_rejections(kiln_gc_heap *heap, kiln_host *host, kiln
         /* A realm without the bootstrap: the first rejection is the uncaught exception. */
         if (kiln_c99_array_of(reported)->count == 0) return KILN_C99_OK;
         *thrown = kiln_val_to_boundary(kiln_c99_array_of(reported)->elements[1]);
+        kiln_c99_uncaught_in_promise = 1;
         return KILN_C99_THROWN;
     }
     arguments[0] = reported;
     arguments[1] = handled;
-    return kiln_c99_call(host, &produced, *tracking, kiln_c99_undefined(), arguments, 2, 0,
-                         thrown);
+    status = kiln_c99_call(host, &produced, *tracking, kiln_c99_undefined(), arguments, 2, 0,
+                           thrown);
+    if (status == KILN_C99_THROWN) kiln_c99_uncaught_in_promise = 1;
+    return status;
 }
 
 static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver,

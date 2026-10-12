@@ -1123,6 +1123,7 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
         let trace = captured_trace(&reason);
         let instruction = vm.instruction;
         let message = vm.describe_uncaught(&reason, instruction);
+        let stack = vm.uncaught_stack(&reason, instruction);
         if let Some(loader) = commonjs_loader.as_deref_mut() {
             loader.record_thrown_value(reason.clone());
         }
@@ -1131,6 +1132,7 @@ pub(super) fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?S
             message,
             error_constructor: vm.error_constructor(&reason),
             trace,
+            stack,
         });
     }
     // The entry awaited something that never settled and the loop has nothing left that could

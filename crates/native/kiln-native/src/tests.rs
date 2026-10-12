@@ -318,7 +318,16 @@ fn run_native_failure_fixture(name: &str, source: &str) -> Option<String> {
             },
         )
         .expect("native diagnostic graph builds");
-    let output = fixture_output(Command::new(&report.output), "native diagnostic fixture");
+    let output = fixture_output(
+        // These fixtures assert the engine's own provenance for the failing instruction, which
+        // the uncaught report leaves out unless asked.
+        {
+            let mut command = Command::new(&report.output);
+            command.env("KILN_DIAGNOSTICS", "1");
+            command
+        },
+        "native diagnostic fixture",
+    );
     assert!(!output.status.success(), "fixture unexpectedly succeeded");
     Some(String::from_utf8(output.stderr).expect("diagnostic output is UTF-8"))
 }
@@ -366,7 +375,16 @@ fn run_native_failure_fixture_with_dependency(
             },
         )
         .expect("native diagnostic graph builds");
-    let output = fixture_output(Command::new(&report.output), "native diagnostic fixture");
+    let output = fixture_output(
+        // These fixtures assert the engine's own provenance for the failing instruction, which
+        // the uncaught report leaves out unless asked.
+        {
+            let mut command = Command::new(&report.output);
+            command.env("KILN_DIAGNOSTICS", "1");
+            command
+        },
+        "native diagnostic fixture",
+    );
     assert!(!output.status.success(), "fixture unexpectedly succeeded");
     Some(String::from_utf8(output.stderr).expect("diagnostic output is UTF-8"))
 }

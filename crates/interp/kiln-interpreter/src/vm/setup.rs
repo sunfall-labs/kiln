@@ -89,6 +89,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             host_agents: execution.host_agents(),
             argv: execution.argv().to_vec(),
             exec_argv: execution.exec_argv().to_vec(),
+            display_root: execution.display_root().map(str::to_owned),
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),

@@ -88,6 +88,10 @@ if [[ -n $NATIVE_TIMEOUT_SECONDS && ! $NATIVE_TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]
 	exit 2
 fi
 
+# The CLI puts a code frame above the interpreter's uncaught-error report and cannot above the
+# native run's; compare the engines' reports, not that.
+export KILN_CODE_FRAME=0
+
 KILN="${KILN_BIN:-}"
 if [[ -z $KILN ]]; then
 	if [[ -x "$(kiln_repo_root)/target/release/kiln" ]]; then
@@ -182,7 +186,14 @@ run_probe() {
 		{ printf 'interpreter invocation timed out; captured output follows:\n'; cat -- "$interpreted_output"; } > "$WORK_DIR/$name.timedout"
 		return 0
 	fi
-	if ((interpreted_status != 0)); then
+	# A probe about an uncaught error or a rejection nobody handled ends the process on purpose:
+	# `// kiln-native: expect-exit=1` says so, and the interpreter then has to exit with exactly
+	# that status (the native side is compared against the interpreter's below, as always).
+	local expected_exit=0
+	if [[ $native_directive =~ expect-exit=([0-9]+) ]]; then
+		expected_exit="${BASH_REMATCH[1]}"
+	fi
+	if ((interpreted_status != expected_exit)); then
 		cp -- "$interpreted_output" "$WORK_DIR/$name.failed"
 		return 0
 	fi

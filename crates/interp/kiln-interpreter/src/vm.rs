@@ -304,6 +304,8 @@ pub(super) struct Vm<'host, H: HostOps + ?Sized> {
     /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
     pub(super) argv: Vec<String>,
     pub(super) exec_argv: Vec<String>,
+    /// Project root that stack-frame file names are shown relative to.
+    pub(super) display_root: Option<String>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pub(super) pending_host: Vec<PendingHostRequest>,
     /// Persistent Node resource requests routed to provider-neutral server/stream drivers.

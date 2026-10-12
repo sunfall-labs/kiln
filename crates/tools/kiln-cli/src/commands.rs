@@ -527,6 +527,17 @@ fn finish_run_summary(
         .diagnostics
         .iter()
         .map(|diagnostic| {
+            // An uncaught exception is reported as the thrown value and its stack. Prefixing it
+            // with the entry path as a diagnostic location would name the wrong place: the
+            // frames in the stack carry the real ones.
+            if diagnostic.path.is_none() && diagnostic.message.starts_with("uncaught ") {
+                // Notes with a newline are printed as written, so carry the prefix ourselves.
+                return if diagnostic.message.contains('\n') {
+                    crate::code_frame::decorate(&format!("kiln: {}", diagnostic.message), path)
+                } else {
+                    diagnostic.message.clone()
+                };
+            }
             render::diagnostic(
                 &display,
                 diagnostic,

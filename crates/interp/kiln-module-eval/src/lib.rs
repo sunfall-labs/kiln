@@ -1619,6 +1619,8 @@ impl GraphExecutor<'_> {
         // Every realm this graph runs in -- the one the modules share and any a module makes --
         // runs the shared built-ins first, in the set this mode has (see `realm_bootstrap`).
         let capabilities = capabilities.with_realm_bootstrap(realm_bootstrap(node));
+        // Stack frames name modules relative to the project root, as the native backend does.
+        let capabilities = capabilities.with_display_root(self.project_root().to_string_lossy());
         // A Node program can start workers, each a realm running another of this graph's
         // modules on a thread of its own (realms issue 06).
         let capabilities = if node {
@@ -2283,6 +2285,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                 error_constructor: None,
                 message: "CommonJS namespace getter failed".into(),
                 trace: Vec::new(),
+                stack: None,
             });
         }
         if self.records.commonjs_namespace_ready(path) {

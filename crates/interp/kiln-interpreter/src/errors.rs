@@ -156,6 +156,12 @@ pub enum ExecutionError {
         /// is for the human reading the failure, and it is the difference between "somewhere in
         /// six thousand lines" and a name to grep for.
         trace: Vec<String>,
+        /// The thrown value's `stack` property, when it is an error that has one, exactly as
+        /// the program would read it: header, then one `    at function (file:line:column)`
+        /// line per frame. This is what a host prints for an uncaught error, and it is the
+        /// same text the native backend prints from the same property, so the two reports are
+        /// the same bytes. `message` stays the short description conformance runners judge.
+        stack: Option<String>,
     },
     /// An exception reached a handler the *host* installed rather than one the program wrote.
     ///
@@ -550,12 +556,29 @@ impl fmt::Display for ExecutionError {
                 write!(formatter, "cannot convert object to primitive value")
             }
             Self::GeneratorReturned => write!(formatter, "generator returned"),
-            Self::Uncaught { message, trace, .. } => {
-                write!(formatter, "uncaught {message}")?;
-                for frame in trace {
-                    write!(formatter, "\n    at {frame}")?;
+            Self::Uncaught {
+                message,
+                trace,
+                stack,
+                ..
+            } => {
+                // `(in promise)` is a prefix of the description, and the stack starts with the
+                // bare error: keep the marker in front of whichever is printed.
+                let marker = if message.starts_with("(in promise) ") {
+                    "(in promise) "
+                } else {
+                    ""
+                };
+                match stack {
+                    Some(stack) => write!(formatter, "uncaught {marker}{stack}"),
+                    None => {
+                        write!(formatter, "uncaught {message}")?;
+                        for frame in trace {
+                            write!(formatter, "\n    at {frame}")?;
+                        }
+                        Ok(())
+                    }
                 }
-                Ok(())
             }
             Self::CaughtByHost => write!(formatter, "exception delivered to the host"),
             Self::ThrownAcrossNative => {

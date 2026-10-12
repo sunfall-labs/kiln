@@ -1728,6 +1728,13 @@ pub struct ExecutionCapabilities {
     argv: Vec<String>,
     /// Runtime flags this execution reports through `process.execArgv`.
     exec_argv: Vec<String>,
+    /// The project root that stack-frame file names are shown relative to.
+    ///
+    /// The native backend names a module by its path under the project root (it cannot know
+    /// where the binary will run), so the interpreter does the same to keep `error.stack` and
+    /// the uncaught-error report byte-identical across engines. A module outside the root keeps
+    /// its absolute path.
+    display_root: Option<String>,
     /// How this execution starts a `node:worker_threads` worker's realm, when it can.
     worker_host: Option<Arc<dyn WorkerHost>>,
 }
@@ -1843,6 +1850,16 @@ impl ExecutionCapabilities {
 
     pub fn exec_argv(&self) -> &[String] {
         &self.exec_argv
+    }
+
+    /// Show stack-frame file names relative to `root`. See the field of the same name.
+    pub fn with_display_root(mut self, root: impl Into<String>) -> Self {
+        self.display_root = Some(root.into());
+        self
+    }
+
+    pub fn display_root(&self) -> Option<&str> {
+        self.display_root.as_deref()
     }
 
     /// Let this execution start workers, through `host`.
