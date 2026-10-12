@@ -60,7 +60,14 @@ if [[ $KILN_PROVIDER_OUTPUT != /* ]]; then
 	KILN_PROVIDER_OUTPUT="$(kiln_repo_root)/$KILN_PROVIDER_OUTPUT"
 fi
 
-KILN_PROVIDER_CARGO="${KILN_PROVIDER_CARGO:-${CARGO:-mbx}}"
+# mbx where it is installed (the shared cache and CPU budget, AGENTS.md); cargo elsewhere, which
+# is what a release runner has.
+if command -v mbx >/dev/null 2>&1; then
+	KILN_PROVIDER_DEFAULT_CARGO=mbx
+else
+	KILN_PROVIDER_DEFAULT_CARGO=cargo
+fi
+KILN_PROVIDER_CARGO="${KILN_PROVIDER_CARGO:-${CARGO:-$KILN_PROVIDER_DEFAULT_CARGO}}"
 # rustc's `--print native-static-libs` note, when the compiler actually runs. A cached or fresh
 # build prints nothing, so this is a cross-check on the contract's own list below, never its source.
 KILN_PROVIDER_RUSTC_STDERR="$(mktemp "${TMPDIR:-/tmp}/kiln-provider-rustc.XXXXXX")"
