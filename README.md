@@ -1,21 +1,53 @@
-# kiln
+<p align="center">
+  <a href="https://sunfall-labs.github.io/kiln/">
+    <img src="docs/assets/kiln-banner.svg" alt="kiln — three rising terracotta forms on warm ivory" width="800" />
+  </a>
+</p>
 
-kiln compiles JavaScript and TypeScript to native executables. It is written in Rust, emits C,
-and links the result against a small Rust runtime built on Tokio and Hyper. There is no
-JavaScript engine inside the binary.
+<h1 align="center">kiln</h1>
 
-A ten-line `node:http` server compiles to a native executable that starts in milliseconds and,
-in the measurements below (see [Measured](#measured)), serves more hello-world requests per second
-from one core than Node, Bun or Deno do with all of theirs, in a third of Node's memory. The
-interpreter that ships alongside the compiler runs the same program immediately, so the edit-run
-loop never waits for a native build.
+<p align="center">
+  <strong>Your JavaScript. A native executable.</strong>
+</p>
+
+<p align="center">
+  <a href="https://sunfall-labs.github.io/kiln/">Website</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#status">Compatibility</a> ·
+  <a href="#measured">Benchmarks</a> ·
+  <a href="docs/design.md">Design</a> ·
+  <a href="https://github.com/sunfall-labs/kiln/releases">Releases</a>
+</p>
+
+kiln compiles JavaScript and TypeScript to native executables. Run your program immediately
+with the built-in interpreter, then compile the same source when you're ready to ship a binary.
+
+| Compile ahead of time | Keep the quick loop | Use familiar foundations |
+| --- | --- | --- |
+| Emits C and builds a native executable with no JavaScript engine inside it. | The bytecode interpreter runs the same source without waiting for a native build. | ESM, CommonJS, async functions and core `node:*` APIs, backed by Rust, Tokio and Hyper. |
+
+**v0.1.0 is the first public release.** Compatibility is still evolving; see [Status](#status)
+for coverage and [Measured](#measured) for results and methodology. Release binaries are
+available for macOS on Apple silicon and Linux x86_64 (glibc).
 
 ## Quick start
 
 ```sh
 curl -fsSL https://github.com/sunfall-labs/kiln/releases/latest/download/install.sh | sh
-kiln run hello.ts                      # run it now, with the built-in interpreter
-kiln build hello.ts && ./hello         # compile it to a native executable
+```
+
+Save a small program as `hello.ts`:
+
+```ts
+const values: number[] = [8, 13, 21];
+console.log(values.reduce((sum, value) => sum + value, 0));
+```
+
+Run it now, or build a native executable. Both print `42`:
+
+```sh
+kiln run hello.ts
+kiln build hello.ts && ./hello
 ```
 
 `kiln run` needs nothing else; `kiln build` needs a C compiler (Clang, GCC, cc or Zig) on `PATH`.
