@@ -1125,6 +1125,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let trace = captured_trace(reason);
         let instruction = self.instruction;
         let described = self.describe_uncaught(reason, instruction);
+        let stack = self.uncaught_stack(reason, instruction);
         // The value, for whoever reports it (a worker's parent gets a copy of the reason).
         self.uncaught_value = Some(reason.clone());
         ExecutionError::Uncaught {
@@ -1132,6 +1133,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             message: format!("(in promise) {described}"),
             error_constructor: self.error_constructor(reason),
             trace,
+            stack,
         }
     }
 

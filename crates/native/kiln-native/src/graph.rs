@@ -3827,6 +3827,7 @@ extern void kiln_cli_report_failure_in(int status, kiln_value value, const char 
 extern void kiln_cli_report_failure_with(int status, kiln_value value, const char *phase, const kiln_cli_host_state *host_state);
 extern void kiln_cli_warn(const char *message, const kiln_cli_host_state *host_state);
 extern kiln_value kiln_cli_describe_error(kiln_value value);
+extern int kiln_c99_uncaught_in_promise_take(void);
 extern int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint,
@@ -6453,6 +6454,7 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
     .unwrap();
     output.push_str(
         r##"
+    int fatal_rejection = status == KILN_GRAPH_FATAL_REJECTION;
     if (status == KILN_GRAPH_FATAL_REJECTION) {
         status = KILN_C99_THROWN;
         phase = "module body";
@@ -6527,14 +6529,23 @@ static int kiln_cli_realm_finish(kiln_cli_realm_run *run, int writes_result,
         if (message.tag != KILN_VALUE_STRING) {
             message = kiln_c99_text(message);
         }
+        /* The report is the thrown value's `stack`, which names the function, file, line and
+         * column of every frame; the interpreter prints the same text. The engine's own
+         * provenance for the failing instruction (module, pc, operation) is for debugging the
+         * engine and would make the two reports differ, so it is opt-in. */
         kiln_value site = kiln_c99_control_diagnostic();
-        if (kiln_c99_diagnostic_available() && message.tag == KILN_VALUE_STRING &&
-            site.tag == KILN_VALUE_STRING && site.len != 0) {
-            kiln_value separator = kiln_c99_copy_text(" at ", 4);
-            graph->instance->result = kiln_c99_concat(kiln_c99_concat(message, separator), site);
-        } else {
-            graph->instance->result = message;
+        if (getenv("KILN_DIAGNOSTICS") != NULL && kiln_c99_diagnostic_available() &&
+            message.tag == KILN_VALUE_STRING && site.tag == KILN_VALUE_STRING && site.len != 0) {
+            kiln_value separator = kiln_c99_copy_text("\n    [engine: ", 14);
+            kiln_value closing = kiln_c99_copy_text("]", 1);
+            message = kiln_c99_concat(kiln_c99_concat(kiln_c99_concat(message, separator), site), closing);
         }
+        /* An unhandled promise rejection ends the run the same way a throw does; say which. */
+        if (fatal_rejection || kiln_c99_uncaught_in_promise_take()) {
+            kiln_value marker = kiln_c99_copy_text("(in promise) ", 13);
+            message = kiln_c99_concat(marker, message);
+        }
+        graph->instance->result = message;
     }
     /* An entry whose top-level await never settled, with the loop out of work: node's answer is a
      * warning and status 13 rather than a refusal, and both engines give that one. */

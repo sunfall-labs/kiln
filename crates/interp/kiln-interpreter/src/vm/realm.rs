@@ -752,6 +752,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ),
             error_constructor: self.error_constructor(&thrown),
             trace: captured_trace(&thrown),
+            stack: None,
         })
     }
 

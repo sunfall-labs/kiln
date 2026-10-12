@@ -2214,6 +2214,21 @@ fn module_evaluation_diagnostics(error: ModuleEvaluationError) -> Vec<Diagnostic
     if let ModuleEvaluationError::Graph(error) = error {
         return module_graph_diagnostics(error);
     }
+    // An uncaught exception is the program's failure, not a fault in the module it surfaced
+    // through: report it as the thrown value and its stack, without naming the module again in
+    // internal wording (the stack's frames already say where).
+    if let ModuleEvaluationError::Execution {
+        error: error @ kiln_interpreter::ExecutionError::Uncaught { .. },
+        ..
+    } = &error
+    {
+        return vec![Diagnostic {
+            path: None,
+            message: error.to_string(),
+            start: None,
+            end: None,
+        }];
+    }
     let path = match &error {
         ModuleEvaluationError::Execution { module, .. } => {
             Some(module.to_string_lossy().into_owned())

@@ -5707,12 +5707,7 @@ fn render_module_positioned(
     }
     render_namespace_wrapper(&mut output, symbol);
     if callables {
-        render_module_realm_wrapper(
-            &mut output,
-            symbol,
-            unit_symbol,
-            commonjs.then_some(diagnostic_site),
-        );
+        render_module_realm_wrapper(&mut output, symbol, unit_symbol, Some(diagnostic_site));
     }
     if should_chunk {
         let function_texts = chunked_bodies.expect("chunked_bodies present when should_chunk");

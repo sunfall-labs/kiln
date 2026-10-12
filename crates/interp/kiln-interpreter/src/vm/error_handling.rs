@@ -26,6 +26,39 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             })
     }
 
+    /// How a stack frame names its module: relative to the project root when it is under it,
+    /// which is the form the native backend bakes in. Anything else keeps the name it has.
+    fn frame_file_name(&self, path: Option<&str>) -> String {
+        let Some(path) = path else {
+            return "<kiln>".to_owned();
+        };
+        if let Some(root) = self.display_root.as_deref() {
+            let root = root.trim_end_matches('/');
+            if let Some(relative) = path
+                .strip_prefix(root)
+                .and_then(|rest| rest.strip_prefix('/'))
+                && !relative.is_empty()
+            {
+                return relative.to_owned();
+            }
+        }
+        path.to_owned()
+    }
+
+    /// A module body that has already returned. Jobs run after it (a promise continuation, a
+    /// timer) are called on top of its leftover state, which is not a caller: nothing is waiting
+    /// in it. A real module frame is mid-call, so its last instruction is never the final
+    /// `Return`.
+    fn idle_module_frame(
+        function: Option<&Rc<Closure>>,
+        program: &Program,
+        instruction: usize,
+    ) -> bool {
+        function.is_none()
+            && instruction + 1 == program.code.len()
+            && matches!(program.code.get(instruction), Some(Instruction::Return))
+    }
+
     fn error_stack_frame_limit(&self) -> Option<usize> {
         let constructor = Value::Native(Native::Error(ErrorKind::Error), self.current_realm);
         let identity = intrinsic_key(&constructor)?;
@@ -240,22 +273,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // This primitive is called by the public TypeScript `Error.captureStackTrace`
         // facade. Like the native frame-snapshot primitive, omit that implementation
         // frame so the first CallSite is the caller of the facade.
-        frames.extend(self.frames.iter().rev().map(|frame| {
-            let span = frame
-                .function
-                .as_ref()
-                .and_then(|closure| frame.program.functions.get(closure.function as usize))
-                .map(|proto| proto.span);
-            let site = frame
-                .program
-                .debug_call_site(span, frame.instruction.saturating_sub(1));
-            (
-                frame.function.clone(),
-                frame.method_name.clone(),
-                frame.module_path.as_deref().unwrap_or("<kiln>").to_owned(),
-                site.map(|site| (site.line, site.column)),
-            )
-        }));
+        frames.extend(
+            self.frames
+                .iter()
+                .rev()
+                .filter(|frame| {
+                    !Self::idle_module_frame(
+                        frame.function.as_ref(),
+                        &frame.program,
+                        frame.instruction.saturating_sub(1),
+                    )
+                })
+                .map(|frame| {
+                    let span = frame
+                        .function
+                        .as_ref()
+                        .and_then(|closure| frame.program.functions.get(closure.function as usize))
+                        .map(|proto| proto.span);
+                    let site = frame
+                        .program
+                        .debug_call_site(span, frame.instruction.saturating_sub(1));
+                    (
+                        frame.function.clone(),
+                        frame.method_name.clone(),
+                        self.frame_file_name(frame.module_path.as_deref()),
+                        site.map(|site| (site.line, site.column)),
+                    )
+                }),
+        );
         // The primitive receives no public JavaScript CallSite objects. The facade is built in
         // errors.ts from these copied metadata records and cannot keep VM frames alive.
         if let Some(Value::Function(constructor)) = arguments.get(1)
@@ -408,7 +453,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     ordinary_object([
                         (
                             "fileName".to_owned(),
-                            Value::String(path.unwrap_or("<kiln>").into()),
+                            Value::String(self.frame_file_name(path).into()),
                         ),
                         (
                             "functionName".to_owned(),
@@ -434,7 +479,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     ])
                 };
                 let mut frames = Vec::new();
-                if self.function.is_some() {
+                if !Self::idle_module_frame(
+                    self.function.as_ref(),
+                    &self.program,
+                    self.instruction.saturating_sub(1),
+                ) {
                     frames.push(snapshot(
                         self.function.as_ref(),
                         self.method_name.as_ref(),
@@ -444,6 +493,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     ));
                 }
                 for frame in self.frames.iter().rev() {
+                    if Self::idle_module_frame(
+                        frame.function.as_ref(),
+                        &frame.program,
+                        frame.instruction.saturating_sub(1),
+                    ) {
+                        continue;
+                    }
                     frames.push(snapshot(
                         frame.function.as_ref(),
                         frame.method_name.as_ref(),
@@ -487,6 +543,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return text.to_lossy_string();
         }
         describe_thrown(thrown)
+    }
+
+    /// The `stack` an uncaught object carries, read as the program would read it.
+    ///
+    /// The native backend's launcher does exactly this, so the two reports agree. Like
+    /// [`Self::describe_uncaught`] it runs user code (the lazy accessor, `prepareStackTrace`) and
+    /// is only acceptable because the run is ending; a getter that throws or answers a
+    /// non-string falls back to the short description.
+    pub(super) fn uncaught_stack(&mut self, thrown: &Value, instruction: usize) -> Option<String> {
+        if !matches!(thrown, Value::Object(_)) {
+            return None;
+        }
+        match self.read_property(thrown, "stack", instruction) {
+            Ok(Value::String(stack)) if !stack.is_empty() => Some(stack.to_lossy_string()),
+            Ok(_) => None,
+            Err(_) => {
+                self.caught = None;
+                None
+            }
+        }
     }
 
     /// Find the constructor name in a thrown value's prototype chain.

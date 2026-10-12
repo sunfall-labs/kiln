@@ -2482,11 +2482,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             let trace = captured_trace(&thrown);
             self.uncaught_value = Some(thrown.clone());
+            let message = self.describe_uncaught(&thrown, instruction);
+            let stack = self.uncaught_stack(&thrown, instruction);
             return Err(ExecutionError::Uncaught {
                 instruction,
-                message: self.describe_uncaught(&thrown, instruction),
+                message,
                 error_constructor: self.error_constructor(&thrown),
                 trace,
+                stack,
             });
         };
         if handler.target == HOST_HANDLER {
