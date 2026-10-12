@@ -143,7 +143,7 @@ def measure_cli(name, src, needs_node, argv, work):
     commands = {
         "node": ["node", src, *argv],
         "bun": ["bun", "run", src, *argv],
-        "kiln": [KILN, "--one-shot", *kiln_flags, "run", src, *argv],
+        "kiln": [KILN, "--one-shot", "--clock", "virtual", *kiln_flags, "run", src, *argv],
     }
     artifacts = {}
     unsupported = {}
@@ -277,7 +277,7 @@ def measure_server(work):
     commands = {
         "node": ["node", src],
         "bun": ["bun", "run", src],
-        "kiln": [KILN, "--one-shot", *fl, "run", src],
+        "kiln": [KILN, "--one-shot", "--clock", "virtual", *fl, "run", src],
     }
     unsupported = {}
     if kiln_bin:

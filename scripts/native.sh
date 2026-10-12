@@ -142,7 +142,9 @@ run_probe() {
 	local name
 	name="$(basename -- "$probe")"
 	local adapter=""
-	local -a clock_policy=()
+	# `kiln run` shows real time by default; the corpus compares the engines, so it asks for the
+	# deterministic clock explicitly (ADR 0044) unless a probe requests `clock=wall`.
+	local -a clock_policy=(--clock virtual)
 	local native_directive
 	native_directive="$(head -5 -- "$probe" | grep -m1 -oE 'kiln-native:.*' || true)"
 	# `.mjs` too: an application-shaped ES module imports `node:` builtins, and only the adapter

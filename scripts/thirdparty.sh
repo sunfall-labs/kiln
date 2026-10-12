@@ -700,7 +700,7 @@ run_interpreted() {
 	local expected_status=0 actual_status=0
 	TZ=UTC node "$bundle" >"$WORK_DIR/$name.node.stdout" 2>"$WORK_DIR/$name.node.stderr" || expected_status=$?
 	printf '%s\n' "$expected_status" >"$WORK_DIR/$name.node.status"
-	"$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" >"$WORK_DIR/$name.interp.stdout" 2>"$WORK_DIR/$name.interp.stderr" || actual_status=$?
+	"$KILN" --one-shot --clock virtual ${adapter:+"$adapter"} run "$bundle" >"$WORK_DIR/$name.interp.stdout" 2>"$WORK_DIR/$name.interp.stderr" || actual_status=$?
 	expected="$(<"$WORK_DIR/$name.node.stdout")"
 	expected_err="$(<"$WORK_DIR/$name.node.stderr")"
 	actual="$(<"$WORK_DIR/$name.interp.stdout")"
@@ -791,7 +791,7 @@ run_native() {
 	expected_status="$(<"$WORK_DIR/$name.node.status")"
 	expected="$(<"$WORK_DIR/$name.node.stdout")"
 	expected_err="$(<"$WORK_DIR/$name.node.stderr")"
-	"$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" >"$WORK_DIR/$name.native.stdout" 2>"$WORK_DIR/$name.native.stderr" || actual_status=$?
+	"$KILN" --one-shot --clock virtual ${adapter:+"$adapter"} run --native "$bundle" >"$WORK_DIR/$name.native.stdout" 2>"$WORK_DIR/$name.native.stderr" || actual_status=$?
 	actual="$(<"$WORK_DIR/$name.native.stdout")"
 	actual_err="$(<"$WORK_DIR/$name.native.stderr")"
 	if [[ $actual == "$expected" && $actual_err == "$expected_err" ]] &&

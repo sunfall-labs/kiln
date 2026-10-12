@@ -316,7 +316,7 @@ class Runner:
         suffix = ".cjs" if node else ".js"
         path = self.workdir / f"{tag}{suffix}"
         path.write_text(source)
-        argv = [str(self.kiln), "--one-shot"]
+        argv = [str(self.kiln), "--one-shot", "--clock", "virtual"]
         if node:
             argv.append("--node")
         argv.append("run")

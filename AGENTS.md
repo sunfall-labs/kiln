@@ -224,7 +224,14 @@ frontmatter, and several have a dedicated runner that knows flags `kiln test` wi
 | `conformance/thirdparty` | `scripts/thirdparty.sh` |
 | Test262 | `scripts/test262.sh` |
 
-`--node` installs the Tokio-owned Node adapter. `conformance/regress` is in the `--node` list for
+`--node` installs the Tokio-owned Node adapter. `kiln run` uses the wall clock by default (`Date`, `performance.now` and timers show real time, as
+in node); `--clock virtual` selects the deterministic clock of ADR 0044. Anything that compares the
+interpreter with the native backend, or with node, must pass `--clock virtual` explicitly -- the
+scripts in this table already do. `kiln build` writes `./<name>` (not `.kiln/bin`) at
+`native-release`; `kiln run --native` still builds under `.kiln/bin` at `native-dev`. The Node layer
+turns on by itself when the program imports a `node:` built-in; `--node` forces it.
+
+`conformance/regress` is in the `--node` list for
 one test (`r08-node-async-context` needs `util.TextEncoder` and `AsyncLocalStorage`). A test that
 needs the adapter declares `requires_host = "node"` in its manifest, and without the flag it fails
 saying so rather than skipping, so a missing flag does not read as a broken engine.
@@ -277,7 +284,9 @@ from the steady state. Setup belongs at module scope, outside the timed function
 exception of state the workload destroys, like the array `array-sort` sorts in place, which has
 to be rebuilt inside it or the second iteration measures an already-sorted best case.
 
-**The interpreter cannot time itself.** Its realm clock is virtual and advances only for
+**The interpreter cannot time itself.** (`kiln run` shows wall time by default now, so every
+harness that compares engines or times the interpreter passes `--clock virtual`; `kiln test` is always
+virtual.) Under that policy its realm clock is virtual and advances only for
 scheduled work (ADR 0044), so `Date.now`, `performance.now` and `process.hrtime` all return the
 same number from the first line of a synchronous run to the last. That is deliberate -- it is
 what makes a run reproducible -- so the harness detects it, reports iterations instead of

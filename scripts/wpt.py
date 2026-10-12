@@ -201,7 +201,7 @@ def run_one(kiln: Path, workdir: Path, checkout: Path, shim: str, test: Path, qu
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", rel + query)
     path = workdir / f"{safe}.cjs"
     path.write_text(assemble(checkout, test, query, shim), encoding="utf-8")
-    argv = [str(kiln), "--one-shot", "--node", "run"]
+    argv = [str(kiln), "--one-shot", "--clock", "virtual", "--node", "run"]
     if engine == "native":
         argv.append("--native")
     argv.append(str(path))
