@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 310" role="img" aria-labelledby="conformance-title conformance-desc">
+<title id="conformance-title">Test262 recorded passes by category</title>
+<desc id="conformance-desc">Language: 43,264 of 44,158 cases; Built-ins: 44,948 of 47,315 cases; Intl: 5,629 of 6,670 cases; Annex B: 1,208 of 1,377 cases; Staging: 2,129 of 2,730 cases. Zero baseline. Exact counts are available in the accompanying table.</desc>
+<text x="0" y="34" font-family="sans-serif" font-size="13" fill="#292d24">Language</text>
+<rect x="160" y="18" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="18" width="254.7362" height="23" fill="#b6462b"/>
+<text x="550" y="34" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">97.98%</text>
+<text x="0" y="82" font-family="sans-serif" font-size="13" fill="#292d24">Built-ins</text>
+<rect x="160" y="66" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="66" width="246.9931" height="23" fill="#b6462b"/>
+<text x="550" y="82" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">95.00%</text>
+<text x="0" y="130" font-family="sans-serif" font-size="13" fill="#292d24">Intl</text>
+<rect x="160" y="114" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="114" width="219.4213" height="23" fill="#b6462b"/>
+<text x="550" y="130" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">84.39%</text>
+<text x="0" y="178" font-family="sans-serif" font-size="13" fill="#292d24">Annex B</text>
+<rect x="160" y="162" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="162" width="228.0901" height="23" fill="#b6462b"/>
+<text x="550" y="178" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">87.73%</text>
+<text x="0" y="226" font-family="sans-serif" font-size="13" fill="#292d24">Staging</text>
+<rect x="160" y="210" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="210" width="202.7619" height="23" fill="#b6462b"/>
+<text x="550" y="226" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">77.99%</text>
+<path d="M160 270H420" stroke="#a9ad9f"/>
+<text x="160" y="289" font-family="monospace" font-size="11" fill="#73796b">0%</text>
+<text x="420" y="289" text-anchor="end" font-family="monospace" font-size="11" fill="#73796b">100%</text>
+</svg>

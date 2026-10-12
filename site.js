@@ -1,8 +1,10 @@
 const commands = {
+  check: ['kiln check hello.ts'],
   run: ['kiln run hello.ts'],
   build: ['kiln build hello.ts', './hello'],
 };
 const descriptions = {
+  check: 'Check TypeScript source before running or compiling it.',
   run: 'The built-in interpreter runs your program immediately.',
   build: 'Compile a native executable, then run it directly.',
 };
@@ -19,6 +21,7 @@ document.querySelectorAll('[data-mode]').forEach((button) => {
       code.append(prompt, document.createTextNode(` ${command}`));
     });
     document.getElementById('workflow-description').textContent = descriptions[mode];
+    document.getElementById('workflow-result').textContent = mode === 'check' ? 'no errors' : '42';
     document.querySelectorAll('[data-mode]').forEach((item) => {
       item.setAttribute('aria-pressed', String(item === button));
     });

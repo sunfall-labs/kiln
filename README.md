@@ -28,3 +28,21 @@ paid plan. Repository visibility must only change with the owner's explicit appr
 Charts and explanatory diagrams are SVG. The benchmark renderer also writes standalone charts
 under `assets/charts/`, offered as downloads on the page. Interactive charts update SVG bar widths
 and accessible descriptions from the same JSON data; ordinary HTML tables retain every measurement.
+
+The homepage leads with TypeScript, including `kiln check`, typed actor examples and a conformance
+section. `reference/` contains checker architecture, conformance evidence and concurrency/ownership
+pages. Counts come from a pinned release snapshot under `data/conformance.json`; preserve the
+source commit, corpus pins and distinctions between exact diagnostics, partial matches, runtime
+variants and package compatibility.
+
+To refresh for a deliberately selected source revision:
+
+```sh
+python3 scripts/import-conformance.py --repo ../kiln --ref v0.1.0
+python3 scripts/render-conformance.py
+```
+
+The renderer refreshes chart SVGs, homepage counts, accessible tables and reference pages. It is
+idempotent. Reference page prose is maintained in the renderer, while downloadable programs live
+under `examples/`; changed TypeScript samples must pass `kiln check` and both execution modes.
+TS7 means pinned TypeScript 7.0.2 libraries and reference comparisons, not full drop-in compatibility.

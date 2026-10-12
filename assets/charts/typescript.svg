@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 358" role="img" aria-labelledby="typescript-title typescript-desc">
+<title id="typescript-title">TypeScript conformance match levels</title>
+<desc id="typescript-desc">Exact output: 11,980 of 13,101 cases; Diagnostic spans: 9 of 13,101 cases; Message words: 57 of 13,101 cases; Error codes: 6 of 13,101 cases; Differs: 1,049 of 13,101 cases; Broken: 0 of 13,101 cases. Zero baseline. Exact counts are available in the accompanying table.</desc>
+<text x="0" y="34" font-family="sans-serif" font-size="13" fill="#292d24">Exact output</text>
+<rect x="160" y="18" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="18" width="237.7528" height="23" fill="#b6462b"/>
+<text x="550" y="34" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">91.44%</text>
+<text x="0" y="82" font-family="sans-serif" font-size="13" fill="#292d24">Diagnostic spans</text>
+<rect x="160" y="66" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="66" width="0.1786" height="23" fill="#b6462b"/>
+<text x="550" y="82" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">0.07%</text>
+<text x="0" y="130" font-family="sans-serif" font-size="13" fill="#292d24">Message words</text>
+<rect x="160" y="114" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="114" width="1.1312" height="23" fill="#b6462b"/>
+<text x="550" y="130" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">0.44%</text>
+<text x="0" y="178" font-family="sans-serif" font-size="13" fill="#292d24">Error codes</text>
+<rect x="160" y="162" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="162" width="0.1191" height="23" fill="#b6462b"/>
+<text x="550" y="178" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">0.05%</text>
+<text x="0" y="226" font-family="sans-serif" font-size="13" fill="#292d24">Differs</text>
+<rect x="160" y="210" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="210" width="20.8183" height="23" fill="#b6462b"/>
+<text x="550" y="226" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">8.01%</text>
+<text x="0" y="274" font-family="sans-serif" font-size="13" fill="#292d24">Broken</text>
+<rect x="160" y="258" width="260" height="23" fill="#ebece3"/>
+<rect x="160" y="258" width="0.0000" height="23" fill="#b6462b"/>
+<text x="550" y="274" text-anchor="end" font-family="monospace" font-size="13" fill="#292d24">0.00%</text>
+<path d="M160 318H420" stroke="#a9ad9f"/>
+<text x="160" y="337" font-family="monospace" font-size="11" fill="#73796b">0%</text>
+<text x="420" y="337" text-anchor="end" font-family="monospace" font-size="11" fill="#73796b">100%</text>
+</svg>

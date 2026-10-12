@@ -1,0 +1,52 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Runnable TypeScript examples for kiln’s parallel methods, typed actor calls and shared immutable graphs."><title>Types, cores and ownership. — kiln reference</title><link rel="icon" href="../mark.svg"><link rel="stylesheet" href="../style.css"></head><body><a class="skip" href="#main">Skip to content</a><div class="page"><header><a class="brand" href="../"><img src="../mark.svg" width="30" height="34" alt=""><span>kiln.</span></a><nav aria-label="Reference navigation"><a href="./">Reference</a><a href="../#start">Install</a><a href="https://github.com/sunfall-labs/kiln">Source</a></nav></header><main id="main" class="reference"><div class="reference-heading"><span class="eyebrow">KILN / TECHNICAL REFERENCE</span><h1>Types, cores and ownership.</h1><p>Runnable TypeScript examples for kiln’s parallel methods, typed actor calls and shared immutable graphs.</p></div><section><p>Save the downloaded examples together with <a href="../examples/package.json" download>package.json</a>, which declares the project as ESM. This module setting is needed for these native TypeScript actor examples in v0.1.0.</p><h2>Parallel callbacks with a checked fallback.</h2><div class="code-card"><div class="code-heading"><span>parallel.ts</span><a download href="../examples/parallel.ts">Download ↓</a></div><pre><code>type Row = { quantity: number; price: number };
+const rows: Row[] = [
+  { quantity: 3, price: 40 },
+  { quantity: 2, price: 80 },
+  { quantity: 1, price: 15 },
+];
+const totals: number[] = rows.parallelMap(row =&gt; row.quantity * row.price);
+console.log(totals.parallelFilter(total =&gt; total &gt; 100)); // [120, 160]</code></pre></div><pre><code>kiln check --explain-parallel parallel.ts
+kiln run parallel.ts
+kiln run --native parallel.ts</code></pre><p>The compiler proves which callbacks have no observable side effects. Native execution can distribute substantial independent work over scheduler lanes. Getters, I/O, random state, clocks and unproven calls can keep execution sequential. A runtime guard or a small workload can also keep a proven call inline. This tiny example demonstrates semantics, not a measured speedup.</p><img class="diagram-svg reference-diagram" src="../assets/diagrams/parallel.svg" width="360" height="220" alt="Independent collection chunks run on scheduler lanes and return ordered results."><h2>Typed calls to isolated state.</h2><div class="code-card"><div class="code-heading"><span>counter.ts</span><a download href="../examples/counter.ts">Download ↓</a></div><pre><code>import { Actor } from &#x27;kiln:actors&#x27;;
+
+export class Counter extends Actor {
+  private count: number;
+  constructor(start: number) {
+    super();
+    this.count = start;
+  }
+  increment(delta: number): number {
+    return (this.count += delta);
+  }
+  readOwner(record: { readonly owner: string }): string {
+    return record.owner;
+  }
+}</code></pre></div><div class="code-card"><div class="code-heading"><span>main.ts</span><a download href="../examples/main.ts">Download ↓</a></div><pre><code>import { spawnActor } from &#x27;kiln:actors&#x27;;
+import type { Counter } from &#x27;./counter.ts&#x27;;
+
+const owner = await spawnActor&lt;Counter&gt;({
+  module: new URL(&#x27;./counter.ts&#x27;, import.meta.url),
+  export: &#x27;Counter&#x27;, args: [0], mailboxCapacity: 8,
+});
+try {
+  const count: number = await owner.ref.call(&#x27;increment&#x27;, [3]);
+  console.log(count); // 3
+} finally {
+  await owner.stop();
+}</code></pre></div><p><code>spawnActor&lt;Counter&gt;</code> returns a typed reference. Method names, arguments and awaited results follow Counter’s public methods. Actors own isolated realm state; a bounded mailbox limits accepted work. Native actors share a bounded scheduler rather than requiring one OS thread per actor. An asynchronous method releases its lane between turns; another call can progress when it awaits.</p><pre><code>kiln check main.ts
+kiln --node run main.ts
+kiln --node run --native main.ts</code></pre><img class="diagram-svg reference-diagram" src="../assets/diagrams/actors.svg" width="360" height="100" alt="Typed asynchronous calls enter a bounded actor mailbox and execute in the actor’s realm."><p>For this actor, <code>owner.ref.call('increment', ['three'])</code> produces TS2322 and <code>owner.ref.call('missing', [])</code> produces TS2345 in <code>kiln check</code>.</p><h2>Share an immutable object graph.</h2><div class="code-card"><div class="code-heading"><span>shared-main.ts</span><a download href="../examples/shared-main.ts">Download ↓</a></div><pre><code>import { spawnActor } from &#x27;kiln:actors&#x27;;
+import { share } from &#x27;kiln:shared&#x27;;
+import type { Counter } from &#x27;./counter.ts&#x27;;
+
+const owner = await spawnActor&lt;Counter&gt;({
+  module: new URL(&#x27;./counter.ts&#x27;, import.meta.url),
+  export: &#x27;Counter&#x27;, args: [0],
+});
+try {
+  const record = share({ owner: &#x27;Ada&#x27; });
+  console.log(await owner.ref.call(&#x27;readOwner&#x27;, [record])); // Ada
+  // record.owner = &#x27;Grace&#x27;; // Type error: the snapshot is readonly.
+} finally {
+  await owner.stop();
+}</code></pre></div><p><code>share</code> creates an immutable snapshot. The source remains independent. Subsequent native sends retain the graph rather than cloning its fields; the Shared type also makes nested data readonly in TypeScript.</p><img class="diagram-svg reference-diagram" src="../assets/diagrams/share.svg" width="360" height="105" alt="Two realms read a single shared immutable graph."><h2>Choose ownership deliberately.</h2><p>Plain messages clone. <code>transfer(buffer)</code> moves an ArrayBuffer when a call is accepted and detaches the sender. <code>prepareTransfer(value)</code> copies a source graph into private storage, then moves that snapshot on a native handoff. <code>isolate(factory)</code> can move certified native heap chunks without copying when exclusive ownership is proved. The interpreter preserves move semantics by encoding and reconstructing the verified graph. Unsupported graphs and ownership failures raise DataCloneError.</p><p>These are kiln-specific APIs that reduce the application machinery around workers and serialization. Other runtimes have workers and transfer mechanisms too; these diagrams describe kiln’s design, not benchmark wins. Actor bootstrap has memory and latency costs, and application capacity needs measurement.</p><p class="evidence-links"><a href="https://github.com/sunfall-labs/kiln/blob/5814f421d547dce3ff4e3f9e1ab05373558b889f/docs/parallel-builtins.md">Parallel proofs, tiers and reduction order</a><a href="https://github.com/sunfall-labs/kiln/blob/5814f421d547dce3ff4e3f9e1ab05373558b889f/docs/actors.md">Actor lifecycle, transfer and capacity</a><a href="https://github.com/sunfall-labs/kiln/blob/5814f421d547dce3ff4e3f9e1ab05373558b889f/packages/kiln-types/actors.d.ts">Actor types</a></p></section></main><footer><a href="../">← kiln home</a><a href="./">All reference pages</a><span>v0.1.0 · pinned source data</span></footer></div></body></html>
