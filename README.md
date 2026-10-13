@@ -80,3 +80,10 @@ The shared comparison suite and frozen profiles are described in `benchmarks/REA
 `render-runtime-results.py` turns it into charts, a compatibility matrix and pairwise recommendations.
 Never count a compile failure as a passing capability or display a time for wrong output. The
 24-probe denominator is the selected shared suite, not Test262 or the 361-package corpus.
+
+The repository microbenchmark explorer uses `data/microbenchmarks.json`, with the exact original
+October 4 record retained in `data/microbench-2026-10-04.json`. The renderer asserts that all 22
+rows match the original record and that it contains no divergences. Do not silently replace one
+row with a later experiment: show follow-up results separately until a complete suite is measured.
+The source commit and original compiler digest stay visible or downloadable. These are JavaScript
+workloads, separate from the released native-runtime comparison and the HTTP measurement.
