@@ -1338,9 +1338,10 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
         } else {
             size_t remaining = (size_t)times;
             while (remaining-- > 0 && status == KILN_C99_OK) {
-                status = kiln_c99_text_append_string(&repeated, receiver);
+                /* Repetition copies JavaScript code units, including lone surrogates. */
+                status = kiln_c99_text_append_js_string(&repeated, receiver);
             }
-            *result = kiln_c99_text_value(&repeated);
+            *result = kiln_c99_text_preserving_surrogates_value(&repeated);
         }
         break;
     }

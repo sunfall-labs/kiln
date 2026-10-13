@@ -233,10 +233,10 @@ named/unmatched captures, embedded NUL/Latin-1, no-match coercion, cursor reset,
 callbacks (including allocation and exceptions), custom Symbol.replace dispatch and a larger
 result. The existing surrogate, literal callback, legacy-capture and unit-offset probes also run.
 
-A separate pre-existing issue remains in String.repeat: it sends JavaScript units through the
-lossy host-text encoder. `repeat-surrogate-probe.js` reproduces the substitution of U+FFFD for
-lone surrogates. The large replacement test builds its input with concatenation so it does not
-conflate this unrelated operation with replacement result materialisation.
+A separate pre-existing issue was found in String.repeat: it sent JavaScript units through the
+lossy host-text encoder, substituting U+FFFD for lone surrogates. The follow-up below fixes it;
+`repeat-surrogate-probe.js` retains the original reproduction. The large replacement test builds
+its input with concatenation to keep the two operations independently covered.
 
 Nine shuffled, interleaved runs per binary on CPU 15 compare the frozen d46bcbd9 native
 binaries with this change. All compilation and correctness checks finished before timing.
@@ -276,3 +276,31 @@ Cold compilation dominated verification: the workspace lane took 1,656 seconds; 
 for correctness before their 4.38-second measurement phase. No source changed during the gate.
 The changed Rust file passes its format check; the repository-wide check also reports unrelated
 pre-existing formatting drift, which this change leaves alone.
+
+## String.repeat follow-up
+
+Native repetition now uses the existing lossless JavaScript-string scratch encoder and decoder,
+so each copy preserves the receiver's exact UTF-16 units. The host-facing lossy UTF-8 encoder
+remains appropriate for host text but no longer participates in this string operation.
+`conformance/native/string-repeat-surrogates.js` checks zero/one/multiple copies of empty,
+Latin-1/NUL, BMP, astral and isolated-surrogate strings, including pairs formed between copies.
+It also checks every unit of a 4,096-unit result across subsequent managed allocations.
+The original minimal reproduction is retained in `repeat-surrogate-probe.js`.
+
+The old 491ba60c release binary reproduces `[97,65533,120,65533,97,65533,120,65533]`;
+the expected units are `[97,55357,120,56832,97,55357,120,56832]`. Both targeted native
+probes match the interpreter ordinarily and with `KILN_NATIVE_GC_STRESS=1` (zero refusals,
+zero divergences). The expanded repeat probe's interpreter output matches Node byte for byte.
+Local evidence is retained under `.scratch/repeat/` in the owned `kiln-string-repeat` worktree.
+The fixed native-release binary also matches Node's complete 805-byte output for the expanded
+probe; comparisons are `.scratch/repeat/{node,interpreter,native}.txt`.
+
+The repeat fix's routine gate passed all ten steps: 3,006 workspace tests passed, 14 ignored,
+zero failures; native parity had 726 matches, six existing refusals and zero divergences;
+all 17 available thirdparty bundles matched (five absent). Routine Test262 retained 97,745
+passes across 102,522 selected variants, with no regressions in 122 chunks and 116 extended
+variants deferred. Node 40/40, regression 58/58 and server seven passes/two existing skips
+passed, as did all 31 facts targets and 12 routine performance bundles. Evidence is
+`target/gate-logs/run.sfGCsWYb/aggregate.json` and its complete step logs. The cold workspace
+lane took 1,949 seconds, including 665 compilation cache misses and native fixture builds;
+Test262 took 754 seconds and native parity 1,176 seconds. This is routine, not full coverage.
