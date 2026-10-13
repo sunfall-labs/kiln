@@ -6,12 +6,12 @@ const commands = {
 const descriptions = {
   check: 'Instant type verification and parallel safety analysis before running or compiling.',
   run: 'The built-in bytecode interpreter provides an instant feedback loop with zero compile wait.',
-  build: 'Ahead-of-time native binary compilation with 2.6ms cold starts and zero JS runtime.',
+  build: 'Ahead-of-time native binary compilation with 6.55ms process startup and zero JS runtime.',
 };
 const workflowOutputs = {
-  check: '✓ 0 errors · TypeScript 7.0.2 verified (4ms)',
-  run: '42 (interpreted immediately)',
-  build: '42 (standalone binary · 2.6ms cold start)',
+  check: '✓ 0 errors · TypeScript 7.0.2 verified',
+  run: 'Result: 42 (interpreted immediately)',
+  build: 'Result: 42 (standalone binary · 6.55ms startup)',
 };
 document.querySelectorAll('[data-mode]').forEach((button) => {
   button.addEventListener('click', () => {
