@@ -811,6 +811,19 @@ static int kiln_c99_text_append_js_string(kiln_text *text, kiln_value value) {
     return KILN_C99_OK;
 }
 
+/* Borrow a UTF-16 span only while copying it into scratch storage. This view never enters the
+ * managed heap or escapes to JavaScript; the existing encoder preserves its exact unit sequence,
+ * including a surrogate pair split across two appended spans. No GC allocation is needed. */
+static int kiln_c99_text_append_js_units(kiln_text *text, const uint16_t *units, size_t count) {
+    kiln_string view;
+    if (count > UINT32_MAX) return KILN_C99_OUT_OF_MEMORY;
+    view.unit_len = (uint32_t)count;
+    view.flags = KILN_STRING_UTF16;
+    view.data = units;
+    return kiln_c99_text_append_js_string(
+        text, kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)&view, count));
+}
+
 static kiln_value kiln_c99_text(kiln_value value) {
     static const char undefined_text[] = "undefined";
     static const char null_text[] = "null";

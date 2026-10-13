@@ -1401,26 +1401,29 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
     }
     case KILN_C99_METHOD_REPLACE:
     case KILN_C99_METHOD_REPLACE_ALL: {
-        kiln_value with = argc > 1 ? kiln_c99_text(args[1]) : kiln_c99_undefined();
+        kiln_value with;
         uint16_t *replacement = NULL;
         size_t replacement_count = 0;
         kiln_text built = {NULL, 0, 0};
         size_t from = 0;
         double at;
-        if (with.tag == KILN_VALUE_STRING &&
-            kiln_c99_to_units(with, &replacement, &replacement_count) != KILN_C99_OK) {
-            status = KILN_C99_OUT_OF_MEMORY;
-            break;
-        }
+        int found = 0;
+        status = kiln_c99_to_text_argument(host, argc > 1 ? args[1] : kiln_c99_undefined(),
+                                           &with, depth, thrown);
+        kiln_c99_gc_keep_alive(&receiver);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_to_units(with, &replacement, &replacement_count);
+        if (status != KILN_C99_OK) break;
         while ((at = kiln_c99_units_find(units, count, needle, needle_count, from)) >= 0.0) {
-            kiln_value head = kiln_c99_from_units(units + from, (size_t)at - from);
+            found = 1;
             /* The occurrence is the only group, which is what lets the template expander below be
              * the same one the regexp path uses -- and a replacement *is* a template even when
              * the pattern was a plain string: `"a".replace("a", "$&$&")` is `"aa"`. */
             int64_t ranges[2];
             ranges[0] = (int64_t)at;
             ranges[1] = (int64_t)at + (int64_t)needle_count;
-            if (kiln_c99_text_append_js_string(&built, head) != KILN_C99_OK ||
+            if (kiln_c99_text_append_js_units(&built, units + from,
+                                              (size_t)at - from) != KILN_C99_OK ||
                 kiln_c99_expand_replacement(&built, replacement, replacement_count, units, count,
                                             ranges, 1, NULL) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
@@ -1434,21 +1437,22 @@ static int kiln_c99_invoke_string_method(kiln_host *host, kiln_value *result, ui
                 break;
             }
             if (needle_count == 0) {
-                kiln_value carried;
                 if (from >= count) {
                     break;
                 }
-                carried = kiln_c99_from_units(units + from, 1);
-                if (kiln_c99_text_append_js_string(&built, carried) != KILN_C99_OK) {
+                if (kiln_c99_text_append_js_units(&built, units + from, 1) != KILN_C99_OK) {
                     status = KILN_C99_OUT_OF_MEMORY;
                     break;
                 }
                 from += 1;
             }
         }
-        if (status == KILN_C99_OK) {
-            kiln_value rest = kiln_c99_from_units(units + from, count - from);
-            if (kiln_c99_text_append_js_string(&built, rest) != KILN_C99_OK) {
+        if (status == KILN_C99_OK && !found && receiver.tag == KILN_VALUE_STRING) {
+            /* No replacement changed the immutable subject. Coercion and searching have still
+             * happened, but result materialisation can retain its original storage. */
+            *result = receiver;
+        } else if (status == KILN_C99_OK) {
+            if (kiln_c99_text_append_js_units(&built, units + from, count - from) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else {
                 *result = kiln_c99_text_preserving_surrogates_value(&built);
@@ -1579,6 +1583,8 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     size_t at = 0;
     uint32_t split_limit = UINT32_MAX;
     int split_stopped = 0;
+    int replaced = 0;
+    int full_unicode = 0;
     int64_t stack_ranges[64];
     int64_t *ranges = stack_ranges;
     size_t ranges_capacity = sizeof(stack_ranges) / sizeof(stack_ranges[0]);
@@ -1649,6 +1655,10 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
                                            argc > 1 ? 2 : 1, depth, thrown);
         }
     }
+    for (size_t flag = 0; regexp->flags != NULL && flag < regexp->flags->unit_len; ++flag) {
+        uint16_t unit = kiln_string_unit_at(regexp->flags, flag);
+        if (unit == 'u' || unit == 'v') full_unicode = 1;
+    }
     every = regexp->global || code == KILN_C99_METHOD_REPLACE_ALL ||
             code == KILN_C99_METHOD_SPLIT;
     if (code == KILN_C99_METHOD_SPLIT && argc > 1 &&
@@ -1700,11 +1710,15 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     }
     if ((code == KILN_C99_METHOD_REPLACE || code == KILN_C99_METHOD_REPLACE_ALL) &&
         !kiln_c99_is_callable(with)) {
-        kiln_value text = kiln_c99_text(with);
-        if (text.tag != KILN_VALUE_STRING ||
-            kiln_c99_to_units(text, &replacement, &replacement_count) != KILN_C99_OK) {
+        kiln_value text;
+        status = kiln_c99_to_text_argument(host, with, &text, depth, thrown);
+        kiln_c99_gc_keep_alive(&pattern);
+        kiln_c99_gc_keep_alive(&receiver);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_to_units(text, &replacement, &replacement_count);
+        if (status != KILN_C99_OK) {
             free(units);
-            return KILN_C99_OUT_OF_MEMORY;
+            return status;
         }
     }
     for (;;) {
@@ -1782,7 +1796,13 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
              * a pattern that can match nothing grows an empty part at each end. */
             if (((size_t)ranges[0] == (size_t)ranges[1] && (size_t)ranges[0] == from) ||
                 (size_t)ranges[0] == count) {
-                at = ranges[1] == ranges[0] ? (size_t)ranges[1] + 1 : (size_t)ranges[1];
+                at = (size_t)ranges[1];
+                if (ranges[1] == ranges[0]) {
+                    ++at;
+                    if (full_unicode && at < count && units[at - 1] >= 0xD800 &&
+                        units[at - 1] <= 0xDBFF && units[at] >= 0xDC00 && units[at] <= 0xDFFF)
+                        ++at;
+                }
                 if (at > count) {
                     break;
                 }
@@ -1812,8 +1832,9 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             if (split_stopped) break;
             from = (size_t)ranges[1];
         } else {
-            kiln_value head = kiln_c99_from_units(units + from, (size_t)ranges[0] - from);
-            if (kiln_c99_text_append_js_string(&built, head) != KILN_C99_OK) {
+            replaced = 1;
+            if (kiln_c99_text_append_js_units(&built, units + from,
+                                              (size_t)ranges[0] - from) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else if (kiln_c99_is_callable(with)) {
                 /* The callback is handed the match, then each group, then the index and the whole
@@ -1850,7 +1871,13 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
         if (status != KILN_C99_OK) {
             break;
         }
-        at = ranges[1] == ranges[0] ? (size_t)ranges[1] + 1 : (size_t)ranges[1];
+        at = (size_t)ranges[1];
+        if (ranges[1] == ranges[0]) {
+            ++at;
+            if (full_unicode && at < count && units[at - 1] >= 0xD800 &&
+                units[at - 1] <= 0xDBFF && units[at] >= 0xDC00 && units[at] <= 0xDFFF)
+                ++at;
+        }
         if (!every) {
             break;
         }
@@ -1886,8 +1913,11 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             *result = collected;
             break;
         default: {
-            kiln_value rest = kiln_c99_from_units(units + from, count - from);
-            if (kiln_c99_text_append_js_string(&built, rest) != KILN_C99_OK) {
+            if (!replaced && receiver.tag == KILN_VALUE_STRING) {
+                *result = receiver;
+                break;
+            }
+            if (kiln_c99_text_append_js_units(&built, units + from, count - from) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else {
                 *result = kiln_c99_text_preserving_surrogates_value(&built);

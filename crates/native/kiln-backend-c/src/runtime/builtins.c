@@ -231,6 +231,14 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
         const uint16_t *piece = NULL;
         size_t piece_count = 0;
         uint16_t literal = unit;
+        if (unit != (uint16_t)'$') {
+            size_t end = at + 1;
+            while (end < pattern_count && pattern[end] != (uint16_t)'$') ++end;
+            if (kiln_c99_text_append_js_units(out, pattern + at, end - at) != KILN_C99_OK)
+                return KILN_C99_OUT_OF_MEMORY;
+            at = end;
+            continue;
+        }
         if (unit == (uint16_t)'$' && at + 1 < pattern_count) {
             uint16_t next = pattern[at + 1];
             if (next == (uint16_t)'$') {
@@ -318,14 +326,10 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
             }
         }
         if (piece != NULL) {
-            kiln_value text = kiln_c99_from_units(piece, piece_count);
-            if (text.tag != KILN_VALUE_STRING ||
-                kiln_c99_text_append_js_string(out, text) != KILN_C99_OK)
+            if (kiln_c99_text_append_js_units(out, piece, piece_count) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
         } else {
-            kiln_value text = kiln_c99_from_units(&literal, 1);
-            if (text.tag != KILN_VALUE_STRING ||
-                kiln_c99_text_append_js_string(out, text) != KILN_C99_OK)
+            if (kiln_c99_text_append_js_units(out, &literal, 1) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
         }
         at += taken;

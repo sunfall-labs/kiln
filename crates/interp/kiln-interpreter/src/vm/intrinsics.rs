@@ -3214,7 +3214,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if arguments.iter().enumerate().any(|(index, argument)| {
                     (string_coerced_argument(native, index)
                         || (matches!(native, Native::StringSplit) && index == 1))
-                        && is_an_object(argument)
+                        && (is_an_object(argument) || matches!(argument, Value::Symbol(_)))
                         && !is_callable(argument)
                         && !matches!(argument, Value::RegExp(_))
                         && !matches!(native, Native::StringPadStart | Native::StringPadEnd)
@@ -3222,7 +3222,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             {
                 let mut converted = Vec::with_capacity(arguments.len());
                 for (index, argument) in arguments.iter().enumerate() {
-                    let convertible = is_an_object(argument)
+                    let convertible = (is_an_object(argument)
+                        || matches!(argument, Value::Symbol(_)))
                         && !is_callable(argument)
                         && !matches!(argument, Value::RegExp(_));
                     // `split`'s limit is the one argument in this set converted with `ToUint32`

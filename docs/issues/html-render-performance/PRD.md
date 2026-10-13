@@ -208,3 +208,71 @@ The first gate exposed a test assertion that compared dispatch from an earlier f
 the expected addition to the private-helper surface snapshot. Both were corrected and pass in
 the final run. The first aggregate correctly rejected changes made during that run; only the
 final aggregate is accepted evidence.
+
+## Implemented: replacement result materialisation
+
+Replacement prefixes, suffixes, template literals and capture slices now copy borrowed UTF-16
+spans directly into the scratch result builder, without allocating intermediate managed strings.
+Contiguous literal template runs copy together. The span uses a transient stack string view and
+the existing lossless encoder; it cannot escape, trigger GC, or add a second encoding algorithm.
+A replacement with no match retains the original immutable string after performing conversion
+and searching. Both literal and RegExp replacement paths benefit. Protocol dispatch, matcher
+selection, callback dispatch and capture expansion remain on their existing paths.
+
+The new parity probe exposed two pre-existing replacement bugs. Non-callable replacement values
+now use the existing checked ToString adapter, including when no match is found; missing literal
+replacements produce `undefined` text, and Symbol/throwing conversions propagate their errors.
+The interpreter's generic string-argument conversion also now routes Symbols through its checked
+ToString adapter; otherwise literal replacement incorrectly accepted a Symbol that Node rejects.
+Empty RegExp matches advance over a complete surrogate pair under `u`/`v`, rather than stepping
+inside it. These corrections accompany the allocation optimization so the no-match path retains
+observable side effects and Unicode behavior.
+
+`conformance/native/string-replace-borrowed-spans.js` covers split surrogate pairs, templates,
+named/unmatched captures, embedded NUL/Latin-1, no-match coercion, cursor reset, empty matches,
+callbacks (including allocation and exceptions), custom Symbol.replace dispatch and a larger
+result. The existing surrogate, literal callback, legacy-capture and unit-offset probes also run.
+
+A separate pre-existing issue remains in String.repeat: it sends JavaScript units through the
+lossy host-text encoder. `repeat-surrogate-probe.js` reproduces the substitution of U+FFFD for
+lone surrogates. The large replacement test builds its input with concatenation so it does not
+conflate this unrelated operation with replacement result materialisation.
+
+Nine shuffled, interleaved runs per binary on CPU 15 compare the frozen d46bcbd9 native
+binaries with this change. All compilation and correctness checks finished before timing.
+The original program is unchanged at 2,000 rows; 1,000/4,000 change only its row-count literal.
+Every full output agrees with Node. Times include startup and exclude compilation:
+
+| Rows | d46bcbd9 median ms (min–max) | Replacement optimization median ms (min–max) |
+| --- | ---: | ---: |
+| 1,000 | 30.83 (29.82–61.84) | 28.31 (27.93–28.81) |
+| 2,000 | 51.25 (50.64–77.59) | 47.57 (46.95–47.99) |
+| 4,000 | 94.87 (93.61–119.77) | 86.43 (85.99–87.17) |
+
+The 2,000-row program takes 7.2% less wall time (1.08× faster) on top of
+the private-accumulator optimization. This is a cold whole-program measurement, not a warmed
+throughput claim. The frozen website release comparison remains unchanged.
+
+Local evidence: `.scratch/regexp/timings.json`, `native-final.log`, `native-stress.log`,
+`snapshot-verified.log`, and `interpreter-spans.txt` / `native-spans.txt`. The expanded replacement
+probe matches Node in both engines (1,024 full-output bytes). Five targeted native probes match;
+three allocation-sensitive probes also match under forced collection.
+
+The final routine gate passed all ten steps in 1,663 seconds on this cold worktree:
+3,006 workspace tests passed, 14 ignored, zero failures; native parity had 725 matches,
+six existing refusals and no divergences; all 17 available thirdparty bundles matched in both
+engines (five absent); routine Test262 had 97,745 passes across 102,522 selected variants and
+no regressions across 122 chunks (116 extended variants deferred). Node 40/40 and regression
+58/58 passed; server had seven passes and two existing skips. The facts baseline passed all
+31 targets, and the routine performance baseline passed all 12 selected bundles (`postcss`
+performance deferred). This is routine coverage, not a complete extended run.
+
+Evidence: `target/gate-logs/run.aInpHUEN/aggregate.json` and its step envelopes/raw logs.
+The aggregate records source snapshot SHA-256
+`2002dfd9ed003b465173647ad46bf4f256f2cdef3ec2e86db23272ec552fec81` and compiler SHA-256
+`6386ab9cec2112d56423f58fe0f4e3d384b306c01f3a3728b9859190231e77e9`.
+Cold compilation dominated verification: the workspace lane took 1,656 seconds; native parity
+1,169; Test262 730; the 12 benchmark binaries took 469 seconds to prepare and then waited
+for correctness before their 4.38-second measurement phase. No source changed during the gate.
+The changed Rust file passes its format check; the repository-wide check also reports unrelated
+pre-existing formatting drift, which this change leaves alone.
