@@ -29,7 +29,10 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use notify::RecursiveMode;
+use notify::{
+    EventKind, RecursiveMode,
+    event::{AccessKind, AccessMode},
+};
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 
 use crate::backend::{Backend, SourceUpdate};
@@ -148,7 +151,11 @@ pub fn run(
             }
         };
         match batch {
-            Ok(batch) => {
+            Ok(mut batch) => {
+                // Resolving imports opens package.json; running a program reads its sources.
+                // Those access notifications must not invalidate the inputs we just read.
+                // Keep close-after-write notifications, which can be a backend's save signal.
+                batch.retain(|event| may_change_files(&event.kind));
                 let target_changed = batch.iter().any(|event| target.matches(event));
                 let resolution_metadata_changed = batch
                     .iter()
@@ -337,6 +344,14 @@ pub fn run(
             }
         }
         refresher.drain(notes)?;
+    }
+}
+
+fn may_change_files(kind: &EventKind) -> bool {
+    match kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
     }
 }
 
@@ -1710,6 +1725,77 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reading_package_metadata_does_not_rerun_an_idle_watch() {
+        let dir = scratch("idle-package-manifest");
+        let entry = dir.join("main.js");
+        let package = dir.join("node_modules/pkg");
+        std::fs::create_dir_all(&package).expect("create package");
+        std::fs::write(&entry, "import { value } from 'pkg'; console.log(value);\n")
+            .expect("write entry");
+        std::fs::write(package.join("index.js"), "export const value = 1;\n")
+            .expect("write package source");
+        let manifest = package.join("package.json");
+        std::fs::write(&manifest, r#"{"exports":"./index.js"}"#).expect("write manifest");
+
+        let (printed, _, _) = watch_in_background_observed(&entry);
+        printed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initial run");
+        assert!(
+            printed.recv_timeout(Duration::from_millis(750)).is_err(),
+            "reading package metadata during initial resolution must not rerun the program"
+        );
+        std::fs::read_to_string(&manifest).expect("read package metadata without editing");
+        assert!(
+            printed.recv_timeout(Duration::from_millis(750)).is_err(),
+            "opening and closing package metadata for reading must not rerun the program"
+        );
+
+        publish_edit(&manifest, r#"{"exports":"./index.js","type":"module"}"#);
+        printed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a metadata edit must still rerun the program");
+        assert!(
+            printed.recv_timeout(Duration::from_millis(750)).is_err(),
+            "reading metadata for the rerun must not start another iteration"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn access_notifications_only_invalidate_on_close_after_write() {
+        for access in [
+            AccessKind::Any,
+            AccessKind::Read,
+            AccessKind::Open(AccessMode::Any),
+            AccessKind::Open(AccessMode::Read),
+            AccessKind::Open(AccessMode::Write),
+            AccessKind::Close(AccessMode::Read),
+            AccessKind::Close(AccessMode::Any),
+            AccessKind::Other,
+        ] {
+            assert!(!may_change_files(&EventKind::Access(access)), "{access:?}");
+        }
+        assert!(may_change_files(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+        for kind in [
+            EventKind::Create(notify::event::CreateKind::File),
+            EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )),
+            EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::Both,
+            )),
+            EventKind::Remove(notify::event::RemoveKind::File),
+            EventKind::Any,
+            EventKind::Other,
+        ] {
+            assert!(may_change_files(&kind), "{kind:?}");
+        }
     }
 
     #[test]
