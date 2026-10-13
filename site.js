@@ -97,3 +97,30 @@ document.querySelectorAll('[data-scaling]').forEach((button) => {
     document.getElementById('scaling-takeaway').textContent = measurements.scaling.takeaways[workload];
   });
 });
+
+const microbenchmarks = JSON.parse(document.getElementById('micro-data').textContent);
+const microSelect = document.getElementById('micro-workload');
+microSelect.addEventListener('change', () => {
+  const row = microbenchmarks.rows.find(item => `${item.suite}/${item.script}` === microSelect.value);
+  const values = ['kiln-native', 'bun', 'node'].map(runtime => row.ms[runtime]);
+  const peak = Math.max(...values);
+  const magnitude = 10 ** Math.floor(Math.log10(peak));
+  const maximum = Math.ceil(peak / magnitude) * magnitude;
+  const container = document.getElementById('micro-bars');
+  container.querySelectorAll('.chart-row').forEach((bar, index) => {
+    bar.querySelector('.bar').setAttribute('width', values[index] / maximum * 172);
+    bar.querySelector('.chart-value').textContent = `${Number(values[index].toPrecision(4))} ms`;
+  });
+  const name = row.script.replace('.mjs', '').replaceAll('-', ' ');
+  document.getElementById('micro-title').textContent = name;
+  const svg = container.querySelector('svg');
+  svg.querySelector('title').textContent = `${name}: warm execution, October 4 snapshot`;
+  svg.querySelector('desc').textContent = [...container.querySelectorAll('.chart-row')]
+    .map(bar => `${bar.querySelector('.chart-label').textContent}: ${bar.querySelector('.chart-value').textContent}`).join('; ');
+  svg.lastElementChild.textContent = `${Number(maximum.toPrecision(4))} ms`;
+  const ratio = row.ms['kiln-native'] / row.ms.bun;
+  document.getElementById('micro-takeaway').textContent = ratio < 1
+    ? `Native takes ${(ratio * 100).toFixed(1)}% of Bun’s time on this workload in the October 4 snapshot.`
+    : `Native takes ${ratio.toFixed(2)}× Bun’s time on this workload in the October 4 snapshot.`;
+  document.getElementById('micro-source').href = `https://github.com/sunfall-labs/kiln/blob/${microbenchmarks.validated_commit}/bench/${row.suite}/${row.script}`;
+});

@@ -12,7 +12,7 @@ def rows(items, values, maximum, suffix, ranges=False, name="chart"):
     description = "; ".join(item["label"] + ": " + ((f"{value[0]:g}–{value[1]:g}" if value[0] != value[1] else f"{value[1]:g}") if ranges else f"{value:g}") + suffix for item, value in zip(items, values))
     titles = {"throughput": "Hello-world HTTP throughput", "memory": "Peak server resident memory", "scaling": "Small-service worker scaling"}
     result = [f'<svg xmlns="http://www.w3.org/2000/svg" class="chart-svg" viewBox="0 0 360 220" role="img" aria-labelledby="{name}-svg-title {name}-svg-desc">',
-              f'<title id="{name}-svg-title">{html.escape(titles[name])}</title>',
+              f'<title id="{name}-svg-title">{html.escape(titles.get(name, "JSON warm execution · October 4 snapshot"))}</title>',
               f'<desc id="{name}-svg-desc">Bars start at zero. {html.escape(description)}. Exact values are also available in the result table.</desc>',
               f'<defs><pattern id="{name}-range" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="2" height="4" fill="#ffffff" fill-opacity=".5"/></pattern></defs>']
     for index, (item, value) in enumerate(zip(items, values)):
@@ -54,6 +54,30 @@ fragments = {
     "scaling-table": table(["Workers", "Hello world", "Small service"], scaling_rows),
     "benchmark-data": '<script id="benchmark-data" type="application/json">' + json.dumps(data, ensure_ascii=False).replace("<", "\\u003c") + '</script>',
 }
+micro = json.loads((ROOT / "data/microbenchmarks.json").read_text())
+assert len(micro["rows"]) == 22
+raw = json.loads((ROOT / micro["raw"]).read_text())
+assert micro["rows"] == raw["rows"] and not raw["divergences"]
+selected = next(r for r in micro["rows"] if r["script"] == "json.mjs")
+labels = {"cpu": "Numerical work", "non-io": "Collections and runtime", "io": "I/O and buffers"}
+options = []
+for suite, label in labels.items():
+    options.append(f'<optgroup label="{label}">')
+    for r in micro["rows"]:
+        if r["suite"] == suite:
+            name = r["script"].removesuffix(".mjs")
+            key = f'{suite}/{r["script"]}'
+            options.append(f'<option value="{key}"' + (' selected' if r == selected else '') + f'>{html.escape(name)}</option>')
+    options.append('</optgroup>')
+entries = [[f'{r["suite"]}/{r["script"]}', *(format(r["ms"][runtime], ".4g") for runtime in ("node", "bun", "kiln-native", "kiln")), f'{r["ms"]["kiln-native"]/r["ms"]["bun"]:.2f}×'] for r in micro["rows"]]
+fragments.update({
+    "micro-options": "\n".join(options),
+    "micro-chart": rows([{"id":"kiln","label":"kiln native"},{"label":"Bun"},{"label":"Node"}], [selected["ms"][r] for r in ("kiln-native","bun","node")], 80, " ms", name="microbench"),
+    "micro-table": table(["Workload", "Node ms", "Bun ms", "Native ms", "Interpreter ms", "Native/Bun"], entries),
+    "micro-data": '<script id="micro-data" type="application/json">' + json.dumps(micro, ensure_ascii=False).replace("<", "\\u003c") + '</script>',
+})
+(ROOT / "assets/charts/microbench.svg").write_text(fragments["micro-chart"] + "\n")
+
 for chart in ("throughput", "memory", "scaling"):
     (ROOT / "assets/charts" / f"{chart}.svg").write_text(fragments[chart] + "\n")
 

@@ -1,0 +1,229 @@
+{
+  "date": "2026-10-04",
+  "source": "https://github.com/sunfall-labs/kiln/blob/491ba60c/docs/performance/microbench-2026-10-04.md",
+  "raw": "data/microbench-2026-10-04.json",
+  "reproduce": "https://github.com/sunfall-labs/kiln/blob/491ba60c/bench/compare.sh",
+  "validated_commit": "e872e3a08f47348f52926ce4f5cda100657e65ce",
+  "rows": [
+    {
+      "suite": "cpu",
+      "script": "collatz.mjs",
+      "ms": {
+        "node": 478,
+        "bun": 421,
+        "kiln": 21778.335039154626,
+        "kiln-native": 192
+      }
+    },
+    {
+      "suite": "cpu",
+      "script": "fib.mjs",
+      "ms": {
+        "node": 36,
+        "bun": 23.75,
+        "kiln": 5777.01863204129,
+        "kiln-native": 54
+      }
+    },
+    {
+      "suite": "cpu",
+      "script": "frame.mjs",
+      "ms": {
+        "node": 0.0003204345703125,
+        "bun": 0.0002593994140625,
+        "kiln": 2.5105749955400825,
+        "kiln-native": 0.00469970703125
+      }
+    },
+    {
+      "suite": "cpu",
+      "script": "loop.mjs",
+      "ms": {
+        "node": 54,
+        "bun": 53,
+        "kiln": 23559.62910503149,
+        "kiln-native": 46
+      }
+    },
+    {
+      "suite": "cpu",
+      "script": "mandelbrot.mjs",
+      "ms": {
+        "node": 17.25,
+        "bun": 17.75,
+        "kiln": 10971.181049011648,
+        "kiln-native": 17.5
+      }
+    },
+    {
+      "suite": "cpu",
+      "script": "nbody.mjs",
+      "ms": {
+        "node": 492,
+        "bun": 479,
+        "kiln": 118607.29073407128,
+        "kiln-native": 540
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "array-functional.mjs",
+      "ms": {
+        "node": 8.375,
+        "bun": 1.71875,
+        "kiln": 562.9500400973484,
+        "kiln-native": 1.875
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "array-sort.mjs",
+      "ms": {
+        "node": 3.375,
+        "bun": 3.125,
+        "kiln": 113.17748809233308,
+        "kiln-native": 3
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "class-poly.mjs",
+      "ms": {
+        "node": 1.078125,
+        "bun": 1.078125,
+        "kiln": 1269.021469168365,
+        "kiln-native": 30
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "collections.mjs",
+      "ms": {
+        "node": 4.375,
+        "bun": 3.5,
+        "kiln": 428.31094411667436,
+        "kiln-native": 8.25
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "json.mjs",
+      "ms": {
+        "node": 55,
+        "bun": 37,
+        "kiln": 857.424789108336,
+        "kiln-native": 71
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "multicore-parallel.mjs",
+      "ms": {
+        "node": 0.84375,
+        "bun": 0.162109375,
+        "kiln": 71.38948515057564,
+        "kiln-native": 0.171875
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "object-literal.mjs",
+      "ms": {
+        "node": 0.01904296875,
+        "bun": 0.018798828125,
+        "kiln": 72.04183808062226,
+        "kiln-native": 5
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "object-spread.mjs",
+      "ms": {
+        "node": 0.765625,
+        "bun": 0.921875,
+        "kiln": 226.03556013200432,
+        "kiln-native": 0.22265625
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "parallel-map-large.mjs",
+      "ms": {
+        "node": 146,
+        "bun": 70,
+        "kiln": 11881.180922035128,
+        "kiln-native": 355
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "property-miss.mjs",
+      "ms": {
+        "node": 0.0419921875,
+        "bun": 0.0517578125,
+        "kiln": 143.32224300596863,
+        "kiln-native": 0.7734375
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "regex.mjs",
+      "ms": {
+        "node": 6.25,
+        "bun": 0.546875,
+        "kiln": 161.13355208653957,
+        "kiln-native": 7.75
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "string-ops.mjs",
+      "ms": {
+        "node": 13.25,
+        "bun": 7.25,
+        "kiln": 636.4846101496369,
+        "kiln-native": 18.75
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "timer-create.mjs",
+      "ms": {
+        "node": 2.4375,
+        "bun": 1.75,
+        "kiln": 41.468996585463174,
+        "kiln-native": 5.0625
+      }
+    },
+    {
+      "suite": "io",
+      "script": "buffer.mjs",
+      "ms": {
+        "node": 10,
+        "bun": 6.125,
+        "kiln": 41477.14432887733,
+        "kiln-native": 1133
+      }
+    },
+    {
+      "suite": "io",
+      "script": "fs-promises.mjs",
+      "ms": {
+        "node": 11,
+        "bun": 5.375,
+        "kiln": 37.39152487833053,
+        "kiln-native": 4.5625
+      }
+    },
+    {
+      "suite": "io",
+      "script": "microtasks.mjs",
+      "ms": {
+        "node": 0.75,
+        "bun": 0.625,
+        "kiln": 45.10350804775953,
+        "kiln-native": 1.59375
+      }
+    }
+  ]
+}

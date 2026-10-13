@@ -1,0 +1,300 @@
+{
+  "floor_ms": {
+    "node": 41.04030691087246,
+    "bun": 7.79397098813206,
+    "kiln": 1347.5737929111347,
+    "kiln-native": 7.066581049002707,
+    "kiln+node": 1342.6747170742601
+  },
+  "passes": 3,
+  "rows": [
+    {
+      "suite": "cpu",
+      "script": "collatz.mjs",
+      "ms": {
+        "node": 478,
+        "bun": 421,
+        "kiln": 21778.335039154626,
+        "kiln-native": 192
+      }
+    },
+    {
+      "suite": "cpu",
+      "script": "fib.mjs",
+      "ms": {
+        "node": 36,
+        "bun": 23.75,
+        "kiln": 5777.01863204129,
+        "kiln-native": 54
+      }
+    },
+    {
+      "suite": "cpu",
+      "script": "frame.mjs",
+      "ms": {
+        "node": 0.0003204345703125,
+        "bun": 0.0002593994140625,
+        "kiln": 2.5105749955400825,
+        "kiln-native": 0.00469970703125
+      }
+    },
+    {
+      "suite": "cpu",
+      "script": "loop.mjs",
+      "ms": {
+        "node": 54,
+        "bun": 53,
+        "kiln": 23559.62910503149,
+        "kiln-native": 46
+      }
+    },
+    {
+      "suite": "cpu",
+      "script": "mandelbrot.mjs",
+      "ms": {
+        "node": 17.25,
+        "bun": 17.75,
+        "kiln": 10971.181049011648,
+        "kiln-native": 17.5
+      }
+    },
+    {
+      "suite": "cpu",
+      "script": "nbody.mjs",
+      "ms": {
+        "node": 492,
+        "bun": 479,
+        "kiln": 118607.29073407128,
+        "kiln-native": 540
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "array-functional.mjs",
+      "ms": {
+        "node": 8.375,
+        "bun": 1.71875,
+        "kiln": 562.9500400973484,
+        "kiln-native": 1.875
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "array-sort.mjs",
+      "ms": {
+        "node": 3.375,
+        "bun": 3.125,
+        "kiln": 113.17748809233308,
+        "kiln-native": 3
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "class-poly.mjs",
+      "ms": {
+        "node": 1.078125,
+        "bun": 1.078125,
+        "kiln": 1269.021469168365,
+        "kiln-native": 30
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "collections.mjs",
+      "ms": {
+        "node": 4.375,
+        "bun": 3.5,
+        "kiln": 428.31094411667436,
+        "kiln-native": 8.25
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "json.mjs",
+      "ms": {
+        "node": 55,
+        "bun": 37,
+        "kiln": 857.424789108336,
+        "kiln-native": 71
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "multicore-parallel.mjs",
+      "ms": {
+        "node": 0.84375,
+        "bun": 0.162109375,
+        "kiln": 71.38948515057564,
+        "kiln-native": 0.171875
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "object-literal.mjs",
+      "ms": {
+        "node": 0.01904296875,
+        "bun": 0.018798828125,
+        "kiln": 72.04183808062226,
+        "kiln-native": 5
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "object-spread.mjs",
+      "ms": {
+        "node": 0.765625,
+        "bun": 0.921875,
+        "kiln": 226.03556013200432,
+        "kiln-native": 0.22265625
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "parallel-map-large.mjs",
+      "ms": {
+        "node": 146,
+        "bun": 70,
+        "kiln": 11881.180922035128,
+        "kiln-native": 355
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "property-miss.mjs",
+      "ms": {
+        "node": 0.0419921875,
+        "bun": 0.0517578125,
+        "kiln": 143.32224300596863,
+        "kiln-native": 0.7734375
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "regex.mjs",
+      "ms": {
+        "node": 6.25,
+        "bun": 0.546875,
+        "kiln": 161.13355208653957,
+        "kiln-native": 7.75
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "string-ops.mjs",
+      "ms": {
+        "node": 13.25,
+        "bun": 7.25,
+        "kiln": 636.4846101496369,
+        "kiln-native": 18.75
+      }
+    },
+    {
+      "suite": "non-io",
+      "script": "timer-create.mjs",
+      "ms": {
+        "node": 2.4375,
+        "bun": 1.75,
+        "kiln": 41.468996585463174,
+        "kiln-native": 5.0625
+      }
+    },
+    {
+      "suite": "io",
+      "script": "buffer.mjs",
+      "ms": {
+        "node": 10,
+        "bun": 6.125,
+        "kiln": 41477.14432887733,
+        "kiln-native": 1133
+      }
+    },
+    {
+      "suite": "io",
+      "script": "fs-promises.mjs",
+      "ms": {
+        "node": 11,
+        "bun": 5.375,
+        "kiln": 37.39152487833053,
+        "kiln-native": 4.5625
+      }
+    },
+    {
+      "suite": "io",
+      "script": "microtasks.mjs",
+      "ms": {
+        "node": 0.75,
+        "bun": 0.625,
+        "kiln": 45.10350804775953,
+        "kiln-native": 1.59375
+      }
+    }
+  ],
+  "divergences": [],
+  "measurement": {
+    "compiler_sha256": "560e7ccceee797c6e27015c93a417c091dc6304d62fa73b91b68518bcbd20cbf",
+    "validated_commit": "e872e3a08f47348f52926ce4f5cda100657e65ce",
+    "profile": "native-release",
+    "passes": 3,
+    "scope": "all22 repository microbenchmarks",
+    "method": "Unmodified bench/compare.sh Python payload and bench/harness.mjs with coordinator-only barrier before floor/warm/timed executions; compilation excluded.",
+    "quiet_window": "No other builds or runtime executions were active during timing.",
+    "start_unix": 1791087171.0699291,
+    "script_sha256": "c49fce271289fba1bf62fbe310384c4b051570592791f640932762d84ba53a3a",
+    "harness_sha256": "b041101125e8f8e789321983bd5ec1579c3a8a8d63abf584adaae43afdcaf827",
+    "discarded_attempt": "invalidated-by-push-hooks.json",
+    "complete": true,
+    "coordinator": "Original repository Python benchmark payload with a coordinator-only barrier; unchanged workloads and timing harness.",
+    "source_sha256": {
+      "bench/cpu/collatz.mjs": "9f7724eec466cea09da178a9126ba3093d739dda6222f47f43ebbda53d6c7890",
+      "bench/cpu/fib.mjs": "653f50e685e00a7dd8fdc60d8f3913dc19ab0e7404be7aa07271a4b314cb447f",
+      "bench/cpu/frame.mjs": "717bd671b45f55d601866559610cce30327d787b1688314c900dbf71a215f651",
+      "bench/cpu/loop.mjs": "f74d6689feb18f5b5669996f0ae28ce9309fec3896fbf89e221cadbbfe8afa18",
+      "bench/cpu/mandelbrot.mjs": "7fda4e1145cea5ffc8d1efc74969b696860d33f6edb92fac870d558b762f75b8",
+      "bench/cpu/nbody.mjs": "d0c7d336d337c3da94df58573d85c741277e6bef002bcfeb17ce3fc151de0e4e",
+      "bench/non-io/array-functional.mjs": "c5066eef5bce646c9cca4de3aac42438841b2d0204aee7b5f871ebc35c0a12f6",
+      "bench/non-io/array-sort.mjs": "51690225158bdb12a2d816037ad690d13cdefba2e36e8e4c9f838a499c7f542a",
+      "bench/non-io/class-poly.mjs": "a1e9dc1fec77d1cf3f607a6e8fbcd09dd421774ee69b628194e3ecfeea4ece5c",
+      "bench/non-io/collections.mjs": "1233b0ee95f8434e587f9d484afb800cfe83761a8322ce5c5075df5dfddf8a4b",
+      "bench/non-io/json.mjs": "17e29da86540bbfa46ede26cf00e81b91ec5d707ab236a649bdac47f6b458149",
+      "bench/non-io/multicore-parallel.mjs": "abd4a175138ef13950cbae7059e70a600106d61231406c30594068f0e17090d3",
+      "bench/non-io/object-literal.mjs": "3eb7898adebe7410845d530dda3b006d3cd74f52607d346d5724f347a80a04e7",
+      "bench/non-io/object-spread.mjs": "d9dab6221681102dc7d3cd1685b5a22dc1c5db07847d0bdd33a37a08acd0eaed",
+      "bench/non-io/parallel-map-large.mjs": "4444dd2a7b3d8e6d972074222c7377f2bf530f3f1412fd7883412afe1bcb77cc",
+      "bench/non-io/property-miss.mjs": "3937d5828506cb5fbe54f8bc587f6d283ed42dd4a8142af269a9fd688b4f2a06",
+      "bench/non-io/regex.mjs": "aee94f97a48236d45c10ab0e8d5cb6ed968167ea6cd47f7cd6c11b66415967a4",
+      "bench/non-io/string-ops.mjs": "a689f435892e475a4abdcb2414960e9a1afc40a34704cacef47c76e374b9bf87",
+      "bench/non-io/timer-create.mjs": "32e8ecc9c35a0c1686ae3e85f0b57a61a0a5341ce0e7adaa12b5290467e1c56e",
+      "bench/io/buffer.mjs": "333f07a5562f1fd7959eaed6e41f6825b346a4ca5394f2e1d8c5e989d3a49ed5",
+      "bench/io/fs-promises.mjs": "3146d642bd22a71b15339eb48b3858821378b99b485d755ed27f3b88f8010bb7",
+      "bench/io/microtasks.mjs": "c044e655aeeb3c164e1cbef2b8efb0de3def3d1bca44abef7a3f4bc03e3476b9"
+    },
+    "native_binary_sha256": {
+      "bench/cpu/collatz.mjs": "e335629192194ae35483df907850bde75938c6f3e6975f9623c769fab3445664",
+      "bench/cpu/fib.mjs": "e083dd45de2d98f2edfb5415c44c446a7480e0bad73c6a0cd77b378459c12a39",
+      "bench/cpu/frame.mjs": "57700d84b8881e888767883035ced4649ab3b05adde85faae923a3d97cb6feef",
+      "bench/cpu/loop.mjs": "9fc5e5e8f760c7ece653d3da0e2ad56556907acd53672deeb5116b6a387e39ea",
+      "bench/cpu/mandelbrot.mjs": "964338fb2305e67c0e6753e4131fb96f458cb2c44434a6aa7c125cec484c7672",
+      "bench/cpu/nbody.mjs": "99921058070b85ff31e608c6b731905bb80ee9aa2aeb1fdceef244c727aef6a0",
+      "bench/non-io/array-functional.mjs": "f6b22a70008afc50e4bdf7eade728b51c4f8566f2c652df8432dade2afa7be15",
+      "bench/non-io/array-sort.mjs": "976bacbe84acb5dbc8e4d42d64976e9379063fa3c2cd15c49bc548b02bb7e662",
+      "bench/non-io/class-poly.mjs": "07cb5c2921f7585cd7bb223bccfb317a5166f94b27d8ca60f02f20e89da7137e",
+      "bench/non-io/collections.mjs": "ac508fbbdd4346bad12d63d8d3b38a3c2519a02cea23e3637e316857ad07fcaf",
+      "bench/non-io/json.mjs": "e1dbc88930095b6ee622c6e8d8b3a8321f517278b385a66eed5f4f863650c212",
+      "bench/non-io/multicore-parallel.mjs": "5fc4dc2bb74c8a10aa12c2260081ad222381704d373eba51e14da814327e8c0f",
+      "bench/non-io/object-literal.mjs": "f41938ad153cb306ef34916fa450f762cc03c61c67e8f9b7da5f9d6578a45195",
+      "bench/non-io/object-spread.mjs": "94cfb33d9f4c44e64719df565804ef4bdc5b561553f1ae3b4a4a349880ef4321",
+      "bench/non-io/parallel-map-large.mjs": "870c527746e73ae407eb9133911bf55c89e27778b850ee102520514bc19304e5",
+      "bench/non-io/property-miss.mjs": "a6dbb361ae321f0e8d9e106270c2a8f9b110586b513f78369994df7caeac35f9",
+      "bench/non-io/regex.mjs": "db50bf7cf1c2cff933e68a2c9aa5139027ec9b19e8adf769c315ce3e34d4034a",
+      "bench/non-io/string-ops.mjs": "b94381bffc65ee69dea89b79f04cd3889c76d54b504aac1843d71641d8065c07",
+      "bench/non-io/timer-create.mjs": "b4510e230b47ed5a613d5fca7565a97daef366738c79ff5c3160f6c7823cadee",
+      "bench/io/buffer.mjs": "d0a57975141cb39bbe402d02107169a63530f01bc9fd6014ce3d2d73b2e13194",
+      "bench/io/fs-promises.mjs": "fa6a0f1db07b8ad3672f0ff6b3a3d743f472882dfe82dd85b8c925113ba89656",
+      "bench/io/microtasks.mjs": "0cbb54a8aebea1a550375181f6e855086ad6488e4bdd7b95116e8a9cead425a6"
+    },
+    "versions": {
+      "node": "26.8.1",
+      "bun": "1.4.2"
+    }
+  }
+}
