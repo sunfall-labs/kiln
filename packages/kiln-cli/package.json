@@ -1,0 +1,16 @@
+{
+  "name": "@sunfall/kiln",
+  "version": "0.1.1",
+  "description": "Compile and run TypeScript and JavaScript with the kiln native runtime",
+  "license": "MIT",
+  "repository": {"type": "git", "url": "https://github.com/sunfall-labs/kiln.git", "directory": "packages/kiln-cli"},
+  "homepage": "https://sunfall-labs.github.io/kiln/",
+  "bin": {"kiln": "bin/kiln.cjs"},
+  "files": ["bin/kiln.cjs", "README.md", "LICENSE"],
+  "engines": {"node": ">=18"},
+  "optionalDependencies": {
+    "@sunfall/kiln-linux-x64": "0.1.1",
+    "@sunfall/kiln-darwin-arm64": "0.1.1"
+  },
+  "publishConfig": {"access": "public"}
+}

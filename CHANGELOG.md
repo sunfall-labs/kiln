@@ -11,6 +11,28 @@ publishes the `## [x.y.z]` section matching the workspace version, so add one be
 
 Next: Linux on arm64 (48-bit pointers in the value layout).
 
+## [0.1.1]
+
+- Native string accumulation now grows private loop-carried buffers geometrically, avoiding
+  repeated copies of an HTML renderer's entire output prefix.
+- Native replacement builds results from borrowed spans, reducing temporary allocations.
+  Replacement coercion rejects Symbols and propagates exceptions even when no match is found;
+  empty Unicode RegExp matches advance over complete surrogate pairs.
+- `String.repeat` preserves lone UTF-16 surrogates in native programs, including pairs formed
+  across repetition boundaries.
+- Builtin type facts survive TypeScript lowering; stream hot paths retain object shapes and
+  avoid unnecessary state capture.
+- Added bounded fuzz campaigns for JSON parsing, HTTP framing and shared-graph input.
+- Added `@sunfall/kiln` and an exact-version Linux binary package for npx and bunx. Platform
+  packages include every native provider library and need no install scripts or downloads.
+
+### Release availability
+
+- Linux x86_64 (glibc): built manually on Ubuntu 22.04, with checksums and unpacked smoke tests.
+- macOS arm64: pending. Use the v0.1.0 archive until a fresh macOS build is available.
+- This manual release has no GitHub Actions build-provenance attestation. GitHub-hosted jobs
+  were blocked by account billing; the source tag and SHA256SUMS identify this release.
+
 ## [0.1.0]
 
 First public release.
@@ -33,5 +55,6 @@ First public release.
   executables are built with stack protection, FORTIFY and (on Linux) full RELRO; releases are
   gated on `cargo deny`.
 
-[Unreleased]: https://github.com/sunfall-labs/kiln/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sunfall-labs/kiln/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/sunfall-labs/kiln/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/sunfall-labs/kiln/releases/tag/v0.1.0

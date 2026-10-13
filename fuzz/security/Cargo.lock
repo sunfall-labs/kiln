@@ -341,21 +341,21 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kiln-artifact-cache"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kiln-digest",
 ]
 
 [[package]]
 name = "kiln-digest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "kiln-host-abi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kiln-number-core",
  "kiln-string",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-json"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "encoding_rs",
  "kiln-string",
@@ -371,14 +371,14 @@ dependencies = [
 
 [[package]]
 name = "kiln-number-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dragonbox_ecma",
 ]
 
 [[package]]
 name = "kiln-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "bytes",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-shared-graph"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "kiln-string",
  "libc",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-string"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "encoding_rs",
 ]

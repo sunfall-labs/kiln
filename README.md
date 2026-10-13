@@ -180,8 +180,9 @@ epoll anywhere and `KILN_IO=uring` asks for the ring below the floor. See
 
 ## Installing
 
-Each release is a binary for macOS on Apple silicon and Linux (glibc) on x86_64. Linux on arm64
-is next: its native programs crash at startup today (the value layout keeps 47-bit pointers, and
+Release targets are macOS on Apple silicon and Linux (glibc) on x86_64. Version 0.1.1's macOS
+archive is pending; use `KILN_VERSION=0.1.0` with the installer on macOS until it is available.
+Linux on arm64 is next: its native programs crash at startup today (the value layout keeps 47-bit pointers, and
 arm64 Linux places programs above that), so it has no release yet.
 
 ```sh
@@ -195,9 +196,21 @@ archive (`lib/kiln/`), so `kiln build` needs only a C compiler -- Clang, GCC, cc
 Rust toolchain; `kiln run` needs neither. Each archive is checked against the release's
 `SHA256SUMS` before it is unpacked. To unpack one by hand, keep its `bin/` and `lib/` together:
 the binary finds its providers at `bin/../lib/kiln`, through a symlink if you make one.
-Public release archives also have signed build provenance. Before unpacking a downloaded archive,
+Archives built by the GitHub Actions release workflow also have signed build provenance. The
+manual v0.1.1 release has checksums but no workflow attestation. For an attested release,
 verify it with `gh attestation verify <archive.tar.gz> --repo sunfall-labs/kiln`; this binds its
 contents to the source and release workflow, beyond checking the download checksum.
+
+The npm distribution includes the executable and all native provider libraries:
+
+```sh
+npx @sunfall/kiln@0.1.1 run app.ts
+bunx @sunfall/kiln@0.1.1 run app.ts
+```
+
+On a Bun-only machine use `bunx --bun`. Version 0.1.1's npm binary is Linux x86_64 with glibc;
+the macOS package is pending. See [npm packaging](packages/kiln-cli/README.md) for project
+installation and publishing instructions.
 
 Not built: Intel macOS and Windows. Linux releases carry no `kiln:gui` provider (the bridge is
 AppKit today, ADR 0074), so a Linux program that imports it is refused by name. In
