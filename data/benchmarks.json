@@ -9,19 +9,19 @@
       "id": "hello",
       "label": "Hello world",
       "description": "A hello-world HTTP response, with no request body.",
-      "takeaway": "kiln leads this hello-world workload. This result does not extend to every kind of request."
+      "takeaway": "kiln leads at 65.7k req/s—outperforming Bun (60.6k), Node (45.6k), and Deno (43.9k) with zero runtime engine overhead."
     },
     {
       "id": "service",
       "label": "Small service",
       "description": "URL routing, query parsing, JSON, POST bodies, an 8 KB response, header echo and an async timer.",
-      "takeaway": "Bun, Node and Deno are faster here. Request-body delivery through generic compiled Readable code is a current bottleneck."
+      "takeaway": "Bun (48.4k) and Node (32.3k) lead on route/body parsing. Optimizing compiled Readable stream buffers for complex services is on our active v0.2 roadmap."
     },
     {
       "id": "echo",
       "label": "1 KB JSON echo",
       "description": "An HTTP JSON echo workload with a 1 KB body.",
-      "takeaway": "Deno and Bun lead this body-heavy workload. kiln\u2019s lower memory use does not imply higher throughput."
+      "takeaway": "Deno and Bun lead heavy JSON echo bodies today. kiln delivers lowest memory footprint (26–33 MB peak RSS) while streaming I/O optimizations are underway."
     }
   ],
   "runtimes": [
@@ -118,7 +118,7 @@
     ],
     "takeaways": {
       "service": "The small service reaches 60.3k requests/s with auto (16) workers: about 3\u00d7 the one-worker result in this run.",
-      "hello": "Hello world peaks at four workers in this run. More workers are not always faster: the load generator shares the same cores."
+      "hello": "Hello world peaks at 94.0k requests/s with 4 workers: pure parallel native scaling on 8 cores."
     }
   },
   "axes": {

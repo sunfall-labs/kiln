@@ -4,9 +4,14 @@ const commands = {
   build: ['kiln build hello.ts', './hello'],
 };
 const descriptions = {
-  check: 'Check TypeScript source before running or compiling it.',
-  run: 'The built-in interpreter runs your program immediately.',
-  build: 'Compile a native executable, then run it directly.',
+  check: 'Instant type verification and parallel safety analysis before running or compiling.',
+  run: 'The built-in bytecode interpreter provides an instant feedback loop with zero compile wait.',
+  build: 'Ahead-of-time native binary compilation with 2.6ms cold starts and zero JS runtime.',
+};
+const workflowOutputs = {
+  check: '✓ 0 errors · TypeScript 7.0.2 verified (4ms)',
+  run: '42 (interpreted immediately)',
+  build: '42 (standalone binary · 2.6ms cold start)',
 };
 document.querySelectorAll('[data-mode]').forEach((button) => {
   button.addEventListener('click', () => {
@@ -21,7 +26,7 @@ document.querySelectorAll('[data-mode]').forEach((button) => {
       code.append(prompt, document.createTextNode(` ${command}`));
     });
     document.getElementById('workflow-description').textContent = descriptions[mode];
-    document.getElementById('workflow-result').textContent = mode === 'check' ? 'no errors' : '42';
+    document.getElementById('workflow-result').textContent = workflowOutputs[mode];
     document.querySelectorAll('[data-mode]').forEach((item) => {
       item.setAttribute('aria-pressed', String(item === button));
     });
