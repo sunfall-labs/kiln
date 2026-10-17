@@ -1671,6 +1671,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
         exact_span_layouts: std::collections::BTreeMap::new(),
         local_layouts: std::collections::BTreeMap::new(),
         new_object_layouts: std::collections::BTreeMap::new(),
+        ..Default::default()
     });
     let checked_hash = crate::identity::hash_program(&checked_prog);
     assert_eq!(
@@ -2199,6 +2200,7 @@ fn large_generic_units_share_planning_tables_and_publish_updates() {
         true,
         false,
         None,
+        crate::NativeSemantics::Js,
         None,
         None,
     )
@@ -2452,6 +2454,7 @@ export const result = run();
             exact_span_layouts: std::collections::BTreeMap::new(),
             local_layouts: std::collections::BTreeMap::from([(0, kiln_ir::RecordLayoutId(1))]),
             new_object_layouts: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     );
     // Function 1: run(): number, local 0 = original (Point2D = 0), local 1 = narrow (Point1D = 1)
@@ -2479,6 +2482,7 @@ export const result = run();
                 new_obj_pc,
                 kiln_ir::RecordLayoutId(0),
             )]),
+            ..Default::default()
         }),
     );
     let emitted = emit_module_with_logical_path_and_policy(
@@ -2515,3 +2519,219 @@ export const result = run();
         emitted.source
     );
 }
+
+#[test]
+fn native_semantics_function_returning_record_by_value() {
+    let source = r#"
+function makePoint(x, y) {
+    return { x: x, y: y };
+}
+function run() {
+    const pt = makePoint(3, 4);
+    return pt.x + pt.y;
+}
+export const result = run();
+"#;
+    let parsed_exec = kiln_frontend_oxc::parse("/test.js", source);
+    let mut module_prog = kiln_ir::compile_module(&parsed_exec).expect("compile module");
+    let record_layouts = vec![kiln_ir::RecordLayout {
+        fields: vec![
+            kiln_ir::RecordField {
+                name: "x".into(),
+                ty: kiln_ir::NativeFieldType::Number,
+                readonly: false,
+            },
+            kiln_ir::RecordField {
+                name: "y".into(),
+                ty: kiln_ir::NativeFieldType::Number,
+                readonly: false,
+            },
+        ],
+    }];
+    // Function 0: makePoint(x: number, y: number): Point2D (record 0)
+    let new_obj_pc = module_prog.program.functions[0]
+        .code
+        .iter()
+        .position(|inst| matches!(inst, Instruction::NewObject { .. }))
+        .expect("NewObject in makePoint()") as u32;
+    module_prog.program.functions[0].type_annotations = Some(
+        kiln_ir::FunctionTypeAnnotations::from_source_types(kiln_ir::SourceTypeAnnotations {
+            version: kiln_ir::SOURCE_TYPE_METADATA_VERSION,
+            checker_identity: "test".into(),
+            parameters: vec![
+                Some(kiln_ir::TypeAnnotation::Number),
+                Some(kiln_ir::TypeAnnotation::Number),
+            ],
+            return_type: None,
+            record_layouts: record_layouts.clone(),
+            parameter_layouts: vec![None, None],
+            return_layout: Some(kiln_ir::RecordLayoutId(0)),
+            span_layouts: std::collections::BTreeMap::new(),
+            exact_span_layouts: std::collections::BTreeMap::new(),
+            local_layouts: std::collections::BTreeMap::new(),
+            new_object_layouts: std::collections::BTreeMap::from([(
+                new_obj_pc,
+                kiln_ir::RecordLayoutId(0),
+            )]),
+            ..Default::default()
+        }),
+    );
+    // Function 1: run(): number
+    module_prog.program.functions[1].type_annotations = Some(
+        kiln_ir::FunctionTypeAnnotations::from_source_types(kiln_ir::SourceTypeAnnotations {
+            version: kiln_ir::SOURCE_TYPE_METADATA_VERSION,
+            checker_identity: "test".into(),
+            parameters: Vec::new(),
+            return_type: Some(kiln_ir::TypeAnnotation::Number),
+            record_layouts: record_layouts.clone(),
+            parameter_layouts: Vec::new(),
+            return_layout: None,
+            span_layouts: std::collections::BTreeMap::new(),
+            exact_span_layouts: std::collections::BTreeMap::new(),
+            local_layouts: std::collections::BTreeMap::from([(0, kiln_ir::RecordLayoutId(0))]),
+            new_object_layouts: std::collections::BTreeMap::new(),
+            ..Default::default()
+        }),
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module_prog,
+        "test.js",
+        EmissionPolicy {
+            compact: true,
+            semantics: crate::NativeSemantics::Native,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("native semantics module emits");
+
+    assert!(
+        emitted.source.contains("static inline ku_rec_0 ku_fn_0_t("),
+        "expected makePoint_t to return struct by value ku_rec_0:\n{}",
+        emitted.source
+    );
+    assert!(
+        !emitted.source.contains("ku_rec_0 *"),
+        "expected makePoint_t to NOT return a pointer to struct:\n{}",
+        emitted.source
+    );
+    assert!(
+        emitted.source.contains("rec_call_"),
+        "expected caller to receive struct by value:\n{}",
+        emitted.source
+    );
+}
+
+#[test]
+fn native_semantics_reflection_guard_emits_refusal() {
+    let source = r#"
+function badFreeze() {
+    const r = { a: 1 };
+    Object.freeze(r);
+}
+badFreeze();
+"#;
+    let parsed_exec = kiln_frontend_oxc::parse("/test.js", source);
+    let mut module_prog = kiln_ir::compile_module(&parsed_exec).expect("compile module");
+    let record_layouts = vec![kiln_ir::RecordLayout {
+        fields: vec![kiln_ir::RecordField {
+            name: "a".into(),
+            ty: kiln_ir::NativeFieldType::Number,
+            readonly: false,
+        }],
+    }];
+    let new_obj_pc = module_prog.program.functions[0]
+        .code
+        .iter()
+        .position(|inst| matches!(inst, Instruction::NewObject { .. }))
+        .expect("NewObject in badFreeze()") as u32;
+    module_prog.program.functions[0].type_annotations = Some(
+        kiln_ir::FunctionTypeAnnotations::from_source_types(kiln_ir::SourceTypeAnnotations {
+            version: kiln_ir::SOURCE_TYPE_METADATA_VERSION,
+            checker_identity: "test".into(),
+            parameters: Vec::new(),
+            return_type: None,
+            record_layouts,
+            parameter_layouts: Vec::new(),
+            return_layout: None,
+            span_layouts: std::collections::BTreeMap::new(),
+            exact_span_layouts: std::collections::BTreeMap::new(),
+            local_layouts: std::collections::BTreeMap::from([(0, kiln_ir::RecordLayoutId(0))]),
+            new_object_layouts: std::collections::BTreeMap::from([(
+                new_obj_pc,
+                kiln_ir::RecordLayoutId(0),
+            )]),
+            ..Default::default()
+        }),
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module_prog,
+        "test.js",
+        EmissionPolicy {
+            compact: true,
+            semantics: crate::NativeSemantics::Native,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("native semantics module emits");
+    assert!(
+        emitted.source.contains("reflection on native record"),
+        "expected reflection refusal in emitted source:\n{}",
+        emitted.source
+    );
+
+    let dce_source = r#"
+function badFreeze() {
+    Object.freeze({ a: 1 });
+}
+badFreeze();
+"#;
+    let parsed_dce = kiln_frontend_oxc::parse("/test_dce.js", dce_source);
+    let mut dce_prog = kiln_ir::compile_module(&parsed_dce).expect("compile dce module");
+    let dce_obj_pc = dce_prog.program.functions[0]
+        .code
+        .iter()
+        .position(|inst| matches!(inst, Instruction::NewObject { .. }))
+        .expect("NewObject in dce badFreeze()") as u32;
+    dce_prog.program.functions[0].type_annotations = Some(
+        kiln_ir::FunctionTypeAnnotations::from_source_types(kiln_ir::SourceTypeAnnotations {
+            version: kiln_ir::SOURCE_TYPE_METADATA_VERSION,
+            checker_identity: "test".into(),
+            parameters: Vec::new(),
+            return_type: None,
+            record_layouts: vec![kiln_ir::RecordLayout {
+                fields: vec![kiln_ir::RecordField {
+                    name: "a".into(),
+                    ty: kiln_ir::NativeFieldType::Number,
+                    readonly: false,
+                }],
+            }],
+            parameter_layouts: Vec::new(),
+            return_layout: None,
+            span_layouts: std::collections::BTreeMap::new(),
+            exact_span_layouts: std::collections::BTreeMap::new(),
+            local_layouts: std::collections::BTreeMap::new(),
+            new_object_layouts: std::collections::BTreeMap::from([(
+                dce_obj_pc,
+                kiln_ir::RecordLayoutId(0),
+            )]),
+            ..Default::default()
+        }),
+    );
+    let emitted_dce = emit_module_with_logical_path_and_policy(
+        &dce_prog,
+        "test_dce.js",
+        EmissionPolicy {
+            compact: true,
+            generic_only: true,
+            semantics: crate::NativeSemantics::Native,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("native semantics dce module emits");
+    assert!(
+        emitted_dce.source.contains("reflection on native record"),
+        "expected reflection refusal in dce emitted source:\n{}",
+        emitted_dce.source
+    );
+}
+

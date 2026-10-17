@@ -1301,3 +1301,70 @@ fn structural_record_layouts_intern_and_propagate() {
         .expect("return fact should exist");
     assert_eq!(return_fact.record_layout, Some(sum_id));
 }
+
+#[test]
+fn source_facts_homogeneous_array_elements() {
+    use kiln_hir::source_types::{NativeFieldType, TypeClass, TypeRole};
+
+    let source = "
+        interface Point { x: number; y: number; }
+        function process(nums: number[], pts: Point[]): Point[] {
+            const arr = [1, 2, 3];
+            return pts;
+        }
+    ";
+    let result = check_sources(&[("/project/main.ts", source)]);
+    assert!(result.complete);
+    assert!(!result.record_layouts.is_empty());
+
+    let point_idx = result
+        .record_layouts
+        .iter()
+        .position(|l| {
+            l.fields.len() == 2
+                && l.fields[0].name == "x"
+                && l.fields[0].ty == NativeFieldType::Number
+                && l.fields[1].name == "y"
+                && l.fields[1].ty == NativeFieldType::Number
+        })
+        .expect("point record layout should exist");
+    let point_id = kiln_hir::source_types::RecordLayoutId(point_idx as u32);
+
+    let nums_param = result
+        .types
+        .iter()
+        .find(|t| t.role == TypeRole::Parameter && t.display.contains("number[]"))
+        .expect("number[] parameter fact should exist");
+    assert_eq!(nums_param.class, TypeClass::Array);
+    assert_eq!(nums_param.array_element, Some(NativeFieldType::Number));
+
+    let pts_param = result
+        .types
+        .iter()
+        .find(|t| t.role == TypeRole::Parameter && t.display.contains("Point[]"))
+        .expect("Point[] parameter fact should exist");
+    assert_eq!(pts_param.class, TypeClass::Array);
+    assert_eq!(
+        pts_param.array_element,
+        Some(NativeFieldType::Record(point_id))
+    );
+
+    let ret_fact = result
+        .types
+        .iter()
+        .find(|t| t.role == TypeRole::Return && t.display.contains("Point[]"))
+        .expect("Point[] return fact should exist");
+    assert_eq!(ret_fact.class, TypeClass::Array);
+    assert_eq!(
+        ret_fact.array_element,
+        Some(NativeFieldType::Record(point_id))
+    );
+
+    let arr_fact = result
+        .types
+        .iter()
+        .find(|t| t.role == TypeRole::Annotation && t.display.contains("number[]"))
+        .expect("arr literal fact should exist");
+    assert_eq!(arr_fact.class, TypeClass::Array);
+    assert_eq!(arr_fact.array_element, Some(NativeFieldType::Number));
+}

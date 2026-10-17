@@ -896,6 +896,8 @@ pub(crate) struct NativeRecordMap {
     pub decls: String,
     pub slot_exprs: HashMap<u32, String>,
     pub value_exprs: HashMap<ValueId, (kiln_ir::RecordLayoutId, String)>,
+    pub boxed_record_values: HashSet<ValueId>,
+    pub all_layouts: Vec<kiln_ir::RecordLayout>,
 }
 
 pub(crate) fn build_native_record_map(
@@ -983,7 +985,7 @@ pub(crate) fn build_native_record_map(
                 match op {
                     GraphOp::NewObject { .. } => {
                         if !value_exprs.contains_key(vid) {
-                            let lid = graph
+                            let mut lid = graph
                                 .origins
                                 .get(vid)
                                 .and_then(|origin| new_object_layouts.get(&origin.pc).copied())
@@ -998,6 +1000,11 @@ pub(crate) fn build_native_record_map(
                                             _ => None,
                                         })
                                 });
+                            if lid.is_none()
+                                && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if ret_v == vid)
+                            {
+                                lid = proto.return_layout();
+                            }
                             if let Some(lid) = lid {
                                 decls.push_str(&format!(
                                     "    {symbol}_rec_{lid} rec_val_{} = {{0}};\n",
@@ -1103,11 +1110,361 @@ pub(crate) fn build_native_record_map(
         }
     }
 
+    let mut boxed_record_values: HashSet<ValueId> = HashSet::new();
+    let mut deps: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+
+    for block in graph.blocks.iter().filter(|b| b.is_reachable_from_entry(graph.entry_block)) {
+        for (vid, op) in &block.operations {
+            match op {
+                GraphOp::StoreLocal { slot, value } => {
+                    if !slot_exprs.contains_key(slot) && value_exprs.contains_key(value) {
+                        boxed_record_values.insert(*value);
+                    }
+                }
+                GraphOp::NewObject { pairs, .. } => {
+                    if !value_exprs.contains_key(vid) {
+                        for (_, val) in pairs {
+                            if value_exprs.contains_key(val) {
+                                boxed_record_values.insert(*val);
+                            }
+                        }
+                    }
+                }
+                GraphOp::GetProperty { object, name, .. } => {
+                    if let Some(&(obj_lid, _)) = value_exprs.get(object) {
+                        let prop_name = match program.constants.get(*name as usize) {
+                            Some(Constant::String(s)) => s.to_scalar_string().ok(),
+                            _ => None,
+                        };
+                        let is_known = prop_name.as_ref().is_some_and(|p| {
+                            all_layouts
+                                .get(obj_lid.0 as usize)
+                                .is_some_and(|l| l.fields.iter().any(|f| &f.name == p))
+                        });
+                        if !is_known {
+                            boxed_record_values.insert(*object);
+                        }
+                    }
+                }
+                GraphOp::SetProperty { object, name, value, .. }
+                | GraphOp::SetPropertyStrict { object, name, value, .. } => {
+                    if let Some(&(obj_lid, _)) = value_exprs.get(object) {
+                        let prop_name = match program.constants.get(*name as usize) {
+                            Some(Constant::String(s)) => s.to_scalar_string().ok(),
+                            _ => None,
+                        };
+                        let field = prop_name.as_ref().and_then(|p| {
+                            all_layouts
+                                .get(obj_lid.0 as usize)
+                                .and_then(|l| l.fields.iter().find(|f| &f.name == p))
+                        });
+                        if let Some(f) = field {
+                            if !matches!(f.ty, kiln_ir::NativeFieldType::Record(_))
+                                && value_exprs.contains_key(value)
+                            {
+                                boxed_record_values.insert(*value);
+                            }
+                        } else {
+                            boxed_record_values.insert(*object);
+                            if value_exprs.contains_key(value) {
+                                boxed_record_values.insert(*value);
+                            }
+                        }
+                    } else if value_exprs.contains_key(value) {
+                        boxed_record_values.insert(*value);
+                    }
+                }
+                GraphOp::Call { callee, args, .. } => {
+                    if plan.typed_sites.contains(vid)
+                        && let Some(&target) = plan.known.get(callee)
+                    {
+                        let target_proto = program.functions.get(target as usize);
+                        for (idx, arg) in args.iter().enumerate() {
+                            let is_rec_param = target_proto
+                                .and_then(|tp| tp.parameter_layouts().get(idx).copied().flatten())
+                                .is_some();
+                            if !is_rec_param && value_exprs.contains_key(arg) {
+                                boxed_record_values.insert(*arg);
+                            }
+                        }
+                    } else {
+                        if value_exprs.contains_key(callee) {
+                            boxed_record_values.insert(*callee);
+                        }
+                        for arg in args {
+                            if value_exprs.contains_key(arg) {
+                                boxed_record_values.insert(*arg);
+                            }
+                        }
+                    }
+                }
+                GraphOp::CheckTdz { value, .. } => {
+                    if value_exprs.contains_key(vid) && value_exprs.contains_key(value) {
+                        deps.entry(*vid).or_default().push(*value);
+                    }
+                }
+                GraphOp::Phi { inputs } => {
+                    if value_exprs.contains_key(vid) {
+                        for (_, in_vid) in inputs {
+                            if value_exprs.contains_key(in_vid) {
+                                deps.entry(*vid).or_default().push(*in_vid);
+                            }
+                        }
+                    }
+                }
+                GraphOp::Bridge { instruction, operands, .. } => {
+                    if matches!(
+                        instruction,
+                        Instruction::DeleteProperty(_)
+                            | Instruction::DeletePropertyStrict { .. }
+                            | Instruction::DeleteComputed
+                            | Instruction::DeleteComputedStrict { .. }
+                    ) {
+                        for op_v in operands.iter().skip(1) {
+                            if value_exprs.contains_key(op_v) {
+                                boxed_record_values.insert(*op_v);
+                            }
+                        }
+                    } else {
+                        for op_v in operands {
+                            if value_exprs.contains_key(op_v) {
+                                boxed_record_values.insert(*op_v);
+                            }
+                        }
+                    }
+                }
+                GraphOp::CallMethod { object, name, args, .. } => {
+                    let method_name = match program.constants.get(*name as usize) {
+                        Some(Constant::String(s)) => s.to_scalar_string().ok(),
+                        _ => None,
+                    };
+                    let is_forbidden_reflection = matches!(
+                        method_name.as_deref(),
+                        Some("defineProperty" | "defineProperties" | "freeze" | "seal" | "preventExtensions")
+                    );
+                    if is_forbidden_reflection {
+                        if value_exprs.contains_key(object) {
+                            boxed_record_values.insert(*object);
+                        }
+                        for (i, arg) in args.iter().enumerate() {
+                            if i == 0 && value_exprs.contains_key(arg) {
+                                continue;
+                            }
+                            if value_exprs.contains_key(arg) {
+                                boxed_record_values.insert(*arg);
+                            }
+                        }
+                    } else {
+                        if value_exprs.contains_key(object) {
+                            boxed_record_values.insert(*object);
+                        }
+                        for arg in args {
+                            if value_exprs.contains_key(arg) {
+                                boxed_record_values.insert(*arg);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    for op_v in op.operands() {
+                        if value_exprs.contains_key(&op_v) {
+                            boxed_record_values.insert(op_v);
+                        }
+                    }
+                }
+            }
+        }
+        match &block.terminator {
+            Terminator::Return(Some(v)) => {
+                if !(matches!(kind, EntryKind::Typed { .. }) && proto.return_layout().is_some())
+                    && value_exprs.contains_key(v)
+                {
+                    boxed_record_values.insert(*v);
+                }
+            }
+            Terminator::Return(None) => {}
+            Terminator::Throw(v) => {
+                if value_exprs.contains_key(v) {
+                    boxed_record_values.insert(*v);
+                }
+            }
+            Terminator::Branch { condition, .. }
+            | Terminator::BranchNotNullish { condition, .. } => {
+                if value_exprs.contains_key(condition) {
+                    boxed_record_values.insert(*condition);
+                }
+            }
+            Terminator::Suspend {
+                value,
+                spilled,
+                delegate,
+                delegate_wrapped,
+                ..
+            } => {
+                if value_exprs.contains_key(value) {
+                    boxed_record_values.insert(*value);
+                }
+                for s in spilled {
+                    if value_exprs.contains_key(s) {
+                        boxed_record_values.insert(*s);
+                    }
+                }
+                if let Some((iter, _, _)) = delegate {
+                    if value_exprs.contains_key(iter) {
+                        boxed_record_values.insert(*iter);
+                    }
+                }
+                if let Some(w) = delegate_wrapped {
+                    if value_exprs.contains_key(w) {
+                        boxed_record_values.insert(*w);
+                    }
+                }
+            }
+            Terminator::Jump(_) | Terminator::Unreachable => {}
+        }
+    }
+
+    let mut worklist: Vec<ValueId> = boxed_record_values.iter().copied().collect();
+    while let Some(vid) = worklist.pop() {
+        if let Some(inputs) = deps.get(&vid) {
+            for &in_vid in inputs {
+                if boxed_record_values.insert(in_vid) {
+                    worklist.push(in_vid);
+                }
+            }
+        }
+    }
+
     NativeRecordMap {
         decls,
         slot_exprs,
         value_exprs,
+        boxed_record_values,
+        all_layouts,
     }
+}
+
+fn emit_box_record_fields(
+    output: &mut String,
+    obj_var: &str,
+    lid: kiln_ir::RecordLayoutId,
+    expr: &str,
+    all_layouts: &[kiln_ir::RecordLayout],
+    depth: usize,
+) {
+    if let Some(layout) = all_layouts.get(lid.0 as usize) {
+        for field in &layout.fields {
+            let name = &field.name;
+            let name_len = name.len();
+            let field_expr = format!("{expr}.{name}");
+            match field.ty {
+                kiln_ir::NativeFieldType::Number => {
+                    writeln!(
+                        output,
+                        "    kiln_c99_define_computed({obj_var}, kiln_c99_copy_text(\"{name}\", {name_len}), kiln_c99_number({field_expr}));"
+                    )
+                    .unwrap();
+                }
+                kiln_ir::NativeFieldType::Int32 => {
+                    writeln!(
+                        output,
+                        "    kiln_c99_define_computed({obj_var}, kiln_c99_copy_text(\"{name}\", {name_len}), kiln_c99_number((double){field_expr}));"
+                    )
+                    .unwrap();
+                }
+                kiln_ir::NativeFieldType::Boolean => {
+                    writeln!(
+                        output,
+                        "    kiln_c99_define_computed({obj_var}, kiln_c99_copy_text(\"{name}\", {name_len}), kiln_c99_boolean({field_expr}));"
+                    )
+                    .unwrap();
+                }
+                kiln_ir::NativeFieldType::String => {
+                    writeln!(
+                        output,
+                        "    kiln_c99_define_computed({obj_var}, kiln_c99_copy_text(\"{name}\", {name_len}), kiln_val_to_boundary({field_expr}));"
+                    )
+                    .unwrap();
+                }
+                kiln_ir::NativeFieldType::Record(sub_lid) => {
+                    let sub_obj_var = format!("sub_obj_{depth}_{name}");
+                    let sub_count = all_layouts
+                        .get(sub_lid.0 as usize)
+                        .map_or(0, |l| l.fields.len());
+                    writeln!(
+                        output,
+                        "    kiln_value {sub_obj_var}; kiln_c99_new_object_with_capacity(&{sub_obj_var}, {sub_count});"
+                    )
+                    .unwrap();
+                    emit_box_record_fields(
+                        output,
+                        &sub_obj_var,
+                        sub_lid,
+                        &field_expr,
+                        all_layouts,
+                        depth + 1,
+                    );
+                    writeln!(
+                        output,
+                        "    kiln_c99_define_computed({obj_var}, kiln_c99_copy_text(\"{name}\", {name_len}), {sub_obj_var});"
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn emit_box_native_record(
+    output: &mut String,
+    _symbol: &str,
+    v: u32,
+    lid: kiln_ir::RecordLayoutId,
+    expr: &str,
+    all_layouts: &[kiln_ir::RecordLayout],
+) {
+    let count = all_layouts.get(lid.0 as usize).map_or(0, |l| l.fields.len());
+    writeln!(
+        output,
+        "    {{ kiln_value built_{v}; kiln_c99_new_object_with_capacity(&built_{v}, {count});"
+    )
+    .unwrap();
+    emit_box_record_fields(output, &format!("built_{v}"), lid, expr, all_layouts, 0);
+    writeln!(output, "    v{v} = kiln_val_from_boundary(built_{v}); }}").unwrap();
+}
+
+pub(crate) fn emit_compound_literal_fields(
+    target_lid: kiln_ir::RecordLayoutId,
+    src_expr: &str,
+    src_lid: kiln_ir::RecordLayoutId,
+    symbol: &str,
+    all_layouts: &[kiln_ir::RecordLayout],
+) -> String {
+    let (Some(target_layout), Some(src_layout)) = (
+        all_layouts.get(target_lid.0 as usize),
+        all_layouts.get(src_lid.0 as usize),
+    ) else {
+        return String::new();
+    };
+    let mut init_fields = Vec::new();
+    for tf in &target_layout.fields {
+        if let Some(sf) = src_layout.fields.iter().find(|sf| sf.name == tf.name) {
+            match (&tf.ty, &sf.ty) {
+                (kiln_ir::NativeFieldType::Record(target_sub), kiln_ir::NativeFieldType::Record(src_sub)) => {
+                    if target_sub == src_sub {
+                        init_fields.push(format!(".{} = {src_expr}.{}", tf.name, tf.name));
+                    } else {
+                        let inner = emit_compound_literal_fields(*target_sub, &format!("{src_expr}.{}", tf.name), *src_sub, symbol, all_layouts);
+                        init_fields.push(format!(".{} = ({symbol}_rec_{target_sub}){{ {} }}", tf.name, inner));
+                    }
+                }
+                _ => {
+                    init_fields.push(format!(".{} = {src_expr}.{}", tf.name, tf.name));
+                }
+            }
+        }
+    }
+    init_fields.join(", ")
 }
 
 fn emit_ssa_declarations(
@@ -1657,6 +2014,7 @@ fn emit_block_sequence(
             _ => {}
         }
     }
+    used.extend(&native_records.boxed_record_values);
     let is_dead_effectless_op = |vid: ValueId, op: &GraphOp| {
         !used.contains(&vid)
             && match op {
@@ -3949,7 +4307,16 @@ fn emit_blocks(
             // A typed entry leaves its failure pending and returns the failure value. The
             // labels exist only where the body jumps to them: a body with nothing that throws
             // has no unwind, and no `thrown` to read.
-            let fail = typed_fail(kind);
+            let fail_str;
+            let fail = if plan.semantics == crate::NativeSemantics::Native
+                && proto.return_layout().is_some()
+            {
+                let ret_lid = proto.return_layout().unwrap();
+                fail_str = format!("({symbol}_rec_{ret_lid}){{0}}");
+                &fail_str
+            } else {
+                typed_fail(kind)
+            };
             let func_text = &output[func_start..];
             let unwinds = func_text.contains("goto kiln_unwind;");
             let refuses = body_can_refuse(func_text, plan.compact);
@@ -3977,9 +4344,10 @@ fn emit_blocks(
             if plan.compact && !scalar_proto {
                 output.push_str("KU_EPILOGUE()\n");
             } else {
+                let refuses = !scalar_proto || body_can_refuse(&output[func_start..], plan.compact);
                 output.push_str("kiln_unwind:;\n");
                 output.push_str("    return KILN_C99_THROWN;\n");
-                if !scalar_proto {
+                if refuses {
                     output.push_str("kiln_refusal:;\n");
                     output.push_str(
                         "    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n",
@@ -4185,15 +4553,31 @@ fn emit_terminator(
             }
             Site::Function { .. } if matches!(kind, EntryKind::Typed { .. }) => {
                 if semantics == crate::NativeSemantics::Native && proto.return_layout().is_some() {
+                    let ret_lid = proto.return_layout().unwrap();
                     match value {
                         Some(val) => {
-                            if let Some((_, expr)) = native_records.value_exprs.get(val) {
-                                writeln!(output, "    return &({expr});").unwrap();
+                            if let Some(&(src_lid, ref expr)) = native_records.value_exprs.get(val) {
+                                if src_lid == ret_lid {
+                                    writeln!(output, "    return {expr};").unwrap();
+                                } else {
+                                    let fields_str = emit_compound_literal_fields(
+                                        ret_lid,
+                                        expr,
+                                        src_lid,
+                                        symbol,
+                                        &native_records.all_layouts,
+                                    );
+                                    writeln!(
+                                        output,
+                                        "    return ({symbol}_rec_{ret_lid}){{ {fields_str} }};",
+                                    )
+                                    .unwrap();
+                                }
                             } else {
-                                output.push_str("    return NULL;\n");
+                                writeln!(output, "    return ({symbol}_rec_{ret_lid}){{0}};").unwrap();
                             }
                         }
-                        None => output.push_str("    return NULL;\n"),
+                        None => writeln!(output, "    return ({symbol}_rec_{ret_lid}){{0}};").unwrap(),
                     }
                 } else {
                     match value {

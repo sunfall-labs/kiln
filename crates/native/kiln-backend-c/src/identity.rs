@@ -787,6 +787,48 @@ pub(super) fn hash_source_type_annotations(
         word(hash, u64::from(*pc));
         word(hash, u64::from(id.0));
     }
+    let hash_field_ty = |hash: &mut u64, ty: kiln_ir::NativeFieldType| match ty {
+        kiln_ir::NativeFieldType::Number => byte(hash, 0),
+        kiln_ir::NativeFieldType::Int32 => byte(hash, 1),
+        kiln_ir::NativeFieldType::Boolean => byte(hash, 2),
+        kiln_ir::NativeFieldType::String => byte(hash, 3),
+        kiln_ir::NativeFieldType::Record(id) => {
+            byte(hash, 4);
+            word(hash, u64::from(id.0));
+        }
+    };
+    word(hash, source.parameter_array_elements.len() as u64);
+    for elem in &source.parameter_array_elements {
+        match elem {
+            Some(ty) => {
+                byte(hash, 1);
+                hash_field_ty(hash, *ty);
+            }
+            None => byte(hash, 0),
+        }
+    }
+    match source.return_array_element {
+        Some(ty) => {
+            byte(hash, 1);
+            hash_field_ty(hash, ty);
+        }
+        None => byte(hash, 0),
+    }
+    word(hash, source.span_array_elements.len() as u64);
+    for (span_start, ty) in &source.span_array_elements {
+        word(hash, u64::from(*span_start));
+        hash_field_ty(hash, *ty);
+    }
+    word(hash, source.local_array_elements.len() as u64);
+    for (slot, ty) in &source.local_array_elements {
+        word(hash, u64::from(*slot));
+        hash_field_ty(hash, *ty);
+    }
+    word(hash, source.new_array_elements.len() as u64);
+    for (pc, ty) in &source.new_array_elements {
+        word(hash, u64::from(*pc));
+        hash_field_ty(hash, *ty);
+    }
 }
 
 pub(super) fn hash_module_pair_with_policy(

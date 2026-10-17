@@ -120,6 +120,7 @@ impl super::Compiler {
             current_function_span: None,
             local_spans: BTreeMap::new(),
             new_object_spans: BTreeMap::new(),
+            new_array_spans: BTreeMap::new(),
         };
         if module.panicked {
             compiler.error(None, "frontend could not produce an executable module");

@@ -226,6 +226,7 @@ function newTargetArguments() { return [arguments.length, new.target]; }
         false,
         false,
         None,
+        crate::NativeSemantics::Js,
         None,
         &length_only,
     );

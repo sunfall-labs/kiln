@@ -547,10 +547,45 @@ fn carry_type_annotations(
         .iter()
         .filter_map(|proto| Some((proto.span, proto.type_annotations.as_ref()?)))
         .collect();
-    for proto in &mut reparsed.program.functions {
-        if proto.type_annotations.is_none()
-            && let Some(annotations) = annotated.get(&proto.span)
+    let annotated_by_start: BTreeMap<_, _> = previous
+        .program
+        .functions
+        .iter()
+        .filter_map(|proto| Some((proto.span.start, proto.type_annotations.as_ref()?)))
+        .collect();
+    let same_len = previous.program.functions.len() == reparsed.program.functions.len();
+    for (idx, proto) in reparsed.program.functions.iter_mut().enumerate() {
+        if proto.type_annotations.is_some() {
+            continue;
+        }
+        if let Some(annotations) = annotated.get(&proto.span) {
+            proto.type_annotations = Some((*annotations).clone());
+            continue;
+        }
+        if same_len
+            && let Some(prev) = previous.program.functions.get(idx)
+            && prev.name == proto.name
+            && prev.parameter_count == proto.parameter_count
+            && let Some(annotations) = &prev.type_annotations
         {
+            proto.type_annotations = Some(annotations.clone());
+            continue;
+        }
+        if let Some(name) = proto.name.as_deref() {
+            let mut matches = previous.program.functions.iter().filter(|prev| {
+                prev.name.as_deref() == Some(name)
+                    && prev.parameter_count == proto.parameter_count
+                    && prev.type_annotations.is_some()
+            });
+            if let Some(first) = matches.next()
+                && matches.next().is_none()
+                && let Some(annotations) = &first.type_annotations
+            {
+                proto.type_annotations = Some(annotations.clone());
+                continue;
+            }
+        }
+        if let Some(annotations) = annotated_by_start.get(&proto.span.start) {
             proto.type_annotations = Some((*annotations).clone());
         }
     }

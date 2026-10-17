@@ -3302,6 +3302,7 @@ fn apply_source_types_attaches_record_layouts_and_spans() {
                 class: TypeClass::Composite,
                 role: TypeRole::Parameter,
                 record_layout: Some(RecordLayoutId(0)),
+                array_element: None,
             },
             SourceType {
                 path: path.to_owned(),
@@ -3310,6 +3311,7 @@ fn apply_source_types_attaches_record_layouts_and_spans() {
                 class: TypeClass::Composite,
                 role: TypeRole::Return,
                 record_layout: Some(RecordLayoutId(0)),
+                array_element: None,
             },
             SourceType {
                 path: path.to_owned(),
@@ -3318,6 +3320,7 @@ fn apply_source_types_attaches_record_layouts_and_spans() {
                 class: TypeClass::Composite,
                 role: TypeRole::Annotation,
                 record_layout: Some(RecordLayoutId(0)),
+                array_element: None,
             },
             SourceType {
                 path: path.to_owned(),
@@ -3326,6 +3329,7 @@ fn apply_source_types_attaches_record_layouts_and_spans() {
                 class: TypeClass::Composite,
                 role: TypeRole::Annotation,
                 record_layout: Some(RecordLayoutId(0)),
+                array_element: None,
             },
         ],
         diagnostics: Vec::new(),
@@ -3361,4 +3365,172 @@ fn apply_source_types_attaches_record_layouts_and_spans() {
         .source_types()
         .expect("top-level source types attached");
     assert_eq!(top.record_layouts.len(), 1);
+}
+
+#[test]
+fn apply_source_types_attaches_array_elements_and_spans() {
+    use crate::Span;
+    use kiln_hir::source_types::{
+        CheckResult, NativeFieldType, RecordField, RecordLayout, RecordLayoutId, SourceType,
+        TypeClass, TypeRole,
+    };
+
+    let path = "/test/main.ts";
+    let arr_lit = Expression {
+        kind: ExpressionKind::Array {
+            elements: vec![
+                ListElement::Item(number(1.0)),
+                ListElement::Item(number(2.0)),
+            ],
+        },
+        span: Span::new(30, 45),
+    };
+    let var_stmt = Statement {
+        kind: StatementKind::Variable {
+            kind: VariableKind::Let,
+            declarations: vec![kiln_hir::VariableDeclarator {
+                pattern: kiln_hir::Pattern::Identifier("nums".into()),
+                initializer: Some(arr_lit),
+                span: Span::new(26, 45),
+            }],
+        },
+        span: Span::new(26, 45),
+    };
+    let mut m = module(vec![function("f", &["pts"], vec![var_stmt])]);
+    m.body[0].span = Span::new(10, 50);
+    if let StatementKind::Function(func) = &mut m.body[0].kind {
+        func.span = Span::new(10, 50);
+        func.parameters[0].span = Span::new(15, 25);
+    }
+    m.type_syntax
+        .signatures
+        .push(kiln_hir::FunctionSignatureSite {
+            owner_span: Span::new(10, 50),
+            signature: kiln_hir::TypeSignature {
+                span: Span::new(10, 50),
+                type_parameters: Vec::new(),
+                this_parameter: None,
+                parameters: vec![kiln_hir::TypeSignatureParameter {
+                    name: Some("pts".into()),
+                    pattern: None,
+                    pattern_span: Span::new(15, 25),
+                    span: Span::new(15, 25),
+                    ty: None,
+                    optional: false,
+                    rest: false,
+                    default: None,
+                }],
+                rest: false,
+                return_type: None,
+            },
+            has_body: true,
+            body_start: None,
+        });
+
+    let mut program = compile(&m).expect("compiles");
+
+    let point_layout = RecordLayout {
+        fields: vec![
+            RecordField {
+                name: "x".into(),
+                ty: NativeFieldType::Number,
+                readonly: false,
+            },
+            RecordField {
+                name: "y".into(),
+                ty: NativeFieldType::Number,
+                readonly: false,
+            },
+        ],
+    };
+    let checked = CheckResult {
+        checker_identity: "test-checker".into(),
+        complete: true,
+        files: vec![(path.to_owned(), true)],
+        record_layouts: vec![point_layout],
+        types: vec![
+            SourceType {
+                path: path.to_owned(),
+                span: Span::new(15, 25),
+                display: "Point[]".into(),
+                class: TypeClass::Array,
+                role: TypeRole::Parameter,
+                record_layout: None,
+                array_element: Some(NativeFieldType::Record(RecordLayoutId(0))),
+            },
+            SourceType {
+                path: path.to_owned(),
+                span: Span::new(10, 50),
+                display: "Point[]".into(),
+                class: TypeClass::Array,
+                role: TypeRole::Return,
+                record_layout: None,
+                array_element: Some(NativeFieldType::Record(RecordLayoutId(0))),
+            },
+            SourceType {
+                path: path.to_owned(),
+                span: Span::new(26, 45),
+                display: "number[]".into(),
+                class: TypeClass::Array,
+                role: TypeRole::Annotation,
+                record_layout: None,
+                array_element: Some(NativeFieldType::Number),
+            },
+            SourceType {
+                path: path.to_owned(),
+                span: Span::new(30, 45),
+                display: "number[]".into(),
+                class: TypeClass::Array,
+                role: TypeRole::Annotation,
+                record_layout: None,
+                array_element: Some(NativeFieldType::Number),
+            },
+        ],
+        diagnostics: Vec::new(),
+    };
+
+    apply_source_types(path, &m, &checked, "test-checker", &mut program);
+
+    let proto = &program.functions[0];
+    assert_eq!(
+        proto.parameter_array_elements(),
+        &[Some(NativeFieldType::Record(RecordLayoutId(0)))]
+    );
+    assert_eq!(
+        proto.return_array_element(),
+        Some(NativeFieldType::Record(RecordLayoutId(0)))
+    );
+
+    let local_elems = proto
+        .local_array_elements()
+        .expect("local array elements exist");
+    assert_eq!(
+        local_elems.get(&0),
+        Some(&NativeFieldType::Record(RecordLayoutId(0)))
+    );
+    assert_eq!(local_elems.get(&1), Some(&NativeFieldType::Number));
+
+    let new_arr_elems = proto
+        .new_array_elements()
+        .expect("new array elements exist");
+    assert!(!new_arr_elems.is_empty());
+    assert!(
+        new_arr_elems
+            .values()
+            .all(|elem| *elem == NativeFieldType::Number)
+    );
+
+    let annotations = proto
+        .type_annotations
+        .as_ref()
+        .and_then(|t| t.source_types.as_ref())
+        .expect("source_types attached");
+    assert_eq!(
+        annotations.span_array_elements.get(&30),
+        Some(&NativeFieldType::Number)
+    );
+    assert_eq!(
+        annotations.exact_span_array_elements.get(&(30, 45)),
+        Some(&NativeFieldType::Number)
+    );
 }

@@ -1253,4 +1253,161 @@ main();
 
         let _ = std::fs::remove_dir_all(&fixture);
     }
+
+    #[test]
+    fn native_semantics_phase2_record_returns_nested_records_and_reflection_guard() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-native-semantics-phase2-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create native semantics phase 2 fixture");
+        #[cfg(unix)]
+        share_native_semantic_cache(&fixture);
+
+        // 1. Nested records and record return by value
+        let source_nested = fixture.join("nested.ts");
+        std::fs::write(
+            &source_nested,
+            r#"interface Inner { val: number; }
+interface Outer { inner: Inner; tag: number; }
+interface Point { x: number; y: number; }
+
+function createPoint(x: number, y: number): Point {
+    return { x: x, y: y };
+}
+
+function shiftPoint(p: Point, d: number): Point {
+    return { x: p.x + d, y: p.y + d };
+}
+
+function run(): void {
+    const p1 = createPoint(10, 20);
+    const p2 = shiftPoint(p1, 5);
+    const o: Outer = { inner: { val: 42 }, tag: 1 };
+    const inCopy: Inner = o.inner;
+    inCopy.val = 99;
+    console.log(p1.x, p1.y, p2.x, p2.y, o.inner.val, inCopy.val);
+}
+
+run();
+"#,
+        )
+        .expect("write nested.ts");
+
+        let js_out = {
+            let mut session = OneShot::start().expect("start js native engine");
+            commands::native_run(
+                &mut session,
+                &source_nested,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                NativeSemantics::Js,
+            )
+            .expect("run nested with --semantics=js")
+        };
+        assert_eq!(js_out.exit_code, 0);
+        assert_eq!(js_out.text, "10 20 15 25 99 99\n");
+
+        let native_out = {
+            let mut session = OneShot::start().expect("start native semantics engine");
+            commands::native_run(
+                &mut session,
+                &source_nested,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                NativeSemantics::Native,
+            )
+            .expect("run nested with --semantics=native")
+        };
+        assert_eq!(native_out.exit_code, 0);
+        assert_eq!(native_out.text, "10 20 15 25 42 99\n");
+
+        // 2. Reflection guard: delete and Object.freeze on native records are refused
+        let source_delete = fixture.join("reflect_delete.ts");
+        std::fs::write(
+            &source_delete,
+            r#"interface Rec { a: number; }
+function badDelete(): void {
+    const r: Rec = { a: 1 };
+    delete (r as any).a;
+}
+badDelete();
+"#,
+        )
+        .expect("write reflect_delete.ts");
+
+        let del_native = {
+            let mut session = OneShot::start().expect("start native semantics engine");
+            commands::native_run(
+                &mut session,
+                &source_delete,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                NativeSemantics::Native,
+            )
+        };
+        match del_native {
+            Ok(output) => assert_ne!(output.exit_code, 0, "expected delete on native record to refuse"),
+            Err(_) => {}
+        }
+
+        let source_freeze = fixture.join("reflect_freeze.ts");
+        std::fs::write(
+            &source_freeze,
+            r#"interface Rec { a: number; }
+function badFreeze(): void {
+    const r: Rec = { a: 1 };
+    Object.freeze(r);
+}
+badFreeze();
+"#,
+        )
+        .expect("write reflect_freeze.ts");
+
+        let freeze_native = {
+            let mut session = OneShot::start().expect("start native semantics engine");
+            commands::native_run(
+                &mut session,
+                &source_freeze,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                NativeSemantics::Native,
+            )
+        };
+        match freeze_native {
+            Ok(output) => assert_ne!(output.exit_code, 0, "expected Object.freeze on native record to refuse"),
+            Err(_) => {}
+        }
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
 }

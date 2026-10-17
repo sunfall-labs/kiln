@@ -2059,6 +2059,7 @@ mod tests {
                         TypeClass::Number
                     },
                     record_layout: None,
+                    array_element: None,
                 }],
                 record_layouts: Vec::new(),
                 diagnostics: Vec::new(),
@@ -2201,6 +2202,7 @@ mod tests {
                         TypeClass::Number
                     },
                     record_layout: None,
+                    array_element: None,
                 }],
                 record_layouts: Vec::new(),
                 diagnostics: Vec::new(),
@@ -2335,6 +2337,7 @@ mod tests {
                         display: "number".into(),
                         class: TypeClass::Number,
                         record_layout: None,
+                        array_element: None,
                     })
                     .collect(),
                 record_layouts: Vec::new(),

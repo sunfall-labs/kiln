@@ -56,6 +56,16 @@ pub struct SourceTypeAnnotations {
     pub local_layouts: BTreeMap<u32, RecordLayoutId>,
     /// Maps `Instruction::NewObject` bytecode PC (`u32`) in this function/program body to its `RecordLayoutId`.
     pub new_object_layouts: BTreeMap<u32, RecordLayoutId>,
+    pub parameter_array_elements: Vec<Option<NativeFieldType>>,
+    pub return_array_element: Option<NativeFieldType>,
+    /// Maps authored span start offset (`decl.span.start` or `expr.span.start`) to its homogeneous array element type.
+    pub span_array_elements: BTreeMap<u32, NativeFieldType>,
+    /// Maps authored `(span.start, span.end)` to its homogeneous array element type.
+    pub exact_span_array_elements: BTreeMap<(u32, u32), NativeFieldType>,
+    /// Maps local slot index (`u32`) in this function/program body to its homogeneous array element type.
+    pub local_array_elements: BTreeMap<u32, NativeFieldType>,
+    /// Maps `Instruction::NewArray` bytecode PC (`u32`) in this function/program body to its homogeneous array element type.
+    pub new_array_elements: BTreeMap<u32, NativeFieldType>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +99,7 @@ pub struct SourceType {
     pub class: TypeClass,
     pub role: TypeRole,
     pub record_layout: Option<RecordLayoutId>,
+    pub array_element: Option<NativeFieldType>,
 }
 
 impl SourceType {
@@ -106,11 +117,17 @@ impl SourceType {
             class,
             role,
             record_layout: None,
+            array_element: None,
         }
     }
 
     pub const fn with_record_layout(mut self, layout: Option<RecordLayoutId>) -> Self {
         self.record_layout = layout;
+        self
+    }
+
+    pub const fn with_array_element(mut self, element: Option<NativeFieldType>) -> Self {
+        self.array_element = element;
         self
     }
 }

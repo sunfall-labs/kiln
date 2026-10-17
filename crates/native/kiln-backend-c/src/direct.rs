@@ -340,6 +340,7 @@ impl DirectPlan {
                 generic_function_optimized,
                 parallel_in_generic,
                 speculate,
+                semantics,
                 known,
                 typed_returns: false_flags.clone(),
                 typed_needs: typed_needs.clone(),
@@ -443,7 +444,7 @@ impl DirectPlan {
         if semantics == crate::NativeSemantics::Native {
             for (i, g) in graphs.iter().enumerate() {
                 let (rec_vals, rec_proven) =
-                    record_values_and_field_proven(g, &program.functions[i], program);
+                    record_values_and_field_proven(g, &program.functions[i], program, &known.functions[i].known);
                 intrinsics[i].extend(rec_proven);
                 function_record_values.push(rec_vals);
             }
@@ -453,7 +454,7 @@ impl DirectPlan {
         let entry_record_values = if semantics == crate::NativeSemantics::Native {
             let entry_p = crate::entry_proto(program);
             let (rec_vals, entry_rec_proven) =
-                record_values_and_field_proven(entry, &entry_p, program);
+                record_values_and_field_proven(entry, &entry_p, program, &known.entry.known);
             entry_intrinsics.extend(entry_rec_proven);
             rec_vals
         } else {
@@ -511,7 +512,17 @@ impl DirectPlan {
         let entry_length_bounds = length_bounds_of(entry);
 
         // Greatest fixpoint: every typed entry returns a number until proven otherwise.
-        let mut typed_returns: Vec<bool> = typed_eligible.clone();
+        let mut typed_returns: Vec<bool> = typed_eligible
+            .iter()
+            .enumerate()
+            .map(|(i, &eligible)| {
+                if semantics == crate::NativeSemantics::Native {
+                    eligible && program.functions[i].return_layout().is_none()
+                } else {
+                    eligible
+                }
+            })
+            .collect();
         loop {
             let mut changed = false;
             for (i, graph) in graphs.iter().enumerate() {
@@ -3230,6 +3241,7 @@ pub(crate) fn record_values_and_field_proven(
     graph: &FunctionGraph,
     proto: &FunctionProto,
     program: &Program,
+    known: &HashMap<ValueId, u32>,
 ) -> (HashSet<ValueId>, HashMap<ValueId, Proven>) {
     let all_layouts = crate::collect_program_record_layouts(program);
     if all_layouts.is_empty() {
@@ -3277,9 +3289,38 @@ pub(crate) fn record_values_and_field_proven(
             for (vid, op) in &block.operations {
                 match op {
                     GraphOp::NewObject { .. } => {
-                        if let Some(origin) = graph.origins.get(vid) {
-                            if let Some(&lid) = new_object_layouts.get(&origin.pc) {
-                                record_value_layouts.insert(*vid, lid);
+                        let mut lid = graph
+                            .origins
+                            .get(vid)
+                            .and_then(|origin| new_object_layouts.get(&origin.pc).copied())
+                            .or_else(|| {
+                                block
+                                    .operations
+                                    .iter()
+                                    .find_map(|(_, next_op)| match next_op {
+                                        GraphOp::StoreLocal { slot, value } if value == vid => {
+                                            local_layouts.get(slot).copied()
+                                        }
+                                        _ => None,
+                                    })
+                            });
+                        if lid.is_none()
+                            && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if *ret_v == *vid)
+                        {
+                            lid = proto.return_layout();
+                        }
+                        if let Some(lid) = lid {
+                            record_value_layouts.insert(*vid, lid);
+                        }
+                    }
+                    GraphOp::Call { callee, .. } => {
+                        if let Some(&target) = known.get(callee) {
+                            if let Some(ret_lid) = program
+                                .functions
+                                .get(target as usize)
+                                .and_then(|f| f.return_layout())
+                            {
+                                record_value_layouts.insert(*vid, ret_lid);
                             }
                         }
                     }

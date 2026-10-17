@@ -1392,6 +1392,11 @@ impl super::Compiler {
                     }
                 }
             }
+            let pc = self.code.len() as u32;
+            if span.end > span.start {
+                self.new_array_spans
+                    .insert((self.current_function_span, pc), span);
+            }
             self.code.push(Instruction::NewArray {
                 count: elements.len() as u32,
             });
@@ -1411,24 +1416,34 @@ impl super::Compiler {
                     pending += 1;
                 }
                 ListElement::Spread(value) => {
-                    self.flush_array_run(&mut pending, &mut started);
+                    self.flush_array_run(&mut pending, &mut started, span);
                     self.expression(value);
                     self.code.push(Instruction::SpreadInto);
                 }
             }
         }
-        self.flush_array_run(&mut pending, &mut started);
+        self.flush_array_run(&mut pending, &mut started, span);
     }
 
     /// Turn the pending literal elements into an array, or append them to the one being built.
-    pub(super) fn flush_array_run(&mut self, pending: &mut u32, started: &mut bool) {
+    pub(super) fn flush_array_run(&mut self, pending: &mut u32, started: &mut bool, span: Span) {
         if !*started {
+            let pc = self.code.len() as u32;
+            if span.end > span.start {
+                self.new_array_spans
+                    .insert((self.current_function_span, pc), span);
+            }
             self.code.push(Instruction::NewArray { count: *pending });
             *started = true;
             *pending = 0;
             return;
         }
         if *pending > 0 {
+            let pc = self.code.len() as u32;
+            if span.end > span.start {
+                self.new_array_spans
+                    .insert((self.current_function_span, pc), span);
+            }
             self.code.push(Instruction::NewArray { count: *pending });
             self.code.push(Instruction::SpreadInto);
             *pending = 0;

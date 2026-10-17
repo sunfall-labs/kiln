@@ -1054,6 +1054,7 @@ struct Compiler {
     pub(super) current_function_span: Option<Span>,
     pub(super) local_spans: BTreeMap<(Option<Span>, u32), Span>,
     pub(super) new_object_spans: BTreeMap<(Option<Span>, u32), Span>,
+    pub(crate) new_array_spans: BTreeMap<(Option<Span>, u32), Span>,
 }
 
 mod bindings;
@@ -1081,6 +1082,7 @@ pub use analysis::{
 };
 
 pub type BodySpanInfo = (
+    BTreeMap<(Option<Span>, u32), Span>,
     BTreeMap<(Option<Span>, u32), Span>,
     BTreeMap<(Option<Span>, u32), Span>,
 );
@@ -1128,7 +1130,11 @@ pub fn collect_body_spans(module: &Module) -> BodySpanInfo {
         compiler.global_bindings_configurable = false;
     }
     compiler.compile_body(module);
-    (compiler.local_spans, compiler.new_object_spans)
+    (
+        compiler.local_spans,
+        compiler.new_object_spans,
+        compiler.new_array_spans,
+    )
 }
 
 /// Collect body spans matching the program's top-level code layout, accounting for whether
@@ -1178,9 +1184,23 @@ pub(crate) fn collect_body_spans_for_program(module: &Module, program: &Program)
             } else {
                 true
             }
+        })
+        && compiler.new_array_spans.keys().all(|(func_idx, pc)| {
+            if func_idx.is_none() {
+                matches!(
+                    program.code.get(*pc as usize),
+                    Some(Instruction::NewArray { .. } | Instruction::Nop)
+                )
+            } else {
+                true
+            }
         });
     if ok {
-        (compiler.local_spans, compiler.new_object_spans)
+        (
+            compiler.local_spans,
+            compiler.new_object_spans,
+            compiler.new_array_spans,
+        )
     } else {
         collect_body_spans(module)
     }

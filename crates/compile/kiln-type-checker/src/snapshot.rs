@@ -1129,6 +1129,25 @@ fn extract_record_layout(
     Some(table.intern(RecordLayout { fields }))
 }
 
+fn resolve_array_element(
+    checker: &mut crate::engine::check::Checker<'_, '_>,
+    table: &mut RecordLayoutTable,
+    ty: crate::engine::types::TypeId,
+) -> Option<NativeFieldType> {
+    let elem_ty = checker.array_element(ty)?;
+    if checker.is_number_like(elem_ty) {
+        Some(NativeFieldType::Number)
+    } else if checker.is_boolean(elem_ty) || checker.is_boolean_like(elem_ty) {
+        Some(NativeFieldType::Boolean)
+    } else if checker.is_string_like(elem_ty) {
+        Some(NativeFieldType::String)
+    } else if let Some(nested_id) = resolve_record_layout(checker, table, elem_ty) {
+        Some(NativeFieldType::Record(nested_id))
+    } else {
+        None
+    }
+}
+
 /// The facts of `sources` that `options` selects, the canonical record layouts, and the files
 /// whose facts are incomplete because the stack ran out.
 fn source_facts(
@@ -1215,12 +1234,15 @@ fn source_facts(
                 ty,
                 &mut table,
             );
-            if st.record_layout.is_some() || options.facts == FactSelection::All {
+            if st.record_layout.is_some()
+                || st.array_element.is_some()
+                || options.facts == FactSelection::All
+            {
                 types.push(st);
             }
         }
         for (expr_index, e) in module.hir.exprs.iter().enumerate() {
-            if matches!(e.kind, hir::ExprKind::Object(_)) {
+            if matches!(e.kind, hir::ExprKind::Object(_) | hir::ExprKind::Array(_)) {
                 let ty = checker.type_of_expr(id, hir::ExprId(expr_index as u32));
                 let st = export_type(
                     &mut checker,
@@ -1230,7 +1252,7 @@ fn source_facts(
                     ty,
                     &mut table,
                 );
-                if st.record_layout.is_some() {
+                if st.record_layout.is_some() || st.array_element.is_some() {
                     types.push(st);
                 }
             }
@@ -1280,6 +1302,9 @@ fn source_facts(
             if let Some(local_id) = ty.record_layout {
                 ty.record_layout = Some(id_map[local_id.0 as usize]);
             }
+            if let Some(NativeFieldType::Record(local_id)) = ty.array_element {
+                ty.array_element = Some(NativeFieldType::Record(id_map[local_id.0 as usize]));
+            }
         }
         all.extend(types);
     }
@@ -1323,6 +1348,11 @@ fn export_type(
     } else {
         None
     };
+    let array_element = if class == TypeClass::Array {
+        resolve_array_element(checker, table, ty)
+    } else {
+        None
+    };
     SourceType {
         path: path.to_owned(),
         span,
@@ -1330,5 +1360,6 @@ fn export_type(
         class,
         role,
         record_layout,
+        array_element,
     }
 }

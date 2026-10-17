@@ -12,7 +12,9 @@ mod ops;
 pub(crate) mod sites;
 mod string_accumulator;
 
-pub(crate) use body::ArgumentsLengthFact;
+pub(crate) use body::{
+    ArgumentsLengthFact, emit_box_native_record, emit_compound_literal_fields,
+};
 pub use body::{
     emit_async_entry_body, emit_entry_from_graph, emit_entry_from_graph_with_profile,
     emit_function_from_graph, emit_function_from_graph_with_profile, retain_used_entry_context,
@@ -171,7 +173,7 @@ pub fn typed_signature(
         "double".to_string()
     } else if semantics == crate::NativeSemantics::Native && proto.return_layout().is_some() {
         let ret_lid = proto.return_layout().unwrap();
-        format!("{symbol}_rec_{ret_lid} *")
+        format!("{symbol}_rec_{ret_lid}")
     } else {
         "kiln_val".to_string()
     };

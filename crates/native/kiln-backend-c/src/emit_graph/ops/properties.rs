@@ -92,8 +92,17 @@ pub(super) fn emit_get_property(
                                 writeln!(output, "    v{v} = {field_expr};").unwrap();
                             }
                         }
-                        kiln_ir::NativeFieldType::Record(_) => {
-                            if need_box {
+                        kiln_ir::NativeFieldType::Record(sub_lid) => {
+                            if ctx.native_records.boxed_record_values.contains(&vid) {
+                                crate::emit_graph::emit_box_native_record(
+                                    output,
+                                    ctx.symbol,
+                                    v,
+                                    sub_lid,
+                                    &field_expr,
+                                    &all_layouts,
+                                );
+                            } else if need_box {
                                 writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
                             }
                         }
@@ -663,9 +672,18 @@ pub(super) fn emit_set_property(
                         kiln_ir::NativeFieldType::String => {
                             writeln!(output, "    {field_expr} = v{val};").unwrap();
                         }
-                        kiln_ir::NativeFieldType::Record(_) => {
-                            if let Some((_, val_expr)) = ctx.native_records.value_exprs.get(value) {
-                                writeln!(output, "    {field_expr} = {val_expr};").unwrap();
+                        kiln_ir::NativeFieldType::Record(dst_sub_lid) => {
+                            if let Some(&(src_sub_lid, ref val_expr)) =
+                                ctx.native_records.value_exprs.get(value)
+                            {
+                                super::emit_struct_copy_fields(
+                                    output,
+                                    &field_expr,
+                                    dst_sub_lid,
+                                    val_expr,
+                                    src_sub_lid,
+                                    &all_layouts,
+                                );
                             }
                         }
                     }

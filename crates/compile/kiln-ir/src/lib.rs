@@ -4,6 +4,7 @@
 //! consumes only that owned HIR and produces plain data, so an interpreter, serializer, or native
 //! backend can be added without coupling it to Oxc (or to any other parser).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub use kiln_hir::{
@@ -864,6 +865,39 @@ impl FunctionProto {
             .as_ref()
             .and_then(|ta| ta.source_types.as_ref())
             .and_then(|s| s.return_layout)
+    }
+
+    /// Return the annotated parameter array elements, if any.
+    pub fn parameter_array_elements(&self) -> &[Option<NativeFieldType>] {
+        self.type_annotations
+            .as_ref()
+            .and_then(|ta| ta.source_types.as_ref())
+            .map(|s| s.parameter_array_elements.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Return the annotated return array element, if any.
+    pub fn return_array_element(&self) -> Option<NativeFieldType> {
+        self.type_annotations
+            .as_ref()
+            .and_then(|ta| ta.source_types.as_ref())
+            .and_then(|s| s.return_array_element)
+    }
+
+    /// Return the annotated local array elements, if any.
+    pub fn local_array_elements(&self) -> Option<&BTreeMap<u32, NativeFieldType>> {
+        self.type_annotations
+            .as_ref()
+            .and_then(|ta| ta.source_types.as_ref())
+            .map(|s| &s.local_array_elements)
+    }
+
+    /// Return the annotated new array elements, if any.
+    pub fn new_array_elements(&self) -> Option<&BTreeMap<u32, NativeFieldType>> {
+        self.type_annotations
+            .as_ref()
+            .and_then(|ta| ta.source_types.as_ref())
+            .map(|s| &s.new_array_elements)
     }
 }
 

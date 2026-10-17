@@ -102,6 +102,51 @@ fn call_status_check(diagnostic_site: &str, pc: u32, operation: &str, unwind: &s
     )
 }
 
+pub(crate) fn emit_struct_copy_fields(
+    output: &mut String,
+    dst_expr: &str,
+    dst_lid: kiln_ir::RecordLayoutId,
+    src_expr: &str,
+    src_lid: kiln_ir::RecordLayoutId,
+    all_layouts: &[kiln_ir::RecordLayout],
+) {
+    if dst_lid == src_lid {
+        writeln!(output, "    {dst_expr} = {src_expr};").unwrap();
+        return;
+    }
+    let (Some(dst_layout), Some(src_layout)) = (
+        all_layouts.get(dst_lid.0 as usize),
+        all_layouts.get(src_lid.0 as usize),
+    ) else {
+        writeln!(output, "    {dst_expr} = {src_expr};").unwrap();
+        return;
+    };
+    for dst_f in &dst_layout.fields {
+        if let Some(src_f) = src_layout.fields.iter().find(|sf| sf.name == dst_f.name) {
+            let field_name = &dst_f.name;
+            match (&dst_f.ty, &src_f.ty) {
+                (
+                    kiln_ir::NativeFieldType::Record(dst_sub),
+                    kiln_ir::NativeFieldType::Record(src_sub),
+                ) => {
+                    emit_struct_copy_fields(
+                        output,
+                        &format!("{dst_expr}.{field_name}"),
+                        *dst_sub,
+                        &format!("{src_expr}.{field_name}"),
+                        *src_sub,
+                        all_layouts,
+                    );
+                }
+                _ => {
+                    writeln!(output, "    {dst_expr}.{field_name} = {src_expr}.{field_name};")
+                        .unwrap();
+                }
+            }
+        }
+    }
+}
+
 /// The numeric fast path of a binary operator on two unboxed doubles `a` and `b`, as the C
 /// expression producing a `kiln_val`, or `None` for an operator with no numeric form.
 /// The arithmetic of a binary operation on two doubles `a` and `b`, as a double.
@@ -361,6 +406,19 @@ pub(super) fn emit_graph_op(
             if ctx.plan.semantics == crate::NativeSemantics::Native
                 && ctx.native_records.slot_exprs.contains_key(slot)
             {
+                if ctx.native_records.boxed_record_values.contains(&vid) {
+                    if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(&vid) {
+                        let all_layouts = crate::collect_program_record_layouts(ctx.program);
+                        crate::emit_graph::emit_box_native_record(
+                            output,
+                            ctx.symbol,
+                            v,
+                            src_lid,
+                            src_expr,
+                            &all_layouts,
+                        );
+                    }
+                }
                 return;
             }
             if in_array(slot) {
@@ -428,27 +486,29 @@ pub(super) fn emit_graph_op(
                                 .flatten()
                         });
                     if let Some(dlid) = dst_lid {
-                        if dlid == src_lid {
-                            writeln!(output, "    {dst_expr} = {src_expr};").unwrap();
-                        } else if let (Some(dst_layout), Some(src_layout)) = (
-                            all_layouts.get(dlid.0 as usize),
-                            all_layouts.get(src_lid.0 as usize),
-                        ) {
-                            for dst_f in &dst_layout.fields {
-                                if src_layout.fields.iter().any(|sf| sf.name == dst_f.name) {
-                                    writeln!(
-                                        output,
-                                        "    {dst_expr}.{} = {src_expr}.{};",
-                                        dst_f.name, dst_f.name
-                                    )
-                                    .unwrap();
-                                }
-                            }
-                        } else {
-                            writeln!(output, "    {dst_expr} = {src_expr};").unwrap();
-                        }
+                        emit_struct_copy_fields(
+                            output,
+                            dst_expr,
+                            dlid,
+                            src_expr,
+                            src_lid,
+                            &all_layouts,
+                        );
                     } else {
                         writeln!(output, "    {dst_expr} = {src_expr};").unwrap();
+                    }
+                }
+                if ctx.native_records.boxed_record_values.contains(&vid) {
+                    if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(&vid) {
+                        let all_layouts = crate::collect_program_record_layouts(ctx.program);
+                        crate::emit_graph::emit_box_native_record(
+                            output,
+                            ctx.symbol,
+                            v,
+                            src_lid,
+                            src_expr,
+                            &all_layouts,
+                        );
                     }
                 }
                 return;
@@ -719,6 +779,26 @@ pub(super) fn emit_graph_op(
             operands,
             pushes,
         } => {
+            if ctx.plan.semantics == crate::NativeSemantics::Native
+                && matches!(
+                    instruction,
+                    Instruction::DeleteProperty(_)
+                        | Instruction::DeletePropertyStrict { .. }
+                        | Instruction::DeleteComputed
+                        | Instruction::DeleteComputedStrict { .. }
+                )
+                && operands
+                    .first()
+                    .is_some_and(|obj| ctx.native_records.value_exprs.contains_key(obj))
+            {
+                let diagnostic_source = crate::diagnostic_source(ctx.diagnostic_site);
+                writeln!(
+                    output,
+                    "    if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"delete on native record\"; kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"delete\", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal;"
+                )
+                .unwrap();
+                return;
+            }
             if matches!(
                 instruction,
                 Instruction::Apply
@@ -1138,23 +1218,15 @@ pub(super) fn emit_graph_op(
                                 call_args.push_str(&format!(", &({src_expr})"));
                             } else {
                                 let all_layouts = crate::collect_program_record_layouts(program);
-                                let mut init_fields = Vec::new();
-                                if let (Some(target_layout), Some(src_layout)) = (
-                                    all_layouts.get(target_lid.0 as usize),
-                                    all_layouts.get(src_lid.0 as usize),
-                                ) {
-                                    for tf in &target_layout.fields {
-                                        if src_layout.fields.iter().any(|sf| sf.name == tf.name) {
-                                            init_fields.push(format!(
-                                                ".{} = {src_expr}.{}",
-                                                tf.name, tf.name
-                                            ));
-                                        }
-                                    }
-                                }
+                                let fields_str = crate::emit_graph::emit_compound_literal_fields(
+                                    target_lid,
+                                    src_expr,
+                                    src_lid,
+                                    symbol,
+                                    &all_layouts,
+                                );
                                 call_args.push_str(&format!(
-                                    ", &(({symbol}_rec_{target_lid}){{ {} }})",
-                                    init_fields.join(", ")
+                                    ", &(({symbol}_rec_{target_lid}){{ {fields_str} }})"
                                 ));
                             }
                         } else {
@@ -1253,13 +1325,19 @@ pub(super) fn emit_graph_op(
                     }
                     _ => String::new(),
                 };
+                let fail_val = if ctx.plan.semantics == crate::NativeSemantics::Native
+                    && let Some(caller_ret_lid) = ctx.proto.return_layout()
+                {
+                    format!("({symbol}_rec_{caller_ret_lid}){{0}}")
+                } else {
+                    typed_fail(kind).to_string()
+                };
                 let failed = if in_typed && unwind != "goto kiln_unwind;" {
                     format!(
-                        "{{ if (kiln_c99_typed_status == KILN_C99_THROWN) {{ *thrown = kiln_c99_typed_thrown; {unwind} }} return {}; }}",
-                        typed_fail(kind)
+                        "{{ if (kiln_c99_typed_status == KILN_C99_THROWN) {{ *thrown = kiln_c99_typed_thrown; {unwind} }} return {fail_val}; }}"
                     )
                 } else if in_typed {
-                    format!("return {};", typed_fail(kind))
+                    format!("return {fail_val};")
                 } else {
                     format!(
                         "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) {{ *thrown = kiln_c99_typed_thrown; {unwind} }} {check} }}"
@@ -1269,9 +1347,20 @@ pub(super) fn emit_graph_op(
                     if let Some(ret_lid) = target_proto.and_then(|tp| tp.return_layout()) {
                         writeln!(
                             output,
-                            "    {{ {recv} {symbol}_rec_{ret_lid} *ret_ptr = {symbol}_fn_{target}_t({call_args}); if (ret_ptr != NULL) rec_call_{v} = *ret_ptr; }}"
+                            "    {{ {recv} rec_call_{v} = {symbol}_fn_{target}_t({call_args}); }}"
                         )
                         .unwrap();
+                        if ctx.native_records.boxed_record_values.contains(&vid) {
+                            let all_layouts = crate::collect_program_record_layouts(ctx.program);
+                            crate::emit_graph::emit_box_native_record(
+                                output,
+                                ctx.symbol,
+                                v,
+                                ret_lid,
+                                &format!("rec_call_{v}"),
+                                &all_layouts,
+                            );
+                        }
                     } else if plan.typed_returns[target as usize] {
                         if live_typed {
                             let int_twin = if live_typed_int {
@@ -1299,7 +1388,7 @@ pub(super) fn emit_graph_op(
                     } else {
                         writeln!(
                             output,
-                            "    {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); }}"
+                            "    {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); if (KILN_UNLIKELY(v{v} == KILN_VAL_TYPED_FAIL)) {failed} }}"
                         )
                         .unwrap();
                     }
@@ -1501,17 +1590,43 @@ pub(super) fn emit_graph_op(
             line,
             column,
             ..
-        } => call_method::emit_call_method(
-            output,
-            vid,
-            object,
-            name,
-            args,
-            *line,
-            *column,
-            *prepared_callee,
-            &ctx,
-        ),
+        } => {
+            if ctx.plan.semantics == crate::NativeSemantics::Native {
+                let method_name = match program.constants.get(*name as usize) {
+                    Some(Constant::String(s)) => s.to_scalar_string().ok(),
+                    _ => None,
+                };
+                let is_reflection = matches!(
+                    method_name.as_deref(),
+                    Some("defineProperty" | "defineProperties" | "freeze" | "seal" | "preventExtensions")
+                );
+                if is_reflection
+                    && args
+                        .first()
+                        .is_some_and(|target| ctx.native_records.value_exprs.contains_key(target))
+                {
+                    let m_name = method_name.unwrap();
+                    let diagnostic_source = crate::diagnostic_source(ctx.diagnostic_site);
+                    writeln!(
+                        output,
+                        "    if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"reflection on native record\"; kiln_c99_note_refusal({diagnostic_source}, (size_t){pc}, \"{m_name}\", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal;"
+                    )
+                    .unwrap();
+                    return;
+                }
+            }
+            call_method::emit_call_method(
+                output,
+                vid,
+                object,
+                name,
+                args,
+                *line,
+                *column,
+                *prepared_callee,
+                &ctx,
+            )
+        }
         GraphOp::New {
             callee,
             args,
@@ -1617,18 +1732,34 @@ pub(super) fn emit_graph_op(
                                     kiln_ir::NativeFieldType::String => {
                                         writeln!(output, "    {field_expr} = v{};", val.0).unwrap();
                                     }
-                                    kiln_ir::NativeFieldType::Record(_) => {
-                                        if let Some((_, sub_expr)) =
+                                    kiln_ir::NativeFieldType::Record(dst_sub_lid) => {
+                                        if let Some(&(src_sub_lid, ref sub_expr)) =
                                             ctx.native_records.value_exprs.get(val)
                                         {
-                                            writeln!(output, "    {field_expr} = {sub_expr};")
-                                                .unwrap();
+                                            emit_struct_copy_fields(
+                                                output,
+                                                &field_expr,
+                                                dst_sub_lid,
+                                                sub_expr,
+                                                src_sub_lid,
+                                                &all_layouts,
+                                            );
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                }
+                if ctx.native_records.boxed_record_values.contains(&vid) {
+                    crate::emit_graph::emit_box_native_record(
+                        output,
+                        ctx.symbol,
+                        v,
+                        lid,
+                        expr,
+                        &all_layouts,
+                    );
                 }
                 return;
             }

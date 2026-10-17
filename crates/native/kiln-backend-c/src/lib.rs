@@ -1939,7 +1939,8 @@ fn render_functions(
         .enumerate()
         .map(|(index, proto)| {
             if policy.semantics == NativeSemantics::Native
-                && proto.parameter_layouts().iter().any(|p| p.is_some())
+                && (proto.parameter_layouts().iter().any(|p| p.is_some())
+                    || proto.return_layout().is_some())
             {
                 return false;
             }
@@ -2238,7 +2239,8 @@ fn render_functions(
         .enumerate()
         .map(|(index, proto)| {
             if policy.semantics == NativeSemantics::Native
-                && proto.parameter_layouts().iter().any(|p| p.is_some())
+                && (proto.parameter_layouts().iter().any(|p| p.is_some())
+                    || proto.return_layout().is_some())
             {
                 return false;
             }
