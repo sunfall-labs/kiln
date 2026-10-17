@@ -1368,3 +1368,78 @@ fn source_facts_homogeneous_array_elements() {
     assert_eq!(arr_fact.class, TypeClass::Array);
     assert_eq!(arr_fact.array_element, Some(NativeFieldType::Number));
 }
+
+#[test]
+fn record_layouts_enum_int32_and_array_fields() {
+    use kiln_hir::source_types::NativeFieldType;
+
+    let source = "
+        enum Kind { A = 0, B = 1, C = 2 }
+        type Tag = 0 | 1 | 2;
+        interface Point { x: number; y: number; }
+        interface Polygon {
+            kind: Kind;
+            tag: Tag;
+            weights: number[];
+            vertices: Point[];
+        }
+        const poly: Polygon = {
+            kind: Kind.A,
+            tag: 1,
+            weights: [1.0, 2.0],
+            vertices: [{ x: 0, y: 0 }],
+        };
+    ";
+    let result = check_sources(&[("/project/main.ts", source)]);
+    assert!(result.complete);
+    assert!(!result.record_layouts.is_empty());
+
+    let point_idx = result
+        .record_layouts
+        .iter()
+        .position(|l| {
+            l.fields.len() == 2
+                && l.fields[0].name == "x"
+                && l.fields[0].ty == NativeFieldType::Number
+                && l.fields[1].name == "y"
+                && l.fields[1].ty == NativeFieldType::Number
+        })
+        .expect("point record layout should exist");
+    let point_id = kiln_hir::source_types::RecordLayoutId(point_idx as u32);
+
+    let poly_layout = result
+        .record_layouts
+        .iter()
+        .find(|l| {
+            l.fields.len() == 4
+                && l.fields.iter().any(|f| f.name == "kind")
+                && l.fields.iter().any(|f| f.name == "tag")
+                && l.fields.iter().any(|f| f.name == "weights")
+                && l.fields.iter().any(|f| f.name == "vertices")
+        })
+        .expect("polygon record layout should exist");
+
+    let kind_field = poly_layout
+        .fields
+        .iter()
+        .find(|f| f.name == "kind")
+        .unwrap();
+    assert_eq!(kind_field.ty, NativeFieldType::Int32);
+
+    let tag_field = poly_layout.fields.iter().find(|f| f.name == "tag").unwrap();
+    assert_eq!(tag_field.ty, NativeFieldType::Int32);
+
+    let weights_field = poly_layout
+        .fields
+        .iter()
+        .find(|f| f.name == "weights")
+        .unwrap();
+    assert_eq!(weights_field.ty, NativeFieldType::NumberArray);
+
+    let vertices_field = poly_layout
+        .fields
+        .iter()
+        .find(|f| f.name == "vertices")
+        .unwrap();
+    assert_eq!(vertices_field.ty, NativeFieldType::RecordArray(point_id));
+}

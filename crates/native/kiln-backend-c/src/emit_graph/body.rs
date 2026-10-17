@@ -1060,7 +1060,7 @@ pub(crate) fn build_native_record_map(
                     }
                 }
             }
-            kiln_ir::NativeFieldType::Number => {
+            kiln_ir::NativeFieldType::Number | kiln_ir::NativeFieldType::Int32 => {
                 number_array_slots.insert(slot);
                 if let Some(&vid) = graph.initial_locals.get(slot as usize) {
                     number_array_values.insert(vid);
@@ -1078,21 +1078,37 @@ pub(crate) fn build_native_record_map(
                 match op {
                     GraphOp::NewObject { .. } => {
                         if !value_exprs.contains_key(vid) {
-                            let mut lid = graph
+                            let obj_lid = graph
                                 .origins
                                 .get(vid)
-                                .and_then(|origin| new_object_layouts.get(&origin.pc).copied())
-                                .or_else(|| {
-                                    block
-                                        .operations
-                                        .iter()
-                                        .find_map(|(_, next_op)| match next_op {
-                                            GraphOp::StoreLocal { slot, value } if value == vid => {
-                                                local_layouts.get(slot).copied()
-                                            }
-                                            _ => None,
-                                        })
-                                });
+                                .and_then(|origin| new_object_layouts.get(&origin.pc).copied());
+                            let store_lid =
+                                block
+                                    .operations
+                                    .iter()
+                                    .find_map(|(_, next_op)| match next_op {
+                                        GraphOp::StoreLocal { slot, value } if value == vid => {
+                                            local_layouts.get(slot).copied().or_else(|| {
+                                                parameter_layouts
+                                                    .get(*slot as usize)
+                                                    .copied()
+                                                    .flatten()
+                                            })
+                                        }
+                                        _ => None,
+                                    });
+                            let mut lid = if let Some(slid) = store_lid {
+                                if obj_lid.is_none_or(|olid| {
+                                    all_layouts.get(olid.0 as usize).map(|l| l.fields.len())
+                                        == all_layouts.get(slid.0 as usize).map(|l| l.fields.len())
+                                }) {
+                                    Some(slid)
+                                } else {
+                                    obj_lid
+                                }
+                            } else {
+                                obj_lid
+                            };
                             if lid.is_none()
                                 && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if ret_v == vid)
                             {
@@ -1139,7 +1155,9 @@ pub(crate) fn build_native_record_map(
                                         .insert(*vid, (lid, format!("rec_arr_val_{}", vid.0)));
                                 }
                             }
-                            Some(kiln_ir::NativeFieldType::Number) => {
+                            Some(
+                                kiln_ir::NativeFieldType::Number | kiln_ir::NativeFieldType::Int32,
+                            ) => {
                                 number_array_values.insert(*vid);
                             }
                             _ => {}
@@ -1260,37 +1278,50 @@ pub(crate) fn build_native_record_map(
                                     record_array_value_exprs
                                         .insert(*vid, (ret_lid, format!("rec_arr_call_{}", vid.0)));
                                 }
-                            } else if let Some(kiln_ir::NativeFieldType::Number) = program
-                                .functions
-                                .get(target as usize)
-                                .and_then(|f| f.return_array_element())
-                            {
+                            } else if matches!(
+                                program
+                                    .functions
+                                    .get(target as usize)
+                                    .and_then(|f| f.return_array_element()),
+                                Some(
+                                    kiln_ir::NativeFieldType::Number
+                                        | kiln_ir::NativeFieldType::Int32,
+                                )
+                            ) {
                                 number_array_values.insert(*vid);
                             }
                         }
                     }
                     GraphOp::GetProperty { object, name, .. } => {
-                        if !value_exprs.contains_key(vid) {
-                            if let Some(&(obj_lid, ref obj_expr)) = value_exprs.get(object) {
-                                if let Some(layout) = all_layouts.get(obj_lid.0 as usize) {
-                                    if let Some(Constant::String(s)) =
-                                        program.constants.get(*name as usize)
-                                    {
-                                        if let Ok(prop_name) = s.to_scalar_string() {
-                                            if let Some(field) =
-                                                layout.fields.iter().find(|f| f.name == prop_name)
-                                            {
-                                                if let kiln_ir::NativeFieldType::Record(sub_lid) =
-                                                    field.ty
-                                                {
-                                                    value_exprs.insert(
-                                                        *vid,
-                                                        (
-                                                            sub_lid,
-                                                            format!("{obj_expr}.{prop_name}"),
-                                                        ),
-                                                    );
+                        if let Some((obj_lid, obj_expr)) = value_exprs.get(object).cloned() {
+                            if let Some(layout) = all_layouts.get(obj_lid.0 as usize) {
+                                if let Some(Constant::String(s)) =
+                                    program.constants.get(*name as usize)
+                                {
+                                    if let Ok(prop_name) = s.to_scalar_string() {
+                                        if let Some(field) =
+                                            layout.fields.iter().find(|f| f.name == prop_name)
+                                        {
+                                            match field.ty {
+                                                kiln_ir::NativeFieldType::Record(sub_lid) => {
+                                                    value_exprs.entry(*vid).or_insert_with(|| {
+                                                        (sub_lid, format!("{obj_expr}.{prop_name}"))
+                                                    });
                                                 }
+                                                kiln_ir::NativeFieldType::RecordArray(sub_lid) => {
+                                                    record_array_value_exprs
+                                                        .entry(*vid)
+                                                        .or_insert_with(|| {
+                                                            (
+                                                                sub_lid,
+                                                                format!("({obj_expr}).{prop_name}"),
+                                                            )
+                                                        });
+                                                }
+                                                kiln_ir::NativeFieldType::NumberArray => {
+                                                    number_array_values.insert(*vid);
+                                                }
+                                                _ => {}
                                             }
                                         }
                                     }
@@ -1403,8 +1434,11 @@ pub(crate) fn build_native_record_map(
                                 .and_then(|l| l.fields.iter().find(|f| &f.name == p))
                         });
                         if let Some(f) = field {
-                            if !matches!(f.ty, kiln_ir::NativeFieldType::Record(_))
-                                && value_exprs.contains_key(value)
+                            if !matches!(
+                                f.ty,
+                                kiln_ir::NativeFieldType::Record(_)
+                                    | kiln_ir::NativeFieldType::RecordArray(_)
+                            ) && value_exprs.contains_key(value)
                             {
                                 boxed_record_values.insert(*value);
                             }
@@ -1688,6 +1722,37 @@ fn emit_box_record_fields(
                     )
                     .unwrap();
                 }
+                kiln_ir::NativeFieldType::NumberArray => {
+                    writeln!(
+                        output,
+                        "    kiln_c99_define_computed({obj_var}, kiln_c99_copy_text(\"{name}\", {name_len}), kiln_val_to_boundary({field_expr}));"
+                    )
+                    .unwrap();
+                }
+                kiln_ir::NativeFieldType::RecordArray(sub_lid) => {
+                    let arr_var = format!("sub_arr_{depth}_{name}");
+                    let idx_var = format!("idx_{depth}_{name}");
+                    let elem_var = format!("sub_elem_{depth}_{name}");
+                    writeln!(
+                        output,
+                        "    {{ kiln_value {arr_var} = kiln_c99_undefined(); kiln_c99_new_array_with_capacity(&{arr_var}, ({field_expr}).count, 0); for (size_t {idx_var} = 0; {idx_var} < ({field_expr}).count; {idx_var}++) {{ kiln_value {elem_var} = kiln_c99_undefined(); kiln_c99_new_object_with_capacity(&{elem_var}, {});",
+                        all_layouts.get(sub_lid.0 as usize).map_or(0, |l| l.fields.len())
+                    )
+                    .unwrap();
+                    emit_box_record_fields(
+                        output,
+                        &elem_var,
+                        sub_lid,
+                        &format!("(({field_expr}).data[{idx_var}])"),
+                        all_layouts,
+                        depth + 1,
+                    );
+                    writeln!(
+                        output,
+                        "    kiln_c99_array_push({arr_var}, {elem_var}); }} kiln_c99_define_computed({obj_var}, kiln_c99_copy_text(\"{name}\", {name_len}), {arr_var}); }}"
+                    )
+                    .unwrap();
+                }
             }
         }
     }
@@ -1749,6 +1814,12 @@ pub(crate) fn emit_compound_literal_fields(
                             tf.name, inner
                         ));
                     }
+                }
+                (kiln_ir::NativeFieldType::Int32, kiln_ir::NativeFieldType::Number) => {
+                    init_fields.push(format!(".{} = (int32_t)({src_expr}.{})", tf.name, tf.name));
+                }
+                (kiln_ir::NativeFieldType::Number, kiln_ir::NativeFieldType::Int32) => {
+                    init_fields.push(format!(".{} = (double)({src_expr}.{})", tf.name, tf.name));
                 }
                 _ => {
                     init_fields.push(format!(".{} = {src_expr}.{}", tf.name, tf.name));

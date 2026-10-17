@@ -3331,6 +3331,13 @@ pub(crate) fn record_values_and_field_proven(
         )
     };
 
+    let mut slot_layouts = local_layouts.clone();
+    for (slot, param_layout) in parameter_layouts.iter().enumerate() {
+        if let Some(lid) = param_layout {
+            slot_layouts.insert(slot as u32, *lid);
+        }
+    }
+
     let mut slot_array_elems = local_array_elems.clone();
     for (slot, param_elem) in parameter_array_elems.iter().enumerate() {
         if let Some(elem_ty) = param_elem {
@@ -3366,21 +3373,32 @@ pub(crate) fn record_values_and_field_proven(
             for (vid, op) in &block.operations {
                 match op {
                     GraphOp::NewObject { .. } => {
-                        let mut lid = graph
+                        let obj_lid = graph
                             .origins
                             .get(vid)
-                            .and_then(|origin| new_object_layouts.get(&origin.pc).copied())
-                            .or_else(|| {
-                                block
-                                    .operations
-                                    .iter()
-                                    .find_map(|(_, next_op)| match next_op {
-                                        GraphOp::StoreLocal { slot, value } if value == vid => {
-                                            local_layouts.get(slot).copied()
-                                        }
-                                        _ => None,
-                                    })
-                            });
+                            .and_then(|origin| new_object_layouts.get(&origin.pc).copied());
+                        let store_lid =
+                            block
+                                .operations
+                                .iter()
+                                .find_map(|(_, next_op)| match next_op {
+                                    GraphOp::StoreLocal { slot, value } if value == vid => {
+                                        slot_layouts.get(slot).copied()
+                                    }
+                                    _ => None,
+                                });
+                        let mut lid = if let Some(slid) = store_lid {
+                            if obj_lid.is_none_or(|olid| {
+                                all_layouts.get(olid.0 as usize).map(|l| l.fields.len())
+                                    == all_layouts.get(slid.0 as usize).map(|l| l.fields.len())
+                            }) {
+                                Some(slid)
+                            } else {
+                                obj_lid
+                            }
+                        } else {
+                            obj_lid
+                        };
                         if lid.is_none()
                             && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if *ret_v == *vid)
                         {
@@ -3507,6 +3525,18 @@ pub(crate) fn record_values_and_field_proven(
                                                 }
                                                 kiln_ir::NativeFieldType::Record(sub_lid) => {
                                                     record_value_layouts.insert(*vid, sub_lid);
+                                                }
+                                                kiln_ir::NativeFieldType::RecordArray(sub_lid) => {
+                                                    array_values.insert(
+                                                        *vid,
+                                                        kiln_ir::NativeFieldType::Record(sub_lid),
+                                                    );
+                                                }
+                                                kiln_ir::NativeFieldType::NumberArray => {
+                                                    array_values.insert(
+                                                        *vid,
+                                                        kiln_ir::NativeFieldType::Number,
+                                                    );
                                                 }
                                             }
                                         }

@@ -17,8 +17,8 @@ use kiln_runtime::{
     node_http_agent::{AgentCancellation, AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
 };
 use kiln_string::StringUnits;
-use rustc_hash::FxHashMap;
 use std::cell::{Cell, RefCell};
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
@@ -5544,144 +5544,25 @@ mod http_stubs {
         }
 
     http_stub!(kiln_realm_http_server_close_active(resource: u64, mode: i32) -> i32);
-    http_stub!(
-        kiln_realm_http_server_attach_active(
-            resource: u64,
-            run: Option<RunHttpEvent>,
-            drop: Option<DropWork>,
-            work: *mut c_void,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_server_attach_with_options_active(
-            resource: u64,
-            allow_half_close: i32,
-            run: Option<RunHttpEvent>,
-            drop: Option<DropWork>,
-            work: *mut c_void,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_client_attach_active(
-            resource: u64,
-            run: Option<RunHttpEvent>,
-            drop: Option<DropWork>,
-            work: *mut c_void,
-        ) -> i32
-    );
+    http_stub!(kiln_realm_http_server_attach_active(resource: u64, run: Option<RunHttpEvent>, drop: Option<DropWork>, work: *mut c_void) -> i32);
+    http_stub!(kiln_realm_http_server_attach_with_options_active(resource: u64, allow_half_close: i32, run: Option<RunHttpEvent>, drop: Option<DropWork>, work: *mut c_void) -> i32);
+    http_stub!(kiln_realm_http_client_attach_active(resource: u64, run: Option<RunHttpEvent>, drop: Option<DropWork>, work: *mut c_void) -> i32);
     http_stub!(kiln_realm_http_client_request_id_active(out_id: *mut u64) -> i32);
-    http_stub!(
-        kiln_realm_http_agent_acquire_active(
-            host: *const u8,
-            host_len: u64,
-            port: u16,
-            request: u64,
-            out_resource: *mut u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_client_owner_active(resource: u64, out_owner: *mut *mut c_void) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_agent_connected_active(
-            host: *const u8,
-            host_len: u64,
-            port: u16,
-            resource: u64,
-            request: u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_agent_connect_failed_active(
-            host: *const u8,
-            host_len: u64,
-            port: u16,
-            failed_request: u64,
-            out_request: *mut u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_agent_cancel_connect_active(
-            host: *const u8,
-            host_len: u64,
-            port: u16,
-            request: u64,
-            out_request: *mut u64,
-        ) -> i32
-    );
+    http_stub!(kiln_realm_http_agent_acquire_active(host: *const u8, host_len: u64, port: u16, request: u64, out_resource: *mut u64) -> i32);
+    http_stub!(kiln_realm_http_client_owner_active(resource: u64, out_owner: *mut *mut c_void) -> i32);
+    http_stub!(kiln_realm_http_agent_connected_active(host: *const u8, host_len: u64, port: u16, resource: u64, request: u64) -> i32);
+    http_stub!(kiln_realm_http_agent_connect_failed_active(host: *const u8, host_len: u64, port: u16, failed_request: u64, out_request: *mut u64) -> i32);
+    http_stub!(kiln_realm_http_agent_cancel_connect_active(host: *const u8, host_len: u64, port: u16, request: u64, out_request: *mut u64) -> i32);
     http_stub!(kiln_realm_http_agent_can_retain_active(resource: u64, reusable: i32) -> i32);
-    http_stub!(
-        kiln_realm_http_agent_release_active(
-            resource: u64,
-            reusable: i32,
-            out_request: *mut u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_client_start_active(
-            resource: u64,
-            id: u64,
-            request: *const HttpRequestView,
-            high_water_mark: u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_client_write_active(
-            resource: u64,
-            id: u64,
-            data: *const u8,
-            data_len: u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_client_end_active(
-            resource: u64,
-            id: u64,
-            data: *const u8,
-            data_len: u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_response_start_active(
-            resource: u64,
-            id: u64,
-            response: *const HttpResponseView,
-            high_water_mark: u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_response_write_active(
-            resource: u64,
-            id: u64,
-            data: *const u8,
-            data_len: u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_response_end_active(
-            resource: u64,
-            id: u64,
-            data: *const u8,
-            data_len: u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_upgrade_write_active(
-            resource: u64,
-            id: u64,
-            data: *const u8,
-            data_len: u64,
-        ) -> i32
-    );
-    http_stub!(
-        kiln_realm_http_upgrade_write_active_with_fence(
-            resource: u64,
-            id: u64,
-            data: *const u8,
-            data_len: u64,
-            out_fence: *mut u64,
-        ) -> i32
-    );
+    http_stub!(kiln_realm_http_agent_release_active(resource: u64, reusable: i32, out_request: *mut u64) -> i32);
+    http_stub!(kiln_realm_http_client_start_active(resource: u64, id: u64, request: *const HttpRequestView, high_water_mark: u64) -> i32);
+    http_stub!(kiln_realm_http_client_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+    http_stub!(kiln_realm_http_client_end_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+    http_stub!(kiln_realm_http_response_start_active(resource: u64, id: u64, response: *const HttpResponseView, high_water_mark: u64) -> i32);
+    http_stub!(kiln_realm_http_response_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+    http_stub!(kiln_realm_http_response_end_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+    http_stub!(kiln_realm_http_upgrade_write_active(resource: u64, id: u64, data: *const u8, data_len: u64) -> i32);
+    http_stub!(kiln_realm_http_upgrade_write_active_with_fence(resource: u64, id: u64, data: *const u8, data_len: u64, out_fence: *mut u64) -> i32);
 }
 
 #[cfg(not(feature = "realm-http"))]

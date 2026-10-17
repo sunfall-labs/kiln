@@ -1779,7 +1779,7 @@ impl<'p, 's> Checker<'p, 's> {
     }
 
     #[inline]
-    fn files(&self) -> &'p Files<'s> {
+    pub(crate) fn files(&self) -> &'p Files<'s> {
         self.files
     }
 
@@ -3440,6 +3440,26 @@ impl<'p, 's> Checker<'p, 's> {
     #[inline]
     pub fn is_nullish(&self, ty: TypeId) -> bool {
         self.flags(ty) & (tf::NULLABLE | tf::VOID) != 0
+    }
+
+    pub fn is_int32_type(&self, ty: TypeId) -> bool {
+        if self.flags(ty) & (tf::NEVER | tf::ANY | tf::UNKNOWN) != 0 {
+            return false;
+        }
+        self.every_type(ty, |c, m| match *c.data(m) {
+            TypeData::NumberLit { bits, .. }
+            | TypeData::EnumLit {
+                value: EnumValue::Number(bits),
+                ..
+            } => {
+                let v = f64::from_bits(bits);
+                v.is_finite()
+                    && v.fract() == 0.0
+                    && v >= (i32::MIN as f64)
+                    && v <= (i32::MAX as f64)
+            }
+            _ => false,
+        })
     }
 
     /// `TypeFlagsPrimitive`, except for the unions that have it: `boolean`, an enum.

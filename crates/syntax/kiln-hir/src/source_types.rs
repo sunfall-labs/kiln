@@ -25,6 +25,8 @@ pub enum NativeFieldType {
     Boolean,
     String,
     Record(RecordLayoutId),
+    NumberArray,
+    RecordArray(RecordLayoutId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

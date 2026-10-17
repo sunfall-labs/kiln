@@ -1058,6 +1058,14 @@ fn resolve_record_layout(
         || checker.is_boolean_like(ty)
         || checker.is_bigint_like(ty)
         || checker.is_symbol_like(ty)
+        || checker.every_type(ty, |c, m| {
+            c.is_number_like(m) || c.is_string_like(m) || c.is_boolean(m) || c.is_boolean_like(m)
+        })
+        || matches!(
+            checker.data(ty),
+            crate::engine::types::TypeData::Ref { target, .. }
+                if checker.files().flags(*target).contains(crate::engine::bind::SymFlags::CLASS)
+        )
     {
         return None;
     }
@@ -1107,12 +1115,22 @@ fn extract_record_layout(
 
     let mut fields = Vec::with_capacity(prop_entries.len());
     for (name, readonly, prop_ty) in prop_entries {
-        let field_ty = if checker.is_number_like(prop_ty) {
+        let field_ty = if checker.is_int32_type(prop_ty) {
+            NativeFieldType::Int32
+        } else if checker.every_type(prop_ty, |c, m| c.is_number_like(m)) {
             NativeFieldType::Number
-        } else if checker.is_boolean(prop_ty) || checker.is_boolean_like(prop_ty) {
+        } else if checker.every_type(prop_ty, |c, m| c.is_boolean(m) || c.is_boolean_like(m)) {
             NativeFieldType::Boolean
-        } else if checker.is_string_like(prop_ty) {
+        } else if checker.every_type(prop_ty, |c, m| c.is_string_like(m)) {
             NativeFieldType::String
+        } else if checker.is_array(prop_ty) {
+            match resolve_array_element(checker, table, prop_ty) {
+                Some(NativeFieldType::Number | NativeFieldType::Int32) => {
+                    NativeFieldType::NumberArray
+                }
+                Some(NativeFieldType::Record(sub_id)) => NativeFieldType::RecordArray(sub_id),
+                _ => return None,
+            }
         } else if let Some(nested_id) = resolve_record_layout(checker, table, prop_ty) {
             NativeFieldType::Record(nested_id)
         } else {
@@ -1135,11 +1153,13 @@ fn resolve_array_element(
     ty: crate::engine::types::TypeId,
 ) -> Option<NativeFieldType> {
     let elem_ty = checker.array_element(ty)?;
-    if checker.is_number_like(elem_ty) {
+    if checker.is_int32_type(elem_ty) {
+        Some(NativeFieldType::Int32)
+    } else if checker.every_type(elem_ty, |c, m| c.is_number_like(m)) {
         Some(NativeFieldType::Number)
-    } else if checker.is_boolean(elem_ty) || checker.is_boolean_like(elem_ty) {
+    } else if checker.every_type(elem_ty, |c, m| c.is_boolean(m) || c.is_boolean_like(m)) {
         Some(NativeFieldType::Boolean)
-    } else if checker.is_string_like(elem_ty) {
+    } else if checker.every_type(elem_ty, |c, m| c.is_string_like(m)) {
         Some(NativeFieldType::String)
     } else if let Some(nested_id) = resolve_record_layout(checker, table, elem_ty) {
         Some(NativeFieldType::Record(nested_id))
@@ -1284,6 +1304,9 @@ fn source_facts(
                         NativeFieldType::Record(child_id) => {
                             NativeFieldType::Record(id_map[child_id.0 as usize])
                         }
+                        NativeFieldType::RecordArray(child_id) => {
+                            NativeFieldType::RecordArray(id_map[child_id.0 as usize])
+                        }
                         other => other,
                     };
                     RecordField {
@@ -1304,6 +1327,8 @@ fn source_facts(
             }
             if let Some(NativeFieldType::Record(local_id)) = ty.array_element {
                 ty.array_element = Some(NativeFieldType::Record(id_map[local_id.0 as usize]));
+            } else if let Some(NativeFieldType::RecordArray(local_id)) = ty.array_element {
+                ty.array_element = Some(NativeFieldType::RecordArray(id_map[local_id.0 as usize]));
             }
         }
         all.extend(types);

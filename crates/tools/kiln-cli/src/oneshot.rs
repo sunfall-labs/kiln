@@ -1513,4 +1513,142 @@ run();
 
         let _ = std::fs::remove_dir_all(&fixture);
     }
+
+    #[test]
+    fn native_semantics_phase4_enum_int32_and_record_array_fields() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-native-semantics-phase4-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create native semantics phase 4 fixture");
+        #[cfg(unix)]
+        share_native_semantic_cache(&fixture);
+
+        let source = fixture.join("phase4.ts");
+        std::fs::write(
+            &source,
+            r#"enum Op { Add = 0, Sub = 1, Mul = 2 }
+
+type Tag = 0 | 1 | 2;
+
+interface Instr {
+    op: Op;
+    tag: Tag;
+    lhs: number;
+    rhs: number;
+}
+
+interface Point {
+    x: number;
+    y: number;
+}
+
+interface Polygon {
+    tag: Op;
+    weights: number[];
+    vertices: Point[];
+}
+
+function evalInstr(instr: Instr): number {
+    if (instr.op === Op.Add) {
+        return instr.lhs + instr.rhs;
+    } else if (instr.op === Op.Sub) {
+        return instr.lhs - instr.rhs;
+    } else if (instr.op === Op.Mul) {
+        return instr.lhs * instr.rhs;
+    }
+    return 0;
+}
+
+function evalPolygon(poly: Polygon): number {
+    let sum = 0;
+    for (let i = 0; i < poly.vertices.length; i++) {
+        sum = sum + poly.vertices[i].x + poly.vertices[i].y;
+    }
+    for (let i = 0; i < poly.weights.length; i++) {
+        sum = sum + poly.weights[i];
+    }
+    return sum;
+}
+
+function run(): void {
+    const instrs: Instr[] = [
+        { op: Op.Add, tag: 0, lhs: 10, rhs: 20 },
+        { op: Op.Sub, tag: 1, lhs: 100, rhs: 35 },
+        { op: Op.Mul, tag: 2, lhs: 6, rhs: 7 },
+    ];
+
+    let total = 0;
+    for (let i = 0; i < 10; i++) {
+        for (let j = 0; j < instrs.length; j++) {
+            total = total + evalInstr(instrs[j]);
+        }
+    }
+
+    const poly: Polygon = {
+        tag: Op.Add,
+        weights: [1.5, 2.5],
+        vertices: [{ x: 10, y: 20 }],
+    };
+
+    poly.weights.push(3.0);
+    poly.vertices.push({ x: 30, y: 40 });
+    poly.vertices[0].x = 15;
+
+    const w0 = poly.weights[0];
+    const polySum = evalPolygon(poly);
+
+    console.log(total, polySum, w0, poly.weights.length, poly.vertices.length);
+}
+
+run();
+"#,
+        )
+        .expect("write phase4.ts");
+
+        let js_out = {
+            let mut session = OneShot::start().expect("start js native engine");
+            commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                NativeSemantics::Js,
+            )
+            .expect("run phase4 with --semantics=js")
+        };
+        assert_eq!(js_out.exit_code, 0);
+        assert_eq!(js_out.text, "1370 112 1.5 3 2\n");
+
+        let native_out = {
+            let mut session = OneShot::start().expect("start native semantics engine");
+            commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                NativeSemantics::Native,
+            )
+            .expect("run phase4 with --semantics=native")
+        };
+        assert_eq!(native_out.exit_code, 0);
+        assert_eq!(native_out.text, "1370 112 1.5 3 2\n");
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
 }

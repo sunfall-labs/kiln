@@ -747,6 +747,13 @@ pub(super) fn hash_source_type_annotations(
                     byte(hash, 4);
                     word(hash, u64::from(id.0));
                 }
+                kiln_ir::NativeFieldType::NumberArray => {
+                    byte(hash, 5);
+                }
+                kiln_ir::NativeFieldType::RecordArray(id) => {
+                    byte(hash, 6);
+                    word(hash, u64::from(id.0));
+                }
             }
             byte(hash, if field.readonly { 1 } else { 0 });
         }
@@ -794,6 +801,11 @@ pub(super) fn hash_source_type_annotations(
         kiln_ir::NativeFieldType::String => byte(hash, 3),
         kiln_ir::NativeFieldType::Record(id) => {
             byte(hash, 4);
+            word(hash, u64::from(id.0));
+        }
+        kiln_ir::NativeFieldType::NumberArray => byte(hash, 5),
+        kiln_ir::NativeFieldType::RecordArray(id) => {
+            byte(hash, 6);
             word(hash, u64::from(id.0));
         }
     };

@@ -162,6 +162,19 @@ pub(super) fn emit_get_property(
                                 writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
                             }
                         }
+                        kiln_ir::NativeFieldType::NumberArray => {
+                            writeln!(output, "    v{v} = {field_expr};").unwrap();
+                        }
+                        kiln_ir::NativeFieldType::RecordArray(_) => {
+                            if need_box
+                                && !ctx
+                                    .native_records
+                                    .record_array_value_exprs
+                                    .contains_key(&vid)
+                            {
+                                writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
+                            }
+                        }
                     }
                     return;
                 }
@@ -740,6 +753,16 @@ pub(super) fn emit_set_property(
                                     src_sub_lid,
                                     &all_layouts,
                                 );
+                            }
+                        }
+                        kiln_ir::NativeFieldType::NumberArray => {
+                            writeln!(output, "    {field_expr} = v{val};").unwrap();
+                        }
+                        kiln_ir::NativeFieldType::RecordArray(_) => {
+                            if let Some(&(_, ref arr_expr)) =
+                                ctx.native_records.record_array_value_exprs.get(value)
+                            {
+                                writeln!(output, "    {field_expr} = {arr_expr};").unwrap();
                             }
                         }
                     }

@@ -138,6 +138,20 @@ pub(crate) fn emit_struct_copy_fields(
                         all_layouts,
                     );
                 }
+                (kiln_ir::NativeFieldType::Int32, kiln_ir::NativeFieldType::Number) => {
+                    writeln!(
+                        output,
+                        "    {dst_expr}.{field_name} = (int32_t)({src_expr}.{field_name});"
+                    )
+                    .unwrap();
+                }
+                (kiln_ir::NativeFieldType::Number, kiln_ir::NativeFieldType::Int32) => {
+                    writeln!(
+                        output,
+                        "    {dst_expr}.{field_name} = (double)({src_expr}.{field_name});"
+                    )
+                    .unwrap();
+                }
                 _ => {
                     writeln!(
                         output,
@@ -1905,6 +1919,17 @@ pub(super) fn emit_graph_op(
                                                 &all_layouts,
                                             );
                                         }
+                                    }
+                                    kiln_ir::NativeFieldType::RecordArray(_) => {
+                                        if let Some(&(_, ref arr_expr)) =
+                                            ctx.native_records.record_array_value_exprs.get(val)
+                                        {
+                                            writeln!(output, "    {field_expr} = {arr_expr};")
+                                                .unwrap();
+                                        }
+                                    }
+                                    kiln_ir::NativeFieldType::NumberArray => {
+                                        writeln!(output, "    {field_expr} = v{};", val.0).unwrap();
                                     }
                                 }
                             }

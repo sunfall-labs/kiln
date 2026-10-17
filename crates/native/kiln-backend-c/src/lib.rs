@@ -2981,11 +2981,15 @@ fn emit_record_typedefs(out: &mut String, symbol: &str, layouts: &[kiln_ir::Reco
         }
         emitted[id] = true;
         for field in &layouts[id].fields {
-            if let kiln_ir::NativeFieldType::Record(sub) = &field.ty {
-                let sub_id = sub.0 as usize;
-                if sub_id < layouts.len() {
-                    visit(sub_id, layouts, emitted, order);
+            match &field.ty {
+                kiln_ir::NativeFieldType::Record(sub)
+                | kiln_ir::NativeFieldType::RecordArray(sub) => {
+                    let sub_id = sub.0 as usize;
+                    if sub_id < layouts.len() {
+                        visit(sub_id, layouts, emitted, order);
+                    }
                 }
+                _ => {}
             }
         }
         order.push(id);
@@ -3015,6 +3019,12 @@ fn emit_record_typedefs(out: &mut String, symbol: &str, layouts: &[kiln_ir::Reco
                     }
                     kiln_ir::NativeFieldType::Record(sub) => {
                         let _ = writeln!(out, "    {symbol}_rec_{} {name};", sub.0);
+                    }
+                    kiln_ir::NativeFieldType::NumberArray => {
+                        let _ = writeln!(out, "    kiln_val {name};");
+                    }
+                    kiln_ir::NativeFieldType::RecordArray(sub) => {
+                        let _ = writeln!(out, "    {symbol}_arr_rec_{} {name};", sub.0);
                     }
                 }
             }
