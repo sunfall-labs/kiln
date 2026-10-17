@@ -1224,3 +1224,80 @@ fn a_gap_in_a_script_leaves_no_file_complete() {
     assert!(!result.complete);
     assert!(!result.is_complete_for(leaf), "{:?}", result.files);
 }
+
+#[test]
+fn structural_record_layouts_intern_and_propagate() {
+    use kiln_hir::source_types::NativeFieldType;
+
+    let source = "
+        interface Point { x: number; y: number; }
+        const p1: Point = { x: 1, y: 2 };
+        const p2 = { y: 20, x: 10 };
+        interface Nested { pt: Point; label: string; }
+        const n: Nested = { pt: p1, label: 'origin' };
+        function dist(pt: Point): { sum: number } {
+            return { sum: pt.x + pt.y };
+        }
+    ";
+    let result = check_sources(&[("/project/main.ts", source)]);
+    assert!(result.complete);
+    assert!(!result.record_layouts.is_empty());
+
+    // Point layout: fields sorted lexicographically ('x', 'y')
+    let point_idx = result
+        .record_layouts
+        .iter()
+        .position(|l| {
+            l.fields.len() == 2
+                && l.fields[0].name == "x"
+                && l.fields[0].ty == NativeFieldType::Number
+                && l.fields[1].name == "y"
+                && l.fields[1].ty == NativeFieldType::Number
+        })
+        .expect("point record layout should exist");
+    let point_id = kiln_hir::source_types::RecordLayoutId(point_idx as u32);
+
+    // Nested layout: fields 'label' (String) and 'pt' (Record(point_id))
+    let nested_layout = result
+        .record_layouts
+        .iter()
+        .find(|l| {
+            l.fields.len() == 2
+                && l.fields[0].name == "label"
+                && l.fields[0].ty == NativeFieldType::String
+                && l.fields[1].name == "pt"
+                && l.fields[1].ty == NativeFieldType::Record(point_id)
+        })
+        .expect("nested record layout should exist");
+    assert_eq!(
+        nested_layout.fields[1].ty,
+        NativeFieldType::Record(point_id)
+    );
+
+    // Dist return layout: { sum: number }
+    let sum_idx = result
+        .record_layouts
+        .iter()
+        .position(|l| {
+            l.fields.len() == 1
+                && l.fields[0].name == "sum"
+                && l.fields[0].ty == NativeFieldType::Number
+        })
+        .expect("sum record layout should exist");
+    let sum_id = kiln_hir::source_types::RecordLayoutId(sum_idx as u32);
+
+    // Verify parameter and return facts have record_layout
+    let param_fact = result
+        .types
+        .iter()
+        .find(|t| t.role == kiln_hir::source_types::TypeRole::Parameter)
+        .expect("parameter fact should exist");
+    assert_eq!(param_fact.record_layout, Some(point_id));
+
+    let return_fact = result
+        .types
+        .iter()
+        .find(|t| t.role == kiln_hir::source_types::TypeRole::Return)
+        .expect("return fact should exist");
+    assert_eq!(return_fact.record_layout, Some(sum_id));
+}

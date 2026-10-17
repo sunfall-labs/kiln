@@ -424,7 +424,8 @@ pub fn emit_function_from_graph_with_profile(
             } else {
                 plan.typed_needs[index]
             };
-            let (result, mut params) = typed_signature(proto, returns_number, needs);
+            let (result, mut params) =
+                typed_signature(proto, symbol, plan.semantics, returns_number, needs);
             if super::parallel_clone() {
                 // Tier 1 (ADR 0069): each captured binding the clone reads arrives as a
                 // `double` after the parameters, read and guarded once on the realm thread.
@@ -613,6 +614,16 @@ pub fn emit_function_from_graph_with_profile(
         .unwrap();
         if proto.parameter_count > 0 && matches!(kind, EntryKind::Typed { .. }) {
             for k in 0..proto.parameter_count {
+                if plan.semantics == crate::NativeSemantics::Native
+                    && proto
+                        .parameter_layouts()
+                        .get(k as usize)
+                        .copied()
+                        .flatten()
+                        .is_some()
+                {
+                    continue;
+                }
                 writeln!(output, "    locals[{k}] = kiln_c99_val_from_double(p{k});").unwrap();
             }
         } else if proto.parameter_count > 0 {
@@ -878,6 +889,225 @@ pub fn emit_async_entry_body(
     );
     output.push_str("}\n");
     shared_sites
+}
+
+#[derive(Default, Clone, Debug)]
+pub(crate) struct NativeRecordMap {
+    pub decls: String,
+    pub slot_exprs: HashMap<u32, String>,
+    pub value_exprs: HashMap<ValueId, (kiln_ir::RecordLayoutId, String)>,
+}
+
+pub(crate) fn build_native_record_map(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    _entry: bool,
+    kind: EntryKind,
+    plan: &CallPlan,
+    enabled: bool,
+) -> NativeRecordMap {
+    if !enabled {
+        return NativeRecordMap::default();
+    }
+    let all_layouts = crate::collect_program_record_layouts(program);
+    if all_layouts.is_empty() {
+        return NativeRecordMap::default();
+    }
+    let (empty_local, empty_obj, empty_param) = (
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+        Vec::new(),
+    );
+    let (local_layouts, new_object_layouts, parameter_layouts) = if let Some(ta) = proto
+        .type_annotations
+        .as_ref()
+        .and_then(|t| t.source_types.as_ref())
+    {
+        (
+            &ta.local_layouts,
+            &ta.new_object_layouts,
+            &ta.parameter_layouts,
+        )
+    } else if let Some(st) = program.source_types() {
+        (
+            &st.local_layouts,
+            &st.new_object_layouts,
+            &st.parameter_layouts,
+        )
+    } else {
+        (&empty_local, &empty_obj, &empty_param)
+    };
+
+    let mut decls = String::new();
+    let mut slot_exprs: HashMap<u32, String> = HashMap::new();
+    let mut value_exprs: HashMap<ValueId, (kiln_ir::RecordLayoutId, String)> = HashMap::new();
+
+    for (&slot, &lid) in local_layouts {
+        if slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
+            slot_exprs.insert(slot, format!("(*p{slot})"));
+        } else {
+            decls.push_str(&format!(
+                "    {symbol}_rec_{lid} rec_slot_{slot} = {{0}};\n"
+            ));
+            slot_exprs.insert(slot, format!("rec_slot_{slot}"));
+        }
+    }
+
+    for (slot, param_layout) in parameter_layouts.iter().enumerate() {
+        if let Some(lid) = param_layout {
+            let slot_u32 = slot as u32;
+            if !slot_exprs.contains_key(&slot_u32) {
+                if slot_u32 < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
+                    slot_exprs.insert(slot_u32, format!("(*p{slot})"));
+                } else {
+                    decls.push_str(&format!(
+                        "    {symbol}_rec_{lid} rec_slot_{slot} = {{0}};\n"
+                    ));
+                    slot_exprs.insert(slot_u32, format!("rec_slot_{slot}"));
+                }
+            }
+            if let Some(&vid) = graph.initial_locals.get(slot) {
+                if let Some(slot_expr) = slot_exprs.get(&slot_u32) {
+                    value_exprs.insert(vid, (*lid, slot_expr.clone()));
+                }
+            }
+        }
+    }
+
+    loop {
+        let before_count = value_exprs.len();
+        for block in &graph.blocks {
+            for (vid, op) in &block.operations {
+                match op {
+                    GraphOp::NewObject { .. } => {
+                        if !value_exprs.contains_key(vid) {
+                            let lid = graph
+                                .origins
+                                .get(vid)
+                                .and_then(|origin| new_object_layouts.get(&origin.pc).copied())
+                                .or_else(|| {
+                                    block
+                                        .operations
+                                        .iter()
+                                        .find_map(|(_, next_op)| match next_op {
+                                            GraphOp::StoreLocal { slot, value } if value == vid => {
+                                                local_layouts.get(slot).copied()
+                                            }
+                                            _ => None,
+                                        })
+                                });
+                            if let Some(lid) = lid {
+                                decls.push_str(&format!(
+                                    "    {symbol}_rec_{lid} rec_val_{} = {{0}};\n",
+                                    vid.0
+                                ));
+                                value_exprs.insert(*vid, (lid, format!("rec_val_{}", vid.0)));
+                            }
+                        }
+                    }
+                    GraphOp::LoadLocal(slot) => {
+                        if !value_exprs.contains_key(vid) {
+                            if let Some(slot_expr) = slot_exprs.get(slot) {
+                                let lid = local_layouts.get(slot).copied().or_else(|| {
+                                    parameter_layouts.get(*slot as usize).copied().flatten()
+                                });
+                                if let Some(lid) = lid {
+                                    value_exprs.insert(*vid, (lid, slot_expr.clone()));
+                                }
+                            }
+                        }
+                    }
+                    GraphOp::StoreLocal { slot, value } => {
+                        if !value_exprs.contains_key(vid) {
+                            if let Some(slot_expr) = slot_exprs.get(slot) {
+                                if let Some(&lid) = local_layouts.get(slot) {
+                                    value_exprs.insert(*vid, (lid, slot_expr.clone()));
+                                } else if let Some((lid, _)) = value_exprs.get(value) {
+                                    value_exprs.insert(*vid, (*lid, slot_expr.clone()));
+                                }
+                            }
+                        }
+                    }
+                    GraphOp::CheckTdz { value, .. } => {
+                        if !value_exprs.contains_key(vid) {
+                            if let Some((lid, expr)) = value_exprs.get(value).cloned() {
+                                value_exprs.insert(*vid, (lid, expr));
+                            }
+                        }
+                    }
+                    GraphOp::Phi { inputs } => {
+                        if !value_exprs.contains_key(vid) {
+                            if let Some((lid, expr)) = inputs
+                                .iter()
+                                .find_map(|(_, in_vid)| value_exprs.get(in_vid).cloned())
+                            {
+                                value_exprs.insert(*vid, (lid, expr));
+                            }
+                        }
+                    }
+                    GraphOp::Call { callee, .. } => {
+                        if !value_exprs.contains_key(vid) {
+                            if let Some(&target) = plan.known.get(callee) {
+                                if let Some(ret_lid) = program
+                                    .functions
+                                    .get(target as usize)
+                                    .and_then(|f| f.return_layout())
+                                {
+                                    decls.push_str(&format!(
+                                        "    {symbol}_rec_{ret_lid} rec_call_{} = {{0}};\n",
+                                        vid.0
+                                    ));
+                                    value_exprs
+                                        .insert(*vid, (ret_lid, format!("rec_call_{}", vid.0)));
+                                }
+                            }
+                        }
+                    }
+                    GraphOp::GetProperty { object, name, .. } => {
+                        if !value_exprs.contains_key(vid) {
+                            if let Some(&(obj_lid, ref obj_expr)) = value_exprs.get(object) {
+                                if let Some(layout) = all_layouts.get(obj_lid.0 as usize) {
+                                    if let Some(Constant::String(s)) =
+                                        program.constants.get(*name as usize)
+                                    {
+                                        if let Ok(prop_name) = s.to_scalar_string() {
+                                            if let Some(field) =
+                                                layout.fields.iter().find(|f| f.name == prop_name)
+                                            {
+                                                if let kiln_ir::NativeFieldType::Record(sub_lid) =
+                                                    field.ty
+                                                {
+                                                    value_exprs.insert(
+                                                        *vid,
+                                                        (
+                                                            sub_lid,
+                                                            format!("{obj_expr}.{prop_name}"),
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if value_exprs.len() == before_count {
+            break;
+        }
+    }
+
+    NativeRecordMap {
+        decls,
+        slot_exprs,
+        value_exprs,
+    }
 }
 
 fn emit_ssa_declarations(
@@ -1209,6 +1439,7 @@ fn emit_resume_exception_path(
             indexed_values,
             &handler_phis,
             boxed,
+            &NativeRecordMap::default(),
         );
     }
     writeln!(output, "        *thrown = frame->sent; {landing_unwind} }}").unwrap();
@@ -1245,6 +1476,7 @@ fn emit_block_sequence(
     spec: &Speculation,
     argument_length_values: &HashSet<ValueId>,
     string_accumulators: &[super::string_accumulator::Accumulator],
+    native_records: &NativeRecordMap,
 ) {
     let prepared_method_properties: HashSet<ValueId> = graph
         .blocks
@@ -1361,7 +1593,7 @@ fn emit_block_sequence(
         if !block.is_reachable_from_entry(graph.entry_block) {
             continue;
         }
-        for (_vid, op) in &block.operations {
+        for (vid, op) in &block.operations {
             // Direct call sites need the statically proven closure value for the published
             // JavaScript frame, including self-calls and typed entries with no upvalue inputs.
             // The generic fallback past the depth limit uses it as well.
@@ -1371,10 +1603,31 @@ fn emit_block_sequence(
                     &program.functions[target as usize],
                     plan.publishes_frame[target as usize],
                 )
-                && matches!(kind, EntryKind::Typed { .. })
             {
                 used.extend(args.iter().copied());
-                used.insert(*callee);
+                let target_proto = &program.functions[target as usize];
+                let own_call = matches!(self_index, Some(index) if index == target);
+                let needs_callee_value = if plan.semantics == crate::NativeSemantics::Native
+                    && plan.typed_sites.contains(vid)
+                {
+                    let needs = plan.typed_needs[target as usize];
+                    (!own_call && needs.upvalues)
+                        || (!own_call && target_proto.arrow && needs.receiver)
+                } else {
+                    true
+                };
+                if needs_callee_value {
+                    used.insert(*callee);
+                }
+                continue;
+            }
+            if plan.semantics == crate::NativeSemantics::Native
+                && let GraphOp::NewObject { pairs, .. } = op
+                && native_records.value_exprs.contains_key(vid)
+            {
+                for (_, val) in pairs {
+                    used.insert(*val);
+                }
                 continue;
             }
             used.extend(op.operands());
@@ -1417,8 +1670,13 @@ fn emit_block_sequence(
                 | GraphOp::Unary {
                     op: UnaryOp::Void, ..
                 } => true,
-                GraphOp::LoadCell(_) | GraphOp::LoadUpvalue(_) => plan.unchecked.contains(&vid),
-                GraphOp::StoreLocal { slot, .. } => !array_slots.contains(slot),
+                GraphOp::LoadCell(_) | GraphOp::LoadUpvalue(_) => {
+                    plan.unchecked.contains(&vid)
+                        || plan.semantics == crate::NativeSemantics::Native
+                }
+                GraphOp::StoreLocal { slot, .. } => {
+                    !array_slots.contains(slot) && !native_records.slot_exprs.contains_key(slot)
+                }
                 GraphOp::CheckTdz { value, .. } => {
                     graph.scalar_alias_map.contains_key(value)
                         || numbers.contains(value)
@@ -1640,6 +1898,7 @@ fn emit_block_sequence(
                 &used,
                 &prepared_method_properties,
                 &argument_length_values,
+                native_records,
             );
             if let Some(accumulator) = string_accumulators
                 .iter()
@@ -1738,7 +1997,9 @@ fn emit_block_sequence(
             &used,
             boxed.as_ref(),
             &suspended_clear_slots,
-            proto.local_count,
+            proto,
+            native_records,
+            plan.semantics,
         );
     }
     if is_fast_clone && !exit_boxes.is_empty() {
@@ -2407,6 +2668,29 @@ fn compute_live_twins(
                         }
                     }
                 }
+                GraphOp::NewObject { pairs, .. } => {
+                    for (_, val) in pairs {
+                        if ints.contains(val) {
+                            live_ints.insert(*val);
+                        } else if numbers.contains(val) {
+                            live_numbers.insert(*val);
+                        }
+                    }
+                }
+                GraphOp::SetProperty { value, .. } | GraphOp::SetPropertyStrict { value, .. } => {
+                    if ints.contains(value) {
+                        live_ints.insert(*value);
+                    } else if numbers.contains(value) {
+                        live_numbers.insert(*value);
+                    }
+                }
+                GraphOp::StoreLocal { value, .. } => {
+                    if ints.contains(value) {
+                        live_ints.insert(*value);
+                    } else if numbers.contains(value) {
+                        live_numbers.insert(*value);
+                    }
+                }
                 _ => {}
             }
 
@@ -2499,7 +2783,10 @@ fn compute_live_twins(
                                 }
                             }
                         }
-                        GraphOp::StoreLocal { slot, value } if !array_slots.contains(slot) => {
+                        GraphOp::StoreLocal { slot, value }
+                            if !array_slots.contains(slot)
+                                || plan.semantics == crate::NativeSemantics::Native =>
+                        {
                             if ints.contains(value) {
                                 if live_ints.insert(*value) {
                                     changed = true;
@@ -2586,7 +2873,10 @@ fn compute_live_twins(
                                 }
                             }
                         }
-                        GraphOp::StoreLocal { slot, value } if !array_slots.contains(slot) => {
+                        GraphOp::StoreLocal { slot, value }
+                            if !array_slots.contains(slot)
+                                || plan.semantics == crate::NativeSemantics::Native =>
+                        {
                             if numbers.contains(value) && live_numbers.insert(*value) {
                                 changed = true;
                             } else if ints.contains(value) && live_ints.insert(*value) {
@@ -2985,6 +3275,16 @@ fn emit_blocks(
     trace_label: &str,
 ) -> (usize, usize) {
     let body_start = output.len();
+    let native_records = build_native_record_map(
+        graph,
+        proto,
+        program,
+        symbol,
+        matches!(site, Site::Entry { .. } | Site::AsyncEntry),
+        kind,
+        plan,
+        plan.semantics == crate::NativeSemantics::Native,
+    );
     let string_accumulators = if matches!(kind, EntryKind::Boxed) {
         super::string_accumulator::analyze(graph, proto, program)
     } else {
@@ -3314,6 +3614,7 @@ fn emit_blocks(
             true,
             false,
         );
+        output.push_str(&native_records.decls);
 
         let index = match site {
             Site::Function { index } => *index,
@@ -3446,6 +3747,7 @@ fn emit_blocks(
             },
             &argument_length_values,
             &string_accumulators,
+            &native_records,
         );
 
         writeln!(output, "    /* Clone B: generic fallback path */").unwrap();
@@ -3485,6 +3787,7 @@ fn emit_blocks(
             },
             &argument_length_values,
             &string_accumulators,
+            &native_records,
         );
     } else {
         let boxed = if plan.generic_only && baseline_numbers.is_empty() {
@@ -3524,6 +3827,7 @@ fn emit_blocks(
             false,
             plan.compact,
         );
+        output.push_str(&native_records.decls);
         emit_block_sequence(
             output,
             graph,
@@ -3554,6 +3858,7 @@ fn emit_blocks(
             &Speculation::default(),
             &argument_length_values,
             &string_accumulators,
+            &native_records,
         );
     }
 
@@ -3840,7 +4145,9 @@ fn emit_terminator(
     used: &HashSet<ValueId>,
     boxed: Option<&HashSet<ValueId>>,
     suspended_clear_slots: &HashMap<BlockId, HashSet<u32>>,
-    local_count: u32,
+    proto: &FunctionProto,
+    native_records: &NativeRecordMap,
+    semantics: crate::NativeSemantics,
 ) {
     match terminator {
         Terminator::Return(value) => match site {
@@ -3876,10 +4183,25 @@ fn emit_terminator(
                     _ => output.push_str("    goto kiln_refusal;\n"),
                 }
             }
-            Site::Function { .. } if matches!(kind, EntryKind::Typed { .. }) => match value {
-                Some(val) => writeln!(output, "    return v{};", val.0).unwrap(),
-                None => output.push_str("    return KILN_VAL_UNDEFINED;\n"),
-            },
+            Site::Function { .. } if matches!(kind, EntryKind::Typed { .. }) => {
+                if semantics == crate::NativeSemantics::Native && proto.return_layout().is_some() {
+                    match value {
+                        Some(val) => {
+                            if let Some((_, expr)) = native_records.value_exprs.get(val) {
+                                writeln!(output, "    return &({expr});").unwrap();
+                            } else {
+                                output.push_str("    return NULL;\n");
+                            }
+                        }
+                        None => output.push_str("    return NULL;\n"),
+                    }
+                } else {
+                    match value {
+                        Some(val) => writeln!(output, "    return v{};", val.0).unwrap(),
+                        None => output.push_str("    return KILN_VAL_UNDEFINED;\n"),
+                    }
+                }
+            }
             Site::Function { index } => match value {
                 Some(val) => {
                     if type_profile_record {
@@ -3978,6 +4300,7 @@ fn emit_terminator(
                 indexed_values,
                 used,
                 boxed,
+                native_records,
             );
             writeln!(output, "    goto {block_prefix}{};", target.0).unwrap();
         }
@@ -4044,6 +4367,7 @@ fn emit_terminator(
                 indexed_values,
                 used,
                 boxed,
+                native_records,
             );
             writeln!(output, "        goto {block_prefix}{};", true_block.0).unwrap();
             output.push_str("    } else {\n");
@@ -4058,6 +4382,7 @@ fn emit_terminator(
                 indexed_values,
                 used,
                 boxed,
+                native_records,
             );
             writeln!(output, "        goto {block_prefix}{};", false_block.0).unwrap();
             output.push_str("    }\n");
@@ -4080,6 +4405,7 @@ fn emit_terminator(
                 indexed_values,
                 used,
                 boxed,
+                native_records,
             );
             writeln!(output, "        goto {block_prefix}{};", true_block.0).unwrap();
             output.push_str("    } else {\n");
@@ -4094,6 +4420,7 @@ fn emit_terminator(
                 indexed_values,
                 used,
                 boxed,
+                native_records,
             );
             writeln!(output, "        goto {block_prefix}{};", false_block.0).unwrap();
             output.push_str("    }\n");
@@ -4139,7 +4466,7 @@ fn emit_terminator(
                 "    kiln_c99_heap_store_value(frame, &frame->sent, kiln_c99_undefined());\n",
             );
             if let Some(clear) = suspended_clear_slots.get(&current_block.id) {
-                for slot in 0..local_count {
+                for slot in 0..proto.local_count {
                     if clear.contains(&slot) {
                         writeln!(
                             output,
@@ -4175,6 +4502,7 @@ fn emit_phi_assignments(
     indexed_values: bool,
     used: &HashSet<ValueId>,
     boxed: Option<&HashSet<ValueId>>,
+    native_records: &NativeRecordMap,
 ) {
     // A parallel move: every input is read before any phi is written, so two phis that swap
     // values (`[a, b] = [b, a]` across a back edge) do not clobber each other.
@@ -4184,6 +4512,20 @@ fn emit_phi_assignments(
     let mut moves: Vec<(u32, u32)> = Vec::new();
     for &(phi_vid, ref op) in &target_block.operations {
         if let GraphOp::Phi { inputs } = op {
+            if let Some(&(phi_lid, ref phi_expr)) = native_records.value_exprs.get(&phi_vid) {
+                for &(pred, in_vid) in inputs {
+                    if pred == from && in_vid != phi_vid {
+                        if let Some(&(from_lid, ref from_expr)) =
+                            native_records.value_exprs.get(&in_vid)
+                        {
+                            if phi_lid == from_lid && phi_expr != from_expr {
+                                writeln!(output, "        {phi_expr} = {from_expr};").unwrap();
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             for &(pred, in_vid) in inputs {
                 if pred == from && in_vid != phi_vid && used.contains(&phi_vid) {
                     moves.push((phi_vid.0, in_vid.0));

@@ -4474,7 +4474,7 @@ static DEFAULT_RUNTIME_PRELUDE_SOURCE: std::sync::OnceLock<String> = std::sync::
 
 /// Return the program-independent C11 runtime prelude source for standalone compilation with a specific policy.
 pub fn runtime_prelude_source_with_policy(policy: &EmissionPolicy) -> String {
-    if *policy == EmissionPolicy::default() {
+    if policy.has_default_prelude_defines() {
         return runtime_prelude_source().to_owned();
     }
     let mut output = String::new();

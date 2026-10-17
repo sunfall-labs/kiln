@@ -65,6 +65,7 @@ pub(super) struct OpContext<'a> {
     pub await_resolve_arg: Option<ValueId>,
     pub used: &'a HashSet<ValueId>,
     pub prepared_method_properties: &'a HashSet<ValueId>,
+    pub native_records: &'a super::body::NativeRecordMap,
 }
 
 /// One status check after a runtime call. A throw unwinds; a refusal is attributed to this site
@@ -239,6 +240,7 @@ pub(super) fn emit_graph_op(
     used: &HashSet<ValueId>,
     prepared_method_properties: &HashSet<ValueId>,
     argument_length_values: &HashSet<ValueId>,
+    native_records: &super::body::NativeRecordMap,
 ) {
     let v = vid.0;
     let typed = numbers.contains(&vid);
@@ -282,6 +284,7 @@ pub(super) fn emit_graph_op(
         await_resolve_arg,
         used,
         prepared_method_properties,
+        native_records,
     };
     match op {
         GraphOp::Const { index, constant } => match constant {
@@ -355,6 +358,11 @@ pub(super) fn emit_graph_op(
             }
         },
         GraphOp::LoadLocal(slot) => {
+            if ctx.plan.semantics == crate::NativeSemantics::Native
+                && ctx.native_records.slot_exprs.contains_key(slot)
+            {
+                return;
+            }
             if in_array(slot) {
                 writeln!(output, "    v{v} = locals[{slot}];").unwrap();
             } else if *slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
@@ -396,6 +404,55 @@ pub(super) fn emit_graph_op(
             }
         }
         GraphOp::StoreLocal { slot, value } => {
+            if ctx.plan.semantics == crate::NativeSemantics::Native
+                && let Some(dst_expr) = ctx.native_records.slot_exprs.get(slot)
+            {
+                if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(value) {
+                    let all_layouts = crate::collect_program_record_layouts(ctx.program);
+                    let dst_lid = ctx
+                        .proto
+                        .type_annotations
+                        .as_ref()
+                        .and_then(|t| t.source_types.as_ref())
+                        .and_then(|st| st.local_layouts.get(slot).copied())
+                        .or_else(|| {
+                            ctx.program
+                                .source_types()
+                                .and_then(|st| st.local_layouts.get(slot).copied())
+                        })
+                        .or_else(|| {
+                            ctx.proto
+                                .parameter_layouts()
+                                .get(*slot as usize)
+                                .copied()
+                                .flatten()
+                        });
+                    if let Some(dlid) = dst_lid {
+                        if dlid == src_lid {
+                            writeln!(output, "    {dst_expr} = {src_expr};").unwrap();
+                        } else if let (Some(dst_layout), Some(src_layout)) = (
+                            all_layouts.get(dlid.0 as usize),
+                            all_layouts.get(src_lid.0 as usize),
+                        ) {
+                            for dst_f in &dst_layout.fields {
+                                if src_layout.fields.iter().any(|sf| sf.name == dst_f.name) {
+                                    writeln!(
+                                        output,
+                                        "    {dst_expr}.{} = {src_expr}.{};",
+                                        dst_f.name, dst_f.name
+                                    )
+                                    .unwrap();
+                                }
+                            }
+                        } else {
+                            writeln!(output, "    {dst_expr} = {src_expr};").unwrap();
+                        }
+                    } else {
+                        writeln!(output, "    {dst_expr} = {src_expr};").unwrap();
+                    }
+                }
+                return;
+            }
             if in_array(slot) {
                 writeln!(
                     output,
@@ -929,11 +986,15 @@ pub(super) fn emit_graph_op(
             )
         }) =>
         {
-            writeln!(
-                output,
-                "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
-            )
-            .unwrap();
+            if !(ctx.plan.semantics == crate::NativeSemantics::Native
+                && plan.typed_sites.contains(&vid))
+            {
+                writeln!(
+                    output,
+                    "    kiln_c99_js_frame_note_instruction({diagnostic_source}, (size_t){pc}, (size_t){line}, (size_t){column});"
+                )
+                .unwrap();
+            }
             // The callee is the closure of a proto this unit compiled, so the body is called by
             // name: no callable test, no body-pointer comparison, and the receiver the language
             // gives a plain function, decided here. A site that proved every argument a number
@@ -1061,8 +1122,45 @@ pub(super) fn emit_graph_op(
                 if needs.runtime {
                     call_args.push_str(", host, thrown");
                 }
-                for a in args {
-                    if live_numbers.contains(a) {
+                let target_proto = program.functions.get(target as usize);
+                for (param_idx, a) in args.iter().enumerate() {
+                    let record_param = if ctx.plan.semantics == crate::NativeSemantics::Native {
+                        target_proto
+                            .and_then(|tp| tp.parameter_layouts().get(param_idx).copied().flatten())
+                    } else {
+                        None
+                    };
+                    if let Some(target_lid) = record_param {
+                        if let Some(&(src_lid, ref src_expr)) =
+                            ctx.native_records.value_exprs.get(a)
+                        {
+                            if src_lid == target_lid {
+                                call_args.push_str(&format!(", &({src_expr})"));
+                            } else {
+                                let all_layouts = crate::collect_program_record_layouts(program);
+                                let mut init_fields = Vec::new();
+                                if let (Some(target_layout), Some(src_layout)) = (
+                                    all_layouts.get(target_lid.0 as usize),
+                                    all_layouts.get(src_lid.0 as usize),
+                                ) {
+                                    for tf in &target_layout.fields {
+                                        if src_layout.fields.iter().any(|sf| sf.name == tf.name) {
+                                            init_fields.push(format!(
+                                                ".{} = {src_expr}.{}",
+                                                tf.name, tf.name
+                                            ));
+                                        }
+                                    }
+                                }
+                                call_args.push_str(&format!(
+                                    ", &(({symbol}_rec_{target_lid}){{ {} }})",
+                                    init_fields.join(", ")
+                                ));
+                            }
+                        } else {
+                            call_args.push_str(", NULL");
+                        }
+                    } else if live_numbers.contains(a) {
                         call_args.push_str(&format!(", d{}", a.0));
                     } else if live_ints.contains(a) {
                         call_args.push_str(&format!(", (double)i{}", a.0));
@@ -1167,7 +1265,45 @@ pub(super) fn emit_graph_op(
                         "{{ int status = kiln_c99_typed_status; if (status == KILN_C99_THROWN) {{ *thrown = kiln_c99_typed_thrown; {unwind} }} {check} }}"
                     )
                 };
-                if plan.typed_returns[target as usize] {
+                if ctx.plan.semantics == crate::NativeSemantics::Native {
+                    if let Some(ret_lid) = target_proto.and_then(|tp| tp.return_layout()) {
+                        writeln!(
+                            output,
+                            "    {{ {recv} {symbol}_rec_{ret_lid} *ret_ptr = {symbol}_fn_{target}_t({call_args}); if (ret_ptr != NULL) rec_call_{v} = *ret_ptr; }}"
+                        )
+                        .unwrap();
+                    } else if plan.typed_returns[target as usize] {
+                        if live_typed {
+                            let int_twin = if live_typed_int {
+                                format!(" i{v} = (int64_t)d{v};")
+                            } else {
+                                String::new()
+                            };
+                            writeln!(
+                                output,
+                                "    {{ {recv} d{v} = {symbol}_fn_{target}_t({call_args}); v{v} = kiln_c99_val_from_double(d{v});{int_twin} }}"
+                            )
+                            .unwrap();
+                        } else {
+                            let int_twin = if live_typed_int {
+                                format!(" i{v} = (int64_t)d_ret_{v};")
+                            } else {
+                                String::new()
+                            };
+                            writeln!(
+                                output,
+                                "    {{ {recv} double d_ret_{v} = {symbol}_fn_{target}_t({call_args}); v{v} = kiln_c99_val_from_double(d_ret_{v});{int_twin} }}"
+                            )
+                            .unwrap();
+                        }
+                    } else {
+                        writeln!(
+                            output,
+                            "    {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); }}"
+                        )
+                        .unwrap();
+                    }
+                } else if plan.typed_returns[target as usize] {
                     if live_typed {
                         let typed_frame_failure_code =
                             typed_frame_failure(&format!("kiln_c99_typed_failed(d{v})"));
@@ -1420,6 +1556,82 @@ pub(super) fn emit_graph_op(
             .unwrap();
         }
         GraphOp::NewObject { pairs, .. } => {
+            if ctx.plan.semantics == crate::NativeSemantics::Native
+                && let Some(&(lid, ref expr)) = ctx.native_records.value_exprs.get(&vid)
+            {
+                let all_layouts = crate::collect_program_record_layouts(program);
+                if let Some(layout) = all_layouts.get(lid.0 as usize) {
+                    for (key, val) in pairs {
+                        if let Some(prop_name) = resolve_const_string(*key, defs, program) {
+                            if let Some(field) = layout.fields.iter().find(|f| f.name == prop_name)
+                            {
+                                let field_expr = format!("{expr}.{prop_name}");
+                                match field.ty {
+                                    kiln_ir::NativeFieldType::Number => {
+                                        if live_numbers.contains(val) {
+                                            writeln!(output, "    {field_expr} = d{};", val.0)
+                                                .unwrap();
+                                        } else if live_ints.contains(val) {
+                                            writeln!(
+                                                output,
+                                                "    {field_expr} = (double)i{};",
+                                                val.0
+                                            )
+                                            .unwrap();
+                                        } else {
+                                            writeln!(output, "    {{ double tmp; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{0}))) memcpy(&tmp, &v{0}, sizeof(tmp)); else tmp = kiln_c99_as_number(kiln_val_to_boundary(v{0})); {field_expr} = tmp; }}", val.0).unwrap();
+                                        }
+                                    }
+                                    kiln_ir::NativeFieldType::Int32 => {
+                                        if live_ints.contains(val) {
+                                            writeln!(
+                                                output,
+                                                "    {field_expr} = (int32_t)i{};",
+                                                val.0
+                                            )
+                                            .unwrap();
+                                        } else if live_numbers.contains(val) {
+                                            writeln!(
+                                                output,
+                                                "    {field_expr} = (int32_t)d{};",
+                                                val.0
+                                            )
+                                            .unwrap();
+                                        } else {
+                                            writeln!(output, "    {{ double tmp; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{0}))) memcpy(&tmp, &v{0}, sizeof(tmp)); else tmp = kiln_c99_as_number(kiln_val_to_boundary(v{0})); {field_expr} = (int32_t)tmp; }}", val.0).unwrap();
+                                        }
+                                    }
+                                    kiln_ir::NativeFieldType::Boolean => {
+                                        if booleans.contains(val) {
+                                            writeln!(output, "    {field_expr} = b{};", val.0)
+                                                .unwrap();
+                                        } else {
+                                            writeln!(
+                                                output,
+                                                "    {field_expr} = kiln_c99_val_truthy(v{});",
+                                                val.0
+                                            )
+                                            .unwrap();
+                                        }
+                                    }
+                                    kiln_ir::NativeFieldType::String => {
+                                        writeln!(output, "    {field_expr} = v{};", val.0).unwrap();
+                                    }
+                                    kiln_ir::NativeFieldType::Record(_) => {
+                                        if let Some((_, sub_expr)) =
+                                            ctx.native_records.value_exprs.get(val)
+                                        {
+                                            writeln!(output, "    {field_expr} = {sub_expr};")
+                                                .unwrap();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             if let Some(scalar_obj) = graph.scalar_objects.get(&vid) {
                 let alloc = vid.0;
                 let written_indices: HashSet<usize> = pairs

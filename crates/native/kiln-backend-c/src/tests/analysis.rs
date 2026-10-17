@@ -1664,6 +1664,13 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
         checker_identity: "checker-v1".into(),
         parameters: vec![Some(TypeAnnotation::Number)],
         return_type: Some(TypeAnnotation::Number),
+        record_layouts: Vec::new(),
+        parameter_layouts: Vec::new(),
+        return_layout: None,
+        span_layouts: std::collections::BTreeMap::new(),
+        exact_span_layouts: std::collections::BTreeMap::new(),
+        local_layouts: std::collections::BTreeMap::new(),
+        new_object_layouts: std::collections::BTreeMap::new(),
     });
     let checked_hash = crate::identity::hash_program(&checked_prog);
     assert_eq!(
@@ -1671,7 +1678,7 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
         crate::identity::hash_program(&checked_prog.clone())
     );
     assert_ne!(checked_hash, crate::identity::hash_program(&typed_prog));
-    for change in 0..4 {
+    for change in 0..8 {
         let mut changed = checked_prog.clone();
         let facts = changed.functions[0]
             .type_annotations
@@ -1684,7 +1691,21 @@ fn type_annotations_drive_candidate_speculation_without_prior_inferred_uses() {
             0 => facts.parameters[0] = Some(TypeAnnotation::String),
             1 => facts.return_type = Some(TypeAnnotation::String),
             2 => facts.version += 1,
-            _ => facts.checker_identity = "checker-v2".into(),
+            3 => facts.checker_identity = "checker-v2".into(),
+            4 => {
+                facts.record_layouts.push(kiln_ir::RecordLayout {
+                    fields: vec![kiln_ir::RecordField {
+                        name: "x".into(),
+                        ty: kiln_ir::NativeFieldType::Number,
+                        readonly: false,
+                    }],
+                });
+            }
+            5 => facts.parameter_layouts = vec![Some(kiln_ir::RecordLayoutId(0))],
+            6 => facts.return_layout = Some(kiln_ir::RecordLayoutId(0)),
+            _ => {
+                facts.span_layouts.insert(10, kiln_ir::RecordLayoutId(0));
+            }
         }
         assert_eq!(changed.functions[0].code, checked_prog.functions[0].code);
         assert_eq!(changed.source, checked_prog.source);
@@ -2375,5 +2396,122 @@ fn leaf_literal_read_drops_the_call_and_the_allocation() {
     assert_eq!(
         crate::leaf_literal::inline_leaf_literal_reads(&program, &mut graphs, &mut entry),
         0
+    );
+}
+
+#[test]
+fn native_semantics_emits_record_structs_and_direct_calls() {
+    let source = r#"
+function getX(p) {
+    return p.x;
+}
+function run() {
+    const original = { x: 1, y: 2 };
+    const narrow = original;
+    narrow.x = 9;
+    return original.x + getX(narrow) + getX(original);
+}
+export const result = run();
+"#;
+    let parsed_exec = kiln_frontend_oxc::parse("/test.js", source);
+    let mut module_prog = kiln_ir::compile_module(&parsed_exec).expect("compile module");
+    let record_layouts = vec![
+        kiln_ir::RecordLayout {
+            fields: vec![
+                kiln_ir::RecordField {
+                    name: "x".into(),
+                    ty: kiln_ir::NativeFieldType::Number,
+                    readonly: false,
+                },
+                kiln_ir::RecordField {
+                    name: "y".into(),
+                    ty: kiln_ir::NativeFieldType::Number,
+                    readonly: false,
+                },
+            ],
+        },
+        kiln_ir::RecordLayout {
+            fields: vec![kiln_ir::RecordField {
+                name: "x".into(),
+                ty: kiln_ir::NativeFieldType::Number,
+                readonly: false,
+            }],
+        },
+    ];
+    // Function 0: getX(p: Point1D): number
+    module_prog.program.functions[0].type_annotations = Some(
+        kiln_ir::FunctionTypeAnnotations::from_source_types(kiln_ir::SourceTypeAnnotations {
+            version: kiln_ir::SOURCE_TYPE_METADATA_VERSION,
+            checker_identity: "test".into(),
+            parameters: vec![None],
+            return_type: Some(kiln_ir::TypeAnnotation::Number),
+            record_layouts: record_layouts.clone(),
+            parameter_layouts: vec![Some(kiln_ir::RecordLayoutId(1))],
+            return_layout: None,
+            span_layouts: std::collections::BTreeMap::new(),
+            exact_span_layouts: std::collections::BTreeMap::new(),
+            local_layouts: std::collections::BTreeMap::from([(0, kiln_ir::RecordLayoutId(1))]),
+            new_object_layouts: std::collections::BTreeMap::new(),
+        }),
+    );
+    // Function 1: run(): number, local 0 = original (Point2D = 0), local 1 = narrow (Point1D = 1)
+    let new_obj_pc = module_prog.program.functions[1]
+        .code
+        .iter()
+        .position(|inst| matches!(inst, Instruction::NewObject { .. }))
+        .expect("NewObject in run()") as u32;
+    module_prog.program.functions[1].type_annotations = Some(
+        kiln_ir::FunctionTypeAnnotations::from_source_types(kiln_ir::SourceTypeAnnotations {
+            version: kiln_ir::SOURCE_TYPE_METADATA_VERSION,
+            checker_identity: "test".into(),
+            parameters: Vec::new(),
+            return_type: Some(kiln_ir::TypeAnnotation::Number),
+            record_layouts: record_layouts.clone(),
+            parameter_layouts: Vec::new(),
+            return_layout: None,
+            span_layouts: std::collections::BTreeMap::new(),
+            exact_span_layouts: std::collections::BTreeMap::new(),
+            local_layouts: std::collections::BTreeMap::from([
+                (0, kiln_ir::RecordLayoutId(0)),
+                (1, kiln_ir::RecordLayoutId(1)),
+            ]),
+            new_object_layouts: std::collections::BTreeMap::from([(
+                new_obj_pc,
+                kiln_ir::RecordLayoutId(0),
+            )]),
+        }),
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module_prog,
+        "test.js",
+        EmissionPolicy {
+            compact: true,
+            semantics: crate::NativeSemantics::Native,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("native semantics module emits");
+
+    assert!(
+        emitted.source.contains("typedef struct ku_rec_"),
+        "expected C struct typedefs in emitted source:\n{}",
+        emitted.source
+    );
+    assert!(
+        emitted.source.contains(".x = "),
+        "expected direct struct field store in emitted source:\n{}",
+        emitted.source
+    );
+    assert!(
+        emitted.source.contains("*p0"),
+        "expected typed record pointer parameter in emitted source:\n{}",
+        emitted.source
+    );
+    assert!(
+        emitted
+            .source
+            .contains("static inline double ku_fn_1_t(int depth)"),
+        "expected run_t to take only (int depth) with no upvalue/runtime tax:\n{}",
+        emitted.source
     );
 }

@@ -134,11 +134,27 @@ pub struct EmissionPolicy {
     /// closure's identity is shared -- no realm can hold another's to compare -- and its
     /// prototype and property store are each realm's own.
     pub shared_region: bool,
+    /// Language semantics contract (`--semantics=js|native`, ADR 0077).
+    pub semantics: NativeSemantics,
+}
+
+/// Language semantics contract for native C emission (ADR 0077).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum NativeSemantics {
+    #[default]
+    Js,
+    Native,
 }
 
 impl EmissionPolicy {
     pub fn should_compile_regex(&self) -> bool {
         self.compile_regex.unwrap_or(!self.compact)
+    }
+
+    pub(crate) fn has_default_prelude_defines(&self) -> bool {
+        let mut prelude_policy = self.clone();
+        prelude_policy.semantics = NativeSemantics::Js;
+        prelude_policy == Self::default()
     }
 }
 
@@ -1922,6 +1938,11 @@ fn render_functions(
         .iter()
         .enumerate()
         .map(|(index, proto)| {
+            if policy.semantics == NativeSemantics::Native
+                && proto.parameter_layouts().iter().any(|p| p.is_some())
+            {
+                return false;
+            }
             direct.typed[index].as_ref().is_some_and(|typed| {
                 emit_graph::emit_restartable(
                     &graphs[index],
@@ -2216,6 +2237,11 @@ fn render_functions(
         .iter()
         .enumerate()
         .map(|(index, proto)| {
+            if policy.semantics == NativeSemantics::Native
+                && proto.parameter_layouts().iter().any(|p| p.is_some())
+            {
+                return false;
+            }
             (!policy.generic_only && proto.code.len() <= MAX_SPECIALIZED_INSTRUCTIONS)
                 .then(|| {
                     emit_graph::emit_fast_clone(
@@ -2313,6 +2339,8 @@ fn render_functions(
         if direct.has_typed_entry(index as u32) {
             let (result, params) = emit_graph::typed_signature(
                 &program.functions[index],
+                symbol,
+                policy.semantics,
                 direct.entry.typed_returns[index],
                 direct.entry.typed_needs[index],
             );
@@ -2902,7 +2930,90 @@ fn entry_proto(program: &Program) -> FunctionProto {
         code: program.code.clone(),
         upvalues: Vec::new(),
         span: kiln_ir::Span::default(),
-        type_annotations: None,
+        type_annotations: program
+            .source_types()
+            .cloned()
+            .map(kiln_ir::FunctionTypeAnnotations::from_source_types),
+    }
+}
+
+pub(crate) fn collect_program_record_layouts(program: &Program) -> Vec<kiln_ir::RecordLayout> {
+    if let Some(st) = program.source_types() {
+        if !st.record_layouts.is_empty() {
+            return st.record_layouts.clone();
+        }
+    }
+    for f in &program.functions {
+        if let Some(st) = f
+            .type_annotations
+            .as_ref()
+            .and_then(|t| t.source_types.as_ref())
+        {
+            if !st.record_layouts.is_empty() {
+                return st.record_layouts.clone();
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn emit_record_typedefs(out: &mut String, symbol: &str, layouts: &[kiln_ir::RecordLayout]) {
+    if layouts.is_empty() {
+        return;
+    }
+    let mut emitted = vec![false; layouts.len()];
+    let mut order = Vec::with_capacity(layouts.len());
+
+    fn visit(
+        id: usize,
+        layouts: &[kiln_ir::RecordLayout],
+        emitted: &mut [bool],
+        order: &mut Vec<usize>,
+    ) {
+        if emitted[id] {
+            return;
+        }
+        emitted[id] = true;
+        for field in &layouts[id].fields {
+            if let kiln_ir::NativeFieldType::Record(sub) = &field.ty {
+                let sub_id = sub.0 as usize;
+                if sub_id < layouts.len() {
+                    visit(sub_id, layouts, emitted, order);
+                }
+            }
+        }
+        order.push(id);
+    }
+
+    for id in 0..layouts.len() {
+        visit(id, layouts, &mut emitted, &mut order);
+    }
+
+    for id in order {
+        let layout = &layouts[id];
+        let _ = writeln!(out, "typedef struct {symbol}_rec_{id} {{");
+        if layout.fields.is_empty() {
+            let _ = writeln!(out, "    uint8_t _unused;");
+        } else {
+            for field in &layout.fields {
+                let name = &field.name;
+                match &field.ty {
+                    kiln_ir::NativeFieldType::Number => {
+                        let _ = writeln!(out, "    double {name};");
+                    }
+                    kiln_ir::NativeFieldType::Int32 | kiln_ir::NativeFieldType::Boolean => {
+                        let _ = writeln!(out, "    int32_t {name};");
+                    }
+                    kiln_ir::NativeFieldType::String => {
+                        let _ = writeln!(out, "    kiln_c99_val {name};");
+                    }
+                    kiln_ir::NativeFieldType::Record(sub) => {
+                        let _ = writeln!(out, "    {symbol}_rec_{} {name};", sub.0);
+                    }
+                }
+            }
+        }
+        let _ = writeln!(out, "}} {symbol}_rec_{id};\n");
     }
 }
 
@@ -3007,6 +3118,7 @@ fn plan_unit(
     generic_only: bool,
     parallel_in_generic: bool,
     speculate: Option<bool>,
+    semantics: NativeSemantics,
     extra_entry_slots: Option<&HashSet<u32>>,
     generic_loop_profile: Option<Arc<direct::LoopCallProfile>>,
 ) -> Result<
@@ -3068,6 +3180,7 @@ fn plan_unit(
         generic_only,
         parallel_in_generic,
         speculate,
+        semantics,
         generic_loop_profile,
         &arguments_length_only,
     );
@@ -4729,7 +4842,7 @@ namespace_failure_without_order:
 }
 
 fn render_emission_policy(output: &mut String, policy: &EmissionPolicy) {
-    if *policy == EmissionPolicy::default() {
+    if policy.has_default_prelude_defines() {
         return;
     }
     writeln!(
@@ -5205,12 +5318,18 @@ fn render_positioned(
         emission_diagnostic_site,
         policy.compact,
         policy.should_compile_regex(),
-        policy.generic_only,
+        policy.generic_only && policy.semantics != NativeSemantics::Native,
         policy.parallel_in_generic,
         policy.speculate,
+        policy.semantics,
         extra_entry_slots.as_ref(),
         None,
     )?;
+    direct.set_semantics(policy.semantics);
+    if policy.semantics == NativeSemantics::Native {
+        let layouts = collect_program_record_layouts(program);
+        emit_record_typedefs(&mut output, symbol, &layouts);
+    }
     if program.has_dynamic_import() {
         output.push_str(
             "__attribute__((weak)) int kiln_graph_dynamic_import(kiln_host *host, const char *importer, kiln_value specifier, kiln_value options, kiln_value *promise, int depth, kiln_value *thrown) {\n    (void)importer; (void)specifier; (void)options;\n    kiln_value err = kiln_c99_undefined();\n    (void)kiln_c99_throw_error(&err, KILN_C99_BUILTIN_TYPE_ERROR, \"no module loader is installed\");\n    return kiln_c99_invoke_method(host, promise, KILN_C99_METHOD_PROMISE_REJECT, kiln_c99_undefined(), &err, 1, depth, thrown);\n}\n",
@@ -5591,14 +5710,16 @@ fn render_module_positioned(
             }
             slots
         };
+    let generic_only = policy.generic_only && policy.semantics != NativeSemantics::Native;
     let (graphs, body, entry_graph, mut direct) = plan_unit(
         emitted_program,
         diagnostic_site,
         policy.compact,
         policy.should_compile_regex(),
-        policy.generic_only,
+        generic_only,
         policy.parallel_in_generic,
         policy.speculate,
+        policy.semantics,
         Some(&extra_entry_slots),
         generic_loop_profile,
     )?;
@@ -5627,9 +5748,13 @@ fn render_module_positioned(
     // pool thread -- go to a unit of their own that the orchestrator compiles optimised. It
     // holds nothing else: a worker reaches no heap, realm or module state (`lib.rs` scans
     // every clone for that before admitting it), so the prelude's declarations are all it needs.
-    let split_workers =
-        policy.generic_only && policy.parallel_workers_unit && policy.decoupled_prelude;
+    let split_workers = generic_only && policy.parallel_workers_unit && policy.decoupled_prelude;
     let mut workers_unit = String::new();
+    direct.set_semantics(policy.semantics);
+    if policy.semantics == NativeSemantics::Native {
+        let layouts = collect_program_record_layouts(emitted_program);
+        emit_record_typedefs(&mut output, unit_symbol, &layouts);
+    }
     let rendered_funcs = render_functions(
         &mut output,
         emitted_program,

@@ -33,6 +33,76 @@ pub(super) fn emit_get_property(
         .get(&vid)
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
+    if ctx.plan.semantics == crate::NativeSemantics::Native {
+        if let Some(&(obj_lid, ref obj_expr)) = ctx.native_records.value_exprs.get(object) {
+            let prop_name = match program.constants.get(*name as usize) {
+                Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+                _ => String::new(),
+            };
+            let all_layouts = crate::collect_program_record_layouts(program);
+            if let Some(layout) = all_layouts.get(obj_lid.0 as usize) {
+                if let Some(field) = layout.fields.iter().find(|f| f.name == prop_name) {
+                    let field_expr = format!("{obj_expr}.{prop_name}");
+                    let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+                    match field.ty {
+                        kiln_ir::NativeFieldType::Number => {
+                            if typed {
+                                writeln!(output, "    d{v} = {field_expr};").unwrap();
+                            }
+                            if typed_int {
+                                writeln!(output, "    i{v} = (int64_t){field_expr};").unwrap();
+                            }
+                            if need_box {
+                                writeln!(
+                                    output,
+                                    "    v{v} = kiln_c99_val_from_double({field_expr});"
+                                )
+                                .unwrap();
+                            }
+                        }
+                        kiln_ir::NativeFieldType::Int32 => {
+                            if typed_int {
+                                writeln!(output, "    i{v} = (int64_t){field_expr};").unwrap();
+                            }
+                            if typed {
+                                writeln!(output, "    d{v} = (double){field_expr};").unwrap();
+                            }
+                            if need_box {
+                                writeln!(
+                                    output,
+                                    "    v{v} = kiln_c99_val_from_double((double){field_expr});"
+                                )
+                                .unwrap();
+                            }
+                        }
+                        kiln_ir::NativeFieldType::Boolean => {
+                            if ctx.booleans.contains(&vid) {
+                                writeln!(output, "    b{v} = {field_expr};").unwrap();
+                            }
+                            if need_box {
+                                writeln!(
+                                    output,
+                                    "    v{v} = ({field_expr}) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
+                                )
+                                .unwrap();
+                            }
+                        }
+                        kiln_ir::NativeFieldType::String => {
+                            if need_box {
+                                writeln!(output, "    v{v} = {field_expr};").unwrap();
+                            }
+                        }
+                        kiln_ir::NativeFieldType::Record(_) => {
+                            if need_box {
+                                writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
     if prepared_method_property(vid, ctx) {
         let key_str = match program.constants.get(*name as usize) {
             Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
@@ -553,6 +623,66 @@ pub(super) fn emit_set_property(
         .get(&vid)
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
+    if ctx.plan.semantics == crate::NativeSemantics::Native {
+        if let Some(&(obj_lid, ref obj_expr)) = ctx.native_records.value_exprs.get(object) {
+            let prop_name = match ctx.program.constants.get(*name as usize) {
+                Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+                _ => String::new(),
+            };
+            let all_layouts = crate::collect_program_record_layouts(ctx.program);
+            if let Some(layout) = all_layouts.get(obj_lid.0 as usize) {
+                if let Some(field) = layout.fields.iter().find(|f| f.name == prop_name) {
+                    let field_expr = format!("{obj_expr}.{prop_name}");
+                    match field.ty {
+                        kiln_ir::NativeFieldType::Number => {
+                            if ctx.live_numbers.contains(value) {
+                                writeln!(output, "    {field_expr} = d{val};").unwrap();
+                            } else if ctx.live_ints.contains(value) {
+                                writeln!(output, "    {field_expr} = (double)i{val};").unwrap();
+                            } else {
+                                writeln!(output, "    {{ double tmp; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) memcpy(&tmp, &v{val}, sizeof(tmp)); else tmp = kiln_c99_as_number(kiln_val_to_boundary(v{val})); {field_expr} = tmp; }}").unwrap();
+                            }
+                        }
+                        kiln_ir::NativeFieldType::Int32 => {
+                            if ctx.live_ints.contains(value) {
+                                writeln!(output, "    {field_expr} = (int32_t)i{val};").unwrap();
+                            } else if ctx.live_numbers.contains(value) {
+                                writeln!(output, "    {field_expr} = (int32_t)d{val};").unwrap();
+                            } else {
+                                writeln!(output, "    {{ double tmp; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(v{val}))) memcpy(&tmp, &v{val}, sizeof(tmp)); else tmp = kiln_c99_as_number(kiln_val_to_boundary(v{val})); {field_expr} = (int32_t)tmp; }}").unwrap();
+                            }
+                        }
+                        kiln_ir::NativeFieldType::Boolean => {
+                            if ctx.booleans.contains(value) {
+                                writeln!(output, "    {field_expr} = b{val};").unwrap();
+                            } else {
+                                writeln!(output, "    {field_expr} = kiln_c99_val_truthy(v{val});")
+                                    .unwrap();
+                            }
+                        }
+                        kiln_ir::NativeFieldType::String => {
+                            writeln!(output, "    {field_expr} = v{val};").unwrap();
+                        }
+                        kiln_ir::NativeFieldType::Record(_) => {
+                            if let Some((_, val_expr)) = ctx.native_records.value_exprs.get(value) {
+                                writeln!(output, "    {field_expr} = {val_expr};").unwrap();
+                            }
+                        }
+                    }
+                    if is_used {
+                        writeln!(output, "    v{v} = v{val};").unwrap();
+                        if typed && ctx.live_numbers.contains(value) {
+                            writeln!(output, "    d{v} = d{val};").unwrap();
+                        }
+                        if typed_int && ctx.live_ints.contains(value) {
+                            writeln!(output, "    i{v} = i{val};").unwrap();
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
     if let Some(&root) = graph.scalar_alias_map.get(object)
         && let Some(scalar_obj) = graph.scalar_objects.get(&root)
     {

@@ -1014,8 +1014,14 @@ impl super::Compiler {
             .parameters
             .iter()
             .any(|parameter| matches!(parameter.pattern, Pattern::WithDefault { .. }));
+        let outer_current_function_span = self.current_function_span;
+        self.current_function_span = Some(function.span);
         for (slot, parameter) in function.parameters.iter().enumerate() {
             let slot = slot as u32;
+            if parameter.span.end > parameter.span.start {
+                self.local_spans
+                    .insert((self.current_function_span, slot), parameter.span);
+            }
             let identifier = match &parameter.pattern {
                 Pattern::Identifier(name) => Some(name),
                 Pattern::WithDefault { inner, .. } => match inner.as_ref() {
@@ -1038,6 +1044,7 @@ impl super::Compiler {
                         Some(parameter.span),
                         format!("duplicate parameter `{name}`"),
                     );
+                    self.current_function_span = outer_current_function_span;
                     return None;
                 }
             }
@@ -1166,9 +1173,11 @@ impl super::Compiler {
             captured: std::mem::replace(&mut self.captured, captured),
             cell_everything: std::mem::replace(&mut self.cell_everything, cell_everything),
             active_function_span: self.active_function_span,
+            current_function_span: outer_current_function_span,
         };
         self.enclosing.push(outer);
         self.active_function_span = Some(function.span);
+        self.current_function_span = Some(function.span);
 
         // A class constructor is not callable. `[[Call]]` on one throws before it looks at an
         // argument, which is why this is the first thing in the body rather than part of the
@@ -1383,6 +1392,7 @@ impl super::Compiler {
         self.captured = restored.captured;
         self.cell_everything = restored.cell_everything;
         self.active_function_span = restored.active_function_span;
+        self.current_function_span = restored.current_function_span;
         self.parameter_scope = outer_parameter_scope;
 
         let index = self.functions.len() as u32;

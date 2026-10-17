@@ -353,6 +353,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             static_link,
             pgo_generate,
             pgo_use,
+            semantics,
         } => {
             let node = auto_node(node, &path);
             if workers > 1 {
@@ -378,6 +379,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                             pgo_gen.as_deref(),
                             pgo_u.as_deref(),
                             true,
+                            semantics,
                         )
                     }));
                 }
@@ -409,6 +411,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                     pgo_generate.as_deref(),
                     pgo_use.as_deref(),
                     true,
+                    semantics,
                 )?)
             }
         }
@@ -427,6 +430,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             static_link,
             pgo_generate,
             pgo_use,
+            semantics,
         } => {
             // `--include` links Node-resolved lazy modules, so it implies the adapter.
             let node = if shared {
@@ -450,6 +454,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 pgo_generate.as_deref(),
                 pgo_use.as_deref(),
                 &includes,
+                semantics,
             )?;
             if explain_parallel && !explain {
                 built.text = render::parallel_explanation_only(&built.text);
@@ -714,6 +719,7 @@ mod tests {
             "--include",
             "--out",
             "--profile",
+            "--semantics",
             "--march=native",
             "--max-steps",
             "--workers",

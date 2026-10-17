@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-pub use kiln_hir::{SourceOrigin, Span, StaticSourceProvenance, TypeAnnotation, VariableKind};
+pub use kiln_hir::{
+    Module, SourceOrigin, Span, StaticSourceProvenance, TypeAnnotation, VariableKind,
+};
 pub use kiln_host_abi::HostOp;
 pub use kiln_string::StringUnits;
 
@@ -14,7 +16,8 @@ pub use kiln_string::StringUnits;
 pub const BYTECODE_VERSION: u16 = 18;
 mod source_types;
 pub use source_types::{
-    SOURCE_TYPE_METADATA_VERSION, SourceTypeAnnotations, apply_source_types, source_types_enabled,
+    NativeFieldType, RecordField, RecordLayout, RecordLayoutId, SOURCE_TYPE_METADATA_VERSION,
+    SourceTypeAnnotations, apply_source_types, rebind_program_layouts, source_types_enabled,
 };
 
 /// A constant embedded in a [`Program`].
@@ -702,6 +705,14 @@ impl Program {
             })
         })
     }
+
+    /// Access top-level source type annotations, when attached.
+    #[must_use]
+    pub fn source_types(&self) -> Option<&SourceTypeAnnotations> {
+        self.static_source_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.source_types.as_ref())
+    }
 }
 
 /// One compiled function body.
@@ -782,6 +793,18 @@ pub struct TypeAnnotations {
     pub return_type: Option<TypeAnnotation>,
 }
 
+pub type FunctionTypeAnnotations = TypeAnnotations;
+
+impl TypeAnnotations {
+    pub fn from_source_types(source_types: SourceTypeAnnotations) -> Self {
+        Self {
+            source_types: Some(source_types),
+            parameters: Vec::new(),
+            return_type: None,
+        }
+    }
+}
+
 impl FunctionProto {
     /// The optional name a runtime closure should expose, preserving JavaScript UTF-16 units.
     /// Written names take precedence because they establish a binding; inferred names are
@@ -824,6 +847,23 @@ impl FunctionProto {
                 .and_then(|s| s.return_type)
                 .or(ta.return_type)
         })
+    }
+
+    /// Return the annotated parameter layouts, if any.
+    pub fn parameter_layouts(&self) -> &[Option<RecordLayoutId>] {
+        self.type_annotations
+            .as_ref()
+            .and_then(|ta| ta.source_types.as_ref())
+            .map(|s| s.parameter_layouts.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Return the annotated return layout, if any.
+    pub fn return_layout(&self) -> Option<RecordLayoutId> {
+        self.type_annotations
+            .as_ref()
+            .and_then(|ta| ta.source_types.as_ref())
+            .and_then(|s| s.return_layout)
     }
 }
 

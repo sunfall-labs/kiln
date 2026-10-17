@@ -649,7 +649,7 @@ impl super::Compiler {
                 {
                     // The prototype is set on an object, so the run of pairs written before it
                     // has to become one first -- the same reason an accessor flushes the run.
-                    self.emit_object_segment(&mut pending, accumulating);
+                    self.emit_object_segment(&mut pending, accumulating, span);
                     accumulating = true;
                     self.expression(&property.value);
                     self.code.push(Instruction::SetPrototype);
@@ -669,7 +669,7 @@ impl super::Compiler {
                         && anonymous_function_value(&property.value);
                     if accumulating || named_after_key {
                         let method = property.form == kiln_hir::PropertyForm::Method;
-                        self.emit_object_segment(&mut pending, accumulating);
+                        self.emit_object_segment(&mut pending, accumulating, span);
                         accumulating = true;
                         match &property.key {
                             ObjectKey::Private(name) => self.error(
@@ -735,7 +735,7 @@ impl super::Compiler {
                 }
                 ObjectMember::Spread(source) => {
                     // The first segment becomes the accumulator; later ones merge into it.
-                    self.emit_object_segment(&mut pending, accumulating);
+                    self.emit_object_segment(&mut pending, accumulating, span);
                     accumulating = true;
                     self.expression(source);
                     self.code.push(Instruction::SpreadObject);
@@ -747,7 +747,7 @@ impl super::Compiler {
                 } => {
                     // An accessor is defined on the object rather than pushed as a pair, so the
                     // pending run has to become an object first.
-                    self.emit_object_segment(&mut pending, accumulating);
+                    self.emit_object_segment(&mut pending, accumulating, span);
                     accumulating = true;
                     match key {
                         ObjectKey::Private(name) => self.error(
@@ -781,7 +781,7 @@ impl super::Compiler {
                 }
             }
         }
-        self.emit_object_segment(&mut pending, accumulating);
+        self.emit_object_segment(&mut pending, accumulating, span);
         if key_slot.is_some() {
             self.scopes
                 .pop()
@@ -880,9 +880,14 @@ impl super::Compiler {
     ///
     /// Skipped when the run is empty and something is already accumulating, so `{ ...a, ...b }`
     /// does not build two throwaway objects.
-    pub(super) fn emit_object_segment(&mut self, pending: &mut u32, merge: bool) {
+    pub(super) fn emit_object_segment(&mut self, pending: &mut u32, merge: bool, span: Span) {
         if merge && *pending == 0 {
             return;
+        }
+        let pc = self.code.len() as u32;
+        if span.end > span.start {
+            self.new_object_spans
+                .insert((self.current_function_span, pc), span);
         }
         self.code.push(Instruction::NewObject { count: *pending });
         *pending = 0;

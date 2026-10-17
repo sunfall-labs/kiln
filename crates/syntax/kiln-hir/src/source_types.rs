@@ -1,9 +1,62 @@
 //! Owned results of source checking; these are contracts, never runtime proofs.
-use crate::Span;
+use crate::{Span, TypeAnnotation};
+use std::collections::BTreeMap;
 /// Checker metadata beside a project's sources: the symbolic links among the directories of its
 /// packages, as a JSON object from the absolute path of each link to the absolute path it names.
 /// The project's own `node_modules` holds it, so no module or package can have its path.
 pub const CHECKER_LINKS_FILE: &str = "node_modules/.kiln-links.json";
+
+/// Metadata format identity, included in the versioned bytecode contract.
+pub const SOURCE_TYPE_METADATA_VERSION: u16 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RecordLayoutId(pub u32);
+
+impl std::fmt::Display for RecordLayoutId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NativeFieldType {
+    Number,
+    Int32,
+    Boolean,
+    String,
+    Record(RecordLayoutId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RecordField {
+    pub name: String,
+    pub ty: NativeFieldType,
+    pub readonly: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RecordLayout {
+    pub fields: Vec<RecordField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SourceTypeAnnotations {
+    pub version: u16,
+    pub checker_identity: String,
+    pub parameters: Vec<Option<TypeAnnotation>>,
+    pub return_type: Option<TypeAnnotation>,
+    pub record_layouts: Vec<RecordLayout>,
+    pub parameter_layouts: Vec<Option<RecordLayoutId>>,
+    pub return_layout: Option<RecordLayoutId>,
+    /// Maps authored span start offset (`decl.span.start` or `expr.span.start`) to its `RecordLayoutId`.
+    pub span_layouts: BTreeMap<u32, RecordLayoutId>,
+    /// Maps authored `(span.start, span.end)` to its `RecordLayoutId`.
+    pub exact_span_layouts: BTreeMap<(u32, u32), RecordLayoutId>,
+    /// Maps local slot index (`u32`) in this function/program body to its `RecordLayoutId`.
+    pub local_layouts: BTreeMap<u32, RecordLayoutId>,
+    /// Maps `Instruction::NewObject` bytecode PC (`u32`) in this function/program body to its `RecordLayoutId`.
+    pub new_object_layouts: BTreeMap<u32, RecordLayoutId>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeClass {
@@ -35,7 +88,33 @@ pub struct SourceType {
     pub display: String,
     pub class: TypeClass,
     pub role: TypeRole,
+    pub record_layout: Option<RecordLayoutId>,
 }
+
+impl SourceType {
+    pub fn new(
+        path: String,
+        span: Span,
+        display: String,
+        class: TypeClass,
+        role: TypeRole,
+    ) -> Self {
+        Self {
+            path,
+            span,
+            display,
+            class,
+            role,
+            record_layout: None,
+        }
+    }
+
+    pub const fn with_record_layout(mut self, layout: Option<RecordLayoutId>) -> Self {
+        self.record_layout = layout;
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceDiagnostic {
     pub path: Option<String>,
@@ -57,6 +136,7 @@ pub struct CheckResult {
     /// gap in a script or in a global augmentation can change any file, so it leaves none
     /// complete. Empty when the check produced no program.
     pub files: Vec<(String, bool)>,
+    pub record_layouts: Vec<RecordLayout>,
 }
 
 impl CheckResult {

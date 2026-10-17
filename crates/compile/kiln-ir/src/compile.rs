@@ -5,7 +5,7 @@ use kiln_hir::{
     Literal, LogicalOperator, Module, ModuleRequestKind, ObjectKey, ObjectMember, Pattern,
     PatternKey, SourceGoal, Statement, StatementKind, SwitchCase, UnaryOperator, VariableKind,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Compile owned HIR into stack bytecode.
@@ -678,6 +678,7 @@ struct FunctionState {
     /// Whether every binding of this function is boxed, because a direct `eval` can see them.
     cell_everything: bool,
     active_function_span: Option<kiln_hir::Span>,
+    current_function_span: Option<kiln_hir::Span>,
 }
 
 /// Where a name lives, which decides how it is read and whether it can be read at all.
@@ -1050,6 +1051,9 @@ struct Compiler {
     /// slot keeps that execution independent of compiler scope bookkeeping.
     local_count: u32,
     diagnostics: Vec<CompileDiagnostic>,
+    pub(super) current_function_span: Option<Span>,
+    pub(super) local_spans: BTreeMap<(Option<Span>, u32), Span>,
+    pub(super) new_object_spans: BTreeMap<(Option<Span>, u32), Span>,
 }
 
 mod bindings;
@@ -1075,3 +1079,109 @@ pub use analysis::{
     function_contains_direct_eval, function_contains_new_function, immutable_module_bindings,
     module_contains_direct_eval, module_contains_new_function, mutable_module_bindings,
 };
+
+pub type BodySpanInfo = (
+    BTreeMap<(Option<Span>, u32), Span>,
+    BTreeMap<(Option<Span>, u32), Span>,
+);
+
+/// Collect the source spans of every local variable slot and every `NewObject` instruction
+/// for both top-level code (keyed by `None`) and every function (keyed by `Some(function_span)`).
+pub fn collect_body_spans(module: &Module) -> BodySpanInfo {
+    let mut compiler = Compiler::new(module);
+    if matches!(module.source_goal, SourceGoal::Module) || !module.imports.is_empty() {
+        compiler.strict = true;
+        compiler.module_body = true;
+        for import in module.imports.iter().filter(|import| !import.type_only) {
+            compiler.declare_import(&import.local, import.span);
+        }
+        for (index, export) in module.exports.iter().enumerate() {
+            if export.type_only {
+                continue;
+            }
+            if matches!(
+                export.origin,
+                ExportOrigin::ReExport { .. }
+                    | ExportOrigin::NamespaceReExport { .. }
+                    | ExportOrigin::Star { .. }
+            ) {
+                let local = format!("{REEXPORT_LOCAL_PREFIX}{index}*");
+                compiler.declare_import(&local, export.span);
+            }
+        }
+        for export in &module.exports {
+            match &export.origin {
+                ExportOrigin::Local { local } => {
+                    compiler.captured.insert(local.clone());
+                }
+                ExportOrigin::DefaultExpression => {
+                    compiler
+                        .captured
+                        .insert(kiln_hir::DEFAULT_EXPORT_LOCAL.to_owned());
+                }
+                _ => {}
+            }
+        }
+    } else {
+        compiler.strict = module.strict;
+        compiler.global_var_scope = true;
+        compiler.global_bindings_configurable = false;
+    }
+    compiler.compile_body(module);
+    (compiler.local_spans, compiler.new_object_spans)
+}
+
+/// Collect body spans matching the program's top-level code layout, accounting for whether
+/// the program was compiled with hoisted module body functions or sloppy script statements.
+pub(crate) fn collect_body_spans_for_program(module: &Module, program: &Program) -> BodySpanInfo {
+    let mut compiler = Compiler::new(module);
+    compiler.strict = true;
+    compiler.module_body = true;
+    for import in module.imports.iter().filter(|import| !import.type_only) {
+        compiler.declare_import(&import.local, import.span);
+    }
+    for (index, export) in module.exports.iter().enumerate() {
+        if export.type_only {
+            continue;
+        }
+        if matches!(
+            export.origin,
+            ExportOrigin::ReExport { .. }
+                | ExportOrigin::NamespaceReExport { .. }
+                | ExportOrigin::Star { .. }
+        ) {
+            let local = format!("{REEXPORT_LOCAL_PREFIX}{index}*");
+            compiler.declare_import(&local, export.span);
+        }
+    }
+    for export in &module.exports {
+        match &export.origin {
+            ExportOrigin::Local { local } => {
+                compiler.captured.insert(local.clone());
+            }
+            ExportOrigin::DefaultExpression => {
+                compiler
+                    .captured
+                    .insert(kiln_hir::DEFAULT_EXPORT_LOCAL.to_owned());
+            }
+            _ => {}
+        }
+    }
+    compiler.compile_body(module);
+    let ok = compiler.code.len() == program.code.len()
+        && compiler.new_object_spans.keys().all(|(func_idx, pc)| {
+            if func_idx.is_none() {
+                matches!(
+                    program.code.get(*pc as usize),
+                    Some(Instruction::NewObject { .. } | Instruction::Nop)
+                )
+            } else {
+                true
+            }
+        });
+    if ok {
+        (compiler.local_spans, compiler.new_object_spans)
+    } else {
+        collect_body_spans(module)
+    }
+}

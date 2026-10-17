@@ -8,7 +8,8 @@
 use kiln_db::{FileId, MemoEngine, QueryEngine, Revision};
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
-    Request, ResolutionMap, Response, SourceDigest, SourceView, Stats, StepBudget, SyncId,
+    NativeSemantics, Request, ResolutionMap, Response, SourceDigest, SourceView, Stats, StepBudget,
+    SyncId,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -1365,6 +1366,7 @@ fn handle<E: QueryEngine>(
             static_link,
             pgo_generate,
             pgo_use,
+            semantics,
         } => {
             let prepared = match prepare_native_snapshot(
                 state,
@@ -1394,6 +1396,7 @@ fn handle<E: QueryEngine>(
                         static_link,
                         pgo_gen,
                         pgo_u,
+                        semantics,
                     )
                 }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
@@ -1409,6 +1412,7 @@ fn handle<E: QueryEngine>(
                         static_link,
                         pgo_gen,
                         pgo_u,
+                        semantics,
                     )
                 }),
             }
@@ -1479,6 +1483,7 @@ fn handle<E: QueryEngine>(
             pgo_generate,
             pgo_use,
             stream_output: _,
+            semantics,
         } => {
             let prepared = match prepare_native_snapshot(
                 state,
@@ -1505,6 +1510,7 @@ fn handle<E: QueryEngine>(
                         static_link,
                         pgo_gen,
                         pgo_u,
+                        semantics,
                     )
                 }),
                 PreparedNative::Program(program) => run_without_engine_lock(|| {
@@ -1517,6 +1523,7 @@ fn handle<E: QueryEngine>(
                         static_link,
                         pgo_gen,
                         pgo_u,
+                        semantics,
                     )
                 }),
             }
@@ -1928,6 +1935,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             static_link,
             pgo_gen.clone(),
             pgo_u.clone(),
+            NativeSemantics::Js,
         ),
         PreparedNative::Program(program) => native_build_program(
             program,
@@ -1941,6 +1949,7 @@ fn handle_native_build_at_revision<E: QueryEngine>(
             static_link,
             pgo_gen,
             pgo_u,
+            NativeSemantics::Js,
         ),
     })
     .0;

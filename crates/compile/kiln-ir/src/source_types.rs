@@ -1,19 +1,13 @@
 //! Source contracts annotate bytecode metadata; they never remove runtime guards.
 use crate::{Program, TypeAnnotation, TypeAnnotations};
-use kiln_hir::{
-    Module,
-    source_types::{CheckResult, TypeClass, TypeRole},
+use kiln_hir::Module;
+pub use kiln_hir::source_types::{
+    CheckResult, NativeFieldType, RecordField, RecordLayout, RecordLayoutId,
+    SOURCE_TYPE_METADATA_VERSION, SourceTypeAnnotations, TypeClass, TypeRole,
 };
 use std::collections::BTreeMap;
-/// Metadata format identity, included in the versioned bytecode contract.
-pub const SOURCE_TYPE_METADATA_VERSION: u16 = 1;
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceTypeAnnotations {
-    pub version: u16,
-    pub checker_identity: String,
-    pub parameters: Vec<Option<TypeAnnotation>>,
-    pub return_type: Option<TypeAnnotation>,
-}
+use std::sync::Arc;
+
 fn coarse(class: &TypeClass) -> Option<TypeAnnotation> {
     match class {
         TypeClass::Number => Some(TypeAnnotation::Number),
@@ -67,20 +61,42 @@ pub fn apply_source_types(
         })
         .collect();
     let mut parameter_types = BTreeMap::new();
+    let mut parameter_types_by_end = BTreeMap::new();
+    let mut parameter_layouts = BTreeMap::new();
+    let mut parameter_layouts_by_end = BTreeMap::new();
     let mut return_types = BTreeMap::new();
+    let mut return_layouts = BTreeMap::new();
+    let mut span_layouts = BTreeMap::new();
+    let mut exact_span_layouts = BTreeMap::new();
+
     for fact in checked.types.iter().filter(|fact| fact.path == path) {
         match fact.role {
             TypeRole::Parameter => {
-                parameter_types
-                    .entry(fact.span)
-                    .or_insert_with(|| coarse(&fact.class));
+                let coarse_type = coarse(&fact.class);
+                parameter_types.entry(fact.span).or_insert(coarse_type);
+                parameter_types_by_end
+                    .entry(fact.span.end)
+                    .or_insert(coarse_type);
+                if let Some(layout) = fact.record_layout {
+                    parameter_layouts.entry(fact.span).or_insert(layout);
+                    parameter_layouts_by_end
+                        .entry(fact.span.end)
+                        .or_insert(layout);
+                }
             }
             TypeRole::Return => {
                 return_types
                     .entry(fact.span.start)
                     .or_insert_with(|| coarse(&fact.class));
+                if let Some(layout) = fact.record_layout {
+                    return_layouts.entry(fact.span.start).or_insert(layout);
+                }
             }
             _ => {}
+        }
+        if let Some(layout) = fact.record_layout {
+            span_layouts.insert(fact.span.start, layout);
+            exact_span_layouts.insert((fact.span.start, fact.span.end), layout);
         }
     }
     for proto in &mut program.functions {
@@ -114,21 +130,56 @@ pub fn apply_source_types(
                     .and_then(|end| signature_ends.get(&end).copied())
             })
         };
-        let Some(signature) = signature else {
-            continue;
-        };
-        let parameters = signature
-            .signature
-            .parameters
-            .iter()
-            .map(|parameter| parameter_types.get(&parameter.span).copied().flatten())
-            .collect::<Vec<_>>();
-        let return_type = return_types
-            .get(&signature.owner_span.start)
-            .or_else(|| authored_start.and_then(|start| return_types.get(&start)))
-            .copied()
-            .flatten();
-        if parameters.iter().any(Option::is_some) || return_type.is_some() {
+        let (parameters, proto_parameter_layouts, return_type, proto_return_layout) =
+            if let Some(signature) = signature {
+                let parameters = signature
+                    .signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| {
+                        parameter_types
+                            .get(&parameter.span)
+                            .copied()
+                            .or_else(|| parameter_types_by_end.get(&parameter.span.end).copied())
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>();
+                let proto_parameter_layouts = signature
+                    .signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| {
+                        parameter_layouts
+                            .get(&parameter.span)
+                            .copied()
+                            .or_else(|| parameter_layouts_by_end.get(&parameter.span.end).copied())
+                    })
+                    .collect::<Vec<_>>();
+                let return_type = return_types
+                    .get(&signature.owner_span.start)
+                    .or_else(|| authored_start.and_then(|start| return_types.get(&start)))
+                    .copied()
+                    .flatten();
+                let proto_return_layout = return_layouts
+                    .get(&signature.owner_span.start)
+                    .or_else(|| authored_start.and_then(|start| return_layouts.get(&start)))
+                    .copied();
+                (
+                    parameters,
+                    proto_parameter_layouts,
+                    return_type,
+                    proto_return_layout,
+                )
+            } else {
+                (Vec::new(), Vec::new(), None, None)
+            };
+        if parameters.iter().any(Option::is_some)
+            || return_type.is_some()
+            || proto_parameter_layouts.iter().any(Option::is_some)
+            || proto_return_layout.is_some()
+            || !span_layouts.is_empty()
+            || !checked.record_layouts.is_empty()
+        {
             proto
                 .type_annotations
                 .get_or_insert_with(TypeAnnotations::default)
@@ -137,7 +188,139 @@ pub fn apply_source_types(
                 checker_identity: checker_identity.into(),
                 parameters,
                 return_type,
+                record_layouts: checked.record_layouts.clone(),
+                parameter_layouts: proto_parameter_layouts,
+                return_layout: proto_return_layout,
+                span_layouts: span_layouts.clone(),
+                exact_span_layouts: exact_span_layouts.clone(),
+                local_layouts: BTreeMap::new(),
+                new_object_layouts: BTreeMap::new(),
             });
+        }
+    }
+
+    if !checked.record_layouts.is_empty() || !span_layouts.is_empty() {
+        let top_annotations = SourceTypeAnnotations {
+            version: SOURCE_TYPE_METADATA_VERSION,
+            checker_identity: checker_identity.into(),
+            parameters: Vec::new(),
+            return_type: None,
+            record_layouts: checked.record_layouts.clone(),
+            parameter_layouts: Vec::new(),
+            return_layout: None,
+            span_layouts: span_layouts.clone(),
+            exact_span_layouts: exact_span_layouts.clone(),
+            local_layouts: BTreeMap::new(),
+            new_object_layouts: BTreeMap::new(),
+        };
+        if let Some(provenance) = &mut program.static_source_provenance {
+            Arc::make_mut(provenance).source_types = Some(top_annotations);
+        } else {
+            program.static_source_provenance = Some(Arc::new(kiln_hir::StaticSourceProvenance {
+                original_path: path.into(),
+                original_source: module.source.clone(),
+                original_type: kiln_hir::StaticSourceType {
+                    goal: module.source_goal,
+                    commonjs: false,
+                    jsx: false,
+                },
+                transform_fingerprint: "".into(),
+                identity: "".into(),
+                authored_value_imports: Arc::new([]),
+                generated_helper_imports: Arc::new([]),
+                authored_internal_helper_imports: Arc::new([]),
+                source_map: Arc::new([]),
+                source_types: Some(top_annotations),
+            }));
+        }
+    }
+
+    rebind_program_layouts(module, program);
+}
+
+/// Rebind local slot layouts and new object layouts on an existing program
+/// after compilation or reparse, using the module's HIR body spans.
+pub fn rebind_program_layouts(module: &Module, program: &mut Program) {
+    let (local_spans, new_object_spans) =
+        crate::compile::collect_body_spans_for_program(module, program);
+    let lookup_span_layout =
+        |source: &SourceTypeAnnotations, span: kiln_hir::Span| -> Option<RecordLayoutId> {
+            let orig_start = module
+                .static_source_provenance
+                .as_deref()
+                .and_then(|prov| prov.original_offset(span.start));
+            let orig_end = module
+                .static_source_provenance
+                .as_deref()
+                .and_then(|prov| prov.original_offset(span.end));
+            if let (Some(s), Some(e)) = (orig_start, orig_end)
+                && let Some(&layout) = source.exact_span_layouts.get(&(s, e))
+            {
+                return Some(layout);
+            }
+            if let Some(&layout) = source.exact_span_layouts.get(&(span.start, span.end)) {
+                return Some(layout);
+            }
+            if let Some(s) = orig_start
+                && let Some(&layout) = source.span_layouts.get(&s)
+            {
+                return Some(layout);
+            }
+            source.span_layouts.get(&span.start).copied()
+        };
+
+    if let Some(provenance) = &mut program.static_source_provenance {
+        let prov = Arc::make_mut(provenance);
+        if let Some(source) = &mut prov.source_types {
+            let mut top_local_layouts = BTreeMap::new();
+            for (&(fn_span, slot), &span) in &local_spans {
+                if fn_span.is_none()
+                    && let Some(layout) = lookup_span_layout(source, span)
+                {
+                    top_local_layouts.insert(slot, layout);
+                }
+            }
+            let mut top_new_object_layouts = BTreeMap::new();
+            for (&(fn_span, pc), &span) in &new_object_spans {
+                if fn_span.is_none()
+                    && let Some(layout) = lookup_span_layout(source, span)
+                {
+                    top_new_object_layouts.insert(pc, layout);
+                }
+            }
+            source.local_layouts = top_local_layouts;
+            source.new_object_layouts = top_new_object_layouts;
+        }
+    }
+
+    for proto in &mut program.functions {
+        let func_span = Some(proto.span);
+        if let Some(annotations) = &mut proto.type_annotations {
+            if let Some(source) = &mut annotations.source_types {
+                let mut local_layouts = BTreeMap::new();
+                for (slot, param_layout) in source.parameter_layouts.iter().enumerate() {
+                    if let Some(id) = param_layout {
+                        local_layouts.insert(slot as u32, *id);
+                    }
+                }
+                for (&(fn_span, slot), &span) in &local_spans {
+                    if fn_span == func_span
+                        && let Some(layout) = lookup_span_layout(source, span)
+                    {
+                        local_layouts.insert(slot, layout);
+                    }
+                }
+                let mut new_object_layouts = BTreeMap::new();
+                for (&(fn_span, pc), &span) in &new_object_spans {
+                    if fn_span == func_span
+                        && let Some(layout) = lookup_span_layout(source, span)
+                    {
+                        new_object_layouts.insert(pc, layout);
+                    }
+                }
+                source.local_layouts = local_layouts;
+                source.new_object_layouts = new_object_layouts;
+            }
         }
     }
 }

@@ -158,7 +158,10 @@ impl Default for CheckOptions {
         }
     }
 }
-pub use kiln_hir::source_types::{CheckResult, SourceDiagnostic, SourceType, TypeClass, TypeRole};
+pub use kiln_hir::source_types::{
+    CheckResult, NativeFieldType, RecordField, RecordLayout, RecordLayoutId, SourceDiagnostic,
+    SourceType, TypeClass, TypeRole,
+};
 struct SnapshotHost<'a> {
     snapshot: &'a SourceSnapshot,
     unsupported: Mutex<Vec<SourceDiagnostic>>,
@@ -887,6 +890,7 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
         types: Vec<SourceType>,
         complete_files: Vec<(String, bool)>,
         ran_out: bool,
+        record_layouts: Vec<RecordLayout>,
     }
     let read: Mutex<Read> = Mutex::default();
     let checked = |program: &Program<'_>, report: &crate::driver::Report| {
@@ -914,7 +918,8 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
             })
             .map(|&(id, _)| id)
             .collect();
-        let (types, facts_ran_out) = source_facts(program, &sources, options, &host);
+        let (types, record_layouts, facts_ran_out) =
+            source_facts(program, &sources, options, &host);
         ran_out_in.extend(facts_ran_out);
         let early = std::mem::take(&mut *host.early.lock().unwrap());
         let mut unsupported = host.unsupported.lock().unwrap();
@@ -930,6 +935,7 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
             types,
             complete_files: complete,
             ran_out: !ran_out_in.is_empty(),
+            record_layouts,
         };
     };
     let request = crate::driver::Request {
@@ -943,11 +949,13 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
         types,
         complete_files,
         ran_out,
+        record_layouts,
     } = read.into_inner().unwrap();
     let mut result = CheckResult {
         checker_identity: format!("{}:{options:?}", crate::CHECKER_VERSION),
         types,
         files: complete_files,
+        record_layouts,
         ..Default::default()
     };
     // The embedded declarations (TypeScript's libraries, kiln's, @types/node) are pinned inputs a
@@ -1016,14 +1024,119 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
     result
 }
 
-/// The facts of `sources` that `options` selects, and the files whose facts are incomplete
-/// because the stack ran out.
+#[derive(Default)]
+pub(crate) struct RecordLayoutTable {
+    pub layouts: Vec<RecordLayout>,
+    pub by_layout: std::collections::HashMap<RecordLayout, RecordLayoutId>,
+    pub visiting: std::collections::HashSet<crate::engine::types::TypeId>,
+}
+
+impl RecordLayoutTable {
+    pub fn intern(&mut self, layout: RecordLayout) -> RecordLayoutId {
+        if let Some(&id) = self.by_layout.get(&layout) {
+            return id;
+        }
+        let id = RecordLayoutId(self.layouts.len() as u32);
+        self.by_layout.insert(layout.clone(), id);
+        self.layouts.push(layout);
+        id
+    }
+}
+
+fn resolve_record_layout(
+    checker: &mut crate::engine::check::Checker<'_, '_>,
+    table: &mut RecordLayoutTable,
+    ty: crate::engine::types::TypeId,
+) -> Option<RecordLayoutId> {
+    if checker.is_any(ty)
+        || checker.is_nullish(ty)
+        || checker.is_array(ty)
+        || checker.is_tuple(ty)
+        || checker.is_number_like(ty)
+        || checker.is_string_like(ty)
+        || checker.is_boolean(ty)
+        || checker.is_boolean_like(ty)
+        || checker.is_bigint_like(ty)
+        || checker.is_symbol_like(ty)
+    {
+        return None;
+    }
+    if !table.visiting.insert(ty) {
+        return None;
+    }
+    let layout = extract_record_layout(checker, table, ty);
+    table.visiting.remove(&ty);
+    layout
+}
+
+fn extract_record_layout(
+    checker: &mut crate::engine::check::Checker<'_, '_>,
+    table: &mut RecordLayoutTable,
+    ty: crate::engine::types::TypeId,
+) -> Option<RecordLayoutId> {
+    let members = checker.members(ty)?;
+    let shape = members.shape();
+
+    if shape.props.is_empty()
+        || !shape.call.is_empty()
+        || !shape.construct.is_empty()
+        || !shape.index.is_empty()
+    {
+        return None;
+    }
+
+    use crate::engine::types::PropFlags;
+
+    let mut prop_entries = Vec::with_capacity(shape.props.len());
+    for prop in shape.props.iter() {
+        if prop.flags.contains(PropFlags::METHOD)
+            || prop.flags.contains(PropFlags::ACCESSOR)
+            || prop.flags.contains(PropFlags::OPTIONAL)
+        {
+            return None;
+        }
+        let name_bytes = checker.atoms().bytes(prop.name);
+        if name_bytes.starts_with(b"__") {
+            return None;
+        }
+        let name = String::from_utf8_lossy(name_bytes).into_owned();
+        let readonly = prop.flags.contains(PropFlags::READONLY);
+        let prop_ty = checker.type_of_prop(prop, members.mapper);
+        prop_entries.push((name, readonly, prop_ty));
+    }
+
+    let mut fields = Vec::with_capacity(prop_entries.len());
+    for (name, readonly, prop_ty) in prop_entries {
+        let field_ty = if checker.is_number_like(prop_ty) {
+            NativeFieldType::Number
+        } else if checker.is_boolean(prop_ty) || checker.is_boolean_like(prop_ty) {
+            NativeFieldType::Boolean
+        } else if checker.is_string_like(prop_ty) {
+            NativeFieldType::String
+        } else if let Some(nested_id) = resolve_record_layout(checker, table, prop_ty) {
+            NativeFieldType::Record(nested_id)
+        } else {
+            return None;
+        };
+        fields.push(RecordField {
+            name,
+            ty: field_ty,
+            readonly,
+        });
+    }
+
+    fields.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(table.intern(RecordLayout { fields }))
+}
+
+/// The facts of `sources` that `options` selects, the canonical record layouts, and the files
+/// whose facts are incomplete because the stack ran out.
 fn source_facts(
     program: &Program<'_>,
     sources: &[(FileId, String)],
     options: &CheckOptions,
     host: &SnapshotHost<'_>,
-) -> (Vec<SourceType>, Vec<FileId>) {
+) -> (Vec<SourceType>, Vec<RecordLayout>, Vec<FileId>) {
     let files = program.files;
     // A declaration file compiles to nothing, so its facts would go unread.
     let fact_sources: Vec<usize> = if options.facts == FactSelection::None {
@@ -1033,7 +1146,7 @@ fn source_facts(
             .filter(|&index| files.module(sources[index].0).hir.kind != hir::FileKind::Declaration)
             .collect()
     };
-    let facts: Vec<Mutex<(Vec<SourceType>, bool)>> =
+    let facts: Vec<Mutex<(Vec<SourceType>, Vec<RecordLayout>, bool)>> =
         fact_sources.iter().map(|_| Mutex::default()).collect();
     host.parallel(fact_sources.len(), &|index| {
         let (id, path) = (
@@ -1044,30 +1157,33 @@ fn source_facts(
         let mut checker = program.checker();
         checker.begin_stack_budget();
         let mut types = Vec::new();
+        let mut table = RecordLayoutTable::default();
         if options.facts == FactSelection::All {
-            for (index, e) in module.hir.exprs.iter().enumerate() {
-                let ty = checker.type_of_expr(id, hir::ExprId(index as u32));
+            for (expr_index, e) in module.hir.exprs.iter().enumerate() {
+                let ty = checker.type_of_expr(id, hir::ExprId(expr_index as u32));
                 types.push(export_type(
                     &mut checker,
                     path,
                     Span::new(e.pos, e.end),
                     TypeRole::Expression,
                     ty,
+                    &mut table,
                 ));
             }
         }
-        for (index, p) in module.hir.params.iter().enumerate() {
-            let ty = checker.type_of_param(id, hir::ParamId(index as u32));
+        for (param_index, p) in module.hir.params.iter().enumerate() {
+            let ty = checker.type_of_param(id, hir::ParamId(param_index as u32));
             types.push(export_type(
                 &mut checker,
                 path,
                 Span::new(p.loc.pos, p.loc.end),
                 TypeRole::Parameter,
                 ty,
+                &mut table,
             ));
         }
-        for (index, f) in module.hir.fns.iter().enumerate() {
-            let ty = checker.return_type_of_fn(id, hir::FnId(index as u32));
+        for (fn_index, f) in module.hir.fns.iter().enumerate() {
+            let ty = checker.return_type_of_fn(id, hir::FnId(fn_index as u32));
             types.push(export_type(
                 &mut checker,
                 path,
@@ -1081,23 +1197,93 @@ fn source_facts(
                 ),
                 TypeRole::Return,
                 ty,
+                &mut table,
             ));
         }
+        for (var_index, decl) in module.hir.var_decls.iter().enumerate() {
+            let ty = checker.type_of_var_decl(id, hir::VarDeclId(var_index as u32));
+            let start = if decl.pat.is_some() {
+                module.hir[decl.pat].pos
+            } else {
+                decl.loc.pos
+            };
+            let st = export_type(
+                &mut checker,
+                path,
+                Span::new(start, decl.loc.end),
+                TypeRole::Annotation,
+                ty,
+                &mut table,
+            );
+            if st.record_layout.is_some() || options.facts == FactSelection::All {
+                types.push(st);
+            }
+        }
+        for (expr_index, e) in module.hir.exprs.iter().enumerate() {
+            if matches!(e.kind, hir::ExprKind::Object(_)) {
+                let ty = checker.type_of_expr(id, hir::ExprId(expr_index as u32));
+                let st = export_type(
+                    &mut checker,
+                    path,
+                    Span::new(e.pos, e.end),
+                    TypeRole::Annotation,
+                    ty,
+                    &mut table,
+                );
+                if st.record_layout.is_some() {
+                    types.push(st);
+                }
+            }
+        }
         let ran_out = checker.take_ran_out_of_stack();
-        *facts[index].lock().unwrap() = (types, ran_out);
+        *facts[index].lock().unwrap() = (types, table.layouts, ran_out);
     });
+    let mut canonical_table = RecordLayoutTable::default();
     let (mut all, mut ran_out_in) = (Vec::new(), Vec::new());
     for (fact, &(id, _)) in facts
         .into_iter()
         .zip(fact_sources.iter().map(|&index| &sources[index]))
     {
-        let (types, fact_ran_out) = fact.into_inner().unwrap();
-        all.extend(types);
+        let (mut types, worker_layouts, fact_ran_out) = fact.into_inner().unwrap();
         if fact_ran_out {
             ran_out_in.push(id);
         }
+        if worker_layouts.is_empty() {
+            all.extend(types);
+            continue;
+        }
+        let mut id_map: Vec<RecordLayoutId> = Vec::with_capacity(worker_layouts.len());
+        for local_layout in &worker_layouts {
+            let remapped_fields: Vec<RecordField> = local_layout
+                .fields
+                .iter()
+                .map(|f| {
+                    let ty = match f.ty {
+                        NativeFieldType::Record(child_id) => {
+                            NativeFieldType::Record(id_map[child_id.0 as usize])
+                        }
+                        other => other,
+                    };
+                    RecordField {
+                        name: f.name.clone(),
+                        ty,
+                        readonly: f.readonly,
+                    }
+                })
+                .collect();
+            let canonical_id = canonical_table.intern(RecordLayout {
+                fields: remapped_fields,
+            });
+            id_map.push(canonical_id);
+        }
+        for ty in &mut types {
+            if let Some(local_id) = ty.record_layout {
+                ty.record_layout = Some(id_map[local_id.0 as usize]);
+            }
+        }
+        all.extend(types);
     }
-    (all, ran_out_in)
+    (all, canonical_table.layouts, ran_out_in)
 }
 
 fn export_type(
@@ -1106,6 +1292,7 @@ fn export_type(
     span: Span,
     role: TypeRole,
     ty: crate::engine::types::TypeId,
+    table: &mut RecordLayoutTable,
 ) -> SourceType {
     let display = String::from_utf8_lossy(&checker.type_to_string(ty)).into_owned();
     let class = if checker.is_any(ty) {
@@ -1131,11 +1318,17 @@ fn export_type(
     } else {
         TypeClass::Composite
     };
+    let record_layout = if class == TypeClass::Composite {
+        resolve_record_layout(checker, table, ty)
+    } else {
+        None
+    };
     SourceType {
         path: path.to_owned(),
         span,
         display,
         class,
         role,
+        record_layout,
     }
 }

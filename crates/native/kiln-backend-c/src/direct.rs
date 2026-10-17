@@ -104,6 +104,8 @@ pub struct TypedNeeds {
 /// How one body's calls are emitted.
 #[derive(Default, Clone, Debug)]
 pub struct CallPlan {
+    /// Native semantics configuration (standard vs native).
+    pub semantics: crate::NativeSemantics,
     /// Use terse generated operations and declarations.
     pub compact: bool,
     /// Whether to compile static regex literals into direct C matchers.
@@ -252,6 +254,7 @@ impl DirectPlan {
             generic_only,
             parallel_in_generic,
             speculate,
+            crate::NativeSemantics::Js,
             loop_profile_override,
             &[],
         )
@@ -267,6 +270,7 @@ impl DirectPlan {
         generic_only: bool,
         parallel_in_generic: bool,
         speculate: Option<bool>,
+        semantics: crate::NativeSemantics,
         loop_profile_override: Option<Arc<LoopCallProfile>>,
         argument_length_only: &[bool],
     ) -> Self {
@@ -422,7 +426,7 @@ impl DirectPlan {
             })
             .collect();
         let has_open_world = program.has_direct_eval() || program.has_dynamic_import();
-        let intrinsics: Vec<HashMap<ValueId, Proven>> = if has_open_world {
+        let mut intrinsics: Vec<HashMap<ValueId, Proven>> = if has_open_world {
             vec![HashMap::new(); graphs.len()]
         } else {
             graphs
@@ -430,10 +434,30 @@ impl DirectPlan {
                 .map(|g| intrinsic_results(g, program))
                 .collect()
         };
-        let entry_intrinsics = if has_open_world {
+        let mut entry_intrinsics = if has_open_world {
             HashMap::new()
         } else {
             intrinsic_results(entry, program)
+        };
+        let mut function_record_values = Vec::with_capacity(graphs.len());
+        if semantics == crate::NativeSemantics::Native {
+            for (i, g) in graphs.iter().enumerate() {
+                let (rec_vals, rec_proven) =
+                    record_values_and_field_proven(g, &program.functions[i], program);
+                intrinsics[i].extend(rec_proven);
+                function_record_values.push(rec_vals);
+            }
+        } else {
+            function_record_values.resize_with(graphs.len(), HashSet::new);
+        }
+        let entry_record_values = if semantics == crate::NativeSemantics::Native {
+            let entry_p = crate::entry_proto(program);
+            let (rec_vals, entry_rec_proven) =
+                record_values_and_field_proven(entry, &entry_p, program);
+            entry_intrinsics.extend(entry_rec_proven);
+            rec_vals
+        } else {
+            HashSet::new()
         };
         let params: Vec<u32> = program
             .functions
@@ -498,7 +522,17 @@ impl DirectPlan {
                     .initial_locals
                     .iter()
                     .take(params[i] as usize)
-                    .map(|&v| (v, Proven::Number))
+                    .enumerate()
+                    .filter(|(k, _)| {
+                        semantics != crate::NativeSemantics::Native
+                            || !program.functions[i]
+                                .parameter_layouts()
+                                .get(*k)
+                                .copied()
+                                .flatten()
+                                .is_some()
+                    })
+                    .map(|(_, &v)| (v, Proven::Number))
                     .collect();
                 let (this_cols, _) = this_columns(graph);
                 for (vid, _) in this_cols {
@@ -514,6 +548,8 @@ impl DirectPlan {
                     &typed_returns,
                     &params,
                     &length_bounds[i],
+                    program,
+                    &function_record_values[i],
                 );
                 // Every return a number. A block nothing reaches -- the `return undefined` the
                 // compiler leaves after a body's last statement -- returns nothing.
@@ -622,6 +658,8 @@ impl DirectPlan {
                     &typed_returns,
                     &params,
                     &length_bounds[i],
+                    program,
+                    &function_record_values[i],
                 );
                 let Some(boolean_result) = crate::parallel::parallel_result(g, &proven) else {
                     return Err(Refusal::new(Reason::ReturnsNonNumber));
@@ -651,7 +689,8 @@ impl DirectPlan {
                         known: &KnownValues,
                         sites: &[Site],
                         seeds: HashMap<ValueId, Proven>,
-                        lb: &HashSet<ValueId>|
+                        lb: &HashSet<ValueId>,
+                        rec_vals: &HashSet<ValueId>|
          -> CallPlan {
             let (proven, typed_sites) = settle(
                 graph,
@@ -661,8 +700,11 @@ impl DirectPlan {
                 &typed_returns,
                 &params,
                 lb,
+                program,
+                rec_vals,
             );
             CallPlan {
+                semantics,
                 compact,
                 compile_regex,
                 generic_only,
@@ -719,6 +761,7 @@ impl DirectPlan {
                     &function_sites[i],
                     intrinsics[i].clone(),
                     &length_bounds[i],
+                    &function_record_values[i],
                 )
             })
             .collect();
@@ -733,7 +776,20 @@ impl DirectPlan {
                     .initial_locals
                     .iter()
                     .take(params[i] as usize)
-                    .map(|&v| (v, Proven::Number))
+                    .enumerate()
+                    .filter_map(|(k, &v)| {
+                        if semantics == crate::NativeSemantics::Native
+                            && program.functions[i]
+                                .parameter_layouts()
+                                .get(k)
+                                .and_then(|p| *p)
+                                .is_some()
+                        {
+                            None
+                        } else {
+                            Some((v, Proven::Number))
+                        }
+                    })
                     .collect();
                 let (this_cols, _) = this_columns(g);
                 for (vid, _) in this_cols {
@@ -746,6 +802,7 @@ impl DirectPlan {
                     &function_sites[i],
                     seeds,
                     &length_bounds[i],
+                    &function_record_values[i],
                 ))
             })
             .collect();
@@ -760,6 +817,7 @@ impl DirectPlan {
                     &function_sites[i],
                     seeds,
                     &length_bounds[i],
+                    &function_record_values[i],
                 ))
             })
             .collect();
@@ -769,6 +827,7 @@ impl DirectPlan {
             &entry_sites,
             entry_intrinsics,
             &entry_length_bounds,
+            &entry_record_values,
         );
 
         // A method call reaches a typed entry by name when the callee the cache remembers is
@@ -1161,6 +1220,7 @@ impl DirectPlan {
             seeds
         };
         let mut typed_returns = vec![false; count];
+        let empty_record_values = HashSet::new();
         for (&t, cb) in &callbacks {
             let i = t as usize;
             let (proven, _) = settle(
@@ -1171,6 +1231,8 @@ impl DirectPlan {
                 &no_returns,
                 &params,
                 &cb.length_bounds,
+                program,
+                &empty_record_values,
             );
             typed_returns[i] = returns_number(&graphs[i], &proven);
         }
@@ -1226,6 +1288,8 @@ impl DirectPlan {
                     &typed_returns,
                     &params,
                     &cb.length_bounds,
+                    program,
+                    &empty_record_values,
                 );
                 let Some(boolean_result) = crate::parallel::parallel_result(&graphs[i], &proven)
                 else {
@@ -1259,6 +1323,8 @@ impl DirectPlan {
                 &typed_returns,
                 &params,
                 &cb.length_bounds,
+                program,
+                &empty_record_values,
             );
             CallPlan {
                 generic_only: false,
@@ -1429,6 +1495,18 @@ impl DirectPlan {
             .chain(std::iter::once(&mut self.entry))
         {
             plan.should_chunk = should_chunk;
+        }
+    }
+
+    pub fn set_semantics(&mut self, semantics: crate::NativeSemantics) {
+        for plan in self
+            .functions
+            .iter_mut()
+            .chain(self.typed.iter_mut().flatten())
+            .chain(self.parallel.iter_mut().flatten())
+            .chain(std::iter::once(&mut self.entry))
+        {
+            plan.semantics = semantics;
         }
     }
 
@@ -3146,6 +3224,138 @@ pub(crate) fn intrinsic_results(
         .collect()
 }
 
+/// Walks the function graph and source type metadata to identify record-typed SSA values
+/// and proven types of their property reads.
+pub(crate) fn record_values_and_field_proven(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+) -> (HashSet<ValueId>, HashMap<ValueId, Proven>) {
+    let all_layouts = crate::collect_program_record_layouts(program);
+    if all_layouts.is_empty() {
+        return (HashSet::new(), HashMap::new());
+    }
+    let (empty_local, empty_obj, empty_param) = (
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+        Vec::new(),
+    );
+    let (local_layouts, new_object_layouts, parameter_layouts) = if let Some(ta) = proto
+        .type_annotations
+        .as_ref()
+        .and_then(|t| t.source_types.as_ref())
+    {
+        (
+            &ta.local_layouts,
+            &ta.new_object_layouts,
+            &ta.parameter_layouts,
+        )
+    } else if let Some(st) = program.source_types() {
+        (
+            &st.local_layouts,
+            &st.new_object_layouts,
+            &st.parameter_layouts,
+        )
+    } else {
+        (&empty_local, &empty_obj, &empty_param)
+    };
+
+    let mut record_value_layouts: HashMap<ValueId, kiln_ir::RecordLayoutId> = HashMap::new();
+    let mut field_proven: HashMap<ValueId, Proven> = HashMap::new();
+
+    for (slot, param_layout) in parameter_layouts.iter().enumerate() {
+        if let Some(lid) = param_layout {
+            if let Some(&vid) = graph.initial_locals.get(slot) {
+                record_value_layouts.insert(vid, *lid);
+            }
+        }
+    }
+
+    loop {
+        let before_count = record_value_layouts.len();
+        for block in &graph.blocks {
+            for (vid, op) in &block.operations {
+                match op {
+                    GraphOp::NewObject { .. } => {
+                        if let Some(origin) = graph.origins.get(vid) {
+                            if let Some(&lid) = new_object_layouts.get(&origin.pc) {
+                                record_value_layouts.insert(*vid, lid);
+                            }
+                        }
+                    }
+                    GraphOp::LoadLocal(slot) => {
+                        if let Some(&lid) = local_layouts.get(slot) {
+                            record_value_layouts.insert(*vid, lid);
+                        }
+                    }
+                    GraphOp::StoreLocal { slot, value } => {
+                        if let Some(&lid) = record_value_layouts
+                            .get(value)
+                            .or_else(|| local_layouts.get(slot))
+                        {
+                            record_value_layouts.insert(*vid, lid);
+                        }
+                    }
+                    GraphOp::CheckTdz { value, .. } => {
+                        if let Some(&lid) = record_value_layouts.get(value) {
+                            record_value_layouts.insert(*vid, lid);
+                        }
+                    }
+                    GraphOp::Phi { inputs } => {
+                        if !record_value_layouts.contains_key(vid) {
+                            if let Some(lid) = inputs
+                                .iter()
+                                .find_map(|(_, in_vid)| record_value_layouts.get(in_vid).copied())
+                            {
+                                record_value_layouts.insert(*vid, lid);
+                            }
+                        }
+                    }
+                    GraphOp::GetProperty { object, name, .. } => {
+                        if let Some(&obj_lid) = record_value_layouts.get(object) {
+                            if let Some(layout) = all_layouts.get(obj_lid.0 as usize) {
+                                if let Some(Constant::String(s)) =
+                                    program.constants.get(*name as usize)
+                                {
+                                    if let Ok(prop_name) = s.to_scalar_string() {
+                                        if let Some(field) =
+                                            layout.fields.iter().find(|f| f.name == prop_name)
+                                        {
+                                            match field.ty {
+                                                kiln_ir::NativeFieldType::Number => {
+                                                    field_proven.insert(*vid, Proven::Number);
+                                                }
+                                                kiln_ir::NativeFieldType::Int32 => {
+                                                    field_proven.insert(*vid, Proven::Int);
+                                                }
+                                                kiln_ir::NativeFieldType::Boolean => {
+                                                    field_proven.insert(*vid, Proven::Boolean);
+                                                }
+                                                kiln_ir::NativeFieldType::String => {
+                                                    field_proven.insert(*vid, Proven::String);
+                                                }
+                                                kiln_ir::NativeFieldType::Record(sub_lid) => {
+                                                    record_value_layouts.insert(*vid, sub_lid);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if record_value_layouts.len() == before_count {
+            break;
+        }
+    }
+    let record_values = record_value_layouts.into_keys().collect();
+    (record_values, field_proven)
+}
+
 /// The proven types of one body under `seeds`, with the typed sites settled: a site is typed
 /// when every argument is proven a number, and its result is a number when the callee's typed
 /// entry returns one. Assuming both optimistically and dropping what fails converges, because
@@ -3158,6 +3368,8 @@ fn settle(
     typed_returns: &[bool],
     params: &[u32],
     length_bounds: &HashSet<ValueId>,
+    program: &Program,
+    record_values: &HashSet<ValueId>,
 ) -> (HashMap<ValueId, Proven>, HashSet<ValueId>) {
     let mut typed_sites: HashSet<ValueId> = sites
         .iter()
@@ -3180,9 +3392,20 @@ fn settle(
                 .iter()
                 .find(|s| s.result == *result)
                 .expect("a settled site");
-            site.args
-                .iter()
-                .all(|a| proven.get(a).is_some_and(|k| k.is_number()))
+            let callee_proto = &program.functions[site.target as usize];
+            let callee_param_layouts = callee_proto.parameter_layouts();
+            site.args.iter().enumerate().all(|(arg_idx, a)| {
+                if callee_param_layouts
+                    .get(arg_idx)
+                    .copied()
+                    .flatten()
+                    .is_some()
+                {
+                    record_values.contains(a)
+                } else {
+                    proven.get(a).is_some_and(|k| k.is_number())
+                }
+            })
         });
         if typed_sites.len() == before {
             return (proven, typed_sites);

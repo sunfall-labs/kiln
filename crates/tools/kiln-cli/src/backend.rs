@@ -6,9 +6,9 @@
 
 use kiln_proto::{
     CacheGcSummary, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    NativeSharedLibrarySummary, OutputStream, ProjectSummary, RecordedWorkers, Request,
-    ResolutionMap, Response, RunSummary, SourceHash, SourceView, Stats, StepBudget, SyncId,
-    TestMode, TestSummary,
+    NativeSemantics, NativeSharedLibrarySummary, OutputStream, ProjectSummary, RecordedWorkers,
+    Request, ResolutionMap, Response, RunSummary, SourceHash, SourceView, Stats, StepBudget,
+    SyncId, TestMode, TestSummary,
 };
 
 use crate::error::{Error, Result};
@@ -271,6 +271,7 @@ pub trait Backend: Send {
         pgo_generate: Option<String>,
         pgo_use: Option<String>,
         source_view: SourceView,
+        semantics: NativeSemantics,
     ) -> Result<SourceResponse<NativeBuildSummary>> {
         match self.request(Request::NativeBuild {
             path,
@@ -285,6 +286,7 @@ pub trait Backend: Send {
             pgo_generate,
             pgo_use,
             source_view,
+            semantics,
         })? {
             Response::NativeBuilt(summary) => Ok(SourceResponse::Ready(summary)),
             Response::StaleSourceView { current } => Ok(SourceResponse::Stale(current)),
@@ -327,6 +329,7 @@ pub trait Backend: Send {
         pgo_use: Option<String>,
         source_view: SourceView,
         stream_output: bool,
+        semantics: NativeSemantics,
     ) -> Result<SourceResponse<NativeRunSummary>> {
         match self.request_native_streaming(
             Request::NativeRun {
@@ -341,6 +344,7 @@ pub trait Backend: Send {
                 pgo_use,
                 source_view,
                 stream_output,
+                semantics,
             },
             &mut write_to_process_streams,
         )? {

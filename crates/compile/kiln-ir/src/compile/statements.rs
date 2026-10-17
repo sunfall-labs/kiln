@@ -785,6 +785,11 @@ impl super::Compiler {
             return;
         }
         if let Some(existing) = self.scopes[scope_index].get(name).copied() {
+            if !bound_from_stack && span.end > span.start {
+                self.local_spans
+                    .entry((self.current_function_span, existing.slot))
+                    .or_insert(span);
+            }
             // A `var` re-declaration is an assignment, and the hoisting pass has already created
             // the slot for every declaration in the block -- so reaching an existing binding is
             // the normal path now, and a *second* declaration of the same `let` is the error.
@@ -839,6 +844,11 @@ impl super::Compiler {
         }
         let slot = self.local_count;
         self.local_count += 1;
+        if !bound_from_stack && span.end > span.start {
+            self.local_spans
+                .entry((self.current_function_span, slot))
+                .or_insert(span);
+        }
         // A captured binding is a cell at every scope, including module scope. `LoadGlobal`
         // reaches the currently executing module frame, which is correct only while a callable
         // stays in its declaring module. Exported functions and classes travel; their cells travel

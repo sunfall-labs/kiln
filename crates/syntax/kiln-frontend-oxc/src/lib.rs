@@ -724,6 +724,7 @@ fn transform_static_typescript(
                 .collect::<Vec<_>>()
                 .into(),
             source_map: segments.into(),
+            source_types: None,
         },
         type_syntax,
     ))

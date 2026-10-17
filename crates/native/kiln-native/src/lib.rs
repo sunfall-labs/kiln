@@ -461,14 +461,16 @@ fn dce_release_graph(
         };
         let is_entry = node.path == graph.entry();
         let hir = match &node.program.program.static_source_provenance {
-            Some(provenance) => kiln_frontend_oxc::parse_dce_native_prepared(
-                path,
-                &node.program.program.source,
-                &demanded_names,
-                is_entry,
-                Arc::clone(provenance),
-            ),
-            None => kiln_frontend_oxc::parse_dce_native(
+            Some(provenance) if !provenance.transform_fingerprint.is_empty() => {
+                kiln_frontend_oxc::parse_dce_native_prepared(
+                    path,
+                    &node.program.program.source,
+                    &demanded_names,
+                    is_entry,
+                    Arc::clone(provenance),
+                )
+            }
+            _ => kiln_frontend_oxc::parse_dce_native(
                 path,
                 &node.program.program.source,
                 &demanded_names,
@@ -478,7 +480,7 @@ fn dce_release_graph(
         let Ok(mut program) = kiln_ir::compile_module(&hir) else {
             continue;
         };
-        carry_type_annotations(&node.program, &mut program);
+        carry_type_annotations(&hir, &node.program, &mut program);
 
         let mut imports = Vec::new();
         for mut import in program.imports {
@@ -535,6 +537,7 @@ fn dce_release_graph(
 /// from the checker's facts. DCE preserves AST byte spans, so a surviving function has the span it
 /// had.
 fn carry_type_annotations(
+    hir: &kiln_ir::Module,
     previous: &kiln_ir::ModuleProgram,
     reparsed: &mut kiln_ir::ModuleProgram,
 ) {
@@ -544,9 +547,6 @@ fn carry_type_annotations(
         .iter()
         .filter_map(|proto| Some((proto.span, proto.type_annotations.as_ref()?)))
         .collect();
-    if annotated.is_empty() {
-        return;
-    }
     for proto in &mut reparsed.program.functions {
         if proto.type_annotations.is_none()
             && let Some(annotations) = annotated.get(&proto.span)
@@ -554,6 +554,30 @@ fn carry_type_annotations(
             proto.type_annotations = Some((*annotations).clone());
         }
     }
+    if let Some(previous_prov) = &previous.program.static_source_provenance {
+        if let Some(source_types) = &previous_prov.source_types {
+            if let Some(reparsed_prov) = &mut reparsed.program.static_source_provenance {
+                std::sync::Arc::make_mut(reparsed_prov).source_types = Some(source_types.clone());
+            } else {
+                reparsed.program.static_source_provenance =
+                    Some(std::sync::Arc::new(kiln_ir::StaticSourceProvenance {
+                        original_path: previous_prov.original_path.clone(),
+                        original_source: previous_prov.original_source.clone(),
+                        original_type: previous_prov.original_type,
+                        transform_fingerprint: "".into(),
+                        identity: previous_prov.identity.clone(),
+                        authored_value_imports: previous_prov.authored_value_imports.clone(),
+                        generated_helper_imports: previous_prov.generated_helper_imports.clone(),
+                        authored_internal_helper_imports: previous_prov
+                            .authored_internal_helper_imports
+                            .clone(),
+                        source_map: std::sync::Arc::new([]),
+                        source_types: Some(source_types.clone()),
+                    }));
+            }
+        }
+    }
+    kiln_ir::rebind_program_layouts(hir, &mut reparsed.program);
 }
 
 fn restore_reexport_imports(
@@ -637,14 +661,16 @@ fn native_import_meta_reparse(
         };
         let is_entry = node.path == graph.entry();
         let hir = match &node.program.program.static_source_provenance {
-            Some(provenance) => kiln_frontend_oxc::parse_dce_native_prepared(
-                path,
-                &node.program.program.source,
-                &demanded_names,
-                is_entry,
-                Arc::clone(provenance),
-            ),
-            None => kiln_frontend_oxc::parse_dce_native(
+            Some(provenance) if !provenance.transform_fingerprint.is_empty() => {
+                kiln_frontend_oxc::parse_dce_native_prepared(
+                    path,
+                    &node.program.program.source,
+                    &demanded_names,
+                    is_entry,
+                    Arc::clone(provenance),
+                )
+            }
+            _ => kiln_frontend_oxc::parse_dce_native(
                 path,
                 &node.program.program.source,
                 &demanded_names,
@@ -654,7 +680,7 @@ fn native_import_meta_reparse(
         let Ok(mut program) = kiln_ir::compile_module(&hir) else {
             continue;
         };
-        carry_type_annotations(&node.program, &mut program);
+        carry_type_annotations(&hir, &node.program, &mut program);
 
         let reparsed_names = program
             .exports
@@ -988,7 +1014,10 @@ fn object_flag_identity(options: &NativeBuildOptions) -> String {
     let mut identity = String::new();
     // Release objects carry stack-protector and FORTIFY flags (`kiln-native-toolchain`); an
     // object cached before them must not be linked into a binary that claims them.
-    if matches!(options.profile, NativeProfile::Release | NativeProfile::ReleaseSize) {
+    if matches!(
+        options.profile,
+        NativeProfile::Release | NativeProfile::ReleaseSize
+    ) {
         identity.push_str("\0hardened-v1");
     }
     if options.march_native {

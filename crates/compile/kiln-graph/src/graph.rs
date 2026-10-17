@@ -1512,7 +1512,6 @@ pub fn build_function_graph(
                 }
                 Instruction::StoreLocal(slot) => {
                     if let Some(val) = frame.stack.pop() {
-                        frame.locals.insert(*slot, val);
                         let stored = graph.alloc_value();
                         operations.push((
                             stored,
@@ -1521,6 +1520,14 @@ pub fn build_function_graph(
                                 value: val,
                             },
                         ));
+                        let is_record_slot = proto
+                            .type_annotations
+                            .as_ref()
+                            .and_then(|t| t.source_types.as_ref())
+                            .or_else(|| program.source_types())
+                            .is_some_and(|s| s.local_layouts.contains_key(slot));
+                        let value_to_store = if is_record_slot { stored } else { val };
+                        frame.locals.insert(*slot, value_to_store);
                     }
                 }
                 Instruction::Pop => {

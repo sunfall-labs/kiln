@@ -90,6 +90,7 @@ fn transformed_static_callsite_coordinates_use_original_typescript() {
             original_offset: 9,
         }]
         .into(),
+        source_types: None,
     }));
     let provenance = source_module
         .static_source_provenance
@@ -3200,4 +3201,164 @@ fn a_member_write_whose_value_reads_a_local_does_not_box_it() {
         "a local read by a member write's value is not captured: {:?}",
         outer.code
     );
+}
+
+#[test]
+fn apply_source_types_attaches_record_layouts_and_spans() {
+    use crate::Span;
+    use kiln_hir::source_types::{
+        CheckResult, NativeFieldType, RecordField, RecordLayout, RecordLayoutId, SourceType,
+        TypeClass, TypeRole,
+    };
+
+    let path = "/test/main.ts";
+    let obj_lit = Expression {
+        kind: ExpressionKind::Object {
+            members: vec![
+                kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                    form: kiln_hir::PropertyForm::KeyValue,
+                    key: kiln_hir::ObjectKey::Static("x".into()),
+                    value: number(1.0),
+                    span: Span::new(32, 36),
+                }),
+                kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
+                    form: kiln_hir::PropertyForm::KeyValue,
+                    key: kiln_hir::ObjectKey::Static("y".into()),
+                    value: number(2.0),
+                    span: Span::new(38, 42),
+                }),
+            ],
+        },
+        span: Span::new(30, 45),
+    };
+    let var_stmt = Statement {
+        kind: StatementKind::Variable {
+            kind: VariableKind::Let,
+            declarations: vec![kiln_hir::VariableDeclarator {
+                pattern: kiln_hir::Pattern::Identifier("p2".into()),
+                initializer: Some(obj_lit),
+                span: Span::new(26, 45),
+            }],
+        },
+        span: Span::new(26, 45),
+    };
+    let mut m = module(vec![function("f", &["pt"], vec![var_stmt])]);
+    m.body[0].span = Span::new(10, 50);
+    if let StatementKind::Function(func) = &mut m.body[0].kind {
+        func.span = Span::new(10, 50);
+        func.parameters[0].span = Span::new(15, 25);
+    }
+    m.type_syntax
+        .signatures
+        .push(kiln_hir::FunctionSignatureSite {
+            owner_span: Span::new(10, 50),
+            signature: kiln_hir::TypeSignature {
+                span: Span::new(10, 50),
+                type_parameters: Vec::new(),
+                this_parameter: None,
+                parameters: vec![kiln_hir::TypeSignatureParameter {
+                    name: Some("pt".into()),
+                    pattern: None,
+                    pattern_span: Span::new(15, 25),
+                    span: Span::new(15, 25),
+                    ty: None,
+                    optional: false,
+                    rest: false,
+                    default: None,
+                }],
+                rest: false,
+                return_type: None,
+            },
+            has_body: true,
+            body_start: None,
+        });
+
+    let mut program = compile(&m).expect("compiles");
+
+    let point_layout = RecordLayout {
+        fields: vec![
+            RecordField {
+                name: "x".into(),
+                ty: NativeFieldType::Number,
+                readonly: false,
+            },
+            RecordField {
+                name: "y".into(),
+                ty: NativeFieldType::Number,
+                readonly: false,
+            },
+        ],
+    };
+    let checked = CheckResult {
+        checker_identity: "test-checker".into(),
+        complete: true,
+        files: vec![(path.to_owned(), true)],
+        record_layouts: vec![point_layout],
+        types: vec![
+            SourceType {
+                path: path.to_owned(),
+                span: Span::new(15, 25),
+                display: "Point".into(),
+                class: TypeClass::Composite,
+                role: TypeRole::Parameter,
+                record_layout: Some(RecordLayoutId(0)),
+            },
+            SourceType {
+                path: path.to_owned(),
+                span: Span::new(10, 50),
+                display: "Point".into(),
+                class: TypeClass::Composite,
+                role: TypeRole::Return,
+                record_layout: Some(RecordLayoutId(0)),
+            },
+            SourceType {
+                path: path.to_owned(),
+                span: Span::new(26, 45),
+                display: "Point".into(),
+                class: TypeClass::Composite,
+                role: TypeRole::Annotation,
+                record_layout: Some(RecordLayoutId(0)),
+            },
+            SourceType {
+                path: path.to_owned(),
+                span: Span::new(30, 45),
+                display: "Point".into(),
+                class: TypeClass::Composite,
+                role: TypeRole::Annotation,
+                record_layout: Some(RecordLayoutId(0)),
+            },
+        ],
+        diagnostics: Vec::new(),
+    };
+
+    apply_source_types(path, &m, &checked, "test-checker", &mut program);
+
+    let annotations = program.functions[0]
+        .type_annotations
+        .as_ref()
+        .and_then(|t| t.source_types.as_ref())
+        .expect("source_types should be attached");
+
+    assert_eq!(annotations.record_layouts.len(), 1);
+    assert_eq!(annotations.parameter_layouts, vec![Some(RecordLayoutId(0))]);
+    assert_eq!(annotations.return_layout, Some(RecordLayoutId(0)));
+    assert_eq!(annotations.span_layouts.get(&30), Some(&RecordLayoutId(0)));
+    assert_eq!(
+        annotations.exact_span_layouts.get(&(30, 45)),
+        Some(&RecordLayoutId(0))
+    );
+    assert_eq!(annotations.local_layouts.get(&0), Some(&RecordLayoutId(0)));
+    assert_eq!(annotations.local_layouts.get(&1), Some(&RecordLayoutId(0)));
+    assert!(!annotations.new_object_layouts.is_empty());
+    assert!(
+        annotations
+            .new_object_layouts
+            .values()
+            .all(|id| *id == RecordLayoutId(0))
+    );
+
+    let top = program
+        .source_types()
+        .expect("top-level source types attached");
+    assert_eq!(top.record_layouts.len(), 1);
 }

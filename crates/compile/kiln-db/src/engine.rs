@@ -2058,7 +2058,9 @@ mod tests {
                     } else {
                         TypeClass::Number
                     },
+                    record_layout: None,
                 }],
+                record_layouts: Vec::new(),
                 diagnostics: Vec::new(),
                 files: Vec::new(),
             })
@@ -2114,6 +2116,7 @@ mod tests {
                 checker_identity: "json-auxiliary-v1".into(),
                 complete: true,
                 types: Vec::new(),
+                record_layouts: Vec::new(),
                 diagnostics: Vec::new(),
                 files: Vec::new(),
             })
@@ -2197,7 +2200,9 @@ mod tests {
                     } else {
                         TypeClass::Number
                     },
+                    record_layout: None,
                 }],
+                record_layouts: Vec::new(),
                 diagnostics: Vec::new(),
                 files: Vec::new(),
             })
@@ -2329,8 +2334,10 @@ mod tests {
                         role: TypeRole::Annotation,
                         display: "number".into(),
                         class: TypeClass::Number,
+                        record_layout: None,
                     })
                     .collect(),
+                record_layouts: Vec::new(),
                 diagnostics: vec![SourceDiagnostic {
                     related: Vec::new(),
                     path: Some(entry.into()),

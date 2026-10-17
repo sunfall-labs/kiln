@@ -1,4 +1,5 @@
 use kiln_artifact_cache::BuildProfile as CacheProfile;
+pub use kiln_backend_c::NativeSemantics;
 use kiln_backend_c::{EmissionPolicy, EmissionStringPolicy};
 use kiln_native_toolchain::BuildProfile as ToolchainProfile;
 use std::path::PathBuf;
@@ -124,6 +125,11 @@ impl NativeBuildOptions {
         self.node = node;
         self
     }
+
+    pub const fn with_semantics(mut self, semantics: NativeSemantics) -> Self {
+        self.realm.semantics = semantics;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -140,6 +146,7 @@ pub struct NativeRealmPolicy {
     /// `kiln build --workers=<n|auto>`. `None` records nothing, so the launcher text -- and with
     /// it the binary's cache identity -- is exactly what it was before the flag existed.
     pub workers: Option<NativeWorkers>,
+    pub semantics: NativeSemantics,
 }
 
 /// A worker count recorded in a binary at build time. `KILN_WORKERS` overrides it at run time.
@@ -192,6 +199,7 @@ impl NativeRealmPolicy {
             type_profile_path: None,
             no_kiln_extensions: false,
             workers: None,
+            semantics: NativeSemantics::Js,
         }
     }
 
@@ -209,6 +217,11 @@ impl NativeRealmPolicy {
 
     pub const fn with_entropy(mut self, entropy: NativeEntropyPolicy) -> Self {
         self.entropy = entropy;
+        self
+    }
+
+    pub const fn with_semantics(mut self, semantics: NativeSemantics) -> Self {
+        self.semantics = semantics;
         self
     }
 
@@ -261,6 +274,7 @@ impl NativeRealmPolicy {
             no_kiln_extensions: self.no_kiln_extensions,
             // Set for the runtime bootstrap alone (`bootstrap_emitter`).
             shared_region: false,
+            semantics: self.semantics,
         }
     }
 

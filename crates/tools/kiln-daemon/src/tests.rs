@@ -12,8 +12,8 @@ use crate::framing::MAX_MESSAGE_BYTES;
 use crate::{Client as RawClient, Daemon, DaemonError, ShutdownHandle};
 use kiln_db::{FileId, Interface, Parsed, Project, QueryEngine, Revision, Stats};
 use kiln_proto::{
-    NativeProfile, PROTOCOL_VERSION, Request, Response, SourceHash, SourceView, StepBudget, SyncId,
-    TestMode, TestOutcome,
+    NativeProfile, NativeSemantics, PROTOCOL_VERSION, Request, Response, SourceHash, SourceView,
+    StepBudget, SyncId, TestMode, TestOutcome,
 };
 use std::collections::HashMap;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -1405,6 +1405,7 @@ fn native_run_round_trips_through_the_daemon_and_reuses_artifacts() {
         pgo_generate: None,
         pgo_use: None,
         args: Vec::new(),
+        semantics: NativeSemantics::Js,
     };
     let first = client.request(&request).expect("first native request");
     let Response::NativeRan(first) = first else {
@@ -3937,6 +3938,7 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
         pgo_generate: None,
         pgo_use: None,
         args: Vec::new(),
+        semantics: NativeSemantics::Js,
     };
     let first = client.request(&request).expect("native graph run");
     let Response::NativeRan(first) = first else {

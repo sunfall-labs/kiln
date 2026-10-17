@@ -117,6 +117,9 @@ impl super::Compiler {
             scopes: vec![HashMap::new()],
             local_count: 0,
             diagnostics: Vec::new(),
+            current_function_span: None,
+            local_spans: BTreeMap::new(),
+            new_object_spans: BTreeMap::new(),
         };
         if module.panicked {
             compiler.error(None, "frontend could not produce an executable module");

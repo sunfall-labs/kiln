@@ -169,12 +169,16 @@ pub struct StaticSourceProvenance {
     /// a helper import with the same specifier in that module.
     pub authored_internal_helper_imports: Arc<[Arc<str>]>,
     pub source_map: Arc<[SourceMapSegment]>,
+    pub source_types: Option<crate::source_types::SourceTypeAnnotations>,
 }
 
 impl StaticSourceProvenance {
     /// Map a generated-JS byte offset to its closest preceding original TS source-map segment.
     #[must_use]
     pub fn original_offset(&self, generated_offset: u32) -> Option<u32> {
+        if self.source_map.is_empty() && self.transform_fingerprint.is_empty() {
+            return Some(generated_offset);
+        }
         let index = self
             .source_map
             .partition_point(|segment| segment.generated_offset <= generated_offset);

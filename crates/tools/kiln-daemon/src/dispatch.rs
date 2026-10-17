@@ -10,8 +10,9 @@ use kiln_module_eval::ModuleGraphExecution;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
     Diagnostic, FileId, ModuleSummary, NativeBuildSummary, NativeProfile, NativeRunSummary,
-    NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, RecordedWorkers, Request,
-    ResolutionMap, Response, RunSummary, ScalarValueSummary, SourceView, Stats, StepBudget,
+    NativeSemantics, NativeSharedLibrarySummary, PROTOCOL_VERSION, ProjectSummary, RecordedWorkers,
+    Request, ResolutionMap, Response, RunSummary, ScalarValueSummary, SourceView, Stats,
+    StepBudget,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -256,6 +257,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             static_link,
             pgo_generate,
             pgo_use,
+            semantics,
         } => {
             let pgo_gen = pgo_generate.map(PathBuf::from);
             let pgo_u = pgo_use.map(PathBuf::from);
@@ -274,6 +276,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                         static_link,
                         pgo_gen,
                         pgo_u,
+                        semantics,
                     ),
                     Ok(None) => match native_program(engine, &path) {
                         Ok(program) => native_build_program(
@@ -288,6 +291,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                             static_link,
                             pgo_gen,
                             pgo_u,
+                            semantics,
                         ),
                         Err(message) => Response::Error { message },
                     },
@@ -356,6 +360,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             pgo_generate,
             pgo_use,
             stream_output: _,
+            semantics,
         } => {
             let pgo_gen = pgo_generate.map(PathBuf::from);
             let pgo_u = pgo_use.map(PathBuf::from);
@@ -371,6 +376,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                         static_link,
                         pgo_gen,
                         pgo_u,
+                        semantics,
                     ),
                     Ok(None) => match native_program(engine, &path) {
                         Ok(program) => native_run_program(
@@ -382,6 +388,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
                             static_link,
                             pgo_gen,
                             pgo_u,
+                            semantics,
                         ),
                         Err(message) => Response::Error { message },
                     },
@@ -2625,6 +2632,7 @@ pub(crate) fn native_build_program(
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
+    semantics: NativeSemantics,
 ) -> Response {
     // The worker supervisor lives in the graph launcher; the single-program launcher runs one
     // realm and has nowhere to record a count, so the flag is refused rather than dropped.
@@ -2665,7 +2673,8 @@ pub(crate) fn native_build_program(
             output,
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::host_clock()
-                .without_kiln_extensions(no_kiln_extensions),
+                .without_kiln_extensions(no_kiln_extensions)
+                .with_semantics(native_semantics(semantics)),
             march_native: false,
             static_link,
             pgo_generate,
@@ -2875,6 +2884,7 @@ pub(crate) fn native_build_graph(
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
+    semantics: NativeSemantics,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
@@ -2907,7 +2917,8 @@ pub(crate) fn native_build_graph(
             profile: native_profile(profile),
             realm: kiln_native::NativeRealmPolicy::host_clock()
                 .without_kiln_extensions(no_kiln_extensions)
-                .with_workers(workers.map(native_workers)),
+                .with_workers(workers.map(native_workers))
+                .with_semantics(native_semantics(semantics)),
             march_native: false,
             static_link,
             pgo_generate,
@@ -2995,6 +3006,7 @@ pub(crate) fn native_run_program(
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
+    semantics: NativeSemantics,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
@@ -3010,7 +3022,8 @@ pub(crate) fn native_run_program(
         kiln_native::NativeRealmPolicy::host_clock()
     } else {
         kiln_native::NativeRealmPolicy::default()
-    };
+    }
+    .with_semantics(native_semantics(semantics));
     let result = run_streaming_native(|sink, inherit| {
         if inherit {
             builder.run_inheriting_output(
@@ -3062,6 +3075,7 @@ pub(crate) fn native_run_graph(
     static_link: bool,
     pgo_generate: Option<PathBuf>,
     pgo_use: Option<PathBuf>,
+    semantics: NativeSemantics,
 ) -> Response {
     let project_root = PathBuf::from(project_root);
     let builder = match discover_native_builder(&project_root) {
@@ -3084,7 +3098,8 @@ pub(crate) fn native_run_graph(
                 kiln_native::NativeRealmPolicy::host_clock()
             } else {
                 kiln_native::NativeRealmPolicy::default()
-            },
+            }
+            .with_semantics(native_semantics(semantics)),
             march_native: false,
             static_link,
             pgo_generate,
@@ -3156,6 +3171,15 @@ fn native_workers(workers: RecordedWorkers) -> kiln_native::NativeWorkers {
     match workers {
         RecordedWorkers::Auto => kiln_native::NativeWorkers::Auto,
         RecordedWorkers::Count(count) => kiln_native::NativeWorkers::Count(count),
+    }
+}
+
+pub(crate) fn native_semantics(
+    semantics: kiln_proto::NativeSemantics,
+) -> kiln_native::NativeSemantics {
+    match semantics {
+        kiln_proto::NativeSemantics::Js => kiln_native::NativeSemantics::Js,
+        kiln_proto::NativeSemantics::Native => kiln_native::NativeSemantics::Native,
     }
 }
 

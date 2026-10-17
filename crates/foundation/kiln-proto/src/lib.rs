@@ -785,6 +785,10 @@ pub enum Request {
         pgo_generate: Option<String>,
         #[serde(default)]
         pgo_use: Option<String>,
+        /// Language semantics contract for native compilation (ADR 0077). Left off the wire when
+        /// `Js` so existing requests serialize identically.
+        #[serde(default, skip_serializing_if = "NativeSemantics::is_js")]
+        semantics: NativeSemantics,
     },
     /// Build from an exact database snapshot, publishing only if that snapshot remains current.
     NativeBuildAtRevision {
@@ -852,6 +856,10 @@ pub enum Request {
         /// [`Response::Output`] frames while it runs, and the [`NativeRunSummary`]'s are empty.
         #[serde(default)]
         stream_output: bool,
+        /// Language semantics contract for native compilation (ADR 0077). Left off the wire when
+        /// `Js` so existing requests serialize identically.
+        #[serde(default, skip_serializing_if = "NativeSemantics::is_js")]
+        semantics: NativeSemantics,
     },
     /// Discover, select, and execute a conformance corpus in this resident process.
     Test {
@@ -986,6 +994,27 @@ pub enum NativeProfile {
     ReleaseSize,
     /// Release, plus profiler instrumentation. A wire-shape change, so PROTOCOL_VERSION moves.
     Profile,
+}
+
+/// Language semantics contract for native compilation (ADR 0077).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NativeSemantics {
+    #[default]
+    Js,
+    Native,
+}
+
+impl NativeSemantics {
+    pub const fn is_js(&self) -> bool {
+        matches!(self, Self::Js)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Js => "js",
+            Self::Native => "native",
+        }
+    }
 }
 
 /// A worker count recorded in a native binary by `kiln build --workers=<n|auto>`, used when
@@ -1414,6 +1443,7 @@ mod tests {
                     static_link: false,
                     pgo_generate: None,
                     pgo_use: None,
+                    semantics: NativeSemantics::Js,
                 },
                 serde_json::json!({"NativeBuild": {
                     "path": "server.mjs",
@@ -1441,6 +1471,7 @@ mod tests {
                     pgo_generate: None,
                     pgo_use: None,
                     stream_output: false,
+                    semantics: NativeSemantics::Js,
                 },
                 serde_json::json!({"NativeRun": {
                     "path": "server.mjs",

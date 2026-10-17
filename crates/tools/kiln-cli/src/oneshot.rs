@@ -9,7 +9,7 @@
 //! connections without requiring a Unix socket or leaving a directory behind.
 
 use kiln_daemon::LocalClient;
-use kiln_proto::{Request, Response};
+use kiln_proto::{NativeSemantics, Request, Response};
 
 use crate::backend::{Backend, interpret};
 use crate::error::{Error, Result};
@@ -154,6 +154,7 @@ mod tests {
                 None,
                 None,
                 false,
+                NativeSemantics::Js,
             )
             .expect("run native exit-code fixture")
         };
@@ -342,6 +343,7 @@ server.listen(0, "127.0.0.1", () => {
                 None,
                 None,
                 false,
+                NativeSemantics::Js,
             )
             .expect("run native Node graph")
         };
@@ -378,6 +380,7 @@ server.listen(0, "127.0.0.1", () => {
                 None,
                 None,
                 false,
+                NativeSemantics::Js,
             )
             .expect("run canonical native Node server roundtrip")
         };
@@ -418,6 +421,7 @@ server.listen(0, "127.0.0.1", () => {
                 None,
                 None,
                 &[],
+                NativeSemantics::Js,
             )
             .expect("build standalone native Node server")
         };
@@ -465,6 +469,7 @@ server.listen(0, "127.0.0.1", () => {
                 None,
                 None,
                 false,
+                NativeSemantics::Js,
             )
             .expect("run canonical native Node request-body roundtrip")
         };
@@ -512,6 +517,7 @@ server.listen(0, "127.0.0.1", () => {
                 None,
                 None,
                 &[],
+                NativeSemantics::Js,
             )
             .expect("build standalone native request-body server")
         };
@@ -602,6 +608,7 @@ server.listen(0, "127.0.0.1", () => {
                 None,
                 None,
                 false,
+                NativeSemantics::Js,
             )
             .expect("run native Node request identity fixture")
         };
@@ -657,6 +664,7 @@ server.listen(0, "127.0.0.1", () => {
                 None,
                 None,
                 false,
+                NativeSemantics::Js,
             )
             .expect("run native HTTP half-close fixture")
         };
@@ -856,6 +864,7 @@ server.listen(0, "127.0.0.1", () => {
                 None,
                 None,
                 &[],
+                NativeSemantics::Js,
             )
             .expect("build without kiln extensions")
         };
@@ -952,6 +961,7 @@ server.listen(0, "127.0.0.1", () => {
                 None,
                 None,
                 &[],
+                NativeSemantics::Js,
             )
             .expect("build unsupported indirect eval fixture")
         };
@@ -1003,6 +1013,7 @@ server.listen(0, "127.0.0.1", () => {
                 None,
                 None,
                 &[],
+                NativeSemantics::Js,
             )
             .expect("build with explain")
         };
@@ -1148,6 +1159,98 @@ server.listen(0, "127.0.0.1", () => {
             output.text, "",
             "streamed output is not repeated in the summary"
         );
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn native_semantics_projects_narrower_records_and_specializes_typed_calls() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-native-semantics-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create native semantics fixture");
+        #[cfg(unix)]
+        share_native_semantic_cache(&fixture);
+        let source = fixture.join("app.ts");
+        std::fs::write(
+            &source,
+            r#"interface Point2D { x: number; y: number; }
+interface Point1D { x: number; }
+
+function readX(p: Point1D): number {
+    return p.x;
+}
+
+function step(p: Point2D, dx: number, dy: number): number {
+    p.x = p.x + dx;
+    p.y = p.y + dy;
+    return p.x + p.y;
+}
+
+function runLoop(): number {
+    const pt: Point2D = { x: 0, y: 0 };
+    let total: number = 0;
+    for (let i: number = 0; i < 10; i = i + 1) {
+        total = total + step(pt, 1, 2);
+    }
+    return total;
+}
+
+function main(): void {
+    const original: Point2D = { x: 1, y: 2 };
+    const narrow: Point1D = original;
+    narrow.x = 9;
+    console.log(original.x, narrow.x, readX(original), readX(narrow), runLoop());
+}
+
+main();
+"#,
+        )
+        .expect("write app.ts");
+
+        let js_out = {
+            let mut session = OneShot::start().expect("start js native engine");
+            commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                NativeSemantics::Js,
+            )
+            .expect("run with --semantics=js")
+        };
+        assert_eq!(js_out.exit_code, 0);
+        assert_eq!(js_out.text, "9 9 9 9 165\n");
+
+        let native_out = {
+            let mut session = OneShot::start().expect("start native semantics engine");
+            commands::native_run(
+                &mut session,
+                &source,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                NativeSemantics::Native,
+            )
+            .expect("run with --semantics=native")
+        };
+        assert_eq!(native_out.exit_code, 0);
+        assert_eq!(native_out.text, "1 9 1 9 165\n");
+
         let _ = std::fs::remove_dir_all(&fixture);
     }
 }

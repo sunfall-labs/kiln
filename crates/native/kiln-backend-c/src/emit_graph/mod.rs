@@ -162,10 +162,19 @@ pub enum Site<'a> {
 /// the body needs and nothing it does not, and the parameters as the doubles they are.
 pub fn typed_signature(
     proto: &FunctionProto,
+    symbol: &str,
+    semantics: crate::NativeSemantics,
     returns_number: bool,
     needs: TypedNeeds,
-) -> (&'static str, String) {
-    let result = if returns_number { "double" } else { "kiln_val" };
+) -> (String, String) {
+    let result = if returns_number {
+        "double".to_string()
+    } else if semantics == crate::NativeSemantics::Native && proto.return_layout().is_some() {
+        let ret_lid = proto.return_layout().unwrap();
+        format!("{symbol}_rec_{ret_lid} *")
+    } else {
+        "kiln_val".to_string()
+    };
     let mut params = String::from("int depth");
     if needs.upvalues {
         params.push_str(", kiln_val * restrict upvalues");
@@ -179,8 +188,16 @@ pub fn typed_signature(
     if needs.runtime {
         params.push_str(", kiln_host *host, kiln_value *thrown");
     }
+    let param_layouts = proto.parameter_layouts();
     for k in 0..proto.parameter_count {
-        params.push_str(&format!(", double p{k}"));
+        if semantics == crate::NativeSemantics::Native
+            && param_layouts.get(k as usize).copied().flatten().is_some()
+        {
+            let lid = param_layouts[k as usize].unwrap();
+            params.push_str(&format!(", {symbol}_rec_{lid} *p{k}"));
+        } else {
+            params.push_str(&format!(", double p{k}"));
+        }
     }
     (result, params)
 }

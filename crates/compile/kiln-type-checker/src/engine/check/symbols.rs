@@ -3256,7 +3256,7 @@ impl<'p, 's> Checker<'p, 's> {
     /// `getTypeForVariableLikeDeclaration`, followed by `widenTypeForVariableLikeDeclaration` if
     /// the variable has a name: a destructured value is not widened
     /// (`getTypeForBindingElementParent`).
-    fn type_of_var_decl(&mut self, file: FileId, d: VarDeclId) -> TypeId {
+    pub(crate) fn type_of_var_decl(&mut self, file: FileId, d: VarDeclId) -> TypeId {
         let hir = self.hir(file);
         let decl = &hir[d];
         let is_name = matches!(hir[decl.pat].kind, PatKind::Ident(_));

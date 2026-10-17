@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use kiln_proto::{NativeProfile, RecordedWorkers, StepBudget};
+use kiln_proto::{NativeProfile, NativeSemantics, RecordedWorkers, StepBudget};
 
 // `--interval` outlived the poll it was written for, but it now names the debounce window
 // rather than a cadence. Dropping it was the alternative, and it was tempting: one fewer
@@ -98,6 +98,7 @@ pub enum Command {
         static_link: bool,
         pgo_generate: Option<PathBuf>,
         pgo_use: Option<PathBuf>,
+        semantics: NativeSemantics,
     },
     Build {
         path: PathBuf,
@@ -118,6 +119,7 @@ pub enum Command {
         static_link: bool,
         pgo_generate: Option<PathBuf>,
         pgo_use: Option<PathBuf>,
+        semantics: NativeSemantics,
     },
     Test {
         path: PathBuf,
@@ -198,6 +200,7 @@ where
     let mut includes = Vec::new();
     let mut test_output: Option<PathBuf> = None;
     let mut profile: Option<NativeProfile> = None;
+    let mut semantics: Option<NativeSemantics> = None;
     let mut max_steps: Option<u64> = None;
     let mut workers: Option<String> = None;
     let mut shared = false;
@@ -365,6 +368,9 @@ where
             "--pgo-use" => {
                 pgo_use = Some(PathBuf::from(value_for(&flag, inline, &mut args)?));
             }
+            "--semantics" => {
+                semantics = Some(parse_semantics(&value_for(&flag, inline, &mut args)?)?);
+            }
             _ => {
                 if passes_arguments_through(&positional) {
                     positional.push(arg);
@@ -476,6 +482,16 @@ where
             "--pgo-generate and --pgo-use cannot be used together",
         ));
     }
+    if semantics.is_some() && name != "build" && !native {
+        return Err(Error::usage(
+            "--semantics only applies to native `kiln run` or `kiln build`",
+        ));
+    }
+    if semantics.is_some() && shared {
+        return Err(Error::usage(
+            "--semantics cannot be combined with `kiln build --shared`",
+        ));
+    }
     if max_steps.is_some() && name != "run" {
         return Err(Error::usage(
             "--max-steps only applies to interpreted `kiln run`",
@@ -557,6 +573,7 @@ where
                 static_link,
                 pgo_generate,
                 pgo_use,
+                semantics: semantics.unwrap_or_default(),
             }
         }
         "build" => Command::Build {
@@ -574,6 +591,7 @@ where
             static_link,
             pgo_generate,
             pgo_use,
+            semantics: semantics.unwrap_or_default(),
         },
         "test" => Command::Test {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -776,6 +794,16 @@ fn parse_profile(raw: &str) -> Result<NativeProfile> {
     }
 }
 
+fn parse_semantics(raw: &str) -> Result<NativeSemantics> {
+    match raw {
+        "js" => Ok(NativeSemantics::Js),
+        "native" => Ok(NativeSemantics::Native),
+        _ => Err(Error::usage(format!(
+            "--semantics expects `js` or `native`, got `{raw}`"
+        ))),
+    }
+}
+
 fn one_operand<I>(command: &str, rest: &mut I) -> Result<String>
 where
     I: Iterator<Item = String>,
@@ -831,6 +859,7 @@ const FLAGS: &[&str] = &[
     "--include",
     "--out",
     "--profile",
+    "--semantics",
     "--march",
     "--max-steps",
     "--workers",
@@ -1032,6 +1061,7 @@ options:
                           listening sockets
     --profile <name>      with --native: native-dev (default, quickest to compile),
                           native-check, native-release, native-release-size, native-profile
+    --semantics <mode>    with --native: js (default) or native
     --march=native        with --native: use the host CPU's instructions, not a portable baseline
     --static              with --native: link a static binary (Linux only)
     --pgo-generate <dir>  with --native: instrument the binary to write PGO profiles
@@ -1053,6 +1083,7 @@ options:
     --profile <name>      native-release (default), native-release-size (smaller),
                           native-dev (fastest to compile), native-check, or native-profile
                           (release plus gprof instrumentation; see scripts/profile-native.sh)
+    --semantics <mode>    js (default) or native
     --shared              write a shared library for embedding (lib<name>.so, .dylib or .dll)
                           instead of an executable
     --node                force the Node compatibility layer on
@@ -1351,6 +1382,7 @@ mod tests {
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
+                semantics: NativeSemantics::Js,
             }
         );
         assert!(matches!(
@@ -1383,6 +1415,7 @@ mod tests {
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
+                semantics: NativeSemantics::Js,
             }
         );
     }
@@ -1896,6 +1929,7 @@ mod tests {
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
+                semantics: NativeSemantics::Js,
             }
         );
         assert_eq!(
@@ -1915,6 +1949,7 @@ mod tests {
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
+                semantics: NativeSemantics::Js,
             }
         );
         assert_eq!(
@@ -1932,6 +1967,7 @@ mod tests {
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
+                semantics: NativeSemantics::Js,
             }
         );
     }
@@ -2024,6 +2060,7 @@ mod tests {
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
+                semantics: NativeSemantics::Js,
             }
         );
         assert!(usage_error(&["run", "a.js", "--explain"]).contains("only applies"));
@@ -2048,6 +2085,7 @@ mod tests {
                 static_link: true,
                 pgo_generate: None,
                 pgo_use: None,
+                semantics: NativeSemantics::Js,
             }
         );
         assert_eq!(
@@ -2073,6 +2111,7 @@ mod tests {
                 static_link: true,
                 pgo_generate: Some(PathBuf::from("/tmp/pgo")),
                 pgo_use: None,
+                semantics: NativeSemantics::Js,
             }
         );
 
@@ -2098,6 +2137,7 @@ mod tests {
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: Some(PathBuf::from("/tmp/pgo/profile.profdata")),
+                semantics: NativeSemantics::Js,
             }
         );
         assert!(usage_error(&["run", "a.js", "--static"]).contains("only applies"));
@@ -2133,6 +2173,7 @@ mod tests {
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
+                semantics: NativeSemantics::Js,
             }
         );
         assert_eq!(
@@ -2150,7 +2191,81 @@ mod tests {
                 static_link: false,
                 pgo_generate: None,
                 pgo_use: None,
+                semantics: NativeSemantics::Js,
             }
+        );
+    }
+
+    #[test]
+    fn semantics_option_parses_for_build_and_native_run() {
+        assert_eq!(
+            run(&["build", "src/main.ts", "--semantics=native"]).command,
+            Command::Build {
+                path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
+                output: None,
+                profile: NativeProfile::Release,
+                shared: false,
+                node: false,
+                march_native: false,
+                explain_parallel: false,
+                explain: false,
+                no_kiln_extensions: false,
+                workers: None,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
+                semantics: NativeSemantics::Native,
+            }
+        );
+        assert_eq!(
+            run(&["build", "src/main.ts", "--semantics", "js"]).command,
+            Command::Build {
+                path: PathBuf::from("src/main.ts"),
+                includes: Vec::new(),
+                output: None,
+                profile: NativeProfile::Release,
+                shared: false,
+                node: false,
+                march_native: false,
+                explain_parallel: false,
+                explain: false,
+                no_kiln_extensions: false,
+                workers: None,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
+                semantics: NativeSemantics::Js,
+            }
+        );
+        assert_eq!(
+            run(&["run", "src/main.ts", "--native", "--semantics=native"]).command,
+            Command::Run {
+                path: PathBuf::from("src/main.ts"),
+                args: Vec::new(),
+                node: false,
+                wall_clock: true,
+                native: true,
+                profile: NativeProfile::Dev,
+                steps: StepBudget::Unmetered,
+                workers: 1,
+                march_native: false,
+                static_link: false,
+                pgo_generate: None,
+                pgo_use: None,
+                semantics: NativeSemantics::Native,
+            }
+        );
+        assert!(usage_error(&["run", "a.js", "--semantics=native"]).contains("only applies"));
+        assert!(usage_error(&["check", "a.js", "--semantics=native"]).contains("only applies"));
+        assert!(usage_error(&["test", "suite", "--semantics=native"]).contains("only applies"));
+        assert!(
+            usage_error(&["build", "a.js", "--shared", "--semantics=native"])
+                .contains("cannot be combined")
+        );
+        assert!(
+            usage_error(&["build", "a.js", "--semantics=fast"])
+                .contains("expects `js` or `native`")
         );
     }
 }

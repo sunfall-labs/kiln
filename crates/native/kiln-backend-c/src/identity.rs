@@ -53,6 +53,10 @@ pub(super) fn hash_program_with_policy_and_seed(
         hash ^= 0x7e;
         hash = hash.wrapping_mul(0x100000001b3);
     }
+    if policy.semantics == NativeSemantics::Native {
+        hash ^= 0x7a;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
     if let Some(bytes) = policy.unit_chunk_bytes {
         hash ^= 0x7d;
         hash = hash.wrapping_mul(0x100000001b3);
@@ -548,6 +552,10 @@ pub(super) fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             word(&mut hash, u64::from(site.column));
         }
     }
+    if let Some(source) = program.source_types() {
+        byte(&mut hash, 0x67);
+        hash_source_type_annotations(&mut hash, source);
+    }
     hash
 }
 
@@ -652,16 +660,7 @@ pub(super) fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
         annotation(hash, annotations.return_type);
         if let Some(source) = &annotations.source_types {
             byte(hash, 1);
-            word(hash, u64::from(source.version));
-            word(hash, source.checker_identity.len() as u64);
-            for value in source.checker_identity.bytes() {
-                byte(hash, value);
-            }
-            word(hash, source.parameters.len() as u64);
-            for value in &source.parameters {
-                annotation(hash, *value);
-            }
-            annotation(hash, source.return_type);
+            hash_source_type_annotations(hash, source);
         } else {
             byte(hash, 0);
         }
@@ -680,6 +679,113 @@ pub(super) fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
                 word(hash, u64::from(*index));
             }
         }
+    }
+}
+
+pub(super) fn hash_source_type_annotations(
+    hash: &mut u64,
+    source: &kiln_ir::SourceTypeAnnotations,
+) {
+    fn byte(hash: &mut u64, value: u8) {
+        *hash ^= u64::from(value);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+    fn word(hash: &mut u64, value: u64) {
+        for value in value.to_le_bytes() {
+            byte(hash, value);
+        }
+    }
+    fn annotation(hash: &mut u64, annotation: Option<kiln_ir::TypeAnnotation>) {
+        byte(
+            hash,
+            match annotation {
+                None => 0,
+                Some(kiln_ir::TypeAnnotation::Number) => 1,
+                Some(kiln_ir::TypeAnnotation::Int) => 2,
+                Some(kiln_ir::TypeAnnotation::Boolean) => 3,
+                Some(kiln_ir::TypeAnnotation::String) => 4,
+                Some(kiln_ir::TypeAnnotation::Void) => 5,
+                Some(kiln_ir::TypeAnnotation::Any) => 6,
+                Some(kiln_ir::TypeAnnotation::Other) => 7,
+                Some(kiln_ir::TypeAnnotation::Array) => 8,
+            },
+        );
+    }
+
+    word(hash, u64::from(source.version));
+    word(hash, source.checker_identity.len() as u64);
+    for value in source.checker_identity.bytes() {
+        byte(hash, value);
+    }
+    word(hash, source.parameters.len() as u64);
+    for value in &source.parameters {
+        annotation(hash, *value);
+    }
+    annotation(hash, source.return_type);
+    word(hash, source.record_layouts.len() as u64);
+    for layout in &source.record_layouts {
+        word(hash, layout.fields.len() as u64);
+        for field in &layout.fields {
+            word(hash, field.name.len() as u64);
+            for b in field.name.bytes() {
+                byte(hash, b);
+            }
+            match field.ty {
+                kiln_ir::NativeFieldType::Number => {
+                    byte(hash, 0);
+                }
+                kiln_ir::NativeFieldType::Int32 => {
+                    byte(hash, 1);
+                }
+                kiln_ir::NativeFieldType::Boolean => {
+                    byte(hash, 2);
+                }
+                kiln_ir::NativeFieldType::String => {
+                    byte(hash, 3);
+                }
+                kiln_ir::NativeFieldType::Record(id) => {
+                    byte(hash, 4);
+                    word(hash, u64::from(id.0));
+                }
+            }
+            byte(hash, if field.readonly { 1 } else { 0 });
+        }
+    }
+    word(hash, source.parameter_layouts.len() as u64);
+    for layout in &source.parameter_layouts {
+        match layout {
+            Some(id) => {
+                byte(hash, 1);
+                word(hash, u64::from(id.0));
+            }
+            None => {
+                byte(hash, 0);
+            }
+        }
+    }
+    match source.return_layout {
+        Some(id) => {
+            byte(hash, 1);
+            word(hash, u64::from(id.0));
+        }
+        None => {
+            byte(hash, 0);
+        }
+    }
+    word(hash, source.span_layouts.len() as u64);
+    for (span_start, id) in &source.span_layouts {
+        word(hash, u64::from(*span_start));
+        word(hash, u64::from(id.0));
+    }
+    word(hash, source.local_layouts.len() as u64);
+    for (slot, id) in &source.local_layouts {
+        word(hash, u64::from(*slot));
+        word(hash, u64::from(id.0));
+    }
+    word(hash, source.new_object_layouts.len() as u64);
+    for (pc, id) in &source.new_object_layouts {
+        word(hash, u64::from(*pc));
+        word(hash, u64::from(id.0));
     }
 }
 
@@ -725,6 +831,10 @@ pub(super) fn hash_module_with_policy_and_seed(
     }
     if policy.no_kiln_extensions {
         hash ^= 0x7e;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    if policy.semantics == NativeSemantics::Native {
+        hash ^= 0x7a;
         hash = hash.wrapping_mul(0x100000001b3);
     }
     if let Some(bytes) = policy.unit_chunk_bytes {

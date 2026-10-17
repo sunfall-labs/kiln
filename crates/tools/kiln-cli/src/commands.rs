@@ -15,8 +15,8 @@ use crate::error::{Error, Result};
 use crate::render::{self, Work};
 use crate::sources;
 use kiln_proto::{
-    NativeProfile, RecordedWorkers, ResolutionMap, SourceDigest, SourceHash, SourceView,
-    StepBudget, TestMode, TestOutcome, TestSummary, source_digest,
+    NativeProfile, NativeSemantics, RecordedWorkers, ResolutionMap, SourceDigest, SourceHash,
+    SourceView, StepBudget, TestMode, TestOutcome, TestSummary, source_digest,
 };
 use serde_json::json;
 
@@ -580,6 +580,7 @@ pub fn build(
     pgo_generate: Option<&Path>,
     pgo_use: Option<&Path>,
     includes: &[String],
+    semantics: NativeSemantics,
 ) -> Result<Output> {
     let display = path.display().to_string();
     let canonical = canonical_path(path)?;
@@ -677,6 +678,7 @@ pub fn build(
         pgo_gen.clone(),
         pgo_u.clone(),
         source_view,
+        semantics,
     )? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(_) => {
@@ -697,6 +699,7 @@ pub fn build(
                 pgo_gen,
                 pgo_u,
                 source_view,
+                semantics,
             )? {
                 SourceResponse::Ready(summary) => summary,
                 SourceResponse::Stale(current) => {
@@ -755,6 +758,7 @@ pub fn native_run(
     pgo_generate: Option<&Path>,
     pgo_use: Option<&Path>,
     stream: bool,
+    semantics: NativeSemantics,
 ) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
@@ -784,6 +788,7 @@ pub fn native_run(
         pgo_u.clone(),
         source_view,
         stream,
+        semantics,
     )? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(_) => {
@@ -802,6 +807,7 @@ pub fn native_run(
                 pgo_u,
                 source_view,
                 stream,
+                semantics,
             )? {
                 SourceResponse::Ready(summary) => summary,
                 SourceResponse::Stale(current) => {
@@ -2380,6 +2386,7 @@ mod tests {
             None,
             None,
             &[],
+            NativeSemantics::Js,
         )
         .expect("shared build");
         assert!(
@@ -2422,6 +2429,7 @@ mod tests {
             None,
             None,
             &[],
+            NativeSemantics::Js,
         )
         .expect("brief shared build");
         assert!(brief.text.starts_with("built "), "{}", brief.text);
@@ -2460,6 +2468,7 @@ mod tests {
             None,
             None,
             &[],
+            NativeSemantics::Js,
         )
         .expect("native build keeps its captured entry snapshot");
 
@@ -2513,6 +2522,7 @@ mod tests {
             None,
             None,
             &[],
+            NativeSemantics::Js,
         )
         .expect("native build with explain");
 
@@ -2551,6 +2561,7 @@ mod tests {
             None,
             None,
             false,
+            NativeSemantics::Js,
         )
         .expect("native run keeps its captured entry snapshot");
 
