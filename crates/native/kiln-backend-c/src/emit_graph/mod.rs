@@ -12,9 +12,7 @@ mod ops;
 pub(crate) mod sites;
 mod string_accumulator;
 
-pub(crate) use body::{
-    ArgumentsLengthFact, emit_box_native_record, emit_compound_literal_fields,
-};
+pub(crate) use body::{ArgumentsLengthFact, emit_box_native_record, emit_compound_literal_fields};
 pub use body::{
     emit_async_entry_body, emit_entry_from_graph, emit_entry_from_graph_with_profile,
     emit_function_from_graph, emit_function_from_graph_with_profile, retain_used_entry_context,
@@ -171,9 +169,15 @@ pub fn typed_signature(
 ) -> (String, String) {
     let result = if returns_number {
         "double".to_string()
-    } else if semantics == crate::NativeSemantics::Native && proto.return_layout().is_some() {
-        let ret_lid = proto.return_layout().unwrap();
-        format!("{symbol}_rec_{ret_lid}")
+    } else if semantics == crate::NativeSemantics::Native {
+        if let Some(ret_lid) = proto.return_layout() {
+            format!("{symbol}_rec_{ret_lid}")
+        } else if let Some(kiln_ir::NativeFieldType::Record(ret_lid)) = proto.return_array_element()
+        {
+            format!("{symbol}_arr_rec_{ret_lid}")
+        } else {
+            "kiln_val".to_string()
+        }
     } else {
         "kiln_val".to_string()
     };
@@ -191,12 +195,20 @@ pub fn typed_signature(
         params.push_str(", kiln_host *host, kiln_value *thrown");
     }
     let param_layouts = proto.parameter_layouts();
+    let param_arrays = proto.parameter_array_elements();
     for k in 0..proto.parameter_count {
-        if semantics == crate::NativeSemantics::Native
-            && param_layouts.get(k as usize).copied().flatten().is_some()
-        {
-            let lid = param_layouts[k as usize].unwrap();
-            params.push_str(&format!(", {symbol}_rec_{lid} *p{k}"));
+        if semantics == crate::NativeSemantics::Native {
+            if let Some(lid) = param_layouts.get(k as usize).copied().flatten() {
+                params.push_str(&format!(", {symbol}_rec_{lid} *p{k}"));
+            } else if let Some(kiln_ir::NativeFieldType::Record(lid)) =
+                param_arrays.get(k as usize).copied().flatten()
+            {
+                params.push_str(&format!(", {symbol}_arr_rec_{lid} *p{k}"));
+            } else if param_arrays.get(k as usize).copied().flatten().is_some() {
+                params.push_str(&format!(", kiln_val p{k}"));
+            } else {
+                params.push_str(&format!(", double p{k}"));
+            }
         } else {
             params.push_str(&format!(", double p{k}"));
         }

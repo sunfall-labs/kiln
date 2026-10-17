@@ -1940,7 +1940,9 @@ fn render_functions(
         .map(|(index, proto)| {
             if policy.semantics == NativeSemantics::Native
                 && (proto.parameter_layouts().iter().any(|p| p.is_some())
-                    || proto.return_layout().is_some())
+                    || proto.return_layout().is_some()
+                    || proto.parameter_array_elements().iter().any(|p| p.is_some())
+                    || proto.return_array_element().is_some())
             {
                 return false;
             }
@@ -2240,7 +2242,9 @@ fn render_functions(
         .map(|(index, proto)| {
             if policy.semantics == NativeSemantics::Native
                 && (proto.parameter_layouts().iter().any(|p| p.is_some())
-                    || proto.return_layout().is_some())
+                    || proto.return_layout().is_some()
+                    || proto.parameter_array_elements().iter().any(|p| p.is_some())
+                    || proto.return_array_element().is_some())
             {
                 return false;
             }
@@ -3016,6 +3020,10 @@ fn emit_record_typedefs(out: &mut String, symbol: &str, layouts: &[kiln_ir::Reco
             }
         }
         let _ = writeln!(out, "}} {symbol}_rec_{id};\n");
+        let _ = writeln!(
+            out,
+            "typedef struct {symbol}_arr_rec_{id} {{ {symbol}_rec_{id} *data; size_t count; size_t capacity; }} {symbol}_arr_rec_{id};\n"
+        );
     }
 }
 

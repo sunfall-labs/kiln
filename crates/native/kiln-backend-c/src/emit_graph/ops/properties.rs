@@ -1,4 +1,5 @@
 use super::OpContext;
+use super::emit_struct_copy_fields;
 use super::status_check;
 use crate::emit_graph::EntryKind;
 use crate::graph::{GraphOp, ValueId, resolve_const_string};
@@ -34,6 +35,61 @@ pub(super) fn emit_get_property(
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
     if ctx.plan.semantics == crate::NativeSemantics::Native {
+        if let Some(&(_obj_lid, ref arr_expr)) =
+            ctx.native_records.record_array_value_exprs.get(object)
+        {
+            let prop_name = match program.constants.get(*name as usize) {
+                Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+                _ => String::new(),
+            };
+            if prop_name == "length" {
+                let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+                if typed {
+                    writeln!(output, "    d{v} = (double){arr_expr}.count;").unwrap();
+                }
+                if typed_int {
+                    writeln!(output, "    i{v} = (int64_t){arr_expr}.count;").unwrap();
+                }
+                if need_box {
+                    writeln!(
+                        output,
+                        "    v{v} = kiln_c99_val_from_double((double){arr_expr}.count);"
+                    )
+                    .unwrap();
+                }
+                return;
+            }
+        }
+        if ctx.native_records.number_array_values.contains(object) {
+            let prop_name = match program.constants.get(*name as usize) {
+                Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
+                _ => String::new(),
+            };
+            if prop_name == "length" {
+                let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
+                writeln!(
+                    output,
+                    "    {{ const kiln_array *arr = (const kiln_array *)KILN_VAL_PTR(v{});",
+                    object.0
+                )
+                .unwrap();
+                if typed {
+                    writeln!(output, "    d{v} = (double)arr->count;").unwrap();
+                }
+                if typed_int {
+                    writeln!(output, "    i{v} = (int64_t)arr->count;").unwrap();
+                }
+                if need_box {
+                    writeln!(
+                        output,
+                        "    v{v} = kiln_c99_val_from_double((double)arr->count);"
+                    )
+                    .unwrap();
+                }
+                writeln!(output, "    }}").unwrap();
+                return;
+            }
+        }
         if let Some(&(obj_lid, ref obj_expr)) = ctx.native_records.value_exprs.get(object) {
             let prop_name = match program.constants.get(*name as usize) {
                 Some(Constant::String(s)) => s.to_scalar_string().unwrap_or_default(),
@@ -899,6 +955,58 @@ pub(super) fn emit_get_computed(
         .get(&vid)
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
+    if ctx.plan.semantics == crate::NativeSemantics::Native {
+        if let Some(&(lid, ref arr_expr)) = ctx.native_records.record_array_value_exprs.get(object)
+        {
+            let idx_expr = if ctx.live_ints.contains(key) || ctx.ints.contains(key) {
+                format!("(size_t)i{}", key.0)
+            } else if ctx.live_numbers.contains(key) || ctx.numbers.contains(key) {
+                format!("(size_t)d{}", key.0)
+            } else {
+                format!(
+                    "((size_t)kiln_c99_as_number(kiln_val_to_boundary(v{})))",
+                    key.0
+                )
+            };
+            writeln!(output, "    rec_ptr_{v} = &({arr_expr}).data[{idx_expr}];").unwrap();
+            if ctx.native_records.boxed_record_values.contains(&vid) {
+                let all_layouts = crate::collect_program_record_layouts(program);
+                crate::emit_graph::emit_box_native_record(
+                    output,
+                    ctx.symbol,
+                    v,
+                    lid,
+                    &format!("(*rec_ptr_{v})"),
+                    &all_layouts,
+                );
+            }
+            return;
+        }
+        if ctx.native_records.number_array_values.contains(object) {
+            let idx_expr = if ctx.live_ints.contains(key) || ctx.ints.contains(key) {
+                format!("(size_t)i{}", key.0)
+            } else if ctx.live_numbers.contains(key) || ctx.numbers.contains(key) {
+                format!("(size_t)d{}", key.0)
+            } else {
+                format!(
+                    "((size_t)kiln_c99_as_number(kiln_val_to_boundary(v{})))",
+                    key.0
+                )
+            };
+            writeln!(output, "    {{ const kiln_array *arr = (const kiln_array *)KILN_VAL_PTR(v{}); v{v} = arr->elements[{idx_expr}]; }}", object.0).unwrap();
+            if typed {
+                writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
+            }
+            if typed_int {
+                if typed {
+                    writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                } else {
+                    writeln!(output, "    {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}").unwrap();
+                }
+            }
+            return;
+        }
+    }
     if let Some(&root) = graph.scalar_alias_map.get(object)
         && let Some(scalar_obj) = graph.scalar_objects.get(&root)
         && let Some(key_str) = resolve_const_string(*key, defs, program)
@@ -1182,11 +1290,78 @@ pub(super) fn emit_set_computed(
     } else {
         String::new()
     };
+    let symbol = ctx.symbol;
     let (pc, label) = ctx
         .origins
         .get(&vid)
         .map(|o| (o.pc, o.label.as_str()))
         .unwrap_or((0, "Op"));
+    if ctx.plan.semantics == crate::NativeSemantics::Native {
+        if let Some(&(lid, ref arr_expr)) = ctx.native_records.record_array_value_exprs.get(object)
+        {
+            let idx_expr = if ctx.live_ints.contains(key) || ctx.ints.contains(key) {
+                format!("(size_t)i{}", key.0)
+            } else if ctx.live_numbers.contains(key) || ctx.numbers.contains(key) {
+                format!("(size_t)d{}", key.0)
+            } else {
+                format!(
+                    "((size_t)kiln_c99_as_number(kiln_val_to_boundary(v{})))",
+                    key.0
+                )
+            };
+            writeln!(
+                output,
+                "    if ({idx_expr} >= {arr_expr}.capacity) {{ size_t new_cap = {idx_expr} + 1 < 4 ? 4 : ({idx_expr} + 1) * 2; {arr_expr}.data = ({symbol}_rec_{lid} *)realloc({arr_expr}.data, new_cap * sizeof({symbol}_rec_{lid})); {arr_expr}.capacity = new_cap; }}\n    if ({idx_expr} >= {arr_expr}.count) {arr_expr}.count = {idx_expr} + 1;"
+            ).unwrap();
+            let dst_expr = format!("{arr_expr}.data[{idx_expr}]");
+            if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(value) {
+                let all_layouts = crate::collect_program_record_layouts(program);
+                emit_struct_copy_fields(output, &dst_expr, lid, src_expr, src_lid, &all_layouts);
+            }
+            return;
+        }
+        if ctx.native_records.number_array_values.contains(object) {
+            let idx_expr = if ctx.live_ints.contains(key) || ctx.ints.contains(key) {
+                format!("(size_t)i{}", key.0)
+            } else if ctx.live_numbers.contains(key) || ctx.numbers.contains(key) {
+                format!("(size_t)d{}", key.0)
+            } else {
+                format!(
+                    "((size_t)kiln_c99_as_number(kiln_val_to_boundary(v{})))",
+                    key.0
+                )
+            };
+            let val_expr = if ctx.live_numbers.contains(value) {
+                format!("kiln_c99_val_from_double(d{})", value.0)
+            } else if ctx.live_ints.contains(value) {
+                format!("kiln_c99_val_from_double((double)i{})", value.0)
+            } else {
+                format!("v{}", value.0)
+            };
+            let check = status_check(diagnostic_site, pc, "SetComputed", unwind);
+            writeln!(
+                output,
+                "    {{ kiln_val elem_v = {val_expr}; kiln_array *arr = (kiln_array *)KILN_VAL_PTR(v{}); if (KILN_LIKELY({idx_expr} < arr->count)) {{ kiln_c99_heap_store_val(arr, &arr->elements[{idx_expr}], elem_v); }} else {{ int status = kiln_c99_val_write_element(host, v{}, kiln_c99_val_from_double((double)({idx_expr})), elem_v, 1, depth, thrown); {check} }} {assign_v}}}",
+                object.0, object.0
+            )
+            .unwrap();
+            if is_used && typed {
+                if ctx.live_numbers.contains(value) {
+                    writeln!(output, "    d{v} = d{};", value.0).unwrap();
+                } else if ctx.live_ints.contains(value) {
+                    writeln!(output, "    d{v} = (double)i{};", value.0).unwrap();
+                }
+            }
+            if is_used && typed_int {
+                if ctx.live_ints.contains(value) {
+                    writeln!(output, "    i{v} = i{};", value.0).unwrap();
+                } else if ctx.live_numbers.contains(value) {
+                    writeln!(output, "    i{v} = (int64_t)d{};", value.0).unwrap();
+                }
+            }
+            return;
+        }
+    }
     if let Some(&root) = graph.scalar_alias_map.get(object)
         && let Some(scalar_obj) = graph.scalar_objects.get(&root)
         && let Some(key_str) = resolve_const_string(*key, defs, program)

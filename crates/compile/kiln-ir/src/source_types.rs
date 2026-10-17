@@ -346,7 +346,10 @@ pub fn rebind_program_layouts(module: &Module, program: &mut Program) {
             {
                 return Some(elem);
             }
-            if let Some(&elem) = source.exact_span_array_elements.get(&(span.start, span.end)) {
+            if let Some(&elem) = source
+                .exact_span_array_elements
+                .get(&(span.start, span.end))
+            {
                 return Some(elem);
             }
             if let Some(s) = orig_start

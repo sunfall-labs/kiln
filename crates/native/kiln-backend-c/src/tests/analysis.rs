@@ -2610,7 +2610,7 @@ export const result = run();
         emitted.source
     );
     assert!(
-        !emitted.source.contains("ku_rec_0 *"),
+        !emitted.source.contains("ku_rec_0 *ku_fn_0_t"),
         "expected makePoint_t to NOT return a pointer to struct:\n{}",
         emitted.source
     );
@@ -2735,3 +2735,104 @@ badFreeze();
     );
 }
 
+#[test]
+fn native_semantics_homogeneous_arrays_emit_unboxed() {
+    let source = r#"
+function sumPoints(pts) {
+    let total = 0;
+    for (let i = 0; i < pts.length; i++) {
+        total = total + pts[i].x;
+    }
+    return total;
+}
+function run() {
+    const pts = [];
+    pts.push({ x: 10 });
+    pts.push({ x: 20 });
+    return sumPoints(pts);
+}
+export const result = run();
+"#;
+    let parsed_exec = kiln_frontend_oxc::parse("/test.js", source);
+    let mut module_prog = kiln_ir::compile_module(&parsed_exec).expect("compile module");
+    let record_layouts = vec![kiln_ir::RecordLayout {
+        fields: vec![kiln_ir::RecordField {
+            name: "x".into(),
+            ty: kiln_ir::NativeFieldType::Number,
+            readonly: false,
+        }],
+    }];
+    // Function 0: sumPoints(pts: Point[]): number
+    module_prog.program.functions[0].type_annotations = Some(
+        kiln_ir::FunctionTypeAnnotations::from_source_types(kiln_ir::SourceTypeAnnotations {
+            version: kiln_ir::SOURCE_TYPE_METADATA_VERSION,
+            checker_identity: "test".into(),
+            parameters: vec![None],
+            return_type: Some(kiln_ir::TypeAnnotation::Number),
+            record_layouts: record_layouts.clone(),
+            parameter_layouts: vec![None],
+            parameter_array_elements: vec![Some(kiln_ir::NativeFieldType::Record(
+                kiln_ir::RecordLayoutId(0),
+            ))],
+            return_layout: None,
+            return_array_element: None,
+            span_layouts: std::collections::BTreeMap::new(),
+            exact_span_layouts: std::collections::BTreeMap::new(),
+            local_layouts: std::collections::BTreeMap::new(),
+            local_array_elements: std::collections::BTreeMap::new(),
+            new_object_layouts: std::collections::BTreeMap::new(),
+            ..Default::default()
+        }),
+    );
+    // Find new array pc in run()
+    let mut new_arr_pc = 0u32;
+    for (pc, op) in module_prog.program.functions[1].code.iter().enumerate() {
+        if matches!(op, Instruction::NewArray { .. }) {
+            new_arr_pc = pc as u32;
+            break;
+        }
+    }
+    // Function 1: run(): number
+    module_prog.program.functions[1].type_annotations = Some(
+        kiln_ir::FunctionTypeAnnotations::from_source_types(kiln_ir::SourceTypeAnnotations {
+            version: kiln_ir::SOURCE_TYPE_METADATA_VERSION,
+            checker_identity: "test".into(),
+            parameters: vec![],
+            return_type: Some(kiln_ir::TypeAnnotation::Number),
+            record_layouts: record_layouts.clone(),
+            parameter_layouts: vec![],
+            parameter_array_elements: vec![],
+            return_layout: None,
+            return_array_element: None,
+            span_layouts: std::collections::BTreeMap::new(),
+            exact_span_layouts: std::collections::BTreeMap::new(),
+            local_layouts: std::collections::BTreeMap::new(),
+            local_array_elements: std::collections::BTreeMap::from([(
+                0,
+                kiln_ir::NativeFieldType::Record(kiln_ir::RecordLayoutId(0)),
+            )]),
+            new_object_layouts: std::collections::BTreeMap::new(),
+            new_array_elements: std::collections::BTreeMap::from([(
+                new_arr_pc,
+                kiln_ir::NativeFieldType::Record(kiln_ir::RecordLayoutId(0)),
+            )]),
+            ..Default::default()
+        }),
+    );
+    let emitted = emit_module_with_logical_path_and_policy(
+        &module_prog,
+        "test_arr.js",
+        EmissionPolicy {
+            compact: true,
+            generic_only: true,
+            semantics: crate::NativeSemantics::Native,
+            ..EmissionPolicy::default()
+        },
+    )
+    .expect("native semantics array module emits");
+    assert!(
+        emitted.source.contains("arr_rec_0"),
+        "expected arr_rec_0 typedef in emitted source:\n{}",
+        emitted.source
+    );
+}

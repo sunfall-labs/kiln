@@ -91,7 +91,10 @@ fn the_virtual_clock_keeps_math_random_reproducible_but_never_crypto() {
     let root = fixture();
     let virtual_clock = ["--clock", "virtual"];
     let (first, second) = (run(&root, &virtual_clock), run(&root, &virtual_clock));
-    assert_eq!(first["math"], second["math"], "Math.random is reproducible on the virtual clock");
+    assert_eq!(
+        first["math"], second["math"],
+        "Math.random is reproducible on the virtual clock"
+    );
     for field in CRYPTO_FIELDS {
         assert_ne!(
             first[field], second[field],

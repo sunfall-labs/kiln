@@ -139,8 +139,11 @@ pub(crate) fn emit_struct_copy_fields(
                     );
                 }
                 _ => {
-                    writeln!(output, "    {dst_expr}.{field_name} = {src_expr}.{field_name};")
-                        .unwrap();
+                    writeln!(
+                        output,
+                        "    {dst_expr}.{field_name} = {src_expr}.{field_name};"
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -407,7 +410,8 @@ pub(super) fn emit_graph_op(
                 && ctx.native_records.slot_exprs.contains_key(slot)
             {
                 if ctx.native_records.boxed_record_values.contains(&vid) {
-                    if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(&vid) {
+                    if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(&vid)
+                    {
                         let all_layouts = crate::collect_program_record_layouts(ctx.program);
                         crate::emit_graph::emit_box_native_record(
                             output,
@@ -418,6 +422,32 @@ pub(super) fn emit_graph_op(
                             &all_layouts,
                         );
                     }
+                }
+                return;
+            }
+            if ctx.plan.semantics == crate::NativeSemantics::Native
+                && ctx
+                    .native_records
+                    .record_array_value_exprs
+                    .contains_key(&vid)
+            {
+                return;
+            }
+            if ctx.plan.semantics == crate::NativeSemantics::Native
+                && ctx.native_records.number_array_slots.contains(slot)
+            {
+                if in_array(slot) {
+                    writeln!(output, "    v{v} = locals[{slot}];").unwrap();
+                } else if *slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
+                    writeln!(output, "    v{v} = p{slot};").unwrap();
+                } else if *slot < proto.parameter_count {
+                    writeln!(
+                        output,
+                        "    v{v} = (size_t){slot} < argc ? args[{slot}] : KILN_VAL_UNDEFINED;"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(output, "    v{v} = KILN_VAL_UNDEFINED;").unwrap();
                 }
                 return;
             }
@@ -463,6 +493,19 @@ pub(super) fn emit_graph_op(
         }
         GraphOp::StoreLocal { slot, value } => {
             if ctx.plan.semantics == crate::NativeSemantics::Native
+                && let Some((_dst_lid, dst_expr)) =
+                    ctx.native_records.record_array_slot_exprs.get(slot)
+            {
+                if let Some((_src_lid, src_expr)) =
+                    ctx.native_records.record_array_value_exprs.get(value)
+                {
+                    if dst_expr != src_expr {
+                        writeln!(output, "    {dst_expr} = {src_expr};").unwrap();
+                    }
+                }
+                return;
+            }
+            if ctx.plan.semantics == crate::NativeSemantics::Native
                 && let Some(dst_expr) = ctx.native_records.slot_exprs.get(slot)
             {
                 if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(value) {
@@ -499,7 +542,8 @@ pub(super) fn emit_graph_op(
                     }
                 }
                 if ctx.native_records.boxed_record_values.contains(&vid) {
-                    if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(&vid) {
+                    if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(&vid)
+                    {
                         let all_layouts = crate::collect_program_record_layouts(ctx.program);
                         crate::emit_graph::emit_box_native_record(
                             output,
@@ -1210,6 +1254,16 @@ pub(super) fn emit_graph_op(
                     } else {
                         None
                     };
+                    let array_param = if ctx.plan.semantics == crate::NativeSemantics::Native {
+                        target_proto.and_then(|tp| {
+                            tp.parameter_array_elements()
+                                .get(param_idx)
+                                .copied()
+                                .flatten()
+                        })
+                    } else {
+                        None
+                    };
                     if let Some(target_lid) = record_param {
                         if let Some(&(src_lid, ref src_expr)) =
                             ctx.native_records.value_exprs.get(a)
@@ -1231,6 +1285,21 @@ pub(super) fn emit_graph_op(
                             }
                         } else {
                             call_args.push_str(", NULL");
+                        }
+                    } else if let Some(elem_ty) = array_param {
+                        match elem_ty {
+                            kiln_ir::NativeFieldType::Record(_target_lid) => {
+                                if let Some(&(_src_lid, ref src_expr)) =
+                                    ctx.native_records.record_array_value_exprs.get(a)
+                                {
+                                    call_args.push_str(&format!(", &({src_expr})"));
+                                } else {
+                                    call_args.push_str(", NULL");
+                                }
+                            }
+                            _ => {
+                                call_args.push_str(&format!(", v{}", a.0));
+                            }
                         }
                     } else if live_numbers.contains(a) {
                         call_args.push_str(&format!(", d{}", a.0));
@@ -1329,6 +1398,11 @@ pub(super) fn emit_graph_op(
                     && let Some(caller_ret_lid) = ctx.proto.return_layout()
                 {
                     format!("({symbol}_rec_{caller_ret_lid}){{0}}")
+                } else if ctx.plan.semantics == crate::NativeSemantics::Native
+                    && let Some(kiln_ir::NativeFieldType::Record(caller_ret_lid)) =
+                        ctx.proto.return_array_element()
+                {
+                    format!("({symbol}_arr_rec_{caller_ret_lid}){{0}}")
                 } else {
                     typed_fail(kind).to_string()
                 };
@@ -1360,6 +1434,25 @@ pub(super) fn emit_graph_op(
                                 &format!("rec_call_{v}"),
                                 &all_layouts,
                             );
+                        }
+                    } else if let Some(elem_ty) =
+                        target_proto.and_then(|tp| tp.return_array_element())
+                    {
+                        match elem_ty {
+                            kiln_ir::NativeFieldType::Record(_ret_lid) => {
+                                writeln!(
+                                    output,
+                                    "    {{ {recv} rec_arr_call_{v} = {symbol}_fn_{target}_t({call_args}); }}"
+                                )
+                                .unwrap();
+                            }
+                            _ => {
+                                writeln!(
+                                    output,
+                                    "    {{ {recv} v{v} = {symbol}_fn_{target}_t({call_args}); }}"
+                                )
+                                .unwrap();
+                            }
                         }
                     } else if plan.typed_returns[target as usize] {
                         if live_typed {
@@ -1598,7 +1691,13 @@ pub(super) fn emit_graph_op(
                 };
                 let is_reflection = matches!(
                     method_name.as_deref(),
-                    Some("defineProperty" | "defineProperties" | "freeze" | "seal" | "preventExtensions")
+                    Some(
+                        "defineProperty"
+                            | "defineProperties"
+                            | "freeze"
+                            | "seal"
+                            | "preventExtensions"
+                    )
                 );
                 if is_reflection
                     && args
@@ -1613,6 +1712,67 @@ pub(super) fn emit_graph_op(
                     )
                     .unwrap();
                     return;
+                }
+                if method_name.as_deref() == Some("push") && args.len() == 1 {
+                    if let Some(&(lid, ref arr_expr)) =
+                        ctx.native_records.record_array_value_exprs.get(object)
+                    {
+                        writeln!(output, "    if ({arr_expr}.count >= {arr_expr}.capacity) {{ size_t new_cap = {arr_expr}.capacity == 0 ? 4 : {arr_expr}.capacity * 2; {arr_expr}.data = ({symbol}_rec_{lid} *)realloc({arr_expr}.data, new_cap * sizeof({symbol}_rec_{lid})); {arr_expr}.capacity = new_cap; }}").unwrap();
+                        let dst_expr = format!("{arr_expr}.data[{arr_expr}.count]");
+                        if let Some(&(src_lid, ref src_expr)) =
+                            ctx.native_records.value_exprs.get(&args[0])
+                        {
+                            let all_layouts = crate::collect_program_record_layouts(ctx.program);
+                            emit_struct_copy_fields(
+                                output,
+                                &dst_expr,
+                                lid,
+                                src_expr,
+                                src_lid,
+                                &all_layouts,
+                            );
+                        }
+                        writeln!(output, "    {arr_expr}.count++;").unwrap();
+                        if live_typed {
+                            writeln!(output, "    d{v} = (double){arr_expr}.count;").unwrap();
+                        }
+                        if live_typed_int {
+                            writeln!(output, "    i{v} = (int64_t){arr_expr}.count;").unwrap();
+                        }
+                        writeln!(
+                            output,
+                            "    v{v} = kiln_c99_val_from_double((double){arr_expr}.count);"
+                        )
+                        .unwrap();
+                        return;
+                    }
+                    if ctx.native_records.number_array_values.contains(object) {
+                        let a0 = args[0];
+                        let arg_val = if ctx.live_numbers.contains(&a0) {
+                            format!("kiln_c99_val_from_double(d{})", a0.0)
+                        } else if ctx.live_ints.contains(&a0) {
+                            format!("kiln_c99_val_from_double((double)i{})", a0.0)
+                        } else {
+                            format!("v{}", a0.0)
+                        };
+                        writeln!(
+                            output,
+                            "    {{ int status = kiln_c99_val_array_push_fast(v{}, {arg_val}, &v{v}); if (status != KILN_C99_OK) return status; }}",
+                            object.0
+                        )
+                        .unwrap();
+                        if live_typed {
+                            writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
+                        }
+                        if live_typed_int {
+                            if live_typed {
+                                writeln!(output, "    i{v} = (int64_t)d{v};").unwrap();
+                            } else {
+                                writeln!(output, "    {{ double tmp_{v}; memcpy(&tmp_{v}, &v{v}, sizeof(tmp_{v})); i{v} = (int64_t)tmp_{v}; }}").unwrap();
+                            }
+                        }
+                        return;
+                    }
                 }
             }
             call_method::emit_call_method(
@@ -2014,6 +2174,34 @@ pub(super) fn emit_graph_op(
             }
         }
         GraphOp::NewArray { elements, .. } => {
+            if ctx.plan.semantics == crate::NativeSemantics::Native
+                && let Some(&(lid, ref arr_expr)) =
+                    ctx.native_records.record_array_value_exprs.get(&vid)
+            {
+                let count = elements.len();
+                let cap = if count < 4 { 4 } else { count };
+                writeln!(
+                    output,
+                    "    {arr_expr}.capacity = {cap}; {arr_expr}.count = {count}; {arr_expr}.data = ({symbol}_rec_{lid} *)malloc({cap} * sizeof({symbol}_rec_{lid}));"
+                )
+                .unwrap();
+                for (i, elem) in elements.iter().enumerate() {
+                    if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(elem)
+                    {
+                        let all_layouts = crate::collect_program_record_layouts(ctx.program);
+                        let dst_expr = format!("{arr_expr}.data[{i}]");
+                        emit_struct_copy_fields(
+                            output,
+                            &dst_expr,
+                            lid,
+                            src_expr,
+                            src_lid,
+                            &all_layouts,
+                        );
+                    }
+                }
+                return;
+            }
             let count = elements.len();
             if plan.compact {
                 if count == 0 {

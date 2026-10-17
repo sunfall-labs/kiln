@@ -795,7 +795,12 @@ fn math_pow_of_unit_base_with_nan_or_infinite_exponent_is_nan_in_both() {
     ];
     let callbacks: Vec<(Expr, u32)> = exponents
         .into_iter()
-        .map(|exponent| (Expr::Math2("pow", Box::new(Expr::Element), Box::new(exponent)), 2))
+        .map(|exponent| {
+            (
+                Expr::Math2("pow", Box::new(Expr::Element), Box::new(exponent)),
+                2,
+            )
+        })
         .collect();
     let failure = compare(&callbacks, &[1.0, -1.0, 2.0, 0.5], [f64::NAN, 0.0]);
     assert!(failure.is_none(), "{failure:?}");

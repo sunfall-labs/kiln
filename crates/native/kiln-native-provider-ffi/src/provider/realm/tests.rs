@@ -1447,11 +1447,7 @@ fn callable_store_front_cache_handles_negative_keys_collisions_and_clear() {
     ];
     expected.sort_unstable();
     assert_eq!(newly_dropped, expected);
-    assert_eq!(
-        newly_dropped.len(),
-        3,
-        "canonical owners drop once each"
-    );
+    assert_eq!(newly_dropped.len(), 3, "canonical owners drop once each");
 }
 
 #[test]

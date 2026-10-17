@@ -409,7 +409,10 @@ fn instantiation_units_keep_their_mixed_tier_in_executable_and_shared_unit_metad
         .collect::<Vec<_>>();
     assert!(cold_arguments.contains(&"-O0".to_owned()));
     assert!(!cold_arguments.contains(&"-DKILN_GENERIC_MIXED_TIER=1".to_owned()));
-    assert_eq!(release_module_compile_identity(true, false), "generic-o0-nosan-nosections");
+    assert_eq!(
+        release_module_compile_identity(true, false),
+        "generic-o0-nosan-nosections"
+    );
 }
 
 #[test]

@@ -155,11 +155,18 @@ fn fixture_output(mut command: std::process::Command, what: &str) -> std::proces
             bytes
         })
     };
-    let stdout = drain(Box::new(child.stdout.take().expect("fixture stdout is piped")));
-    let stderr = drain(Box::new(child.stderr.take().expect("fixture stderr is piped")));
+    let stdout = drain(Box::new(
+        child.stdout.take().expect("fixture stdout is piped"),
+    ));
+    let stderr = drain(Box::new(
+        child.stderr.take().expect("fixture stderr is piped"),
+    ));
     let deadline = Instant::now() + FIXTURE_DEADLINE;
     let status = loop {
-        if let Some(status) = child.try_wait().unwrap_or_else(|error| panic!("poll {what}: {error}")) {
+        if let Some(status) = child
+            .try_wait()
+            .unwrap_or_else(|error| panic!("poll {what}: {error}"))
+        {
             break status;
         }
         if Instant::now() >= deadline {

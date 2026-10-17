@@ -614,15 +614,32 @@ pub fn emit_function_from_graph_with_profile(
         .unwrap();
         if proto.parameter_count > 0 && matches!(kind, EntryKind::Typed { .. }) {
             for k in 0..proto.parameter_count {
-                if plan.semantics == crate::NativeSemantics::Native
-                    && proto
+                if plan.semantics == crate::NativeSemantics::Native {
+                    if proto
                         .parameter_layouts()
                         .get(k as usize)
                         .copied()
                         .flatten()
                         .is_some()
-                {
-                    continue;
+                        || proto
+                            .parameter_array_elements()
+                            .get(k as usize)
+                            .copied()
+                            .flatten()
+                            .is_some_and(|ty| matches!(ty, kiln_ir::NativeFieldType::Record(_)))
+                    {
+                        continue;
+                    }
+                    if proto
+                        .parameter_array_elements()
+                        .get(k as usize)
+                        .copied()
+                        .flatten()
+                        .is_some()
+                    {
+                        writeln!(output, "    locals[{k}] = p{k};").unwrap();
+                        continue;
+                    }
                 }
                 writeln!(output, "    locals[{k}] = kiln_c99_val_from_double(p{k});").unwrap();
             }
@@ -898,6 +915,10 @@ pub(crate) struct NativeRecordMap {
     pub value_exprs: HashMap<ValueId, (kiln_ir::RecordLayoutId, String)>,
     pub boxed_record_values: HashSet<ValueId>,
     pub all_layouts: Vec<kiln_ir::RecordLayout>,
+    pub record_array_slot_exprs: HashMap<u32, (kiln_ir::RecordLayoutId, String)>,
+    pub record_array_value_exprs: HashMap<ValueId, (kiln_ir::RecordLayoutId, String)>,
+    pub number_array_slots: HashSet<u32>,
+    pub number_array_values: HashSet<ValueId>,
 }
 
 pub(crate) fn build_native_record_map(
@@ -914,15 +935,24 @@ pub(crate) fn build_native_record_map(
         return NativeRecordMap::default();
     }
     let all_layouts = crate::collect_program_record_layouts(program);
-    if all_layouts.is_empty() {
-        return NativeRecordMap::default();
-    }
     let (empty_local, empty_obj, empty_param) = (
         std::collections::BTreeMap::new(),
         std::collections::BTreeMap::new(),
         Vec::new(),
     );
-    let (local_layouts, new_object_layouts, parameter_layouts) = if let Some(ta) = proto
+    let (empty_local_arr, empty_new_arr, empty_param_arr) = (
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+        Vec::new(),
+    );
+    let (
+        local_layouts,
+        new_object_layouts,
+        parameter_layouts,
+        local_array_elements,
+        new_array_elements,
+        parameter_array_elements,
+    ) = if let Some(ta) = proto
         .type_annotations
         .as_ref()
         .and_then(|t| t.source_types.as_ref())
@@ -931,20 +961,48 @@ pub(crate) fn build_native_record_map(
             &ta.local_layouts,
             &ta.new_object_layouts,
             &ta.parameter_layouts,
+            &ta.local_array_elements,
+            &ta.new_array_elements,
+            &ta.parameter_array_elements,
         )
     } else if let Some(st) = program.source_types() {
         (
             &st.local_layouts,
             &st.new_object_layouts,
             &st.parameter_layouts,
+            &st.local_array_elements,
+            &st.new_array_elements,
+            &st.parameter_array_elements,
         )
     } else {
-        (&empty_local, &empty_obj, &empty_param)
+        (
+            &empty_local,
+            &empty_obj,
+            &empty_param,
+            &empty_local_arr,
+            &empty_new_arr,
+            &empty_param_arr,
+        )
     };
+
+    if all_layouts.is_empty()
+        && local_array_elements.is_empty()
+        && new_array_elements.is_empty()
+        && parameter_array_elements.is_empty()
+        && proto.return_array_element().is_none()
+    {
+        return NativeRecordMap::default();
+    }
 
     let mut decls = String::new();
     let mut slot_exprs: HashMap<u32, String> = HashMap::new();
     let mut value_exprs: HashMap<ValueId, (kiln_ir::RecordLayoutId, String)> = HashMap::new();
+    let mut record_array_slot_exprs: HashMap<u32, (kiln_ir::RecordLayoutId, String)> =
+        HashMap::new();
+    let mut record_array_value_exprs: HashMap<ValueId, (kiln_ir::RecordLayoutId, String)> =
+        HashMap::new();
+    let mut number_array_slots: HashSet<u32> = HashSet::new();
+    let mut number_array_values: HashSet<ValueId> = HashSet::new();
 
     for (&slot, &lid) in local_layouts {
         if slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
@@ -978,8 +1036,43 @@ pub(crate) fn build_native_record_map(
         }
     }
 
+    let mut slot_array_elems = local_array_elements.clone();
+    for (slot, param_elem) in parameter_array_elements.iter().enumerate() {
+        if let Some(elem_ty) = param_elem {
+            slot_array_elems.insert(slot as u32, *elem_ty);
+        }
+    }
+
+    for (&slot, &elem_ty) in &slot_array_elems {
+        match elem_ty {
+            kiln_ir::NativeFieldType::Record(lid) => {
+                if slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
+                    record_array_slot_exprs.insert(slot, (lid, format!("(*p{slot})")));
+                } else {
+                    decls.push_str(&format!(
+                        "    {symbol}_arr_rec_{lid} rec_arr_slot_{slot} = {{0}};\n"
+                    ));
+                    record_array_slot_exprs.insert(slot, (lid, format!("rec_arr_slot_{slot}")));
+                }
+                if let Some(&vid) = graph.initial_locals.get(slot as usize) {
+                    if let Some((_, expr)) = record_array_slot_exprs.get(&slot) {
+                        record_array_value_exprs.insert(vid, (lid, expr.clone()));
+                    }
+                }
+            }
+            kiln_ir::NativeFieldType::Number => {
+                number_array_slots.insert(slot);
+                if let Some(&vid) = graph.initial_locals.get(slot as usize) {
+                    number_array_values.insert(vid);
+                }
+            }
+            _ => {}
+        }
+    }
+
     loop {
-        let before_count = value_exprs.len();
+        let before_count =
+            value_exprs.len() + record_array_value_exprs.len() + number_array_values.len();
         for block in &graph.blocks {
             for (vid, op) in &block.operations {
                 match op {
@@ -1014,6 +1107,44 @@ pub(crate) fn build_native_record_map(
                             }
                         }
                     }
+                    GraphOp::NewArray { .. } => {
+                        let mut elem_ty = graph
+                            .origins
+                            .get(vid)
+                            .and_then(|origin| new_array_elements.get(&origin.pc).copied())
+                            .or_else(|| {
+                                block
+                                    .operations
+                                    .iter()
+                                    .find_map(|(_, next_op)| match next_op {
+                                        GraphOp::StoreLocal { slot, value } if value == vid => {
+                                            slot_array_elems.get(slot).copied()
+                                        }
+                                        _ => None,
+                                    })
+                            });
+                        if elem_ty.is_none()
+                            && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if ret_v == vid)
+                        {
+                            elem_ty = proto.return_array_element();
+                        }
+                        match elem_ty {
+                            Some(kiln_ir::NativeFieldType::Record(lid)) => {
+                                if !record_array_value_exprs.contains_key(vid) {
+                                    decls.push_str(&format!(
+                                        "    {symbol}_arr_rec_{lid} rec_arr_val_{} = {{0}};\n",
+                                        vid.0
+                                    ));
+                                    record_array_value_exprs
+                                        .insert(*vid, (lid, format!("rec_arr_val_{}", vid.0)));
+                                }
+                            }
+                            Some(kiln_ir::NativeFieldType::Number) => {
+                                number_array_values.insert(*vid);
+                            }
+                            _ => {}
+                        }
+                    }
                     GraphOp::LoadLocal(slot) => {
                         if !value_exprs.contains_key(vid) {
                             if let Some(slot_expr) = slot_exprs.get(slot) {
@@ -1024,6 +1155,14 @@ pub(crate) fn build_native_record_map(
                                     value_exprs.insert(*vid, (lid, slot_expr.clone()));
                                 }
                             }
+                        }
+                        if let Some((lid, expr)) = record_array_slot_exprs.get(slot) {
+                            record_array_value_exprs
+                                .entry(*vid)
+                                .or_insert_with(|| (*lid, expr.clone()));
+                        }
+                        if number_array_slots.contains(slot) {
+                            number_array_values.insert(*vid);
                         }
                     }
                     GraphOp::StoreLocal { slot, value } => {
@@ -1036,12 +1175,33 @@ pub(crate) fn build_native_record_map(
                                 }
                             }
                         }
+                        if let Some(&(lid, ref expr)) = record_array_slot_exprs.get(slot) {
+                            record_array_value_exprs
+                                .entry(*vid)
+                                .or_insert_with(|| (lid, expr.clone()));
+                        } else if let Some(&(lid, _)) = record_array_value_exprs.get(value) {
+                            if let Some((_, expr)) = record_array_slot_exprs.get(slot) {
+                                record_array_value_exprs
+                                    .entry(*vid)
+                                    .or_insert_with(|| (lid, expr.clone()));
+                            }
+                        }
+                        if number_array_slots.contains(slot) || number_array_values.contains(value)
+                        {
+                            number_array_values.insert(*vid);
+                        }
                     }
                     GraphOp::CheckTdz { value, .. } => {
                         if !value_exprs.contains_key(vid) {
                             if let Some((lid, expr)) = value_exprs.get(value).cloned() {
                                 value_exprs.insert(*vid, (lid, expr));
                             }
+                        }
+                        if let Some((lid, expr)) = record_array_value_exprs.get(value).cloned() {
+                            record_array_value_exprs.insert(*vid, (lid, expr));
+                        }
+                        if number_array_values.contains(value) {
+                            number_array_values.insert(*vid);
                         }
                     }
                     GraphOp::Phi { inputs } => {
@@ -1051,6 +1211,21 @@ pub(crate) fn build_native_record_map(
                                 .find_map(|(_, in_vid)| value_exprs.get(in_vid).cloned())
                             {
                                 value_exprs.insert(*vid, (lid, expr));
+                            }
+                        }
+                        if !record_array_value_exprs.contains_key(vid) {
+                            if let Some((lid, expr)) = inputs.iter().find_map(|(_, in_vid)| {
+                                record_array_value_exprs.get(in_vid).cloned()
+                            }) {
+                                record_array_value_exprs.insert(*vid, (lid, expr));
+                            }
+                        }
+                        if !number_array_values.contains(vid) {
+                            if inputs
+                                .iter()
+                                .any(|(_, in_vid)| number_array_values.contains(in_vid))
+                            {
+                                number_array_values.insert(*vid);
                             }
                         }
                     }
@@ -1069,6 +1244,28 @@ pub(crate) fn build_native_record_map(
                                     value_exprs
                                         .insert(*vid, (ret_lid, format!("rec_call_{}", vid.0)));
                                 }
+                            }
+                        }
+                        if let Some(&target) = plan.known.get(callee) {
+                            if let Some(kiln_ir::NativeFieldType::Record(ret_lid)) = program
+                                .functions
+                                .get(target as usize)
+                                .and_then(|f| f.return_array_element())
+                            {
+                                if !record_array_value_exprs.contains_key(vid) {
+                                    decls.push_str(&format!(
+                                        "    {symbol}_arr_rec_{ret_lid} rec_arr_call_{} = {{0}};\n",
+                                        vid.0
+                                    ));
+                                    record_array_value_exprs
+                                        .insert(*vid, (ret_lid, format!("rec_arr_call_{}", vid.0)));
+                                }
+                            } else if let Some(kiln_ir::NativeFieldType::Number) = program
+                                .functions
+                                .get(target as usize)
+                                .and_then(|f| f.return_array_element())
+                            {
+                                number_array_values.insert(*vid);
                             }
                         }
                     }
@@ -1101,11 +1298,24 @@ pub(crate) fn build_native_record_map(
                             }
                         }
                     }
+                    GraphOp::GetComputed { object, .. } => {
+                        if !value_exprs.contains_key(vid) {
+                            if let Some(&(lid, _)) = record_array_value_exprs.get(object) {
+                                decls.push_str(&format!(
+                                    "    {symbol}_rec_{lid} *rec_ptr_{} = NULL;\n",
+                                    vid.0
+                                ));
+                                value_exprs.insert(*vid, (lid, format!("(*rec_ptr_{})", vid.0)));
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
         }
-        if value_exprs.len() == before_count {
+        if value_exprs.len() + record_array_value_exprs.len() + number_array_values.len()
+            == before_count
+        {
             break;
         }
     }
@@ -1113,12 +1323,36 @@ pub(crate) fn build_native_record_map(
     let mut boxed_record_values: HashSet<ValueId> = HashSet::new();
     let mut deps: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
 
-    for block in graph.blocks.iter().filter(|b| b.is_reachable_from_entry(graph.entry_block)) {
+    for block in graph
+        .blocks
+        .iter()
+        .filter(|b| b.is_reachable_from_entry(graph.entry_block))
+    {
         for (vid, op) in &block.operations {
             match op {
                 GraphOp::StoreLocal { slot, value } => {
                     if !slot_exprs.contains_key(slot) && value_exprs.contains_key(value) {
                         boxed_record_values.insert(*value);
+                    }
+                }
+                GraphOp::NewArray { elements, .. } => {
+                    if !record_array_value_exprs.contains_key(vid) {
+                        for elem in elements {
+                            if value_exprs.contains_key(elem) {
+                                boxed_record_values.insert(*elem);
+                            }
+                        }
+                    }
+                }
+                GraphOp::SetComputed { object, value, .. }
+                | GraphOp::SetComputedStrict { object, value, .. } => {
+                    if !record_array_value_exprs.contains_key(object) {
+                        if value_exprs.contains_key(object) {
+                            boxed_record_values.insert(*object);
+                        }
+                        if value_exprs.contains_key(value) {
+                            boxed_record_values.insert(*value);
+                        }
                     }
                 }
                 GraphOp::NewObject { pairs, .. } => {
@@ -1146,8 +1380,18 @@ pub(crate) fn build_native_record_map(
                         }
                     }
                 }
-                GraphOp::SetProperty { object, name, value, .. }
-                | GraphOp::SetPropertyStrict { object, name, value, .. } => {
+                GraphOp::SetProperty {
+                    object,
+                    name,
+                    value,
+                    ..
+                }
+                | GraphOp::SetPropertyStrict {
+                    object,
+                    name,
+                    value,
+                    ..
+                } => {
                     if let Some(&(obj_lid, _)) = value_exprs.get(object) {
                         let prop_name = match program.constants.get(*name as usize) {
                             Some(Constant::String(s)) => s.to_scalar_string().ok(),
@@ -1183,7 +1427,14 @@ pub(crate) fn build_native_record_map(
                             let is_rec_param = target_proto
                                 .and_then(|tp| tp.parameter_layouts().get(idx).copied().flatten())
                                 .is_some();
-                            if !is_rec_param && value_exprs.contains_key(arg) {
+                            let is_rec_arr_param = target_proto
+                                .and_then(|tp| {
+                                    tp.parameter_array_elements().get(idx).copied().flatten()
+                                })
+                                .is_some_and(|elem| {
+                                    matches!(elem, kiln_ir::NativeFieldType::Record(_))
+                                });
+                            if !is_rec_param && !is_rec_arr_param && value_exprs.contains_key(arg) {
                                 boxed_record_values.insert(*arg);
                             }
                         }
@@ -1212,7 +1463,11 @@ pub(crate) fn build_native_record_map(
                         }
                     }
                 }
-                GraphOp::Bridge { instruction, operands, .. } => {
+                GraphOp::Bridge {
+                    instruction,
+                    operands,
+                    ..
+                } => {
                     if matches!(
                         instruction,
                         Instruction::DeleteProperty(_)
@@ -1233,14 +1488,22 @@ pub(crate) fn build_native_record_map(
                         }
                     }
                 }
-                GraphOp::CallMethod { object, name, args, .. } => {
+                GraphOp::CallMethod {
+                    object, name, args, ..
+                } => {
                     let method_name = match program.constants.get(*name as usize) {
                         Some(Constant::String(s)) => s.to_scalar_string().ok(),
                         _ => None,
                     };
                     let is_forbidden_reflection = matches!(
                         method_name.as_deref(),
-                        Some("defineProperty" | "defineProperties" | "freeze" | "seal" | "preventExtensions")
+                        Some(
+                            "defineProperty"
+                                | "defineProperties"
+                                | "freeze"
+                                | "seal"
+                                | "preventExtensions"
+                        )
                     );
                     if is_forbidden_reflection {
                         if value_exprs.contains_key(object) {
@@ -1255,12 +1518,18 @@ pub(crate) fn build_native_record_map(
                             }
                         }
                     } else {
-                        if value_exprs.contains_key(object) {
-                            boxed_record_values.insert(*object);
-                        }
-                        for arg in args {
-                            if value_exprs.contains_key(arg) {
-                                boxed_record_values.insert(*arg);
+                        if record_array_value_exprs.contains_key(object)
+                            && method_name.as_deref() == Some("push")
+                        {
+                            // args do not require boxing
+                        } else {
+                            if value_exprs.contains_key(object) {
+                                boxed_record_values.insert(*object);
+                            }
+                            for arg in args {
+                                if value_exprs.contains_key(arg) {
+                                    boxed_record_values.insert(*arg);
+                                }
                             }
                         }
                     }
@@ -1276,7 +1545,12 @@ pub(crate) fn build_native_record_map(
         }
         match &block.terminator {
             Terminator::Return(Some(v)) => {
-                if !(matches!(kind, EntryKind::Typed { .. }) && proto.return_layout().is_some())
+                if !(matches!(kind, EntryKind::Typed { .. })
+                    && (proto.return_layout().is_some()
+                        || matches!(
+                            proto.return_array_element(),
+                            Some(kiln_ir::NativeFieldType::Record(_))
+                        )))
                     && value_exprs.contains_key(v)
                 {
                     boxed_record_values.insert(*v);
@@ -1341,6 +1615,10 @@ pub(crate) fn build_native_record_map(
         value_exprs,
         boxed_record_values,
         all_layouts,
+        record_array_slot_exprs,
+        record_array_value_exprs,
+        number_array_slots,
+        number_array_values,
     }
 }
 
@@ -1423,7 +1701,9 @@ pub(crate) fn emit_box_native_record(
     expr: &str,
     all_layouts: &[kiln_ir::RecordLayout],
 ) {
-    let count = all_layouts.get(lid.0 as usize).map_or(0, |l| l.fields.len());
+    let count = all_layouts
+        .get(lid.0 as usize)
+        .map_or(0, |l| l.fields.len());
     writeln!(
         output,
         "    {{ kiln_value built_{v}; kiln_c99_new_object_with_capacity(&built_{v}, {count});"
@@ -1450,12 +1730,24 @@ pub(crate) fn emit_compound_literal_fields(
     for tf in &target_layout.fields {
         if let Some(sf) = src_layout.fields.iter().find(|sf| sf.name == tf.name) {
             match (&tf.ty, &sf.ty) {
-                (kiln_ir::NativeFieldType::Record(target_sub), kiln_ir::NativeFieldType::Record(src_sub)) => {
+                (
+                    kiln_ir::NativeFieldType::Record(target_sub),
+                    kiln_ir::NativeFieldType::Record(src_sub),
+                ) => {
                     if target_sub == src_sub {
                         init_fields.push(format!(".{} = {src_expr}.{}", tf.name, tf.name));
                     } else {
-                        let inner = emit_compound_literal_fields(*target_sub, &format!("{src_expr}.{}", tf.name), *src_sub, symbol, all_layouts);
-                        init_fields.push(format!(".{} = ({symbol}_rec_{target_sub}){{ {} }}", tf.name, inner));
+                        let inner = emit_compound_literal_fields(
+                            *target_sub,
+                            &format!("{src_expr}.{}", tf.name),
+                            *src_sub,
+                            symbol,
+                            all_layouts,
+                        );
+                        init_fields.push(format!(
+                            ".{} = ({symbol}_rec_{target_sub}){{ {} }}",
+                            tf.name, inner
+                        ));
                     }
                 }
                 _ => {
@@ -4186,6 +4478,18 @@ fn emit_blocks(
             plan.compact,
         );
         output.push_str(&native_records.decls);
+        if matches!(kind, EntryKind::Typed { .. }) {
+            for slot in 0..proto.parameter_count as usize {
+                if native_records.number_array_slots.contains(&(slot as u32)) {
+                    if let Some(&init_vid) = graph.initial_locals.get(slot) {
+                        writeln!(output, "    v{} = p{slot};", init_vid.0).unwrap();
+                    }
+                    if array_slots.contains(&(slot as u32)) {
+                        writeln!(output, "    locals[{slot}] = p{slot};").unwrap();
+                    }
+                }
+            }
+        }
         emit_block_sequence(
             output,
             graph,
@@ -4308,12 +4612,18 @@ fn emit_blocks(
             // labels exist only where the body jumps to them: a body with nothing that throws
             // has no unwind, and no `thrown` to read.
             let fail_str;
-            let fail = if plan.semantics == crate::NativeSemantics::Native
-                && proto.return_layout().is_some()
-            {
-                let ret_lid = proto.return_layout().unwrap();
-                fail_str = format!("({symbol}_rec_{ret_lid}){{0}}");
-                &fail_str
+            let fail = if plan.semantics == crate::NativeSemantics::Native {
+                if let Some(ret_lid) = proto.return_layout() {
+                    fail_str = format!("({symbol}_rec_{ret_lid}){{0}}");
+                    &fail_str
+                } else if let Some(kiln_ir::NativeFieldType::Record(ret_lid)) =
+                    proto.return_array_element()
+                {
+                    fail_str = format!("({symbol}_arr_rec_{ret_lid}){{0}}");
+                    &fail_str
+                } else {
+                    typed_fail(kind)
+                }
             } else {
                 typed_fail(kind)
             };
@@ -4556,7 +4866,8 @@ fn emit_terminator(
                     let ret_lid = proto.return_layout().unwrap();
                     match value {
                         Some(val) => {
-                            if let Some(&(src_lid, ref expr)) = native_records.value_exprs.get(val) {
+                            if let Some(&(src_lid, ref expr)) = native_records.value_exprs.get(val)
+                            {
                                 if src_lid == ret_lid {
                                     writeln!(output, "    return {expr};").unwrap();
                                 } else {
@@ -4574,10 +4885,41 @@ fn emit_terminator(
                                     .unwrap();
                                 }
                             } else {
-                                writeln!(output, "    return ({symbol}_rec_{ret_lid}){{0}};").unwrap();
+                                writeln!(output, "    return ({symbol}_rec_{ret_lid}){{0}};")
+                                    .unwrap();
                             }
                         }
-                        None => writeln!(output, "    return ({symbol}_rec_{ret_lid}){{0}};").unwrap(),
+                        None => {
+                            writeln!(output, "    return ({symbol}_rec_{ret_lid}){{0}};").unwrap()
+                        }
+                    }
+                } else if semantics == crate::NativeSemantics::Native
+                    && proto.return_array_element().is_some()
+                {
+                    match proto.return_array_element().unwrap() {
+                        kiln_ir::NativeFieldType::Record(ret_lid) => match value {
+                            Some(val) => {
+                                if let Some(&(_src_lid, ref expr)) =
+                                    native_records.record_array_value_exprs.get(val)
+                                {
+                                    writeln!(output, "    return {expr};").unwrap();
+                                } else {
+                                    writeln!(
+                                        output,
+                                        "    return ({symbol}_arr_rec_{ret_lid}){{0}};"
+                                    )
+                                    .unwrap();
+                                }
+                            }
+                            None => {
+                                writeln!(output, "    return ({symbol}_arr_rec_{ret_lid}){{0}};")
+                                    .unwrap()
+                            }
+                        },
+                        _ => match value {
+                            Some(val) => writeln!(output, "    return v{};", val.0).unwrap(),
+                            None => output.push_str("    return KILN_VAL_UNDEFINED;\n"),
+                        },
                     }
                 } else {
                     match value {

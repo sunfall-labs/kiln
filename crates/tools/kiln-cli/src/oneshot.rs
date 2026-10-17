@@ -1369,7 +1369,10 @@ badDelete();
             )
         };
         match del_native {
-            Ok(output) => assert_ne!(output.exit_code, 0, "expected delete on native record to refuse"),
+            Ok(output) => assert_ne!(
+                output.exit_code, 0,
+                "expected delete on native record to refuse"
+            ),
             Err(_) => {}
         }
 
@@ -1404,9 +1407,109 @@ badFreeze();
             )
         };
         match freeze_native {
-            Ok(output) => assert_ne!(output.exit_code, 0, "expected Object.freeze on native record to refuse"),
+            Ok(output) => assert_ne!(
+                output.exit_code, 0,
+                "expected Object.freeze on native record to refuse"
+            ),
             Err(_) => {}
         }
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn native_semantics_phase3_unboxed_number_and_record_arrays() {
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-native-semantics-phase3-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create native semantics phase 3 fixture");
+        #[cfg(unix)]
+        share_native_semantic_cache(&fixture);
+
+        let source_arrays = fixture.join("arrays.ts");
+        std::fs::write(
+            &source_arrays,
+            r#"interface Point { x: number; y: number; }
+
+function sumNumbers(nums: number[]): number {
+    let s = 0;
+    for (let i = 0; i < nums.length; i++) {
+        s = s + nums[i];
+    }
+    return s;
+}
+
+function sumPoints(pts: Point[]): number {
+    let s = 0;
+    for (let i = 0; i < pts.length; i++) {
+        s = s + pts[i].x + pts[i].y;
+    }
+    return s;
+}
+
+function run(): void {
+    const nums: number[] = [1, 2, 3];
+    nums.push(4);
+    nums[1] = 20;
+    const nSum = sumNumbers(nums);
+
+    const pts: Point[] = [];
+    pts.push({ x: 10, y: 20 });
+    pts.push({ x: 30, y: 40 });
+    pts[0].x = 15;
+    const pSum = sumPoints(pts);
+
+    console.log(nSum, pSum, nums.length, pts.length);
+}
+
+run();
+"#,
+        )
+        .expect("write arrays.ts");
+
+        let js_out = {
+            let mut session = OneShot::start().expect("start js native engine");
+            commands::native_run(
+                &mut session,
+                &source_arrays,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                NativeSemantics::Js,
+            )
+            .expect("run arrays with --semantics=js")
+        };
+        assert_eq!(js_out.exit_code, 0);
+        assert_eq!(js_out.text, "28 105 4 2\n");
+
+        let native_out = {
+            let mut session = OneShot::start().expect("start native semantics engine");
+            commands::native_run(
+                &mut session,
+                &source_arrays,
+                &fixture,
+                &[],
+                kiln_proto::NativeProfile::Dev,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                NativeSemantics::Native,
+            )
+            .expect("run arrays with --semantics=native")
+        };
+        assert_eq!(native_out.exit_code, 0);
+        assert_eq!(native_out.text, "28 105 4 2\n");
 
         let _ = std::fs::remove_dir_all(&fixture);
     }

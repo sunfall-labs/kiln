@@ -18,8 +18,17 @@ pub unsafe extern "C" fn kiln_bigint_free(_handle: *mut c_void) {}
 pub unsafe extern "C" fn kiln_bigint_to_double(_handle: *const c_void) -> f64 {
     f64::NAN
 }
-invalid!(kiln_bigint_to_string(handle: *const c_void, radix: u32, buffer: *mut u8, capacity: usize));
-invalid!(kiln_bigint_binary(operation: u32, left: *const c_void, right: *const c_void, out: *mut *mut c_void));
+invalid!(
+    kiln_bigint_to_string(handle: *const c_void, radix: u32, buffer: *mut u8, capacity: usize)
+);
+invalid!(
+    kiln_bigint_binary(
+        operation: u32,
+        left: *const c_void,
+        right: *const c_void,
+        out: *mut *mut c_void,
+    )
+);
 invalid!(kiln_bigint_negate(handle: *const c_void, out: *mut *mut c_void));
 invalid!(kiln_bigint_compare(left: *const c_void, right: *const c_void));
 invalid!(kiln_bigint_is_zero(handle: *const c_void));

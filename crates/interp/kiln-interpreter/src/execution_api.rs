@@ -117,10 +117,10 @@ pub fn execute_with_clock_and_strictness<H: HostOps + ?Sized>(
     clock: ClockCapability,
 ) -> Result<ExecutionResult, ExecutionError> {
     let mut runtime = RealmRuntime::with_capabilities(RealmCapabilities::for_clock(clock))
-    .map_err(|error| ExecutionError::Host {
-        instruction: 0,
-        message: error.to_string(),
-    })?;
+        .map_err(|error| ExecutionError::Host {
+            instruction: 0,
+            message: error.to_string(),
+        })?;
     execute_in_runtime_with_strictness(
         program,
         strictness,
@@ -229,10 +229,10 @@ pub fn execute_node_with_clock_and_strictness<H: HostOps + ?Sized>(
     clock: ClockCapability,
 ) -> Result<ExecutionResult, ExecutionError> {
     let mut runtime = RealmRuntime::with_capabilities(RealmCapabilities::for_clock(clock))
-    .map_err(|error| ExecutionError::Host {
-        instruction: 0,
-        message: error.to_string(),
-    })?;
+        .map_err(|error| ExecutionError::Host {
+            instruction: 0,
+            message: error.to_string(),
+        })?;
     execute_node_in_runtime_with_strictness(
         program,
         strictness,
