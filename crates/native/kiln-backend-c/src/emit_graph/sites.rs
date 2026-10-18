@@ -4,7 +4,11 @@ use crate::graph::{FunctionGraph, GraphOp, ValueId};
 use kiln_ir::{Constant, Instruction, Program};
 use std::collections::HashSet;
 
-/// The protos this unit defines as a method of `key` -- `class C { key() {} }` and
+// A dispatch site must not expand once for every same-named method in a large module.
+// These are optional inlining hints; every omitted callee keeps the ordinary cached call.
+const MAX_INLINE_METHOD_CANDIDATES: usize = 8;
+
+/// The bounded set of protos this unit defines as a method of `key` -- `class C { key() {} }` and
 /// `{ key() {} }` -- read off the bytecode as `Const(key) MakeFunction(i) DefineMethod`. A hint
 /// only: a method-call site whose cached callee's body is one of these calls it by name, which
 /// lets the C compiler inline it; a callee that is none of them takes the indirect call. Nothing
@@ -17,6 +21,9 @@ pub(crate) fn method_candidates(
     let mut found = Vec::new();
     let mut scan = |code: &[Instruction]| {
         for window in code.windows(3) {
+            if found.len() == MAX_INLINE_METHOD_CANDIDATES {
+                break;
+            }
             if let [
                 Instruction::Const(k),
                 Instruction::MakeFunction(i),
@@ -59,7 +66,7 @@ pub(crate) fn method_candidates_map(
                 )
             {
                 let list = map.entry(s.clone()).or_insert_with(Vec::new);
-                if !list.contains(i) {
+                if list.len() < MAX_INLINE_METHOD_CANDIDATES && !list.contains(i) {
                     list.push(*i);
                 }
             }
@@ -293,6 +300,7 @@ pub(crate) fn collect_typed_call_sites(
                         let callee = &program.functions[i as usize];
                         plan.typed_entries.get(i as usize).copied().unwrap_or(false)
                             && !callee.arrow
+                            && !crate::direct::has_native_typed_sig(callee)
                             && callee.parameter_count as usize == argc
                     })
                     .collect();

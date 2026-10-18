@@ -123,7 +123,7 @@ pub(crate) fn emit_struct_copy_fields(
     };
     for dst_f in &dst_layout.fields {
         if let Some(src_f) = src_layout.fields.iter().find(|sf| sf.name == dst_f.name) {
-            let field_name = &dst_f.name;
+            let field_name = crate::c_record_field_name(&dst_f.name);
             match (&dst_f.ty, &src_f.ty) {
                 (
                     kiln_ir::NativeFieldType::Record(dst_sub),
@@ -525,23 +525,10 @@ pub(super) fn emit_graph_op(
                 if let Some(&(src_lid, ref src_expr)) = ctx.native_records.value_exprs.get(value) {
                     let all_layouts = crate::collect_program_record_layouts(ctx.program);
                     let dst_lid = ctx
-                        .proto
-                        .type_annotations
-                        .as_ref()
-                        .and_then(|t| t.source_types.as_ref())
-                        .and_then(|st| st.local_layouts.get(slot).copied())
-                        .or_else(|| {
-                            ctx.program
-                                .source_types()
-                                .and_then(|st| st.local_layouts.get(slot).copied())
-                        })
-                        .or_else(|| {
-                            ctx.proto
-                                .parameter_layouts()
-                                .get(*slot as usize)
-                                .copied()
-                                .flatten()
-                        });
+                        .native_records
+                        .value_exprs
+                        .get(&vid)
+                        .map(|&(lid, _)| lid);
                     if let Some(dlid) = dst_lid {
                         emit_struct_copy_fields(
                             output,
@@ -1231,13 +1218,22 @@ pub(super) fn emit_graph_op(
                 "kiln_val recv = KILN_VAL_UNDEFINED;".to_owned()
             };
             let check = status_check(diagnostic_site, pc, label, unwind);
+            let fail_val = if ctx.plan.semantics == crate::NativeSemantics::Native
+                && let Some(caller_ret_lid) = ctx.proto.return_layout()
+            {
+                format!("({symbol}_rec_{caller_ret_lid}){{0}}")
+            } else if ctx.plan.semantics == crate::NativeSemantics::Native
+                && let Some(kiln_ir::NativeFieldType::Record(caller_ret_lid)) =
+                    ctx.proto.return_array_element()
+            {
+                format!("({symbol}_arr_rec_{caller_ret_lid}){{0}}")
+            } else {
+                typed_fail(kind).to_string()
+            };
             // Past the depth limit a boxed body takes the generic call, which throws the
             // `RangeError`; a typed entry leaves it pending and fails.
             let overflow = if in_typed {
-                format!(
-                    "{{ kiln_c99_typed_overflow(); return {}; }}",
-                    typed_fail(kind)
-                )
+                format!("{{ kiln_c99_typed_overflow(); return {fail_val}; }}")
             } else {
                 format!(
                     "{{ kiln_val call_args[{n}] = {{ {init} }}; int status = kiln_c99_val_call(host, v{c}, {argc} > 0 ? call_args : NULL, (size_t){argc}, depth, thrown, {diagnostic_source}, (size_t){pc}, \"{label}\", &v{v}); {check} }}",
@@ -1854,7 +1850,8 @@ pub(super) fn emit_graph_op(
                         if let Some(prop_name) = resolve_const_string(*key, defs, program) {
                             if let Some(field) = layout.fields.iter().find(|f| f.name == prop_name)
                             {
-                                let field_expr = format!("{expr}.{prop_name}");
+                                let c_field = crate::c_record_field_name(&prop_name);
+                                let field_expr = format!("{expr}.{c_field}");
                                 match field.ty {
                                     kiln_ir::NativeFieldType::Number => {
                                         if live_numbers.contains(val) {

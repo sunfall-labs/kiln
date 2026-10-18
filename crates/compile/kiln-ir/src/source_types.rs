@@ -308,59 +308,57 @@ pub fn rebind_program_layouts(module: &Module, program: &mut Program) {
         crate::compile::collect_body_spans_for_program(module, program);
     let lookup_span_layout =
         |source: &SourceTypeAnnotations, span: kiln_hir::Span| -> Option<RecordLayoutId> {
-            let orig_start = module
-                .static_source_provenance
-                .as_deref()
-                .and_then(|prov| prov.original_offset(span.start));
-            let orig_end = module
-                .static_source_provenance
-                .as_deref()
-                .and_then(|prov| prov.original_offset(span.end));
-            if let (Some(s), Some(e)) = (orig_start, orig_end)
-                && let Some(&layout) = source.exact_span_layouts.get(&(s, e))
-            {
-                return Some(layout);
+            if let Some(prov) = module.static_source_provenance.as_deref() {
+                let orig_start = prov.original_offset(span.start);
+                let orig_end = prov.original_offset(span.end);
+                if let (Some(s), Some(e)) = (orig_start, orig_end)
+                    && let Some(&layout) = source.exact_span_layouts.get(&(s, e))
+                {
+                    return Some(layout);
+                }
+                if let Some(s) = orig_start
+                    && let Some(&layout) = source.span_layouts.get(&s)
+                {
+                    return Some(layout);
+                }
+                None
+            } else {
+                if let Some(&layout) = source.exact_span_layouts.get(&(span.start, span.end)) {
+                    return Some(layout);
+                }
+                source.span_layouts.get(&span.start).copied()
             }
-            if let Some(&layout) = source.exact_span_layouts.get(&(span.start, span.end)) {
-                return Some(layout);
-            }
-            if let Some(s) = orig_start
-                && let Some(&layout) = source.span_layouts.get(&s)
-            {
-                return Some(layout);
-            }
-            source.span_layouts.get(&span.start).copied()
         };
     let lookup_span_array_element =
         |source: &SourceTypeAnnotations, span: kiln_hir::Span| -> Option<NativeFieldType> {
-            let orig_start = module
-                .static_source_provenance
-                .as_deref()
-                .and_then(|prov| prov.original_offset(span.start));
-            let orig_end = module
-                .static_source_provenance
-                .as_deref()
-                .and_then(|prov| prov.original_offset(span.end));
-            if let (Some(s), Some(e)) = (orig_start, orig_end)
-                && let Some(&elem) = source.exact_span_array_elements.get(&(s, e))
-            {
-                return Some(elem);
+            if let Some(prov) = module.static_source_provenance.as_deref() {
+                let orig_start = prov.original_offset(span.start);
+                let orig_end = prov.original_offset(span.end);
+                if let (Some(s), Some(e)) = (orig_start, orig_end)
+                    && let Some(&elem) = source.exact_span_array_elements.get(&(s, e))
+                {
+                    return Some(elem);
+                }
+                if let Some(s) = orig_start
+                    && let Some(&elem) = source.span_array_elements.get(&s)
+                {
+                    return Some(elem);
+                }
+                None
+            } else {
+                if let Some(&elem) = source
+                    .exact_span_array_elements
+                    .get(&(span.start, span.end))
+                {
+                    return Some(elem);
+                }
+                source.span_array_elements.get(&span.start).copied()
             }
-            if let Some(&elem) = source
-                .exact_span_array_elements
-                .get(&(span.start, span.end))
-            {
-                return Some(elem);
-            }
-            if let Some(s) = orig_start
-                && let Some(&elem) = source.span_array_elements.get(&s)
-            {
-                return Some(elem);
-            }
-            source.span_array_elements.get(&span.start).copied()
         };
 
-    if let Some(provenance) = &mut program.static_source_provenance {
+    if let Some(provenance) = &mut program.static_source_provenance
+        && provenance.source_types.is_some()
+    {
         let prov = Arc::make_mut(provenance);
         if let Some(source) = &mut prov.source_types {
             let mut top_local_layouts = std::mem::take(&mut source.local_layouts);
@@ -407,7 +405,11 @@ pub fn rebind_program_layouts(module: &Module, program: &mut Program) {
                     std::mem::take(&mut source.new_object_layouts)
                         .into_values()
                         .collect();
-                let mut local_layouts = prev_local_layouts.clone();
+                let mut local_layouts: BTreeMap<u32, RecordLayoutId> = prev_local_layouts
+                    .iter()
+                    .filter(|&(&slot, _)| slot >= proto.parameter_count)
+                    .map(|(&k, &v)| (k, v))
+                    .collect();
                 for (slot, param_layout) in source.parameter_layouts.iter().enumerate() {
                     if let Some(id) = param_layout {
                         local_layouts.insert(slot as u32, *id);
@@ -415,6 +417,7 @@ pub fn rebind_program_layouts(module: &Module, program: &mut Program) {
                 }
                 for (&(fn_span, slot), &span) in &local_spans {
                     if fn_span == func_span
+                        && slot >= proto.parameter_count
                         && let Some(layout) = lookup_span_layout(source, span)
                     {
                         local_layouts.insert(slot, layout);
@@ -453,7 +456,12 @@ pub fn rebind_program_layouts(module: &Module, program: &mut Program) {
                     std::mem::take(&mut source.new_array_elements)
                         .into_values()
                         .collect();
-                let mut local_array_elements = prev_local_array_elements.clone();
+                let mut local_array_elements: BTreeMap<u32, NativeFieldType> =
+                    prev_local_array_elements
+                        .iter()
+                        .filter(|&(&slot, _)| slot >= proto.parameter_count)
+                        .map(|(&k, &v)| (k, v))
+                        .collect();
                 for (slot, param_elem) in source.parameter_array_elements.iter().enumerate() {
                     if let Some(elem) = param_elem {
                         local_array_elements.insert(slot as u32, *elem);
@@ -461,6 +469,7 @@ pub fn rebind_program_layouts(module: &Module, program: &mut Program) {
                 }
                 for (&(fn_span, slot), &span) in &local_spans {
                     if fn_span == func_span
+                        && slot >= proto.parameter_count
                         && let Some(elem) = lookup_span_array_element(source, span)
                     {
                         local_array_elements.insert(slot, elem);

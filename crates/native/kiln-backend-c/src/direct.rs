@@ -413,7 +413,7 @@ impl DirectPlan {
                     .any(|instruction| matches!(instruction, Instruction::RestArguments(_)))
             })
             .collect();
-        let typed_eligible: Vec<bool> = direct
+        let mut typed_eligible: Vec<bool> = direct
             .iter()
             .zip(&has_rest_parameter)
             .zip(&program.functions)
@@ -424,10 +424,13 @@ impl DirectPlan {
                     && !argument_length_only.get(index).copied().unwrap_or(false)
                     && !generic_only
                     && proto.code.len() <= crate::MAX_SPECIALIZED_INSTRUCTIONS
+                    && !(semantics == crate::NativeSemantics::Native
+                        && has_native_typed_sig(proto)
+                        && (proto.is_method || proto.is_class))
             })
             .collect();
         let has_open_world = program.has_direct_eval() || program.has_dynamic_import();
-        let mut intrinsics: Vec<HashMap<ValueId, Proven>> = if has_open_world {
+        let base_intrinsics: Vec<HashMap<ValueId, Proven>> = if has_open_world {
             vec![HashMap::new(); graphs.len()]
         } else {
             graphs
@@ -435,34 +438,162 @@ impl DirectPlan {
                 .map(|g| intrinsic_results(g, program))
                 .collect()
         };
-        let mut entry_intrinsics = if has_open_world {
+        let base_entry_intrinsics = if has_open_world {
             HashMap::new()
         } else {
             intrinsic_results(entry, program)
         };
-        let mut function_record_values = Vec::with_capacity(graphs.len());
-        let mut function_array_values = Vec::with_capacity(graphs.len());
+        let mut typed_record_values = vec![HashSet::new(); graphs.len()];
+        let mut typed_array_values = vec![HashMap::new(); graphs.len()];
+        let mut typed_intrinsics = base_intrinsics.clone();
+        let mut boxed_record_values = vec![HashSet::new(); graphs.len()];
+        let mut boxed_array_values = vec![HashMap::new(); graphs.len()];
+        let mut boxed_intrinsics = base_intrinsics.clone();
+        let mut entry_intrinsics = base_entry_intrinsics.clone();
+
         if semantics == crate::NativeSemantics::Native {
+            loop {
+                let mut changed = false;
+                for (i, g) in graphs.iter().enumerate() {
+                    if !typed_eligible[i] {
+                        typed_record_values[i].clear();
+                        typed_array_values[i].clear();
+                        typed_intrinsics[i] = base_intrinsics[i].clone();
+                        continue;
+                    }
+                    let (rec_vals, arr_vals, rec_proven) = record_values_and_field_proven(
+                        g,
+                        &program.functions[i],
+                        program,
+                        false,
+                        true,
+                        &known.functions[i].known,
+                        Some(&typed_eligible),
+                        None,
+                    );
+                    let mut intr = base_intrinsics[i].clone();
+                    intr.extend(rec_proven);
+                    typed_intrinsics[i] = intr;
+                    typed_record_values[i] = rec_vals;
+                    typed_array_values[i] = arr_vals;
+                }
+                for (i, g) in graphs.iter().enumerate() {
+                    if !typed_eligible[i] || !has_native_typed_sig(&program.functions[i]) {
+                        continue;
+                    }
+                    let proto = &program.functions[i];
+                    let mut ok = true;
+                    for k in 0..proto.parameter_count as usize {
+                        if proto
+                            .parameter_layouts()
+                            .get(k)
+                            .copied()
+                            .flatten()
+                            .is_some()
+                        {
+                            let init_vid = g.initial_locals.get(k).copied();
+                            if !init_vid.is_some_and(|v| typed_record_values[i].contains(&v)) {
+                                ok = false;
+                                break;
+                            }
+                        } else if let Some(elem) =
+                            proto.parameter_array_elements().get(k).copied().flatten()
+                        {
+                            let mapped = match elem {
+                                kiln_ir::NativeFieldType::Int32 => kiln_ir::NativeFieldType::Number,
+                                other => other,
+                            };
+                            let init_vid = g.initial_locals.get(k).copied();
+                            if !init_vid
+                                .is_some_and(|v| typed_array_values[i].get(&v) == Some(&mapped))
+                            {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok && proto.return_layout().is_some() {
+                        let mut has_return = false;
+                        for b in g
+                            .blocks
+                            .iter()
+                            .filter(|b| b.is_reachable_from_entry(g.entry_block))
+                        {
+                            if let Terminator::Return(opt) = &b.terminator {
+                                has_return = true;
+                                if !opt.is_some_and(|v| typed_record_values[i].contains(&v)) {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if !has_return {
+                            ok = false;
+                        }
+                    }
+                    if ok && let Some(ret_elem) = proto.return_array_element() {
+                        let mapped = match ret_elem {
+                            kiln_ir::NativeFieldType::Int32 => kiln_ir::NativeFieldType::Number,
+                            other => other,
+                        };
+                        let mut has_return = false;
+                        for b in g
+                            .blocks
+                            .iter()
+                            .filter(|b| b.is_reachable_from_entry(g.entry_block))
+                        {
+                            if let Terminator::Return(opt) = &b.terminator {
+                                has_return = true;
+                                if !opt
+                                    .is_some_and(|v| typed_array_values[i].get(&v) == Some(&mapped))
+                                {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if !has_return {
+                            ok = false;
+                        }
+                    }
+                    if !ok {
+                        typed_eligible[i] = false;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
             for (i, g) in graphs.iter().enumerate() {
                 let (rec_vals, arr_vals, rec_proven) = record_values_and_field_proven(
                     g,
                     &program.functions[i],
                     program,
+                    false,
+                    false,
                     &known.functions[i].known,
+                    Some(&typed_eligible),
+                    None,
                 );
-                intrinsics[i].extend(rec_proven);
-                function_record_values.push(rec_vals);
-                function_array_values.push(arr_vals);
+                boxed_intrinsics[i].extend(rec_proven);
+                boxed_record_values[i] = rec_vals;
+                boxed_array_values[i] = arr_vals;
             }
-        } else {
-            function_record_values.resize_with(graphs.len(), HashSet::new);
-            function_array_values.resize_with(graphs.len(), HashMap::new);
         }
+        let entry_p = crate::entry_proto(program);
         let (entry_record_values, entry_array_values) =
             if semantics == crate::NativeSemantics::Native {
-                let entry_p = crate::entry_proto(program);
-                let (rec_vals, arr_vals, entry_rec_proven) =
-                    record_values_and_field_proven(entry, &entry_p, program, &known.entry.known);
+                let (rec_vals, arr_vals, entry_rec_proven) = record_values_and_field_proven(
+                    entry,
+                    &entry_p,
+                    program,
+                    true,
+                    false,
+                    &known.entry.known,
+                    Some(&typed_eligible),
+                    None,
+                );
                 entry_intrinsics.extend(entry_rec_proven);
                 (rec_vals, arr_vals)
             } else {
@@ -565,7 +696,7 @@ impl DirectPlan {
                 for (vid, _) in this_cols {
                     seeds.insert(vid, Proven::Number);
                 }
-                seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
+                seeds.extend(typed_intrinsics[i].iter().map(|(&v, &k)| (v, k)));
 
                 let (proven, _) = settle(
                     graph,
@@ -576,8 +707,8 @@ impl DirectPlan {
                     &params,
                     &length_bounds[i],
                     program,
-                    &function_record_values[i],
-                    &function_array_values[i],
+                    &typed_record_values[i],
+                    &typed_array_values[i],
                 );
                 // Every return a number. A block nothing reaches -- the `return undefined` the
                 // compiler leaves after a body's last statement -- returns nothing.
@@ -677,7 +808,7 @@ impl DirectPlan {
                     .map(|&v| (v, Proven::Number))
                     .collect();
                 seeds.extend(shape.captured_values.iter().map(|&v| (v, Proven::Number)));
-                seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
+                seeds.extend(boxed_intrinsics[i].iter().map(|(&v, &k)| (v, k)));
                 let (proven, _) = settle(
                     g,
                     seeds.clone(),
@@ -687,8 +818,8 @@ impl DirectPlan {
                     &params,
                     &length_bounds[i],
                     program,
-                    &function_record_values[i],
-                    &function_array_values[i],
+                    &boxed_record_values[i],
+                    &boxed_array_values[i],
                 );
                 let Some(boolean_result) = crate::parallel::parallel_result(g, &proven) else {
                     return Err(Refusal::new(Reason::ReturnsNonNumber));
@@ -715,14 +846,18 @@ impl DirectPlan {
         let shared_available = std::sync::Arc::new(vec![true; graphs.len()]);
         let shared_publishes = std::sync::Arc::new(publishes_frame.to_vec());
         let plan_for = |graph: &FunctionGraph,
+                        proto: &FunctionProto,
+                        is_entry: bool,
+                        is_typed_entry: bool,
                         known: &KnownValues,
                         sites: &[Site],
+                        base_seeds: HashMap<ValueId, Proven>,
                         seeds: HashMap<ValueId, Proven>,
                         lb: &HashSet<ValueId>,
                         rec_vals: &HashSet<ValueId>,
                         arr_vals: &HashMap<ValueId, kiln_ir::NativeFieldType>|
          -> CallPlan {
-            let (proven, typed_sites) = settle(
+            let (mut proven, mut typed_sites) = settle(
                 graph,
                 seeds,
                 sites,
@@ -734,6 +869,38 @@ impl DirectPlan {
                 rec_vals,
                 arr_vals,
             );
+            if semantics == crate::NativeSemantics::Native
+                && (!rec_vals.is_empty() || !arr_vals.is_empty())
+            {
+                let (rec_vals2, arr_vals2, rec_proven2) = record_values_and_field_proven(
+                    graph,
+                    proto,
+                    program,
+                    is_entry,
+                    is_typed_entry,
+                    &known.known,
+                    Some(&typed_eligible),
+                    Some(&typed_sites),
+                );
+                if rec_vals2 != *rec_vals || arr_vals2 != *arr_vals {
+                    let mut seeds2 = base_seeds;
+                    seeds2.extend(rec_proven2);
+                    let settled2 = settle(
+                        graph,
+                        seeds2,
+                        sites,
+                        &typed_eligible,
+                        &typed_returns,
+                        &params,
+                        lb,
+                        program,
+                        &rec_vals2,
+                        &arr_vals2,
+                    );
+                    proven = settled2.0;
+                    typed_sites = settled2.1;
+                }
+            }
             CallPlan {
                 semantics,
                 compact,
@@ -788,12 +955,16 @@ impl DirectPlan {
             .map(|(i, g)| {
                 plan_for(
                     g,
+                    &program.functions[i],
+                    false,
+                    false,
                     &known.functions[i],
                     &function_sites[i],
-                    intrinsics[i].clone(),
+                    base_intrinsics[i].clone(),
+                    boxed_intrinsics[i].clone(),
                     &length_bounds[i],
-                    &function_record_values[i],
-                    &function_array_values[i],
+                    &boxed_record_values[i],
+                    &boxed_array_values[i],
                 )
             })
             .collect();
@@ -804,7 +975,7 @@ impl DirectPlan {
                 if !typed_eligible[i] {
                     return None;
                 }
-                let mut seeds: HashMap<ValueId, Proven> = g
+                let mut base_seeds: HashMap<ValueId, Proven> = g
                     .initial_locals
                     .iter()
                     .take(params[i] as usize)
@@ -830,17 +1001,23 @@ impl DirectPlan {
                     .collect();
                 let (this_cols, _) = this_columns(g);
                 for (vid, _) in this_cols {
-                    seeds.insert(vid, Proven::Number);
+                    base_seeds.insert(vid, Proven::Number);
                 }
-                seeds.extend(intrinsics[i].iter().map(|(&v, &k)| (v, k)));
+                base_seeds.extend(base_intrinsics[i].iter().map(|(&v, &k)| (v, k)));
+                let mut seeds = base_seeds.clone();
+                seeds.extend(typed_intrinsics[i].iter().map(|(&v, &k)| (v, k)));
                 Some(plan_for(
                     g,
+                    &program.functions[i],
+                    false,
+                    true,
                     &known.functions[i],
                     &function_sites[i],
+                    base_seeds,
                     seeds,
                     &length_bounds[i],
-                    &function_record_values[i],
-                    &function_array_values[i],
+                    &typed_record_values[i],
+                    &typed_array_values[i],
                 ))
             })
             .collect();
@@ -851,19 +1028,27 @@ impl DirectPlan {
                 let seeds = parallel_seeds[i].clone()?;
                 Some(plan_for(
                     g,
+                    &program.functions[i],
+                    false,
+                    false,
                     &known.functions[i],
                     &function_sites[i],
+                    seeds.clone(),
                     seeds,
                     &length_bounds[i],
-                    &function_record_values[i],
-                    &function_array_values[i],
+                    &boxed_record_values[i],
+                    &boxed_array_values[i],
                 ))
             })
             .collect();
         let entry_plan = plan_for(
             entry,
+            &entry_p,
+            true,
+            false,
             &known.entry,
             &entry_sites,
+            base_entry_intrinsics,
             entry_intrinsics,
             &entry_length_bounds,
             &entry_record_values,
@@ -889,12 +1074,11 @@ impl DirectPlan {
                     && args.iter().all(|a| plan.numbers.contains(a))
                 {
                     if let Some(candidates) = method_candidates_by_name.get(key) {
-                        targets.extend(
-                            candidates
-                                .iter()
-                                .copied()
-                                .filter(|&i| params[i as usize] as usize == args.len()),
-                        );
+                        targets.extend(candidates.iter().copied().filter(|&i| {
+                            params[i as usize] as usize == args.len()
+                                && (semantics != crate::NativeSemantics::Native
+                                    || !has_native_typed_sig(&program.functions[i as usize]))
+                        }));
                     }
                 }
             }
@@ -917,13 +1101,6 @@ impl DirectPlan {
                 if let GraphOp::CallMethod { name, args, .. } = op
                     && let Some(Constant::String(key)) = program.constants.get(*name as usize)
                 {
-                    // A family site (parallel issues 10 and 15) calls the typed entries of its
-                    // callbacks twice over: the pooled lowering's clones hang off them, and when
-                    // the pool declines the site runs the sequential method's own loop --
-                    // `map`'s, `filter`'s, or `parallelReduce`'s tree -- which enters them like
-                    // any `map` site does. `parallelFlatMap` has only the pooled lowering (its
-                    // callback must be parallel-safe to be referenced), and a `parallelSort`
-                    // comparator is never called there, only recognised.
                     if let Some(method) = key
                         .to_scalar_string()
                         .ok()
@@ -946,6 +1123,8 @@ impl DirectPlan {
                         for &(position, arities) in sequential {
                             if let Some(&target) = plan.known.get(&args[position])
                                 && arities.contains(&params[target as usize])
+                                && (semantics != crate::NativeSemantics::Native
+                                    || !has_native_typed_sig(&program.functions[target as usize]))
                                 && (method != crate::parallel::ParallelMethod::FlatMap
                                     || parallel_safe[target as usize])
                             {
@@ -962,6 +1141,8 @@ impl DirectPlan {
                     };
                     if let Some(&target) = plan.known.get(&args[0])
                         && arities.contains(&params[target as usize])
+                        && (semantics != crate::NativeSemantics::Native
+                            || !has_native_typed_sig(&program.functions[target as usize]))
                     {
                         targets.push(target);
                     }
@@ -3268,338 +3449,49 @@ pub(crate) fn intrinsic_results(
         .collect()
 }
 
+pub(crate) fn has_native_typed_sig(proto: &FunctionProto) -> bool {
+    proto.parameter_layouts().iter().any(|p| p.is_some())
+        || proto.return_layout().is_some()
+        || proto.parameter_array_elements().iter().any(|p| p.is_some())
+        || proto.return_array_element().is_some()
+}
+
 /// Walks the function graph and source type metadata to identify record-typed SSA values
 /// and proven types of their property reads.
 pub(crate) fn record_values_and_field_proven(
     graph: &FunctionGraph,
     proto: &FunctionProto,
     program: &Program,
+    entry: bool,
+    typed_entry: bool,
     known: &HashMap<ValueId, u32>,
+    typed_eligible: Option<&[bool]>,
+    settled_typed_sites: Option<&HashSet<ValueId>>,
 ) -> (
     HashSet<ValueId>,
     HashMap<ValueId, kiln_ir::NativeFieldType>,
     HashMap<ValueId, Proven>,
 ) {
-    let all_layouts = crate::collect_program_record_layouts(program);
-    let (empty_local, empty_obj, empty_param) = (
-        std::collections::BTreeMap::new(),
-        std::collections::BTreeMap::new(),
-        Vec::new(),
+    let (map, field_proven) = crate::emit_graph::analyze_native_records(
+        graph,
+        proto,
+        program,
+        "kiln",
+        entry,
+        typed_entry,
+        known,
+        typed_eligible,
+        settled_typed_sites,
+        true,
     );
-    let (empty_local_arr, empty_new_arr, empty_param_arr) = (
-        std::collections::BTreeMap::new(),
-        std::collections::BTreeMap::new(),
-        Vec::new(),
-    );
-    let (
-        local_layouts,
-        new_object_layouts,
-        parameter_layouts,
-        local_array_elems,
-        new_array_elems,
-        parameter_array_elems,
-    ) = if let Some(ta) = proto
-        .type_annotations
-        .as_ref()
-        .and_then(|t| t.source_types.as_ref())
-    {
-        (
-            &ta.local_layouts,
-            &ta.new_object_layouts,
-            &ta.parameter_layouts,
-            &ta.local_array_elements,
-            &ta.new_array_elements,
-            &ta.parameter_array_elements,
-        )
-    } else if let Some(st) = program.source_types() {
-        (
-            &st.local_layouts,
-            &st.new_object_layouts,
-            &st.parameter_layouts,
-            &st.local_array_elements,
-            &st.new_array_elements,
-            &st.parameter_array_elements,
-        )
-    } else {
-        (
-            &empty_local,
-            &empty_obj,
-            &empty_param,
-            &empty_local_arr,
-            &empty_new_arr,
-            &empty_param_arr,
-        )
-    };
-
-    let mut slot_layouts = local_layouts.clone();
-    for (slot, param_layout) in parameter_layouts.iter().enumerate() {
-        if let Some(lid) = param_layout {
-            slot_layouts.insert(slot as u32, *lid);
-        }
+    let record_values = map.value_exprs.into_keys().collect();
+    let mut array_values = HashMap::new();
+    for (vid, (lid, _)) in map.record_array_value_exprs {
+        array_values.insert(vid, kiln_ir::NativeFieldType::Record(lid));
     }
-
-    let mut slot_array_elems = local_array_elems.clone();
-    for (slot, param_elem) in parameter_array_elems.iter().enumerate() {
-        if let Some(elem_ty) = param_elem {
-            slot_array_elems.insert(slot as u32, *elem_ty);
-        }
+    for vid in map.number_array_values {
+        array_values.insert(vid, kiln_ir::NativeFieldType::Number);
     }
-
-    let mut record_value_layouts: HashMap<ValueId, kiln_ir::RecordLayoutId> = HashMap::new();
-    let mut array_values: HashMap<ValueId, kiln_ir::NativeFieldType> = HashMap::new();
-    let mut field_proven: HashMap<ValueId, Proven> = HashMap::new();
-
-    for (slot, param_layout) in parameter_layouts.iter().enumerate() {
-        if let Some(lid) = param_layout {
-            if let Some(&vid) = graph.initial_locals.get(slot) {
-                record_value_layouts.insert(vid, *lid);
-            }
-        }
-    }
-
-    for (&slot, &elem_ty) in &slot_array_elems {
-        if let Some(&vid) = graph.initial_locals.get(slot as usize) {
-            array_values.insert(vid, elem_ty);
-        }
-    }
-
-    loop {
-        let before_count = (
-            record_value_layouts.len(),
-            array_values.len(),
-            field_proven.len(),
-        );
-        for block in &graph.blocks {
-            for (vid, op) in &block.operations {
-                match op {
-                    GraphOp::NewObject { .. } => {
-                        let obj_lid = graph
-                            .origins
-                            .get(vid)
-                            .and_then(|origin| new_object_layouts.get(&origin.pc).copied());
-                        let store_lid =
-                            block
-                                .operations
-                                .iter()
-                                .find_map(|(_, next_op)| match next_op {
-                                    GraphOp::StoreLocal { slot, value } if value == vid => {
-                                        slot_layouts.get(slot).copied()
-                                    }
-                                    _ => None,
-                                });
-                        let mut lid = if let Some(slid) = store_lid {
-                            if obj_lid.is_none_or(|olid| {
-                                all_layouts.get(olid.0 as usize).map(|l| l.fields.len())
-                                    == all_layouts.get(slid.0 as usize).map(|l| l.fields.len())
-                            }) {
-                                Some(slid)
-                            } else {
-                                obj_lid
-                            }
-                        } else {
-                            obj_lid
-                        };
-                        if lid.is_none()
-                            && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if *ret_v == *vid)
-                        {
-                            lid = proto.return_layout();
-                        }
-                        if let Some(lid) = lid {
-                            record_value_layouts.insert(*vid, lid);
-                        }
-                    }
-                    GraphOp::NewArray { .. } => {
-                        let mut elem_ty = graph
-                            .origins
-                            .get(vid)
-                            .and_then(|origin| new_array_elems.get(&origin.pc).copied())
-                            .or_else(|| {
-                                block
-                                    .operations
-                                    .iter()
-                                    .find_map(|(_, next_op)| match next_op {
-                                        GraphOp::StoreLocal { slot, value } if value == vid => {
-                                            slot_array_elems.get(slot).copied()
-                                        }
-                                        _ => None,
-                                    })
-                            });
-                        if elem_ty.is_none()
-                            && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if ret_v == vid)
-                        {
-                            elem_ty = proto.return_array_element();
-                        }
-                        if let Some(elem_ty) = elem_ty {
-                            array_values.insert(*vid, elem_ty);
-                        }
-                    }
-                    GraphOp::Call { callee, .. } => {
-                        if let Some(&target) = known.get(callee) {
-                            if let Some(ret_lid) = program
-                                .functions
-                                .get(target as usize)
-                                .and_then(|f| f.return_layout())
-                            {
-                                record_value_layouts.insert(*vid, ret_lid);
-                            }
-                            if let Some(ret_elem) = program
-                                .functions
-                                .get(target as usize)
-                                .and_then(|f| f.return_array_element())
-                            {
-                                array_values.insert(*vid, ret_elem);
-                            }
-                        }
-                    }
-                    GraphOp::LoadLocal(slot) => {
-                        if let Some(&lid) = local_layouts.get(slot) {
-                            record_value_layouts.insert(*vid, lid);
-                        }
-                        if let Some(&elem_ty) = slot_array_elems.get(slot) {
-                            array_values.insert(*vid, elem_ty);
-                        }
-                    }
-                    GraphOp::StoreLocal { slot, value } => {
-                        if let Some(&lid) = record_value_layouts
-                            .get(value)
-                            .or_else(|| local_layouts.get(slot))
-                        {
-                            record_value_layouts.insert(*vid, lid);
-                        }
-                        if let Some(&elem_ty) = array_values
-                            .get(value)
-                            .or_else(|| slot_array_elems.get(slot))
-                        {
-                            array_values.insert(*vid, elem_ty);
-                            slot_array_elems.entry(*slot).or_insert(elem_ty);
-                        }
-                    }
-                    GraphOp::CheckTdz { value, .. } => {
-                        if let Some(&lid) = record_value_layouts.get(value) {
-                            record_value_layouts.insert(*vid, lid);
-                        }
-                        if let Some(&elem_ty) = array_values.get(value) {
-                            array_values.insert(*vid, elem_ty);
-                        }
-                    }
-                    GraphOp::Phi { inputs } => {
-                        if !record_value_layouts.contains_key(vid) {
-                            if let Some(lid) = inputs
-                                .iter()
-                                .find_map(|(_, in_vid)| record_value_layouts.get(in_vid).copied())
-                            {
-                                record_value_layouts.insert(*vid, lid);
-                            }
-                        }
-                        if !array_values.contains_key(vid) {
-                            if let Some(elem_ty) = inputs
-                                .iter()
-                                .find_map(|(_, in_vid)| array_values.get(in_vid).copied())
-                            {
-                                array_values.insert(*vid, elem_ty);
-                            }
-                        }
-                    }
-                    GraphOp::GetProperty { object, name, .. } => {
-                        if let Some(&obj_lid) = record_value_layouts.get(object) {
-                            if let Some(layout) = all_layouts.get(obj_lid.0 as usize) {
-                                if let Some(Constant::String(s)) =
-                                    program.constants.get(*name as usize)
-                                {
-                                    if let Ok(prop_name) = s.to_scalar_string() {
-                                        if let Some(field) =
-                                            layout.fields.iter().find(|f| f.name == prop_name)
-                                        {
-                                            match field.ty {
-                                                kiln_ir::NativeFieldType::Number => {
-                                                    field_proven.insert(*vid, Proven::Number);
-                                                }
-                                                kiln_ir::NativeFieldType::Int32 => {
-                                                    field_proven.insert(*vid, Proven::Int);
-                                                }
-                                                kiln_ir::NativeFieldType::Boolean => {
-                                                    field_proven.insert(*vid, Proven::Boolean);
-                                                }
-                                                kiln_ir::NativeFieldType::String => {
-                                                    field_proven.insert(*vid, Proven::String);
-                                                }
-                                                kiln_ir::NativeFieldType::Record(sub_lid) => {
-                                                    record_value_layouts.insert(*vid, sub_lid);
-                                                }
-                                                kiln_ir::NativeFieldType::RecordArray(sub_lid) => {
-                                                    array_values.insert(
-                                                        *vid,
-                                                        kiln_ir::NativeFieldType::Record(sub_lid),
-                                                    );
-                                                }
-                                                kiln_ir::NativeFieldType::NumberArray => {
-                                                    array_values.insert(
-                                                        *vid,
-                                                        kiln_ir::NativeFieldType::Number,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if array_values.contains_key(object) {
-                            if let Some(Constant::String(s)) = program.constants.get(*name as usize)
-                            {
-                                if let Ok(prop_name) = s.to_scalar_string() {
-                                    if prop_name == "length" {
-                                        field_proven.insert(*vid, Proven::Int);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    GraphOp::CallMethod {
-                        object, name, args, ..
-                    } => {
-                        if array_values.contains_key(object) && args.len() == 1 {
-                            if let Some(Constant::String(s)) = program.constants.get(*name as usize)
-                            {
-                                if let Ok(method_name) = s.to_scalar_string() {
-                                    if method_name == "push" {
-                                        field_proven.insert(*vid, Proven::Int);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    GraphOp::GetComputed { object, .. } => {
-                        if let Some(&elem_ty) = array_values.get(object) {
-                            match elem_ty {
-                                kiln_ir::NativeFieldType::Number
-                                | kiln_ir::NativeFieldType::Boolean => {
-                                    field_proven.insert(*vid, Proven::Number);
-                                }
-                                kiln_ir::NativeFieldType::Int32 => {
-                                    field_proven.insert(*vid, Proven::Int);
-                                }
-                                kiln_ir::NativeFieldType::Record(lid) => {
-                                    record_value_layouts.insert(*vid, lid);
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if (
-            record_value_layouts.len(),
-            array_values.len(),
-            field_proven.len(),
-        ) == before_count
-        {
-            break;
-        }
-    }
-    let record_values = record_value_layouts.into_keys().collect();
     (record_values, array_values, field_proven)
 }
 

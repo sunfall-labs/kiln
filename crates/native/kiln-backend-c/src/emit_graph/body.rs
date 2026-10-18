@@ -926,13 +926,41 @@ pub(crate) fn build_native_record_map(
     proto: &FunctionProto,
     program: &Program,
     symbol: &str,
-    _entry: bool,
+    entry: bool,
     kind: EntryKind,
     plan: &CallPlan,
     enabled: bool,
 ) -> NativeRecordMap {
-    if !enabled {
-        return NativeRecordMap::default();
+    analyze_native_records(
+        graph,
+        proto,
+        program,
+        symbol,
+        entry,
+        matches!(kind, EntryKind::Typed { .. }),
+        &plan.known,
+        None,
+        Some(&plan.typed_sites),
+        enabled,
+    )
+    .0
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn analyze_native_records(
+    graph: &FunctionGraph,
+    proto: &FunctionProto,
+    program: &Program,
+    symbol: &str,
+    entry: bool,
+    typed_entry: bool,
+    known: &HashMap<ValueId, u32>,
+    typed_eligible: Option<&[bool]>,
+    settled_typed_sites: Option<&HashSet<ValueId>>,
+    enabled: bool,
+) -> (NativeRecordMap, HashMap<ValueId, Proven>) {
+    if !enabled || proto.generator || proto.asynchronous {
+        return (NativeRecordMap::default(), HashMap::new());
     }
     let all_layouts = crate::collect_program_record_layouts(program);
     let (empty_local, empty_obj, empty_param) = (
@@ -965,7 +993,7 @@ pub(crate) fn build_native_record_map(
             &ta.new_array_elements,
             &ta.parameter_array_elements,
         )
-    } else if let Some(st) = program.source_types() {
+    } else if entry && let Some(st) = program.source_types() {
         (
             &st.local_layouts,
             &st.new_object_layouts,
@@ -991,8 +1019,56 @@ pub(crate) fn build_native_record_map(
         && parameter_array_elements.is_empty()
         && proto.return_array_element().is_none()
     {
-        return NativeRecordMap::default();
+        return (NativeRecordMap::default(), HashMap::new());
     }
+
+    let slot_in_array = array_slots(graph, program);
+    let reachable_blocks: Vec<&BasicBlock> = graph
+        .blocks
+        .iter()
+        .filter(|b| b.is_reachable_from_entry(graph.entry_block))
+        .collect();
+
+    let mut allowed_local_layouts: std::collections::BTreeMap<u32, kiln_ir::RecordLayoutId> =
+        local_layouts
+            .iter()
+            .filter(|&(&slot, _)| slot >= proto.parameter_count && !slot_in_array.contains(&slot))
+            .map(|(&k, &v)| (k, v))
+            .collect();
+    let mut allowed_local_array_elems: std::collections::BTreeMap<u32, kiln_ir::NativeFieldType> =
+        local_array_elements
+            .iter()
+            .filter(|&(&slot, _)| slot >= proto.parameter_count && !slot_in_array.contains(&slot))
+            .map(|(&k, &v)| (k, v))
+            .collect();
+    let mut disallowed_phis: HashSet<ValueId> = HashSet::new();
+    let mut disallowed_calls: HashSet<ValueId> = HashSet::new();
+
+    let is_call_candidate = |vid: &ValueId,
+                             callee: &ValueId,
+                             args: &[ValueId],
+                             disallowed: &HashSet<ValueId>|
+     -> Option<u32> {
+        if disallowed.contains(vid) {
+            return None;
+        }
+        let &target = known.get(callee)?;
+        if let Some(sites) = settled_typed_sites {
+            if !sites.contains(vid) {
+                return None;
+            }
+        } else {
+            if !typed_eligible.map_or(true, |el| el.get(target as usize).copied().unwrap_or(false))
+            {
+                return None;
+            }
+            let tp = program.functions.get(target as usize)?;
+            if args.len() != tp.parameter_count as usize {
+                return None;
+            }
+        }
+        Some(target)
+    };
 
     let mut decls = String::new();
     let mut slot_exprs: HashMap<u32, String> = HashMap::new();
@@ -1003,257 +1079,283 @@ pub(crate) fn build_native_record_map(
         HashMap::new();
     let mut number_array_slots: HashSet<u32> = HashSet::new();
     let mut number_array_values: HashSet<ValueId> = HashSet::new();
-
-    for (&slot, &lid) in local_layouts {
-        if slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
-            slot_exprs.insert(slot, format!("(*p{slot})"));
-        } else {
-            decls.push_str(&format!(
-                "    {symbol}_rec_{lid} rec_slot_{slot} = {{0}};\n"
-            ));
-            slot_exprs.insert(slot, format!("rec_slot_{slot}"));
-        }
-    }
-
-    for (slot, param_layout) in parameter_layouts.iter().enumerate() {
-        if let Some(lid) = param_layout {
-            let slot_u32 = slot as u32;
-            if !slot_exprs.contains_key(&slot_u32) {
-                if slot_u32 < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
-                    slot_exprs.insert(slot_u32, format!("(*p{slot})"));
-                } else {
-                    decls.push_str(&format!(
-                        "    {symbol}_rec_{lid} rec_slot_{slot} = {{0}};\n"
-                    ));
-                    slot_exprs.insert(slot_u32, format!("rec_slot_{slot}"));
-                }
-            }
-            if let Some(&vid) = graph.initial_locals.get(slot) {
-                if let Some(slot_expr) = slot_exprs.get(&slot_u32) {
-                    value_exprs.insert(vid, (*lid, slot_expr.clone()));
-                }
-            }
-        }
-    }
-
-    let mut slot_array_elems = local_array_elements.clone();
-    for (slot, param_elem) in parameter_array_elements.iter().enumerate() {
-        if let Some(elem_ty) = param_elem {
-            slot_array_elems.insert(slot as u32, *elem_ty);
-        }
-    }
-
-    for (&slot, &elem_ty) in &slot_array_elems {
-        match elem_ty {
-            kiln_ir::NativeFieldType::Record(lid) => {
-                if slot < proto.parameter_count && matches!(kind, EntryKind::Typed { .. }) {
-                    record_array_slot_exprs.insert(slot, (lid, format!("(*p{slot})")));
-                } else {
-                    decls.push_str(&format!(
-                        "    {symbol}_arr_rec_{lid} rec_arr_slot_{slot} = {{0}};\n"
-                    ));
-                    record_array_slot_exprs.insert(slot, (lid, format!("rec_arr_slot_{slot}")));
-                }
-                if let Some(&vid) = graph.initial_locals.get(slot as usize) {
-                    if let Some((_, expr)) = record_array_slot_exprs.get(&slot) {
-                        record_array_value_exprs.insert(vid, (lid, expr.clone()));
-                    }
-                }
-            }
-            kiln_ir::NativeFieldType::Number | kiln_ir::NativeFieldType::Int32 => {
-                number_array_slots.insert(slot);
-                if let Some(&vid) = graph.initial_locals.get(slot as usize) {
-                    number_array_values.insert(vid);
-                }
-            }
-            _ => {}
-        }
-    }
+    let mut field_proven: HashMap<ValueId, Proven> = HashMap::new();
 
     loop {
-        let before_count =
-            value_exprs.len() + record_array_value_exprs.len() + number_array_values.len();
-        for block in &graph.blocks {
-            for (vid, op) in &block.operations {
-                match op {
-                    GraphOp::NewObject { .. } => {
-                        if !value_exprs.contains_key(vid) {
-                            let obj_lid = graph
-                                .origins
-                                .get(vid)
-                                .and_then(|origin| new_object_layouts.get(&origin.pc).copied());
-                            let store_lid =
-                                block
-                                    .operations
-                                    .iter()
-                                    .find_map(|(_, next_op)| match next_op {
-                                        GraphOp::StoreLocal { slot, value } if value == vid => {
-                                            local_layouts.get(slot).copied().or_else(|| {
-                                                parameter_layouts
-                                                    .get(*slot as usize)
-                                                    .copied()
-                                                    .flatten()
-                                            })
-                                        }
-                                        _ => None,
-                                    });
-                            let mut lid = if let Some(slid) = store_lid {
-                                if obj_lid.is_none_or(|olid| {
-                                    all_layouts.get(olid.0 as usize).map(|l| l.fields.len())
-                                        == all_layouts.get(slid.0 as usize).map(|l| l.fields.len())
-                                }) {
-                                    Some(slid)
+        decls.clear();
+        slot_exprs.clear();
+        value_exprs.clear();
+        record_array_slot_exprs.clear();
+        record_array_value_exprs.clear();
+        number_array_slots.clear();
+        number_array_values.clear();
+        field_proven.clear();
+
+        let mut slot_layouts = allowed_local_layouts.clone();
+        if typed_entry {
+            for (slot, param_layout) in parameter_layouts.iter().enumerate() {
+                let slot_u32 = slot as u32;
+                if slot_u32 < proto.parameter_count
+                    && !slot_in_array.contains(&slot_u32)
+                    && let Some(lid) = param_layout
+                {
+                    slot_layouts.insert(slot_u32, *lid);
+                }
+            }
+        }
+
+        for (&slot, &lid) in &slot_layouts {
+            if slot < proto.parameter_count && typed_entry {
+                slot_exprs.insert(slot, format!("(*p{slot})"));
+                if let Some(&vid) = graph.initial_locals.get(slot as usize) {
+                    value_exprs.insert(vid, (lid, format!("(*p{slot})")));
+                }
+            } else {
+                decls.push_str(&format!(
+                    "    {symbol}_rec_{lid} rec_slot_{slot} = {{0}};\n"
+                ));
+                slot_exprs.insert(slot, format!("rec_slot_{slot}"));
+            }
+        }
+
+        let mut slot_array_elems = allowed_local_array_elems.clone();
+        if typed_entry {
+            for (slot, param_elem) in parameter_array_elements.iter().enumerate() {
+                let slot_u32 = slot as u32;
+                if slot_u32 < proto.parameter_count
+                    && !slot_in_array.contains(&slot_u32)
+                    && let Some(elem_ty) = param_elem
+                {
+                    slot_array_elems.insert(slot_u32, *elem_ty);
+                }
+            }
+        }
+
+        for (&slot, &elem_ty) in &slot_array_elems {
+            match elem_ty {
+                kiln_ir::NativeFieldType::Record(lid) => {
+                    if slot < proto.parameter_count && typed_entry {
+                        record_array_slot_exprs.insert(slot, (lid, format!("(*p{slot})")));
+                        if let Some(&vid) = graph.initial_locals.get(slot as usize) {
+                            record_array_value_exprs.insert(vid, (lid, format!("(*p{slot})")));
+                        }
+                    } else {
+                        decls.push_str(&format!(
+                            "    {symbol}_arr_rec_{lid} rec_arr_slot_{slot} = {{0}};\n"
+                        ));
+                        record_array_slot_exprs.insert(slot, (lid, format!("rec_arr_slot_{slot}")));
+                    }
+                }
+                kiln_ir::NativeFieldType::Number | kiln_ir::NativeFieldType::Int32 => {
+                    number_array_slots.insert(slot);
+                    if slot < proto.parameter_count
+                        && typed_entry
+                        && let Some(&vid) = graph.initial_locals.get(slot as usize)
+                    {
+                        number_array_values.insert(vid);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        loop {
+            let before_count = (
+                value_exprs.len(),
+                record_array_value_exprs.len(),
+                number_array_values.len(),
+                field_proven.len(),
+            );
+            for &block in &reachable_blocks {
+                for (vid, op) in &block.operations {
+                    match op {
+                        GraphOp::NewObject { .. } => {
+                            if !value_exprs.contains_key(vid) {
+                                let obj_lid = graph
+                                    .origins
+                                    .get(vid)
+                                    .and_then(|origin| new_object_layouts.get(&origin.pc).copied());
+                                let store_lid =
+                                    block.operations.iter().find_map(
+                                        |(_, next_op)| match next_op {
+                                            GraphOp::StoreLocal { slot, value } if value == vid => {
+                                                slot_layouts.get(slot).copied()
+                                            }
+                                            _ => None,
+                                        },
+                                    );
+                                let mut lid = if let Some(slid) = store_lid {
+                                    if obj_lid.is_none_or(|olid| {
+                                        all_layouts.get(olid.0 as usize).map(|l| l.fields.len())
+                                            == all_layouts
+                                                .get(slid.0 as usize)
+                                                .map(|l| l.fields.len())
+                                    }) {
+                                        Some(slid)
+                                    } else {
+                                        obj_lid
+                                    }
                                 } else {
                                     obj_lid
+                                };
+                                if lid.is_none()
+                                    && typed_entry
+                                    && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if ret_v == vid)
+                                {
+                                    lid = proto.return_layout();
                                 }
-                            } else {
-                                obj_lid
-                            };
-                            if lid.is_none()
-                                && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if ret_v == vid)
-                            {
-                                lid = proto.return_layout();
-                            }
-                            if let Some(lid) = lid {
-                                decls.push_str(&format!(
-                                    "    {symbol}_rec_{lid} rec_val_{} = {{0}};\n",
-                                    vid.0
-                                ));
-                                value_exprs.insert(*vid, (lid, format!("rec_val_{}", vid.0)));
-                            }
-                        }
-                    }
-                    GraphOp::NewArray { .. } => {
-                        let mut elem_ty = graph
-                            .origins
-                            .get(vid)
-                            .and_then(|origin| new_array_elements.get(&origin.pc).copied())
-                            .or_else(|| {
-                                block
-                                    .operations
-                                    .iter()
-                                    .find_map(|(_, next_op)| match next_op {
-                                        GraphOp::StoreLocal { slot, value } if value == vid => {
-                                            slot_array_elems.get(slot).copied()
-                                        }
-                                        _ => None,
-                                    })
-                            });
-                        if elem_ty.is_none()
-                            && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if ret_v == vid)
-                        {
-                            elem_ty = proto.return_array_element();
-                        }
-                        match elem_ty {
-                            Some(kiln_ir::NativeFieldType::Record(lid)) => {
-                                if !record_array_value_exprs.contains_key(vid) {
+                                if let Some(lid) = lid {
                                     decls.push_str(&format!(
-                                        "    {symbol}_arr_rec_{lid} rec_arr_val_{} = {{0}};\n",
+                                        "    {symbol}_rec_{lid} rec_val_{} = {{0}};\n",
                                         vid.0
                                     ));
-                                    record_array_value_exprs
-                                        .insert(*vid, (lid, format!("rec_arr_val_{}", vid.0)));
+                                    value_exprs.insert(*vid, (lid, format!("rec_val_{}", vid.0)));
                                 }
                             }
-                            Some(
-                                kiln_ir::NativeFieldType::Number | kiln_ir::NativeFieldType::Int32,
-                            ) => {
+                        }
+                        GraphOp::NewArray { .. } => {
+                            let mut elem_ty = graph
+                                .origins
+                                .get(vid)
+                                .and_then(|origin| new_array_elements.get(&origin.pc).copied())
+                                .or_else(|| {
+                                    block
+                                        .operations
+                                        .iter()
+                                        .find_map(|(_, next_op)| match next_op {
+                                            GraphOp::StoreLocal { slot, value } if value == vid => {
+                                                slot_array_elems.get(slot).copied()
+                                            }
+                                            _ => None,
+                                        })
+                                });
+                            if elem_ty.is_none()
+                                && typed_entry
+                                && matches!(&block.terminator, Terminator::Return(Some(ret_v)) if ret_v == vid)
+                            {
+                                elem_ty = proto.return_array_element();
+                            }
+                            match elem_ty {
+                                Some(kiln_ir::NativeFieldType::Record(lid)) => {
+                                    if !record_array_value_exprs.contains_key(vid) {
+                                        decls.push_str(&format!(
+                                            "    {symbol}_arr_rec_{lid} rec_arr_val_{} = {{0}};\n",
+                                            vid.0
+                                        ));
+                                        record_array_value_exprs
+                                            .insert(*vid, (lid, format!("rec_arr_val_{}", vid.0)));
+                                    }
+                                }
+                                Some(
+                                    kiln_ir::NativeFieldType::Number
+                                    | kiln_ir::NativeFieldType::Int32,
+                                ) => {
+                                    number_array_values.insert(*vid);
+                                }
+                                _ => {}
+                            }
+                        }
+                        GraphOp::LoadLocal(slot) => {
+                            if *slot < proto.parameter_count && typed_entry {
+                                if !value_exprs.contains_key(vid) {
+                                    if let Some(slot_expr) = slot_exprs.get(slot)
+                                        && let Some(&lid) = slot_layouts.get(slot)
+                                    {
+                                        value_exprs.insert(*vid, (lid, slot_expr.clone()));
+                                    }
+                                }
+                                if let Some((lid, expr)) = record_array_slot_exprs.get(slot) {
+                                    record_array_value_exprs
+                                        .entry(*vid)
+                                        .or_insert_with(|| (*lid, expr.clone()));
+                                }
+                                if number_array_slots.contains(slot) {
+                                    number_array_values.insert(*vid);
+                                }
+                            }
+                        }
+                        GraphOp::StoreLocal { slot, value } => {
+                            if !value_exprs.contains_key(vid)
+                                && let Some(&(src_lid, ref src_expr)) = value_exprs.get(value)
+                            {
+                                if let Some(slot_expr) = slot_exprs.get(slot) {
+                                    let dst_lid =
+                                        slot_layouts.get(slot).copied().unwrap_or(src_lid);
+                                    value_exprs.insert(*vid, (dst_lid, slot_expr.clone()));
+                                } else {
+                                    value_exprs.insert(*vid, (src_lid, src_expr.clone()));
+                                }
+                            }
+                            if !record_array_value_exprs.contains_key(vid)
+                                && let Some(&(src_lid, ref src_expr)) =
+                                    record_array_value_exprs.get(value)
+                            {
+                                if let Some(&(dst_lid, ref slot_expr)) =
+                                    record_array_slot_exprs.get(slot)
+                                {
+                                    record_array_value_exprs
+                                        .insert(*vid, (dst_lid, slot_expr.clone()));
+                                } else {
+                                    record_array_value_exprs
+                                        .insert(*vid, (src_lid, src_expr.clone()));
+                                }
+                            }
+                            if number_array_values.contains(value) {
                                 number_array_values.insert(*vid);
                             }
-                            _ => {}
                         }
-                    }
-                    GraphOp::LoadLocal(slot) => {
-                        if !value_exprs.contains_key(vid) {
-                            if let Some(slot_expr) = slot_exprs.get(slot) {
-                                let lid = local_layouts.get(slot).copied().or_else(|| {
-                                    parameter_layouts.get(*slot as usize).copied().flatten()
-                                });
-                                if let Some(lid) = lid {
-                                    value_exprs.insert(*vid, (lid, slot_expr.clone()));
-                                }
-                            }
-                        }
-                        if let Some((lid, expr)) = record_array_slot_exprs.get(slot) {
-                            record_array_value_exprs
-                                .entry(*vid)
-                                .or_insert_with(|| (*lid, expr.clone()));
-                        }
-                        if number_array_slots.contains(slot) {
-                            number_array_values.insert(*vid);
-                        }
-                    }
-                    GraphOp::StoreLocal { slot, value } => {
-                        if !value_exprs.contains_key(vid) {
-                            if let Some(slot_expr) = slot_exprs.get(slot) {
-                                if let Some(&lid) = local_layouts.get(slot) {
-                                    value_exprs.insert(*vid, (lid, slot_expr.clone()));
-                                } else if let Some((lid, _)) = value_exprs.get(value) {
-                                    value_exprs.insert(*vid, (*lid, slot_expr.clone()));
-                                }
-                            }
-                        }
-                        if let Some(&(lid, ref expr)) = record_array_slot_exprs.get(slot) {
-                            record_array_value_exprs
-                                .entry(*vid)
-                                .or_insert_with(|| (lid, expr.clone()));
-                        } else if let Some(&(lid, _)) = record_array_value_exprs.get(value) {
-                            if let Some((_, expr)) = record_array_slot_exprs.get(slot) {
-                                record_array_value_exprs
-                                    .entry(*vid)
-                                    .or_insert_with(|| (lid, expr.clone()));
-                            }
-                        }
-                        if number_array_slots.contains(slot) || number_array_values.contains(value)
-                        {
-                            number_array_values.insert(*vid);
-                        }
-                    }
-                    GraphOp::CheckTdz { value, .. } => {
-                        if !value_exprs.contains_key(vid) {
-                            if let Some((lid, expr)) = value_exprs.get(value).cloned() {
-                                value_exprs.insert(*vid, (lid, expr));
-                            }
-                        }
-                        if let Some((lid, expr)) = record_array_value_exprs.get(value).cloned() {
-                            record_array_value_exprs.insert(*vid, (lid, expr));
-                        }
-                        if number_array_values.contains(value) {
-                            number_array_values.insert(*vid);
-                        }
-                    }
-                    GraphOp::Phi { inputs } => {
-                        if !value_exprs.contains_key(vid) {
-                            if let Some((lid, expr)) = inputs
-                                .iter()
-                                .find_map(|(_, in_vid)| value_exprs.get(in_vid).cloned())
+                        GraphOp::CheckTdz { value, .. } => {
+                            if !value_exprs.contains_key(vid)
+                                && let Some((lid, expr)) = value_exprs.get(value).cloned()
                             {
                                 value_exprs.insert(*vid, (lid, expr));
                             }
-                        }
-                        if !record_array_value_exprs.contains_key(vid) {
-                            if let Some((lid, expr)) = inputs.iter().find_map(|(_, in_vid)| {
-                                record_array_value_exprs.get(in_vid).cloned()
-                            }) {
+                            if let Some((lid, expr)) = record_array_value_exprs.get(value).cloned()
+                            {
                                 record_array_value_exprs.insert(*vid, (lid, expr));
                             }
-                        }
-                        if !number_array_values.contains(vid) {
-                            if inputs
-                                .iter()
-                                .any(|(_, in_vid)| number_array_values.contains(in_vid))
-                            {
+                            if number_array_values.contains(value) {
                                 number_array_values.insert(*vid);
                             }
+                            if let Some(&p) = field_proven.get(value) {
+                                field_proven.insert(*vid, p);
+                            }
                         }
-                    }
-                    GraphOp::Call { callee, .. } => {
-                        if !value_exprs.contains_key(vid) {
-                            if let Some(&target) = plan.known.get(callee) {
-                                if let Some(ret_lid) = program
-                                    .functions
-                                    .get(target as usize)
-                                    .and_then(|f| f.return_layout())
+                        GraphOp::Phi { inputs } => {
+                            if !disallowed_phis.contains(vid) {
+                                if !value_exprs.contains_key(vid)
+                                    && let Some((lid, expr)) = inputs
+                                        .iter()
+                                        .find_map(|(_, in_vid)| value_exprs.get(in_vid).cloned())
+                                {
+                                    value_exprs.insert(*vid, (lid, expr));
+                                }
+                                if !record_array_value_exprs.contains_key(vid)
+                                    && let Some((lid, expr)) =
+                                        inputs.iter().find_map(|(_, in_vid)| {
+                                            record_array_value_exprs.get(in_vid).cloned()
+                                        })
+                                {
+                                    record_array_value_exprs.insert(*vid, (lid, expr));
+                                }
+                                if !number_array_values.contains(vid)
+                                    && inputs
+                                        .iter()
+                                        .any(|(_, in_vid)| number_array_values.contains(in_vid))
+                                {
+                                    number_array_values.insert(*vid);
+                                }
+                            }
+                        }
+                        GraphOp::Call { callee, args, .. } => {
+                            if let Some(target) =
+                                is_call_candidate(vid, callee, args, &disallowed_calls)
+                            {
+                                if !value_exprs.contains_key(vid)
+                                    && let Some(ret_lid) = program
+                                        .functions
+                                        .get(target as usize)
+                                        .and_then(|f| f.return_layout())
                                 {
                                     decls.push_str(&format!(
                                         "    {symbol}_rec_{ret_lid} rec_call_{} = {{0}};\n",
@@ -1262,81 +1364,253 @@ pub(crate) fn build_native_record_map(
                                     value_exprs
                                         .insert(*vid, (ret_lid, format!("rec_call_{}", vid.0)));
                                 }
-                            }
-                        }
-                        if let Some(&target) = plan.known.get(callee) {
-                            if let Some(kiln_ir::NativeFieldType::Record(ret_lid)) = program
-                                .functions
-                                .get(target as usize)
-                                .and_then(|f| f.return_array_element())
-                            {
-                                if !record_array_value_exprs.contains_key(vid) {
-                                    decls.push_str(&format!(
-                                        "    {symbol}_arr_rec_{ret_lid} rec_arr_call_{} = {{0}};\n",
-                                        vid.0
-                                    ));
-                                    record_array_value_exprs
-                                        .insert(*vid, (ret_lid, format!("rec_arr_call_{}", vid.0)));
-                                }
-                            } else if matches!(
-                                program
+                                if let Some(kiln_ir::NativeFieldType::Record(ret_lid)) = program
                                     .functions
                                     .get(target as usize)
-                                    .and_then(|f| f.return_array_element()),
-                                Some(
-                                    kiln_ir::NativeFieldType::Number
-                                        | kiln_ir::NativeFieldType::Int32,
-                                )
-                            ) {
-                                number_array_values.insert(*vid);
+                                    .and_then(|f| f.return_array_element())
+                                {
+                                    if !record_array_value_exprs.contains_key(vid) {
+                                        decls.push_str(&format!(
+                                            "    {symbol}_arr_rec_{ret_lid} rec_arr_call_{} = {{0}};\n",
+                                            vid.0
+                                        ));
+                                        record_array_value_exprs.insert(
+                                            *vid,
+                                            (ret_lid, format!("rec_arr_call_{}", vid.0)),
+                                        );
+                                    }
+                                } else if matches!(
+                                    program
+                                        .functions
+                                        .get(target as usize)
+                                        .and_then(|f| f.return_array_element()),
+                                    Some(
+                                        kiln_ir::NativeFieldType::Number
+                                            | kiln_ir::NativeFieldType::Int32,
+                                    )
+                                ) {
+                                    number_array_values.insert(*vid);
+                                }
                             }
                         }
-                    }
-                    GraphOp::GetProperty { object, name, .. } => {
-                        if let Some((obj_lid, obj_expr)) = value_exprs.get(object).cloned() {
-                            if let Some(layout) = all_layouts.get(obj_lid.0 as usize) {
-                                if let Some(Constant::String(s)) =
+                        GraphOp::GetProperty { object, name, .. } => {
+                            if let Some((obj_lid, obj_expr)) = value_exprs.get(object).cloned()
+                                && let Some(layout) = all_layouts.get(obj_lid.0 as usize)
+                                && let Some(Constant::String(s)) =
                                     program.constants.get(*name as usize)
-                                {
-                                    if let Ok(prop_name) = s.to_scalar_string() {
-                                        if let Some(field) =
-                                            layout.fields.iter().find(|f| f.name == prop_name)
-                                        {
-                                            match field.ty {
-                                                kiln_ir::NativeFieldType::Record(sub_lid) => {
-                                                    value_exprs.entry(*vid).or_insert_with(|| {
-                                                        (sub_lid, format!("{obj_expr}.{prop_name}"))
-                                                    });
-                                                }
-                                                kiln_ir::NativeFieldType::RecordArray(sub_lid) => {
-                                                    record_array_value_exprs
-                                                        .entry(*vid)
-                                                        .or_insert_with(|| {
-                                                            (
-                                                                sub_lid,
-                                                                format!("({obj_expr}).{prop_name}"),
-                                                            )
-                                                        });
-                                                }
-                                                kiln_ir::NativeFieldType::NumberArray => {
-                                                    number_array_values.insert(*vid);
-                                                }
-                                                _ => {}
-                                            }
-                                        }
+                                && let Ok(prop_name) = s.to_scalar_string()
+                                && let Some(field) =
+                                    layout.fields.iter().find(|f| f.name == prop_name)
+                            {
+                                match field.ty {
+                                    kiln_ir::NativeFieldType::Number => {
+                                        field_proven.insert(*vid, Proven::Number);
+                                    }
+                                    kiln_ir::NativeFieldType::Int32 => {
+                                        field_proven.insert(*vid, Proven::Int);
+                                    }
+                                    kiln_ir::NativeFieldType::Boolean => {
+                                        field_proven.insert(*vid, Proven::Boolean);
+                                    }
+                                    kiln_ir::NativeFieldType::String => {
+                                        field_proven.insert(*vid, Proven::String);
+                                    }
+                                    kiln_ir::NativeFieldType::Record(sub_lid) => {
+                                        let c_field = crate::c_record_field_name(&prop_name);
+                                        value_exprs.entry(*vid).or_insert_with(|| {
+                                            (sub_lid, format!("{obj_expr}.{c_field}"))
+                                        });
+                                    }
+                                    kiln_ir::NativeFieldType::RecordArray(sub_lid) => {
+                                        let c_field = crate::c_record_field_name(&prop_name);
+                                        record_array_value_exprs.entry(*vid).or_insert_with(|| {
+                                            (sub_lid, format!("({obj_expr}).{c_field}"))
+                                        });
+                                    }
+                                    kiln_ir::NativeFieldType::NumberArray => {
+                                        number_array_values.insert(*vid);
                                     }
                                 }
                             }
+                            if (record_array_value_exprs.contains_key(object)
+                                || number_array_values.contains(object))
+                                && let Some(Constant::String(s)) =
+                                    program.constants.get(*name as usize)
+                                && let Ok(prop_name) = s.to_scalar_string()
+                                && prop_name == "length"
+                            {
+                                field_proven.insert(*vid, Proven::Int);
+                            }
                         }
-                    }
-                    GraphOp::GetComputed { object, .. } => {
-                        if !value_exprs.contains_key(vid) {
-                            if let Some(&(lid, _)) = record_array_value_exprs.get(object) {
+                        GraphOp::CallMethod {
+                            object, name, args, ..
+                        } => {
+                            if (record_array_value_exprs.contains_key(object)
+                                || number_array_values.contains(object))
+                                && args.len() == 1
+                                && let Some(Constant::String(s)) =
+                                    program.constants.get(*name as usize)
+                                && let Ok(method_name) = s.to_scalar_string()
+                                && method_name == "push"
+                            {
+                                field_proven.insert(*vid, Proven::Int);
+                            }
+                        }
+                        GraphOp::GetComputed { object, .. } => {
+                            if !value_exprs.contains_key(vid)
+                                && let Some(&(lid, _)) = record_array_value_exprs.get(object)
+                            {
                                 decls.push_str(&format!(
                                     "    {symbol}_rec_{lid} *rec_ptr_{} = NULL;\n",
                                     vid.0
                                 ));
                                 value_exprs.insert(*vid, (lid, format!("(*rec_ptr_{})", vid.0)));
+                            } else if number_array_values.contains(object) {
+                                field_proven.insert(*vid, Proven::Number);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if (
+                value_exprs.len(),
+                record_array_value_exprs.len(),
+                number_array_values.len(),
+                field_proven.len(),
+            ) == before_count
+            {
+                break;
+            }
+        }
+
+        let mut pruned = false;
+        for slot in allowed_local_layouts.keys().copied().collect::<Vec<_>>() {
+            let mut has_store = false;
+            let mut all_valid = true;
+            for &block in &reachable_blocks {
+                for (_, op) in &block.operations {
+                    if let GraphOp::StoreLocal { slot: s, value } = op
+                        && *s == slot
+                    {
+                        has_store = true;
+                        if !value_exprs.contains_key(value) {
+                            all_valid = false;
+                        }
+                    }
+                }
+            }
+            if !has_store || !all_valid {
+                allowed_local_layouts.remove(&slot);
+                pruned = true;
+            }
+        }
+
+        for (slot, elem_ty) in allowed_local_array_elems
+            .iter()
+            .map(|(&k, &v)| (k, v))
+            .collect::<Vec<_>>()
+        {
+            let mut has_store = false;
+            let mut all_valid = true;
+            for &block in &reachable_blocks {
+                for (_, op) in &block.operations {
+                    if let GraphOp::StoreLocal { slot: s, value } = op
+                        && *s == slot
+                    {
+                        has_store = true;
+                        let valid = match elem_ty {
+                            kiln_ir::NativeFieldType::Record(_) => {
+                                record_array_value_exprs.contains_key(value)
+                            }
+                            kiln_ir::NativeFieldType::Number | kiln_ir::NativeFieldType::Int32 => {
+                                number_array_values.contains(value)
+                            }
+                            _ => false,
+                        };
+                        if !valid {
+                            all_valid = false;
+                        }
+                    }
+                }
+            }
+            if !has_store || !all_valid {
+                allowed_local_array_elems.remove(&slot);
+                pruned = true;
+            }
+        }
+
+        for &block in &reachable_blocks {
+            for (vid, op) in &block.operations {
+                match op {
+                    GraphOp::Phi { inputs } if !disallowed_phis.contains(vid) => {
+                        if let Some(&(lid, _)) = value_exprs.get(vid) {
+                            if inputs.is_empty()
+                                || inputs.iter().any(|(_, in_vid)| {
+                                    value_exprs.get(in_vid).map(|(in_lid, _)| *in_lid) != Some(lid)
+                                })
+                            {
+                                disallowed_phis.insert(*vid);
+                                pruned = true;
+                            }
+                        }
+                        if let Some(&(lid, _)) = record_array_value_exprs.get(vid) {
+                            if inputs.is_empty()
+                                || inputs.iter().any(|(_, in_vid)| {
+                                    record_array_value_exprs
+                                        .get(in_vid)
+                                        .map(|(in_lid, _)| *in_lid)
+                                        != Some(lid)
+                                })
+                            {
+                                disallowed_phis.insert(*vid);
+                                pruned = true;
+                            }
+                        }
+                        if number_array_values.contains(vid)
+                            && (inputs.is_empty()
+                                || inputs
+                                    .iter()
+                                    .any(|(_, in_vid)| !number_array_values.contains(in_vid)))
+                        {
+                            disallowed_phis.insert(*vid);
+                            pruned = true;
+                        }
+                    }
+                    GraphOp::Call { callee, args, .. }
+                        if settled_typed_sites.is_none()
+                            && !disallowed_calls.contains(vid)
+                            && (value_exprs.contains_key(vid)
+                                || record_array_value_exprs.contains_key(vid)
+                                || number_array_values.contains(vid)) =>
+                    {
+                        if let Some(target) =
+                            is_call_candidate(vid, callee, args, &disallowed_calls)
+                            && let Some(tp) = program.functions.get(target as usize)
+                        {
+                            let args_ok = args.iter().enumerate().all(|(idx, arg)| {
+                                if tp.parameter_layouts().get(idx).copied().flatten().is_some() {
+                                    value_exprs.contains_key(arg)
+                                } else if let Some(elem_ty) =
+                                    tp.parameter_array_elements().get(idx).copied().flatten()
+                                {
+                                    match elem_ty {
+                                        kiln_ir::NativeFieldType::Record(_) => {
+                                            record_array_value_exprs.contains_key(arg)
+                                        }
+                                        kiln_ir::NativeFieldType::Number
+                                        | kiln_ir::NativeFieldType::Int32 => {
+                                            number_array_values.contains(arg)
+                                        }
+                                        _ => false,
+                                    }
+                                } else {
+                                    true
+                                }
+                            });
+                            if !args_ok {
+                                disallowed_calls.insert(*vid);
+                                pruned = true;
                             }
                         }
                     }
@@ -1344,39 +1618,72 @@ pub(crate) fn build_native_record_map(
                 }
             }
         }
-        if value_exprs.len() + record_array_value_exprs.len() + number_array_values.len()
-            == before_count
-        {
+
+        if !pruned {
             break;
         }
     }
 
     let mut boxed_record_values: HashSet<ValueId> = HashSet::new();
-    let mut deps: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+    let mut record_array_escapes = false;
 
-    for block in graph
-        .blocks
-        .iter()
-        .filter(|b| b.is_reachable_from_entry(graph.entry_block))
-    {
+    for &block in &reachable_blocks {
         for (vid, op) in &block.operations {
             match op {
                 GraphOp::StoreLocal { slot, value } => {
                     if !slot_exprs.contains_key(slot) && value_exprs.contains_key(value) {
                         boxed_record_values.insert(*value);
                     }
+                    if !record_array_slot_exprs.contains_key(slot)
+                        && record_array_value_exprs.contains_key(value)
+                    {
+                        record_array_escapes = true;
+                    }
                 }
+                GraphOp::LoadLocal(_) => {}
                 GraphOp::NewArray { elements, .. } => {
                     if !record_array_value_exprs.contains_key(vid) {
                         for elem in elements {
                             if value_exprs.contains_key(elem) {
                                 boxed_record_values.insert(*elem);
                             }
+                            if record_array_value_exprs.contains_key(elem) {
+                                record_array_escapes = true;
+                            }
+                        }
+                    } else {
+                        for elem in elements {
+                            if !value_exprs.contains_key(elem) {
+                                record_array_escapes = true;
+                            }
                         }
                     }
                 }
-                GraphOp::SetComputed { object, value, .. }
-                | GraphOp::SetComputedStrict { object, value, .. } => {
+                GraphOp::GetComputed { object, key, .. } => {
+                    if value_exprs.contains_key(object) {
+                        boxed_record_values.insert(*object);
+                    }
+                    if value_exprs.contains_key(key) {
+                        boxed_record_values.insert(*key);
+                    }
+                    if record_array_value_exprs.contains_key(key) {
+                        record_array_escapes = true;
+                    }
+                }
+                GraphOp::SetComputed {
+                    object, key, value, ..
+                }
+                | GraphOp::SetComputedStrict {
+                    object, key, value, ..
+                } => {
+                    if value_exprs.contains_key(key) {
+                        boxed_record_values.insert(*key);
+                    }
+                    if record_array_value_exprs.contains_key(key)
+                        || record_array_value_exprs.contains_key(value)
+                    {
+                        record_array_escapes = true;
+                    }
                     if !record_array_value_exprs.contains_key(object) {
                         if value_exprs.contains_key(object) {
                             boxed_record_values.insert(*object);
@@ -1384,13 +1691,40 @@ pub(crate) fn build_native_record_map(
                         if value_exprs.contains_key(value) {
                             boxed_record_values.insert(*value);
                         }
+                    } else if !value_exprs.contains_key(value) {
+                        record_array_escapes = true;
                     }
                 }
                 GraphOp::NewObject { pairs, .. } => {
-                    if !value_exprs.contains_key(vid) {
+                    if let Some(&(obj_lid, _)) = value_exprs.get(vid) {
+                        let layout = all_layouts.get(obj_lid.0 as usize);
+                        for (_, val) in pairs {
+                            if value_exprs.contains_key(val) {
+                                if !layout.is_some_and(|l| {
+                                    l.fields.iter().any(|f| {
+                                        matches!(f.ty, kiln_ir::NativeFieldType::Record(_))
+                                    })
+                                }) {
+                                    boxed_record_values.insert(*val);
+                                }
+                            }
+                            if record_array_value_exprs.contains_key(val) {
+                                if !layout.is_some_and(|l| {
+                                    l.fields.iter().any(|f| {
+                                        matches!(f.ty, kiln_ir::NativeFieldType::RecordArray(_))
+                                    })
+                                }) {
+                                    record_array_escapes = true;
+                                }
+                            }
+                        }
+                    } else {
                         for (_, val) in pairs {
                             if value_exprs.contains_key(val) {
                                 boxed_record_values.insert(*val);
+                            }
+                            if record_array_value_exprs.contains_key(val) {
+                                record_array_escapes = true;
                             }
                         }
                     }
@@ -1409,6 +1743,16 @@ pub(crate) fn build_native_record_map(
                         if !is_known {
                             boxed_record_values.insert(*object);
                         }
+                    } else if record_array_value_exprs.contains_key(object) {
+                        let is_len = match program.constants.get(*name as usize) {
+                            Some(Constant::String(s)) => {
+                                s.to_scalar_string().ok().as_deref() == Some("length")
+                            }
+                            _ => false,
+                        };
+                        if !is_len {
+                            record_array_escapes = true;
+                        }
                     }
                 }
                 GraphOp::SetProperty {
@@ -1423,6 +1767,9 @@ pub(crate) fn build_native_record_map(
                     value,
                     ..
                 } => {
+                    if record_array_value_exprs.contains_key(object) {
+                        record_array_escapes = true;
+                    }
                     if let Some(&(obj_lid, _)) = value_exprs.get(object) {
                         let prop_name = match program.constants.get(*name as usize) {
                             Some(Constant::String(s)) => s.to_scalar_string().ok(),
@@ -1434,28 +1781,52 @@ pub(crate) fn build_native_record_map(
                                 .and_then(|l| l.fields.iter().find(|f| &f.name == p))
                         });
                         if let Some(f) = field {
-                            if !matches!(
-                                f.ty,
-                                kiln_ir::NativeFieldType::Record(_)
-                                    | kiln_ir::NativeFieldType::RecordArray(_)
-                            ) && value_exprs.contains_key(value)
-                            {
-                                boxed_record_values.insert(*value);
+                            match f.ty {
+                                kiln_ir::NativeFieldType::Record(_) => {
+                                    if !value_exprs.contains_key(value) {
+                                        boxed_record_values.insert(*object);
+                                    }
+                                    if record_array_value_exprs.contains_key(value) {
+                                        record_array_escapes = true;
+                                    }
+                                }
+                                kiln_ir::NativeFieldType::RecordArray(_) => {
+                                    if !record_array_value_exprs.contains_key(value) {
+                                        record_array_escapes = true;
+                                    }
+                                    if value_exprs.contains_key(value) {
+                                        boxed_record_values.insert(*value);
+                                    }
+                                }
+                                _ => {
+                                    if value_exprs.contains_key(value) {
+                                        boxed_record_values.insert(*value);
+                                    }
+                                    if record_array_value_exprs.contains_key(value) {
+                                        record_array_escapes = true;
+                                    }
+                                }
                             }
                         } else {
                             boxed_record_values.insert(*object);
                             if value_exprs.contains_key(value) {
                                 boxed_record_values.insert(*value);
                             }
+                            if record_array_value_exprs.contains_key(value) {
+                                record_array_escapes = true;
+                            }
                         }
-                    } else if value_exprs.contains_key(value) {
-                        boxed_record_values.insert(*value);
+                    } else {
+                        if value_exprs.contains_key(value) {
+                            boxed_record_values.insert(*value);
+                        }
+                        if record_array_value_exprs.contains_key(value) {
+                            record_array_escapes = true;
+                        }
                     }
                 }
                 GraphOp::Call { callee, args, .. } => {
-                    if plan.typed_sites.contains(vid)
-                        && let Some(&target) = plan.known.get(callee)
-                    {
+                    if let Some(target) = is_call_candidate(vid, callee, args, &disallowed_calls) {
                         let target_proto = program.functions.get(target as usize);
                         for (idx, arg) in args.iter().enumerate() {
                             let is_rec_param = target_proto
@@ -1468,35 +1839,31 @@ pub(crate) fn build_native_record_map(
                                 .is_some_and(|elem| {
                                     matches!(elem, kiln_ir::NativeFieldType::Record(_))
                                 });
-                            if !is_rec_param && !is_rec_arr_param && value_exprs.contains_key(arg) {
+                            if !is_rec_param && value_exprs.contains_key(arg) {
                                 boxed_record_values.insert(*arg);
+                            }
+                            if !is_rec_arr_param && record_array_value_exprs.contains_key(arg) {
+                                record_array_escapes = true;
                             }
                         }
                     } else {
                         if value_exprs.contains_key(callee) {
                             boxed_record_values.insert(*callee);
                         }
+                        if record_array_value_exprs.contains_key(callee) {
+                            record_array_escapes = true;
+                        }
                         for arg in args {
                             if value_exprs.contains_key(arg) {
                                 boxed_record_values.insert(*arg);
                             }
-                        }
-                    }
-                }
-                GraphOp::CheckTdz { value, .. } => {
-                    if value_exprs.contains_key(vid) && value_exprs.contains_key(value) {
-                        deps.entry(*vid).or_default().push(*value);
-                    }
-                }
-                GraphOp::Phi { inputs } => {
-                    if value_exprs.contains_key(vid) {
-                        for (_, in_vid) in inputs {
-                            if value_exprs.contains_key(in_vid) {
-                                deps.entry(*vid).or_default().push(*in_vid);
+                            if record_array_value_exprs.contains_key(arg) {
+                                record_array_escapes = true;
                             }
                         }
                     }
                 }
+                GraphOp::CheckTdz { .. } | GraphOp::Phi { .. } => {}
                 GraphOp::Bridge {
                     instruction,
                     operands,
@@ -1513,11 +1880,17 @@ pub(crate) fn build_native_record_map(
                             if value_exprs.contains_key(op_v) {
                                 boxed_record_values.insert(*op_v);
                             }
+                            if record_array_value_exprs.contains_key(op_v) {
+                                record_array_escapes = true;
+                            }
                         }
                     } else {
                         for op_v in operands {
                             if value_exprs.contains_key(op_v) {
                                 boxed_record_values.insert(*op_v);
+                            }
+                            if record_array_value_exprs.contains_key(op_v) {
+                                record_array_escapes = true;
                             }
                         }
                     }
@@ -1543,6 +1916,9 @@ pub(crate) fn build_native_record_map(
                         if value_exprs.contains_key(object) {
                             boxed_record_values.insert(*object);
                         }
+                        if record_array_value_exprs.contains_key(object) {
+                            record_array_escapes = true;
+                        }
                         for (i, arg) in args.iter().enumerate() {
                             if i == 0 && value_exprs.contains_key(arg) {
                                 continue;
@@ -1550,20 +1926,29 @@ pub(crate) fn build_native_record_map(
                             if value_exprs.contains_key(arg) {
                                 boxed_record_values.insert(*arg);
                             }
-                        }
-                    } else {
-                        if record_array_value_exprs.contains_key(object)
-                            && method_name.as_deref() == Some("push")
-                        {
-                            // args do not require boxing
-                        } else {
-                            if value_exprs.contains_key(object) {
-                                boxed_record_values.insert(*object);
+                            if record_array_value_exprs.contains_key(arg) {
+                                record_array_escapes = true;
                             }
-                            for arg in args {
-                                if value_exprs.contains_key(arg) {
-                                    boxed_record_values.insert(*arg);
-                                }
+                        }
+                    } else if record_array_value_exprs.contains_key(object)
+                        && method_name.as_deref() == Some("push")
+                        && args.len() == 1
+                        && value_exprs.contains_key(&args[0])
+                    {
+                        // Unboxed record array push
+                    } else {
+                        if value_exprs.contains_key(object) {
+                            boxed_record_values.insert(*object);
+                        }
+                        if record_array_value_exprs.contains_key(object) {
+                            record_array_escapes = true;
+                        }
+                        for arg in args {
+                            if value_exprs.contains_key(arg) {
+                                boxed_record_values.insert(*arg);
+                            }
+                            if record_array_value_exprs.contains_key(arg) {
+                                record_array_escapes = true;
                             }
                         }
                     }
@@ -1573,21 +1958,27 @@ pub(crate) fn build_native_record_map(
                         if value_exprs.contains_key(&op_v) {
                             boxed_record_values.insert(op_v);
                         }
+                        if record_array_value_exprs.contains_key(&op_v) {
+                            record_array_escapes = true;
+                        }
                     }
                 }
             }
         }
         match &block.terminator {
             Terminator::Return(Some(v)) => {
-                if !(matches!(kind, EntryKind::Typed { .. })
-                    && (proto.return_layout().is_some()
-                        || matches!(
-                            proto.return_array_element(),
-                            Some(kiln_ir::NativeFieldType::Record(_))
-                        )))
-                    && value_exprs.contains_key(v)
+                if !(typed_entry && proto.return_layout().is_some()) && value_exprs.contains_key(v)
                 {
                     boxed_record_values.insert(*v);
+                }
+                if !(typed_entry
+                    && matches!(
+                        proto.return_array_element(),
+                        Some(kiln_ir::NativeFieldType::Record(_))
+                    ))
+                    && record_array_value_exprs.contains_key(v)
+                {
+                    record_array_escapes = true;
                 }
             }
             Terminator::Return(None) => {}
@@ -1595,11 +1986,17 @@ pub(crate) fn build_native_record_map(
                 if value_exprs.contains_key(v) {
                     boxed_record_values.insert(*v);
                 }
+                if record_array_value_exprs.contains_key(v) {
+                    record_array_escapes = true;
+                }
             }
             Terminator::Branch { condition, .. }
             | Terminator::BranchNotNullish { condition, .. } => {
                 if value_exprs.contains_key(condition) {
                     boxed_record_values.insert(*condition);
+                }
+                if record_array_value_exprs.contains_key(condition) {
+                    record_array_escapes = true;
                 }
             }
             Terminator::Suspend {
@@ -1612,19 +2009,31 @@ pub(crate) fn build_native_record_map(
                 if value_exprs.contains_key(value) {
                     boxed_record_values.insert(*value);
                 }
+                if record_array_value_exprs.contains_key(value) {
+                    record_array_escapes = true;
+                }
                 for s in spilled {
                     if value_exprs.contains_key(s) {
                         boxed_record_values.insert(*s);
+                    }
+                    if record_array_value_exprs.contains_key(s) {
+                        record_array_escapes = true;
                     }
                 }
                 if let Some((iter, _, _)) = delegate {
                     if value_exprs.contains_key(iter) {
                         boxed_record_values.insert(*iter);
                     }
+                    if record_array_value_exprs.contains_key(iter) {
+                        record_array_escapes = true;
+                    }
                 }
                 if let Some(w) = delegate_wrapped {
                     if value_exprs.contains_key(w) {
                         boxed_record_values.insert(*w);
+                    }
+                    if record_array_value_exprs.contains_key(w) {
+                        record_array_escapes = true;
                     }
                 }
             }
@@ -1632,28 +2041,24 @@ pub(crate) fn build_native_record_map(
         }
     }
 
-    let mut worklist: Vec<ValueId> = boxed_record_values.iter().copied().collect();
-    while let Some(vid) = worklist.pop() {
-        if let Some(inputs) = deps.get(&vid) {
-            for &in_vid in inputs {
-                if boxed_record_values.insert(in_vid) {
-                    worklist.push(in_vid);
-                }
-            }
-        }
+    if !boxed_record_values.is_empty() || record_array_escapes {
+        return (NativeRecordMap::default(), HashMap::new());
     }
 
-    NativeRecordMap {
-        decls,
-        slot_exprs,
-        value_exprs,
-        boxed_record_values,
-        all_layouts,
-        record_array_slot_exprs,
-        record_array_value_exprs,
-        number_array_slots,
-        number_array_values,
-    }
+    (
+        NativeRecordMap {
+            decls,
+            slot_exprs,
+            value_exprs,
+            boxed_record_values,
+            all_layouts,
+            record_array_slot_exprs,
+            record_array_value_exprs,
+            number_array_slots,
+            number_array_values,
+        },
+        field_proven,
+    )
 }
 
 fn emit_box_record_fields(
@@ -1668,7 +2073,8 @@ fn emit_box_record_fields(
         for field in &layout.fields {
             let name = &field.name;
             let name_len = name.len();
-            let field_expr = format!("{expr}.{name}");
+            let c_name = crate::c_record_field_name(name);
+            let field_expr = format!("{expr}.{c_name}");
             match field.ty {
                 kiln_ir::NativeFieldType::Number => {
                     writeln!(
@@ -1699,7 +2105,7 @@ fn emit_box_record_fields(
                     .unwrap();
                 }
                 kiln_ir::NativeFieldType::Record(sub_lid) => {
-                    let sub_obj_var = format!("sub_obj_{depth}_{name}");
+                    let sub_obj_var = format!("sub_obj_{depth}_{c_name}");
                     let sub_count = all_layouts
                         .get(sub_lid.0 as usize)
                         .map_or(0, |l| l.fields.len());
@@ -1730,9 +2136,9 @@ fn emit_box_record_fields(
                     .unwrap();
                 }
                 kiln_ir::NativeFieldType::RecordArray(sub_lid) => {
-                    let arr_var = format!("sub_arr_{depth}_{name}");
-                    let idx_var = format!("idx_{depth}_{name}");
-                    let elem_var = format!("sub_elem_{depth}_{name}");
+                    let arr_var = format!("sub_arr_{depth}_{c_name}");
+                    let idx_var = format!("idx_{depth}_{c_name}");
+                    let elem_var = format!("sub_elem_{depth}_{c_name}");
                     writeln!(
                         output,
                         "    {{ kiln_value {arr_var} = kiln_c99_undefined(); kiln_c99_new_array_with_capacity(&{arr_var}, ({field_expr}).count, 0); for (size_t {idx_var} = 0; {idx_var} < ({field_expr}).count; {idx_var}++) {{ kiln_value {elem_var} = kiln_c99_undefined(); kiln_c99_new_object_with_capacity(&{elem_var}, {});",
@@ -1794,35 +2200,36 @@ pub(crate) fn emit_compound_literal_fields(
     let mut init_fields = Vec::new();
     for tf in &target_layout.fields {
         if let Some(sf) = src_layout.fields.iter().find(|sf| sf.name == tf.name) {
+            let c_name = crate::c_record_field_name(&tf.name);
             match (&tf.ty, &sf.ty) {
                 (
                     kiln_ir::NativeFieldType::Record(target_sub),
                     kiln_ir::NativeFieldType::Record(src_sub),
                 ) => {
                     if target_sub == src_sub {
-                        init_fields.push(format!(".{} = {src_expr}.{}", tf.name, tf.name));
+                        init_fields.push(format!(".{c_name} = {src_expr}.{c_name}"));
                     } else {
                         let inner = emit_compound_literal_fields(
                             *target_sub,
-                            &format!("{src_expr}.{}", tf.name),
+                            &format!("{src_expr}.{c_name}"),
                             *src_sub,
                             symbol,
                             all_layouts,
                         );
                         init_fields.push(format!(
-                            ".{} = ({symbol}_rec_{target_sub}){{ {} }}",
-                            tf.name, inner
+                            ".{c_name} = ({symbol}_rec_{target_sub}){{ {} }}",
+                            inner
                         ));
                     }
                 }
                 (kiln_ir::NativeFieldType::Int32, kiln_ir::NativeFieldType::Number) => {
-                    init_fields.push(format!(".{} = (int32_t)({src_expr}.{})", tf.name, tf.name));
+                    init_fields.push(format!(".{c_name} = (int32_t)({src_expr}.{c_name})"));
                 }
                 (kiln_ir::NativeFieldType::Number, kiln_ir::NativeFieldType::Int32) => {
-                    init_fields.push(format!(".{} = (double)({src_expr}.{})", tf.name, tf.name));
+                    init_fields.push(format!(".{c_name} = (double)({src_expr}.{c_name})"));
                 }
                 _ => {
-                    init_fields.push(format!(".{} = {src_expr}.{}", tf.name, tf.name));
+                    init_fields.push(format!(".{c_name} = {src_expr}.{c_name}"));
                 }
             }
         }

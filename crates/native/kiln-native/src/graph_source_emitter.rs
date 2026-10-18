@@ -59,10 +59,16 @@ pub(super) fn effective_policy(
     let mut policy = policy.clone();
     policy.parallel_in_generic = parallel_in_generic(profile);
     if profile == NativeProfile::Release {
-        policy.generic_only = release_module_uses_generic_bodies(&node.program, &policy);
-        // Issue 14: such a module is compiled at -O0 for build time; its parallel workers go to
-        // a unit of their own, compiled like a specialized module (`module_units`).
-        policy.parallel_workers_unit = policy.generic_only;
+        if policy.semantics == kiln_backend_c::NativeSemantics::Native {
+            policy.generic_only = false;
+            policy.parallel_workers_unit = false;
+            policy.unit_chunk_bytes.get_or_insert(1 << 20);
+        } else {
+            policy.generic_only = release_module_uses_generic_bodies(&node.program, &policy);
+            // Issue 14: such a module is compiled at -O0 for build time; its parallel workers go to
+            // a unit of their own, compiled like a specialized module (`module_units`).
+            policy.parallel_workers_unit = policy.generic_only;
+        }
     } else if profile == NativeProfile::ReleaseSize {
         policy.generic_only = true;
         policy.omit_source = true;

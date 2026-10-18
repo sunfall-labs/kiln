@@ -78,7 +78,13 @@ fn typed_callback(
     {
         return None;
     }
-    let arity = program.functions[target as usize].parameter_count;
+    let proto = &program.functions[target as usize];
+    if plan.semantics == crate::NativeSemantics::Native
+        && crate::direct::has_native_typed_sig(proto)
+    {
+        return None;
+    }
+    let arity = proto.parameter_count;
     if !expected_arity.contains(&arity) {
         return None;
     }
@@ -4432,6 +4438,7 @@ fn emit_call_prepared_method(
                 .copied()
                 .unwrap_or(false)
                 && !callee.arrow
+                && !crate::direct::has_native_typed_sig(callee)
                 && callee.parameter_count as usize == argc
                 && args.iter().all(|arg| ctx.live_numbers.contains(arg))
         })

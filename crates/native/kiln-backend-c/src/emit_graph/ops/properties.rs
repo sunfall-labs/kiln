@@ -98,7 +98,8 @@ pub(super) fn emit_get_property(
             let all_layouts = crate::collect_program_record_layouts(program);
             if let Some(layout) = all_layouts.get(obj_lid.0 as usize) {
                 if let Some(field) = layout.fields.iter().find(|f| f.name == prop_name) {
-                    let field_expr = format!("{obj_expr}.{prop_name}");
+                    let c_field = crate::c_record_field_name(&prop_name);
+                    let field_expr = format!("{obj_expr}.{c_field}");
                     let need_box = ctx.boxed.map_or(true, |b| b.contains(&vid));
                     match field.ty {
                         kiln_ir::NativeFieldType::Number => {
@@ -710,7 +711,8 @@ pub(super) fn emit_set_property(
             let all_layouts = crate::collect_program_record_layouts(ctx.program);
             if let Some(layout) = all_layouts.get(obj_lid.0 as usize) {
                 if let Some(field) = layout.fields.iter().find(|f| f.name == prop_name) {
-                    let field_expr = format!("{obj_expr}.{prop_name}");
+                    let c_field = crate::c_record_field_name(&prop_name);
+                    let field_expr = format!("{obj_expr}.{c_field}");
                     match field.ty {
                         kiln_ir::NativeFieldType::Number => {
                             if ctx.live_numbers.contains(value) {
@@ -981,9 +983,9 @@ pub(super) fn emit_get_computed(
     if ctx.plan.semantics == crate::NativeSemantics::Native {
         if let Some(&(lid, ref arr_expr)) = ctx.native_records.record_array_value_exprs.get(object)
         {
-            let idx_expr = if ctx.live_ints.contains(key) || ctx.ints.contains(key) {
+            let idx_expr = if ctx.live_ints.contains(key) {
                 format!("(size_t)i{}", key.0)
-            } else if ctx.live_numbers.contains(key) || ctx.numbers.contains(key) {
+            } else if ctx.live_numbers.contains(key) {
                 format!("(size_t)d{}", key.0)
             } else {
                 format!(
@@ -1006,9 +1008,9 @@ pub(super) fn emit_get_computed(
             return;
         }
         if ctx.native_records.number_array_values.contains(object) {
-            let idx_expr = if ctx.live_ints.contains(key) || ctx.ints.contains(key) {
+            let idx_expr = if ctx.live_ints.contains(key) {
                 format!("(size_t)i{}", key.0)
-            } else if ctx.live_numbers.contains(key) || ctx.numbers.contains(key) {
+            } else if ctx.live_numbers.contains(key) {
                 format!("(size_t)d{}", key.0)
             } else {
                 format!(
@@ -1016,7 +1018,7 @@ pub(super) fn emit_get_computed(
                     key.0
                 )
             };
-            writeln!(output, "    {{ const kiln_array *arr = (const kiln_array *)KILN_VAL_PTR(v{}); v{v} = arr->elements[{idx_expr}]; }}", object.0).unwrap();
+            writeln!(output, "    {{ const kiln_array *arr = (const kiln_array *)KILN_VAL_PTR(v{}); size_t idx_{v} = {idx_expr}; v{v} = KILN_LIKELY(idx_{v} < arr->count) ? arr->elements[idx_{v}] : KILN_VAL_UNDEFINED; }}", object.0).unwrap();
             if typed {
                 writeln!(output, "    memcpy(&d{v}, &v{v}, sizeof(d{v}));").unwrap();
             }
@@ -1281,6 +1283,35 @@ pub(super) fn emit_get_computed(
             .unwrap();
 }
 
+#[derive(Clone, Copy)]
+enum LiteralComputedKey {
+    String,
+    Number,
+}
+
+fn literal_computed_key(mut value: ValueId, ctx: &OpContext) -> Option<LiteralComputedKey> {
+    for _ in 0..64 {
+        match ctx.defs.get(&value)? {
+            GraphOp::Const {
+                constant: Constant::String(_),
+                ..
+            } => return Some(LiteralComputedKey::String),
+            GraphOp::Const {
+                constant: Constant::Number(_),
+                ..
+            } => return Some(LiteralComputedKey::Number),
+            GraphOp::StoreLocal { value: rhs, .. }
+            | GraphOp::CheckTdz { value: rhs, .. }
+            | GraphOp::SetProperty { value: rhs, .. }
+            | GraphOp::SetPropertyStrict { value: rhs, .. }
+            | GraphOp::SetComputed { value: rhs, .. }
+            | GraphOp::SetComputedStrict { value: rhs, .. } => value = *rhs,
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// `GraphOp::SetComputed { object, key, value, .. } | GraphOp::SetComputedStrict { .. }`, moved
 /// out of `emit_graph_op`'s match verbatim.
 pub(super) fn emit_set_computed(
@@ -1322,9 +1353,9 @@ pub(super) fn emit_set_computed(
     if ctx.plan.semantics == crate::NativeSemantics::Native {
         if let Some(&(lid, ref arr_expr)) = ctx.native_records.record_array_value_exprs.get(object)
         {
-            let idx_expr = if ctx.live_ints.contains(key) || ctx.ints.contains(key) {
+            let idx_expr = if ctx.live_ints.contains(key) {
                 format!("(size_t)i{}", key.0)
-            } else if ctx.live_numbers.contains(key) || ctx.numbers.contains(key) {
+            } else if ctx.live_numbers.contains(key) {
                 format!("(size_t)d{}", key.0)
             } else {
                 format!(
@@ -1344,9 +1375,9 @@ pub(super) fn emit_set_computed(
             return;
         }
         if ctx.native_records.number_array_values.contains(object) {
-            let idx_expr = if ctx.live_ints.contains(key) || ctx.ints.contains(key) {
+            let idx_expr = if ctx.live_ints.contains(key) {
                 format!("(size_t)i{}", key.0)
-            } else if ctx.live_numbers.contains(key) || ctx.numbers.contains(key) {
+            } else if ctx.live_numbers.contains(key) {
                 format!("(size_t)d{}", key.0)
             } else {
                 format!(
@@ -1443,6 +1474,32 @@ pub(super) fn emit_set_computed(
             check = check,
             assign_v = assign_v,
             typed_sync = typed_sync,
+        )
+        .unwrap();
+        return;
+    }
+    if ctx.plan.semantics == crate::NativeSemantics::Native
+        && let Some(kind) = literal_computed_key(*key, ctx)
+    {
+        let (declaration, helper, cache) = match kind {
+            LiteralComputedKey::String => (
+                "static kiln_c99_symbol_cell kiln_key_site; ",
+                "kiln_c99_val_write_string_key",
+                ", &kiln_key_site",
+            ),
+            LiteralComputedKey::Number => ("", "kiln_c99_val_write_element", ""),
+        };
+        let key_expr = if ctx.live_ints.contains(key) {
+            format!("kiln_c99_val_from_double((double)i{})", key.0)
+        } else if ctx.live_numbers.contains(key) {
+            format!("kiln_c99_val_from_double(d{})", key.0)
+        } else {
+            format!("v{}", key.0)
+        };
+        writeln!(
+            output,
+            "    {{ {declaration}int status = {helper}(host, v{o}, {key_expr}, v{val}, {strict}, depth, thrown{cache}); {check} {assign_v}}}{typed_sync}",
+            o = object.0,
         )
         .unwrap();
         return;

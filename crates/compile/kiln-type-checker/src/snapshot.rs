@@ -1028,6 +1028,7 @@ fn check_inner(snapshot: &SourceSnapshot, roots: &[String], options: &CheckOptio
 pub(crate) struct RecordLayoutTable {
     pub layouts: Vec<RecordLayout>,
     pub by_layout: std::collections::HashMap<RecordLayout, RecordLayoutId>,
+    pub by_type: std::collections::HashMap<crate::engine::types::TypeId, Option<RecordLayoutId>>,
     pub visiting: std::collections::HashSet<crate::engine::types::TypeId>,
 }
 
@@ -1048,6 +1049,9 @@ fn resolve_record_layout(
     table: &mut RecordLayoutTable,
     ty: crate::engine::types::TypeId,
 ) -> Option<RecordLayoutId> {
+    if let Some(&cached) = table.by_type.get(&ty) {
+        return cached;
+    }
     if checker.is_any(ty)
         || checker.is_nullish(ty)
         || checker.is_array(ty)
@@ -1058,15 +1062,18 @@ fn resolve_record_layout(
         || checker.is_boolean_like(ty)
         || checker.is_bigint_like(ty)
         || checker.is_symbol_like(ty)
-        || checker.every_type(ty, |c, m| {
-            c.is_number_like(m) || c.is_string_like(m) || c.is_boolean(m) || c.is_boolean_like(m)
-        })
+        || matches!(
+            checker.data(ty),
+            crate::engine::types::TypeData::Union(_)
+                | crate::engine::types::TypeData::Intersection(_)
+        )
         || matches!(
             checker.data(ty),
             crate::engine::types::TypeData::Ref { target, .. }
                 if checker.files().flags(*target).contains(crate::engine::bind::SymFlags::CLASS)
         )
     {
+        table.by_type.insert(ty, None);
         return None;
     }
     if !table.visiting.insert(ty) {
@@ -1074,6 +1081,9 @@ fn resolve_record_layout(
     }
     let layout = extract_record_layout(checker, table, ty);
     table.visiting.remove(&ty);
+    if table.visiting.is_empty() || layout.is_some() {
+        table.by_type.insert(ty, layout);
+    }
     layout
 }
 
@@ -1086,6 +1096,7 @@ fn extract_record_layout(
     let shape = members.shape();
 
     if shape.props.is_empty()
+        || shape.props.len() > 32
         || !shape.call.is_empty()
         || !shape.construct.is_empty()
         || !shape.index.is_empty()
@@ -1095,19 +1106,74 @@ fn extract_record_layout(
 
     use crate::engine::types::PropFlags;
 
-    let mut prop_entries = Vec::with_capacity(shape.props.len());
     for prop in shape.props.iter() {
-        if prop.flags.contains(PropFlags::METHOD)
-            || prop.flags.contains(PropFlags::ACCESSOR)
-            || prop.flags.contains(PropFlags::OPTIONAL)
+        if prop
+            .flags
+            .intersects(PropFlags::METHOD | PropFlags::ACCESSOR | PropFlags::OPTIONAL)
         {
             return None;
         }
         let name_bytes = checker.atoms().bytes(prop.name);
-        if name_bytes.starts_with(b"__") {
+        if name_bytes.is_empty() || name_bytes.starts_with(b"__") {
             return None;
         }
+        if !name_bytes[0].is_ascii_alphabetic() && name_bytes[0] != b'_' {
+            return None;
+        }
+        if !name_bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        {
+            return None;
+        }
+    }
+
+    let mut prop_entries = Vec::with_capacity(shape.props.len());
+    for prop in shape.props.iter() {
+        let name_bytes = checker.atoms().bytes(prop.name);
         let name = String::from_utf8_lossy(name_bytes).into_owned();
+        if matches!(
+            name.as_str(),
+            "auto"
+                | "bool"
+                | "break"
+                | "case"
+                | "char"
+                | "const"
+                | "continue"
+                | "default"
+                | "do"
+                | "double"
+                | "else"
+                | "enum"
+                | "extern"
+                | "false"
+                | "float"
+                | "for"
+                | "goto"
+                | "if"
+                | "inline"
+                | "int"
+                | "long"
+                | "register"
+                | "restrict"
+                | "return"
+                | "short"
+                | "signed"
+                | "sizeof"
+                | "static"
+                | "struct"
+                | "switch"
+                | "true"
+                | "typedef"
+                | "union"
+                | "unsigned"
+                | "void"
+                | "volatile"
+                | "while"
+        ) {
+            return None;
+        }
         let readonly = prop.flags.contains(PropFlags::READONLY);
         let prop_ty = checker.type_of_prop(prop, members.mapper);
         prop_entries.push((name, readonly, prop_ty));
@@ -1157,10 +1223,6 @@ fn resolve_array_element(
         Some(NativeFieldType::Int32)
     } else if checker.every_type(elem_ty, |c, m| c.is_number_like(m)) {
         Some(NativeFieldType::Number)
-    } else if checker.every_type(elem_ty, |c, m| c.is_boolean(m) || c.is_boolean_like(m)) {
-        Some(NativeFieldType::Boolean)
-    } else if checker.every_type(elem_ty, |c, m| c.is_string_like(m)) {
-        Some(NativeFieldType::String)
     } else if let Some(nested_id) = resolve_record_layout(checker, table, elem_ty) {
         Some(NativeFieldType::Record(nested_id))
     } else {

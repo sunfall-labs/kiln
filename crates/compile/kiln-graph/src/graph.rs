@@ -1520,12 +1520,27 @@ pub fn build_function_graph(
                                 value: val,
                             },
                         ));
-                        let is_record_slot = proto
+                        let is_record_slot = if let Some(ta) = proto
                             .type_annotations
                             .as_ref()
                             .and_then(|t| t.source_types.as_ref())
-                            .or_else(|| program.source_types())
-                            .is_some_and(|s| s.local_layouts.contains_key(slot));
+                        {
+                            if *slot < proto.parameter_count {
+                                ta.parameter_layouts
+                                    .get(*slot as usize)
+                                    .copied()
+                                    .flatten()
+                                    .is_some()
+                            } else {
+                                ta.local_layouts.contains_key(slot)
+                            }
+                        } else if proto.span.start == 0 && proto.span.end == 0 {
+                            program
+                                .source_types()
+                                .is_some_and(|s| s.local_layouts.contains_key(slot))
+                        } else {
+                            false
+                        };
                         let value_to_store = if is_record_slot { stored } else { val };
                         frame.locals.insert(*slot, value_to_store);
                     }

@@ -1998,6 +1998,18 @@ fn render_functions(
                 } else {
                     None
                 };
+                let typed_diagnostic_site = if policy.semantics == NativeSemantics::Native
+                    && (proto.return_layout().is_some()
+                        || matches!(
+                            proto.return_array_element(),
+                            Some(kiln_ir::NativeFieldType::Record(_))
+                        ))
+                    && compact_diagnostic_site(diagnostic_site)
+                {
+                    symbol
+                } else {
+                    diagnostic_site
+                };
                 emit_graph::emit_function_from_graph_with_profile(
                     output,
                     &graphs[index],
@@ -2006,7 +2018,7 @@ fn render_functions(
                     symbol,
                     index,
                     !proto_produces_references(proto, program),
-                    diagnostic_site,
+                    typed_diagnostic_site,
                     &plan.functions,
                     strict_functions,
                     typed,
@@ -2963,6 +2975,86 @@ pub(crate) fn collect_program_record_layouts(program: &Program) -> Vec<kiln_ir::
     Vec::new()
 }
 
+pub(crate) fn c_record_field_name(name: &str) -> String {
+    let is_c_reserved = matches!(
+        name,
+        "auto"
+            | "break"
+            | "case"
+            | "char"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "double"
+            | "else"
+            | "enum"
+            | "extern"
+            | "float"
+            | "for"
+            | "goto"
+            | "if"
+            | "inline"
+            | "int"
+            | "long"
+            | "register"
+            | "restrict"
+            | "return"
+            | "short"
+            | "signed"
+            | "sizeof"
+            | "static"
+            | "struct"
+            | "switch"
+            | "typedef"
+            | "union"
+            | "unsigned"
+            | "void"
+            | "volatile"
+            | "while"
+            | "bool"
+            | "true"
+            | "false"
+            | "alignas"
+            | "alignof"
+            | "atomic"
+            | "complex"
+            | "generic"
+            | "imaginary"
+            | "noreturn"
+            | "static_assert"
+            | "thread_local"
+            | "typeof"
+            | "typeof_unqual"
+            | "errno"
+            | "stdin"
+            | "stdout"
+            | "stderr"
+            | "main"
+            | "unix"
+            | "linux"
+    );
+    if !is_c_reserved
+        && !name.starts_with("f_")
+        && name.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        name.to_string()
+    } else {
+        let sanitized: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("f_{sanitized}")
+    }
+}
+
 fn emit_record_typedefs(out: &mut String, symbol: &str, layouts: &[kiln_ir::RecordLayout]) {
     if layouts.is_empty() {
         return;
@@ -3006,7 +3098,7 @@ fn emit_record_typedefs(out: &mut String, symbol: &str, layouts: &[kiln_ir::Reco
             let _ = writeln!(out, "    uint8_t _unused;");
         } else {
             for field in &layout.fields {
-                let name = &field.name;
+                let name = c_record_field_name(&field.name);
                 match &field.ty {
                     kiln_ir::NativeFieldType::Number => {
                         let _ = writeln!(out, "    double {name};");
@@ -3015,7 +3107,7 @@ fn emit_record_typedefs(out: &mut String, symbol: &str, layouts: &[kiln_ir::Reco
                         let _ = writeln!(out, "    int32_t {name};");
                     }
                     kiln_ir::NativeFieldType::String => {
-                        let _ = writeln!(out, "    kiln_c99_val {name};");
+                        let _ = writeln!(out, "    kiln_val {name};");
                     }
                     kiln_ir::NativeFieldType::Record(sub) => {
                         let _ = writeln!(out, "    {symbol}_rec_{} {name};", sub.0);
@@ -5928,6 +6020,10 @@ fn render_module_positioned(
             );
         }
         render_compact_macros(&mut chunk_header, emitted_program, &closure_fn);
+        if policy.semantics == NativeSemantics::Native {
+            let layouts = collect_program_record_layouts(emitted_program);
+            emit_record_typedefs(&mut chunk_header, unit_symbol, &layouts);
+        }
         render_constant_declarations_extern(
             &mut chunk_header,
             emitted_program,
